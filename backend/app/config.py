@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     APP_PORT: int = 8000
 
     # CORS
-    ALLOW_ORIGINS: str = "*"  # comma-separated list or '*'
+    ALLOW_ORIGINS: str = "*"
 
     # Temporary directory for uploaded/processed files
     TEMP_DIR: str = Field(default_factory=lambda: os.path.join(os.getcwd(), "tmp"))

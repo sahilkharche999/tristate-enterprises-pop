@@ -4,10 +4,21 @@ This app exposes endpoints that accept an uploaded Excel file and parameters, ru
 pipeline-style computations and return JSON results. Configuration values are
 externalized via `app.config.settings` (pydantic.BaseSettings).
 """
+from .config import settings
+from .routers import macros
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import macros
-from app.config import settings
+import logging
+import sys
+
+# Basic logging configuration for the application. Containers and prod deployments
+# can override this via environment or a more advanced logging setup.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    stream=sys.stdout,
+)
+logger = logging.getLogger(__name__)
 
 
 def create_app() -> FastAPI:
