@@ -1,0 +1,37 @@
+version: "3.9"
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: tristate-backend-image:latest
+    ports:
+      - "8000:8000"
+    environment:
+      - ALLOW_ORIGINS=*
+    networks:
+      - popnet
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/openapi.json || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: tristate-frontend-image:latest
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    networks:
+      - popnet
+    restart: unless-stopped
+
+networks:
+  popnet:
+    driver: bridge
