@@ -2,12 +2,57 @@ import { Link, useParams, useNavigate, useSearchParams } from 'react-router';
 import { ArrowLeft, CheckCircle2, Settings } from 'lucide-react';
 import { Button } from './ui/button';
 import { hoaList, type LineItem } from '../data/mockData';
+import { toNum } from '../api/macros';
+import type { SheetTable } from '../api/macros';
+
+// ─── parseBudgetPreview ───────────────────────────────────────────────────────
+
+interface BudgetTotals {
+  totalIncome: number;
+  totalOperatingExpense: number;
+  totalReserveContributions: number;
+}
+
+function parseBudgetPreview(budgetPreview: SheetTable): BudgetTotals {
+  // The backend budget_preview contains rows from the generated Budget_Pipeline.xlsx.
+  // We look for rows where the label (first non-null cell) contains "Total Income",
+  // "Total Operating", "Total Reserve", or "Total Expense".
+  let totalIncome = 0;
+  let totalOperatingExpense = 0;
+  let totalReserveContributions = 0;
+
+  for (const row of budgetPreview.rows) {
+    // Find the label — scan first few columns for a non-null string
+    const label = row.slice(0, 5).find((v) => v != null && v !== '');
+    if (label == null) continue;
+    const lbl = String(label).toLowerCase();
+
+    // The last non-null numeric value in the row is the total amount (backward scan avoids array copy)
+    let lastVal = null;
+    for (let i = row.length - 1; i >= 0; i--) {
+      if (typeof row[i] === 'number' || (row[i] != null && row[i] !== '')) { lastVal = row[i]; break; }
+    }
+    const amount = toNum(lastVal);
+
+    if (lbl.includes('total income')) totalIncome = amount;
+    else if (lbl.includes('total operating') || lbl.includes('total expense - operating')) totalOperatingExpense = amount;
+    else if (lbl.includes('total reserve') || lbl.includes('total expense - reserve')) totalReserveContributions = amount;
+  }
+
+  return { totalIncome, totalOperatingExpense, totalReserveContributions };
+}
+
+// ─── Component ────────────────────────────────────────────────────────────────
 
 interface GeneratedBudgetScreenProps {
   lineItems: LineItem[];
   version: number;
   generatedAt: Date;
   onRegenerateSnapshot: () => void;
+  budgetPreview?: SheetTable | null;
+  growthFactor?: number;
+  growthFactorNote?: string;
+  isRegenerating?: boolean;
 }
 
 export function GeneratedBudgetScreen({
@@ -15,10 +60,14 @@ export function GeneratedBudgetScreen({
   version,
   generatedAt,
   onRegenerateSnapshot,
+  budgetPreview,
+  growthFactor,
+  growthFactorNote,
+  isRegenerating = false,
 }: GeneratedBudgetScreenProps) {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const [searchParams, setSearchParams] = useSearchParams();
+  const [, setSearchParams] = useSearchParams();
   const hoa = hoaList.find((h) => h.id === id);
 
   const formatCurrency = (value: number) => {
@@ -40,34 +89,30 @@ export function GeneratedBudgetScreen({
     });
   };
 
-  const calculateProjection = (ytd: number) => {
-    // Extrapolate YTD to full year (assuming 8 months of data)
-    return (ytd / 8) * 12;
-  };
+  // Compute totals: prefer real backend data, fall back to client-side calculation
+  let totalIncome: number;
+  let totalOperatingExpense: number;
+  let totalReserveContributions: number;
 
-  const calculateProposedChange = (projection: number, percentChange: number) => {
-    return projection * (1 + percentChange / 100);
-  };
+  if (budgetPreview) {
+    ({ totalIncome, totalOperatingExpense, totalReserveContributions } = parseBudgetPreview(budgetPreview));
+  } else {
+    const calculateProjection = (ytd: number) => (ytd / 8) * 12;
+    const calculateProposedChange = (projection: number, percentChange: number) =>
+      projection * (1 + percentChange / 100);
 
-  // Calculate totals
-  const incomeItems = lineItems.filter((item) => item.category === 'income');
-  const operatingItems = lineItems.filter((item) => item.category === 'operating');
-  const reserveItems = lineItems.filter((item) => item.category === 'reserve');
+    totalIncome = lineItems
+      .filter((i) => i.category === 'income')
+      .reduce((sum, item) => sum + calculateProposedChange(calculateProjection(item.ytdActual), item.percentChange), 0);
 
-  const totalIncome = incomeItems.reduce((sum, item) => {
-    const projection = calculateProjection(item.ytdActual);
-    return sum + calculateProposedChange(projection, item.percentChange);
-  }, 0);
+    totalOperatingExpense = lineItems
+      .filter((i) => i.category === 'operating')
+      .reduce((sum, item) => sum + calculateProposedChange(calculateProjection(item.ytdActual), item.percentChange), 0);
 
-  const totalOperatingExpense = operatingItems.reduce((sum, item) => {
-    const projection = calculateProjection(item.ytdActual);
-    return sum + calculateProposedChange(projection, item.percentChange);
-  }, 0);
-
-  const totalReserveContributions = reserveItems.reduce((sum, item) => {
-    const projection = calculateProjection(item.ytdActual);
-    return sum + calculateProposedChange(projection, item.percentChange);
-  }, 0);
+    totalReserveContributions = lineItems
+      .filter((i) => i.category === 'reserve')
+      .reduce((sum, item) => sum + calculateProposedChange(calculateProjection(item.ytdActual), item.percentChange), 0);
+  }
 
   const totalExpense = totalOperatingExpense + totalReserveContributions;
   const netOperatingIncome = totalIncome - totalExpense;
@@ -106,6 +151,17 @@ export function GeneratedBudgetScreen({
               <p className="text-xs text-[#a3a3a3]">Draft Version {version}</p>
               <p className="text-sm text-[#525252] font-medium">{formatTimestamp(generatedAt)}</p>
             </div>
+            {growthFactor != null && (
+              <div className="text-right">
+                <p className="text-xs text-[#a3a3a3]">Growth Factor</p>
+                <p className="text-sm text-[#525252] font-medium">
+                  {growthFactor.toFixed(4)}
+                  {growthFactorNote && (
+                    <span className="text-xs text-[#737373] ml-1">({growthFactorNote})</span>
+                  )}
+                </p>
+              </div>
+            )}
             <div className="h-8 w-px bg-[#e5e5e5]"></div>
             <Link to={`/hoa/${id}/settings`}>
               <Button variant="ghost" size="icon" className="hover:bg-[#f5f5f5]">
@@ -158,7 +214,7 @@ export function GeneratedBudgetScreen({
             <p className="text-xs font-medium text-[#a3a3a3] uppercase tracking-wide mb-3">
               Net Operating Income
             </p>
-            <p className={`text-2xl font-semibold ${netOperatingIncome >= 0 ? 'text-[#111111]' : 'text-[#111111]'}`}>
+            <p className="text-2xl font-semibold text-[#111111]">
               {formatCurrency(netOperatingIncome)}
             </p>
           </div>
@@ -219,9 +275,10 @@ export function GeneratedBudgetScreen({
           </Button>
           <Button
             onClick={onRegenerateSnapshot}
+            disabled={isRegenerating}
             className="bg-[#111111] text-white hover:bg-[#262626] shadow-sm"
           >
-            Regenerate Snapshot
+            {isRegenerating ? 'Generating...' : 'Regenerate Snapshot'}
           </Button>
         </div>
 

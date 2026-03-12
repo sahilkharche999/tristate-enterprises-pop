@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useParams, Link } from 'react-router';
 import { ArrowLeft, Settings, Upload, Download, FileText } from 'lucide-react';
 import { Button } from './ui/button';
@@ -7,12 +7,57 @@ import { EnrichedView } from './EnrichedView';
 import { BudgetView } from './BudgetView';
 import { AISuggestionMode } from './AISuggestionMode';
 import { toast } from 'sonner';
+import { generateBudget, toNum } from '../api/macros';
+import type { SheetTable } from '../api/macros';
+
+// ─── Utility ─────────────────────────────────────────────────────────────────
+
+export function parseEnrichedResponse(enriched: SheetTable): LineItem[] {
+  const items: LineItem[] = [];
+  let currentCategory: LineItem['category'] = 'operating';
+  let idCounter = 0;
+
+  for (const row of enriched.rows) {
+    const colA = row[0];
+    const colB = row[1];
+
+    // Skip rows where both col A and col B are empty
+    if ((colA == null || colA === '') && (colB == null || colB === '')) continue;
+
+    // Section header: col A non-empty, col B empty
+    if (colA != null && colA !== '' && (colB == null || colB === '')) {
+      const header = String(colA).toLowerCase();
+      if (header.includes('income')) currentCategory = 'income';
+      else if (header.includes('reserve')) currentCategory = 'reserve';
+      else currentCategory = 'operating';
+      continue;
+    }
+
+    // Line item: col B non-empty
+    if (colB != null && colB !== '') {
+      items.push({
+        id: `item-${++idCounter}`,
+        category: currentCategory,
+        name: String(colB),
+        ytdActual: toNum(row[19]),      // col T (index 19)
+        annualBudget: toNum(row[32]),   // col AG (index 32)
+        percentChange: toNum(row[38]) * 100, // col AM (index 38), decimal → display %
+      });
+    }
+  }
+
+  return items;
+}
+
+// ─── Component ────────────────────────────────────────────────────────────────
 
 interface BudgetScreenProps {
   lineItems: LineItem[];
   onLineItemsUpdate: (lineItems: LineItem[]) => void;
   onGenerateBudget: () => void;
+  onFileUploaded?: (file: File) => void;
   budgetGenerated: boolean;
+  isGenerating?: boolean;
   initialView?: 'enriched' | 'budget' | 'ai';
 }
 
@@ -20,7 +65,9 @@ export function BudgetScreen({
   lineItems,
   onLineItemsUpdate,
   onGenerateBudget,
+  onFileUploaded,
   budgetGenerated,
+  isGenerating = false,
   initialView = 'enriched',
 }: BudgetScreenProps) {
   const { id } = useParams<{ id: string }>();
@@ -30,6 +77,7 @@ export function BudgetScreen({
   const [currentView, setCurrentView] = useState<'enriched' | 'budget' | 'ai'>(initialView);
   const [globalNote, setGlobalNote] = useState('');
   const [lastSaved, setLastSaved] = useState(new Date());
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Auto-save effect
   useEffect(() => {
@@ -39,12 +87,29 @@ export function BudgetScreen({
     return () => clearTimeout(timer);
   }, [lineItems, globalNote]);
 
-  const handleUpload = () => {
+  const handleSelectFile = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    // Reset input so the same file can be re-selected if needed
+    e.target.value = '';
+
     setUploadState('uploading');
-    setTimeout(() => {
+    try {
+      const result = await generateBudget({ file, enrichOnly: true });
+      const parsed = parseEnrichedResponse(result.enriched);
+      onLineItemsUpdate(parsed);
+      onFileUploaded?.(file);
       setUploadState('complete');
       toast.success('Income statement parsed successfully');
-    }, 2000);
+    } catch (err: unknown) {
+      const apiErr = err as { status?: number; message?: string };
+      toast.error(apiErr?.message || 'Upload failed. Please try again.');
+      setUploadState('initial');
+    }
   };
 
   const handlePercentChange = (itemId: string, newPercent: number) => {
@@ -131,16 +196,21 @@ export function BudgetScreen({
                   {uploadState === 'uploading' ? 'Parsing document...' : 'Upload your Excel or CSV file to begin'}
                 </p>
               </div>
+              {/* Hidden file input */}
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".xlsx,.xls"
+                className="hidden"
+                onChange={handleFileChange}
+              />
               <Button
-                onClick={handleUpload}
+                onClick={handleSelectFile}
                 disabled={uploadState === 'uploading'}
                 className="bg-[#111111] text-white hover:bg-[#262626] px-6 py-2.5 shadow-sm"
               >
                 {uploadState === 'uploading' ? 'Processing...' : 'Select File'}
               </Button>
-              {uploadState === 'initial' && (
-                null
-              )}
             </div>
           </div>
         </main>
@@ -255,9 +325,10 @@ export function BudgetScreen({
           {currentView === 'enriched' && (
             <Button
               onClick={onGenerateBudget}
+              disabled={isGenerating}
               className="bg-[#111111] text-white hover:bg-[#262626] shadow-sm"
             >
-              {budgetGenerated ? 'Regenerate Budget' : 'Generate Budget'}
+              {isGenerating ? 'Generating...' : budgetGenerated ? 'Regenerate Budget' : 'Generate Budget'}
             </Button>
           )}
         </div>

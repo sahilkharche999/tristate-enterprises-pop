@@ -41,3 +41,9 @@ Thumbs.db
 # Cache
 .eslintcache
 .cache/
+node_modules
+
+# Project tooling
+.claude/
+openspec/
+docs/

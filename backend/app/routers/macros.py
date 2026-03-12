@@ -4,10 +4,13 @@ from fastapi.concurrency import run_in_threadpool
 from ..services import macros_service
 from ..models.schemas import TableResponse, SumResponse, DupsResponse, SimpleResponse
 from ..config import settings
+import json
+import logging
 import os
 import tempfile
 import shutil
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
@@ -154,6 +157,7 @@ async def generate_budget(
     am_seed_file: UploadFile | None = File(None),
     aliases_csv: UploadFile | None = File(None),
     enrich_only: bool = Form(False),
+    percent_changes_json: str | None = Form(None),
     background: BackgroundTasks = None,
 ):
     """Run the full budget pipeline reusing existing Python code in the repo.
@@ -166,6 +170,17 @@ async def generate_budget(
     input_path = await save_upload_tmp(file)
     if background:
         background.add_task(lambda p=input_path: os.path.exists(p) and os.remove(p))
+
+    # Apply percent changes from JSON before pipeline runs (writes to AM column by label)
+    if percent_changes_json:
+        try:
+            changes = json.loads(percent_changes_json)
+            await run_in_threadpool(
+                macros_service.write_percent_changes_by_label, input_path, "Income Statement", changes
+            )
+        except Exception as e:
+            logger.warning("write_percent_changes_by_label skipped: %s", e)
+
     tempdir = tempfile.mkdtemp(prefix="budget_pipeline_")
     try:
         intermediate_path = os.path.join(tempdir, "Income_Statement_Enriched.xlsx")
@@ -250,24 +265,15 @@ async def generate_budget(
         except Exception:
             raise HTTPException(status_code=500, detail="Budget pipeline failed")
 
-        # Read enriched intermediate and budget preview
+        # Read enriched intermediate
         enriched = await run_in_threadpool(macros_service.read_sheet_as_table, intermediate_path, "Income Statement")
 
-        # Read budget preview from generated output: first worksheet
-        from openpyxl import load_workbook
-        wb = load_workbook(output_path, data_only=True)
-        try:
-            ws = wb[wb.sheetnames[0]]
-            max_col = ws.max_column
-            headers = [ws.cell(row=1, column=c).value for c in range(1, max_col + 1)]
-            rows = []
-            for r in range(2, min(ws.max_row, settings.MAX_PREVIEW_ROWS) + 1):
-                row = [ws.cell(row=r, column=c).value for c in range(1, max_col + 1)]
-                if any(v is not None for v in row):
-                    rows.append(row)
-            budget_preview = {"sheet": ws.title, "headers": headers, "rows": rows}
-        finally:
-            wb.close()
+        # Read budget preview only when the full pipeline ran (enrich_only=False produces the output file)
+        budget_preview = None
+        if not enrich_only:
+            budget_preview = await run_in_threadpool(
+                macros_service.read_first_sheet_preview, output_path, settings.MAX_PREVIEW_ROWS
+            )
 
         # Compose response
         resp = {

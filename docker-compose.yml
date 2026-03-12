@@ -3,8 +3,8 @@ version: "3.9"
 services:
   backend:
     build:
-      context: ./backend
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: backend/Dockerfile
     image: tristate-backend-image:latest
     ports:
       - "8000:8000"

@@ -8,6 +8,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 import { hoaList, getKnowledgeBaseFolders } from '../data/mockData';
 import { toast } from 'sonner';
+import { MacroToolsPanel } from './MacroToolsPanel';
 
 export function SettingsScreen() {
   const { id } = useParams<{ id: string }>();
@@ -218,14 +219,8 @@ export function SettingsScreen() {
                 </div>
               </div>
 
-              {/* Upload New Macro */}
-              <div className="space-y-4">
-                <h3 className="text-lg font-medium text-[#111111]">Upload Macro File</h3>
-                <div className="flex gap-2">
-                  <Input type="file" accept=".xlsx,.xls" className="bg-white border-[#E5E5E5]" />
-                  <Button className="bg-[#000000] text-white hover:bg-[#111111]">Upload</Button>
-                </div>
-              </div>
+              {/* Macro Tools Panel */}
+              <MacroToolsPanel />
 
               {/* Logic Formulas */}
               <div className="space-y-4">

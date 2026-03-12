@@ -19,6 +19,9 @@ from openpyxl import load_workbook
 from openpyxl.utils.cell import coordinate_from_string, column_index_from_string
 
 
+_AM_COL = column_index_from_string("AM")  # column 39, pre-computed once
+
+
 def _ensure_temp_dir():
     os.makedirs(settings.TEMP_DIR, exist_ok=True)
     return settings.TEMP_DIR
@@ -271,6 +274,47 @@ def cumulative_sum(path: str, sheet: str, start_row: int, start_col: int, end_ro
         duration = time.perf_counter() - start
         logger.info("cumulative_sum done: path=%s sheet=%s sum=%.2f duration=%.3fs", path, sheet, round(total, 2), duration)
         return {"cumulative_sum": round(total, 2), "start_row": start_row, "end_row": end_row - 1}
+    finally:
+        wb.close()
+
+
+def read_first_sheet_preview(path: str, max_rows: int) -> Dict[str, Any]:
+    """Read the first worksheet up to max_rows, returning {sheet, headers, rows}."""
+    wb = load_workbook(path, data_only=True)
+    try:
+        ws = wb[wb.sheetnames[0]]
+        max_col = ws.max_column
+        headers = [ws.cell(row=1, column=c).value for c in range(1, max_col + 1)]
+        rows = []
+        for r in range(2, min(ws.max_row, max_rows) + 1):
+            row = [ws.cell(row=r, column=c).value for c in range(1, max_col + 1)]
+            if any(v is not None for v in row):
+                rows.append(row)
+        return {"sheet": ws.title, "headers": headers, "rows": rows}
+    finally:
+        wb.close()
+
+
+def write_percent_changes_by_label(path: str, sheet: str, changes: Dict[str, float]) -> None:
+    """Write decimal percent change values to column AM for rows whose col B label matches.
+
+    Args:
+        path: path to workbook (.xlsx)
+        sheet: worksheet name (typically "Income Statement")
+        changes: mapping of label → decimal percent change (e.g. {"Insurance": 0.085})
+    """
+    if not changes:
+        return
+    wb = load_workbook(path)
+    try:
+        if sheet not in wb.sheetnames:
+            raise ValueError(f"Sheet not found: {sheet}")
+        ws = wb[sheet]
+        for r in range(1, ws.max_row + 1):
+            label = ws.cell(row=r, column=2).value  # col B
+            if label is not None and str(label).strip() in changes:
+                ws.cell(row=r, column=_AM_COL, value=changes[str(label).strip()])
+        wb.save(path)
     finally:
         wb.close()
 
