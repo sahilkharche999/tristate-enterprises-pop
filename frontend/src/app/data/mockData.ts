@@ -4,7 +4,9 @@ export interface LineItem {
   name: string;
   ytdActual: number;
   annualBudget: number;
-  percentChange: number;
+  percentChange: number; // display %, user-editable
+  projection?: number;   // backend col AL: YTD × growth factor
+  readOnly?: boolean;    // true = excluded from board-adjustable flow (reserve-study rows)
   note?: {
     title: string;
     body: string;

@@ -1,4 +1,5 @@
 import { type LineItem } from '../data/mockData';
+import { formatCurrency, getCategoryLabel, calcProposed, calcMonthly, calcCategoryTotal } from '../lib/budget';
 
 interface BudgetViewProps {
   lineItems: LineItem[];
@@ -6,40 +7,6 @@ interface BudgetViewProps {
 }
 
 export function BudgetView({ lineItems, units }: BudgetViewProps) {
-  const formatCurrency = (value: number) => {
-    return new Intl.NumberFormat('en-US', {
-      style: 'currency',
-      currency: 'USD',
-      minimumFractionDigits: 0,
-      maximumFractionDigits: 0,
-    }).format(value);
-  };
-
-  const calculateProjection = (ytd: number) => {
-    return (ytd / 8) * 12;
-  };
-
-  const calculateProposedChange = (projection: number, percentChange: number) => {
-    return projection * (1 + percentChange / 100);
-  };
-
-  const calculateMonthly = (proposedChange: number) => {
-    return proposedChange / 12;
-  };
-
-  const getCategoryLabel = (category: string) => {
-    switch (category) {
-      case 'income':
-        return 'INCOME';
-      case 'operating':
-        return 'OPERATING EXPENSES';
-      case 'reserve':
-        return 'RESERVE CONTRIBUTIONS';
-      default:
-        return category.toUpperCase();
-    }
-  };
-
   const groupedItems = lineItems.reduce((acc, item) => {
     if (!acc[item.category]) {
       acc[item.category] = [];
@@ -48,28 +15,10 @@ export function BudgetView({ lineItems, units }: BudgetViewProps) {
     return acc;
   }, {} as Record<string, LineItem[]>);
 
-  const calculateCategoryTotal = (items: LineItem[], field: 'ytdActual' | 'projection' | 'proposedChange' | 'monthly') => {
-    return items.reduce((sum, item) => {
-      if (field === 'projection') {
-        return sum + calculateProjection(item.ytdActual);
-      } else if (field === 'proposedChange') {
-        const projection = calculateProjection(item.ytdActual);
-        return sum + calculateProposedChange(projection, item.percentChange);
-      } else if (field === 'monthly') {
-        const projection = calculateProjection(item.ytdActual);
-        const proposedChange = calculateProposedChange(projection, item.percentChange);
-        return sum + calculateMonthly(proposedChange);
-      }
-      return sum + item[field];
-    }, 0);
-  };
-
-  const totalOperating = calculateCategoryTotal(groupedItems['operating'] || [], 'proposedChange');
-  const totalReserve = calculateCategoryTotal(groupedItems['reserve'] || [], 'proposedChange');
-  const totalAnnual = lineItems.reduce((sum, item) => {
-    const projection = calculateProjection(item.ytdActual);
-    return sum + calculateProposedChange(projection, item.percentChange);
-  }, 0);
+  const totalOperating = calcCategoryTotal(groupedItems['operating'] || [], 'proposedChange');
+  const totalReserve = calcCategoryTotal(groupedItems['reserve'] || [], 'proposedChange');
+  // Total annual requirement = expenses only (operating + reserve), not income
+  const totalAnnual = totalOperating + totalReserve;
   const monthlyPerUnit = totalAnnual / 12 / units;
 
   return (
@@ -97,9 +46,21 @@ export function BudgetView({ lineItems, units }: BudgetViewProps) {
                 </tr>,
                 // Line Items
                 ...items.map((item) => {
-                  const projection = calculateProjection(item.ytdActual);
-                  const proposedChange = calculateProposedChange(projection, item.percentChange);
-                  const monthly = calculateMonthly(proposedChange);
+                  if (item.readOnly) {
+                    return (
+                      <tr key={item.id} className="border-b border-[#E5E5E5] h-14 opacity-60">
+                        <td className="px-6 py-4 text-sm text-[#525252] italic">{item.name}</td>
+                        <td className="px-6 py-4 text-sm text-[#666666] text-right">{formatCurrency(item.ytdActual)}</td>
+                        <td className="px-6 py-4 text-sm text-[#a3a3a3] text-right">—</td>
+                        <td className="px-6 py-4 text-sm text-[#a3a3a3] text-right">—</td>
+                        <td className="px-6 py-4 text-sm text-[#a3a3a3] text-right">—</td>
+                      </tr>
+                    );
+                  }
+
+                  const projection = item.projection ?? 0;
+                  const proposedChange = calcProposed(item.annualBudget, item.percentChange);
+                  const monthly = calcMonthly(proposedChange);
 
                   return (
                     <tr
@@ -126,16 +87,16 @@ export function BudgetView({ lineItems, units }: BudgetViewProps) {
                 <tr key={`${category}-total`} className="bg-[#F7F7F7] font-medium border-b border-[#E5E5E5]">
                   <td className="px-6 py-3 text-sm text-[#111111]">{getCategoryLabel(category)} Total</td>
                   <td className="px-6 py-3 text-sm text-[#666666] text-right">
-                    {formatCurrency(calculateCategoryTotal(items, 'ytdActual'))}
+                    {formatCurrency(calcCategoryTotal(items, 'ytdActual'))}
                   </td>
                   <td className="px-6 py-3 text-sm text-[#666666] text-right">
-                    {formatCurrency(calculateCategoryTotal(items, 'projection'))}
+                    {formatCurrency(calcCategoryTotal(items, 'projection'))}
                   </td>
                   <td className="px-6 py-3 text-sm font-medium text-[#111111] text-right">
-                    {formatCurrency(calculateCategoryTotal(items, 'proposedChange'))}
+                    {formatCurrency(calcCategoryTotal(items, 'proposedChange'))}
                   </td>
                   <td className="px-6 py-3 text-sm text-[#666666] text-right">
-                    {formatCurrency(calculateCategoryTotal(items, 'monthly'))}
+                    {formatCurrency(calcCategoryTotal(items, 'monthly'))}
                   </td>
                 </tr>
               ])}

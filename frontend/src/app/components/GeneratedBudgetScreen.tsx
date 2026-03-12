@@ -4,6 +4,7 @@ import { Button } from './ui/button';
 import { hoaList, type LineItem } from '../data/mockData';
 import { toNum } from '../api/macros';
 import type { SheetTable } from '../api/macros';
+import { calcProposed } from '../lib/budget';
 
 // ─── parseBudgetPreview ───────────────────────────────────────────────────────
 
@@ -97,21 +98,17 @@ export function GeneratedBudgetScreen({
   if (budgetPreview) {
     ({ totalIncome, totalOperatingExpense, totalReserveContributions } = parseBudgetPreview(budgetPreview));
   } else {
-    const calculateProjection = (ytd: number) => (ytd / 8) * 12;
-    const calculateProposedChange = (projection: number, percentChange: number) =>
-      projection * (1 + percentChange / 100);
-
-    totalIncome = lineItems
-      .filter((i) => i.category === 'income')
-      .reduce((sum, item) => sum + calculateProposedChange(calculateProjection(item.ytdActual), item.percentChange), 0);
-
-    totalOperatingExpense = lineItems
-      .filter((i) => i.category === 'operating')
-      .reduce((sum, item) => sum + calculateProposedChange(calculateProjection(item.ytdActual), item.percentChange), 0);
-
-    totalReserveContributions = lineItems
-      .filter((i) => i.category === 'reserve')
-      .reduce((sum, item) => sum + calculateProposedChange(calculateProjection(item.ytdActual), item.percentChange), 0);
+    // Single pass over lineItems, accumulate all three totals at once
+    ({ totalIncome, totalOperatingExpense, totalReserveContributions } = lineItems.reduce(
+      (acc, item) => {
+        const proposed = calcProposed(item.annualBudget, item.percentChange);
+        if (item.category === 'income')    acc.totalIncome += proposed;
+        else if (item.category === 'operating') acc.totalOperatingExpense += proposed;
+        else if (item.category === 'reserve')   acc.totalReserveContributions += proposed;
+        return acc;
+      },
+      { totalIncome: 0, totalOperatingExpense: 0, totalReserveContributions: 0 },
+    ));
   }
 
   const totalExpense = totalOperatingExpense + totalReserveContributions;

@@ -3,6 +3,14 @@ import { MessageSquare, ChevronDown, ChevronUp, Percent, DollarSign } from 'luci
 import { Input } from './ui/input';
 import { Button } from './ui/button';
 import { type LineItem } from '../data/mockData';
+import {
+  formatCurrency,
+  getCategoryLabel,
+  calcProposed,
+  calcMonthly,
+  calcPercentDiff,
+  calcCategoryTotal,
+} from '../lib/budget';
 
 interface EnrichedViewProps {
   lineItems: LineItem[];
@@ -15,36 +23,8 @@ export function EnrichedView({ lineItems, onPercentChange, onNoteUpdate, units }
   const [expandedNote, setExpandedNote] = useState<string | null>(null);
   const [noteEdits, setNoteEdits] = useState<Record<string, { title: string; body: string }>>({});
   const [calculating, setCalculating] = useState(false);
-  const [operatingIncomePercent, setOperatingIncomePercent] = useState(0);
-  const [incomeHeaderPercent, setIncomeHeaderPercent] = useState(0);
   const [inputMode, setInputMode] = useState<Record<string, 'percent' | 'dollar'>>({});
 
-  const formatCurrency = (value: number) => {
-    return new Intl.NumberFormat('en-US', {
-      style: 'currency',
-      currency: 'USD',
-      minimumFractionDigits: 0,
-      maximumFractionDigits: 0,
-    }).format(value);
-  };
-
-  const calculatePercentDifference = (ytd: number, budget: number) => {
-    if (ytd === 0) return 0;
-    return ((budget - ytd) / ytd) * 100;
-  };
-
-  const calculateProjection = (ytd: number) => {
-    // Extrapolate YTD to full year (assuming 8 months of data)
-    return (ytd / 8) * 12;
-  };
-
-  const calculateProposedChange = (projection: number, percentChange: number) => {
-    return projection * (1 + percentChange / 100);
-  };
-
-  const calculateMonthly = (proposedChange: number) => {
-    return proposedChange / 12;
-  };
 
   const handlePercentChangeInput = (itemId: string, value: string) => {
     const numValue = parseFloat(value) || 0;
@@ -53,9 +33,10 @@ export function EnrichedView({ lineItems, onPercentChange, onNoteUpdate, units }
     setTimeout(() => setCalculating(false), 300);
   };
 
-  const handleDollarChangeInput = (itemId: string, dollarValue: string, projection: number) => {
+  const handleDollarChangeInput = (itemId: string, dollarValue: string, annualBudget: number) => {
     const numValue = parseFloat(dollarValue) || 0;
-    const percentChange = projection > 0 ? ((numValue - projection) / projection) * 100 : 0;
+    // Invert backend formula: proposed = annualBudget × (1 + % change)
+    const percentChange = annualBudget > 0 ? ((numValue / annualBudget) - 1) * 100 : 0;
     setCalculating(true);
     onPercentChange(itemId, percentChange);
     setTimeout(() => setCalculating(false), 300);
@@ -66,20 +47,6 @@ export function EnrichedView({ lineItems, onPercentChange, onNoteUpdate, units }
       ...prev,
       [itemId]: prev[itemId] === 'dollar' ? 'percent' : 'dollar'
     }));
-  };
-
-  const handleOperatingIncomeChange = (value: string) => {
-    const numValue = parseFloat(value) || 0;
-    setCalculating(true);
-    setOperatingIncomePercent(numValue);
-    setTimeout(() => setCalculating(false), 300);
-  };
-
-  const handleIncomeHeaderChange = (value: string) => {
-    const numValue = parseFloat(value) || 0;
-    setCalculating(true);
-    setIncomeHeaderPercent(numValue);
-    setTimeout(() => setCalculating(false), 300);
   };
 
   const toggleNote = (itemId: string) => {
@@ -104,19 +71,6 @@ export function EnrichedView({ lineItems, onPercentChange, onNoteUpdate, units }
     }
   };
 
-  const getCategoryLabel = (category: string) => {
-    switch (category) {
-      case 'income':
-        return 'INCOME';
-      case 'operating':
-        return 'OPERATING EXPENSES';
-      case 'reserve':
-        return 'RESERVE CONTRIBUTIONS';
-      default:
-        return category.toUpperCase();
-    }
-  };
-
   const groupedItems = lineItems.reduce((acc, item) => {
     if (!acc[item.category]) {
       acc[item.category] = [];
@@ -125,28 +79,10 @@ export function EnrichedView({ lineItems, onPercentChange, onNoteUpdate, units }
     return acc;
   }, {} as Record<string, LineItem[]>);
 
-  // Calculate totals
-  const calculateCategoryTotal = (items: LineItem[], field: 'ytdActual' | 'annualBudget' | 'projection' | 'proposedChange' | 'monthly') => {
-    return items.reduce((sum, item) => {
-      if (field === 'projection') {
-        return sum + calculateProjection(item.ytdActual);
-      } else if (field === 'proposedChange') {
-        const projection = calculateProjection(item.ytdActual);
-        return sum + calculateProposedChange(projection, item.percentChange);
-      } else if (field === 'monthly') {
-        const projection = calculateProjection(item.ytdActual);
-        const proposedChange = calculateProposedChange(projection, item.percentChange);
-        return sum + calculateMonthly(proposedChange);
-      }
-      return sum + item[field];
-    }, 0);
-  };
-
-  // Total Annual Budget
-  const totalAnnualBudget = lineItems.reduce((sum, item) => {
-    const projection = calculateProjection(item.ytdActual);
-    return sum + calculateProposedChange(projection, item.percentChange);
-  }, 0);
+  // Total Annual Budget = expenses only (operating + reserve), same pattern as BudgetView
+  const totalAnnualBudget =
+    calcCategoryTotal(groupedItems['operating'] || [], 'proposedChange') +
+    calcCategoryTotal(groupedItems['reserve'] || [], 'proposedChange');
 
   const perUnitMonthly = totalAnnualBudget / 12 / units;
 
@@ -178,96 +114,41 @@ export function EnrichedView({ lineItems, onPercentChange, onNoteUpdate, units }
             </thead>
             <tbody>
               {Object.entries(groupedItems).flatMap(([category, items]) => [
-                // Operating Income Row (only for income category, before header)
-                ...(category === 'income' ? [
-                  <tr key="operating-income" className="border-b border-[#e5e5e5] hover:bg-[#fafafa] transition-colors">
-                    <td className="px-6 py-4 text-sm text-[#111111] font-medium">Operating Income</td>
-                    <td className="px-6 py-4 text-sm text-[#525252] text-right font-mono">
-                      0.00
-                    </td>
-                    <td className="px-6 py-4 text-sm text-[#525252] text-right font-mono">
-                      0.00
-                    </td>
-                    <td className="px-6 py-4 text-sm text-[#737373] text-right font-mono">
-                      0.0
-                    </td>
-                    <td className="px-6 py-4 text-sm text-[#525252] text-right font-mono">
-                      0.00
-                    </td>
-                    <td className="px-6 py-4 text-right">
-                      <Input
-                        type="number"
-                        step="0.1"
-                        value={operatingIncomePercent}
-                        onChange={(e) => handleOperatingIncomeChange(e.target.value)}
-                        className="w-24 text-right text-sm h-9 bg-white border-[#d4d4d4] focus:border-[#737373] focus:ring-1 focus:ring-[#737373] font-mono [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
-                      />
-                    </td>
-                    <td className="px-6 py-4 text-sm font-semibold text-[#111111] text-right font-mono">
-                      0.00
-                    </td>
-                    <td className="px-6 py-4 text-sm text-[#737373] text-right font-mono">
-                      0.00
-                    </td>
-                    <td className="px-6 py-4 text-center">
-                      <button
-                        disabled
-                        className="p-2 rounded transition-colors text-[#d4d4d4] cursor-not-allowed"
-                      >
-                        <MessageSquare className="w-4 h-4" />
-                      </button>
-                    </td>
-                  </tr>
-                ] : []),
                 // Category Header
-                ...(category === 'income' ? [
-                  <tr key={`${category}-header`} className="bg-[#f5f5f5] border-b border-[#e5e5e5]">
-                    <td className="px-6 py-3.5 text-xs font-bold text-[#111111] uppercase tracking-wide">
-                      {getCategoryLabel(category)}
-                    </td>
-                    <td className="px-6 py-3.5 text-xs font-bold text-[#111111] text-right font-mono">
-                      0.00
-                    </td>
-                    <td className="px-6 py-3.5 text-xs font-bold text-[#111111] text-right font-mono">
-                      0.00
-                    </td>
-                    <td className="px-6 py-3.5 text-xs font-bold text-[#111111] text-right font-mono">
-                      0.0
-                    </td>
-                    <td className="px-6 py-3.5 text-xs font-bold text-[#111111] text-right font-mono">
-                      0.00
-                    </td>
-                    <td className="px-6 py-3.5 text-right">
-                      <Input
-                        type="number"
-                        step="0.1"
-                        value={incomeHeaderPercent}
-                        onChange={(e) => handleIncomeHeaderChange(e.target.value)}
-                        className="w-24 text-right text-xs h-8 bg-white border-[#d4d4d4] focus:border-[#737373] focus:ring-1 focus:ring-[#737373] font-mono font-bold [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
-                      />
-                    </td>
-                    <td className="px-6 py-3.5 text-xs font-bold text-[#111111] text-right font-mono">
-                      0.00
-                    </td>
-                    <td className="px-6 py-3.5 text-xs font-bold text-[#111111] text-right font-mono">
-                      0.00
-                    </td>
-                    <td className="px-6 py-3.5"></td>
-                  </tr>
-                ] : [
-                  <tr key={`${category}-header`} className="bg-[#f5f5f5] border-b border-[#e5e5e5]">
-                    <td colSpan={9} className="px-6 py-3.5 text-xs font-bold text-[#111111] uppercase tracking-wide">
-                      {getCategoryLabel(category)}
-                    </td>
-                  </tr>
-                ]),
+                <tr key={`${category}-header`} className="bg-[#f5f5f5] border-b border-[#e5e5e5]">
+                  <td colSpan={9} className="px-6 py-3.5 text-xs font-bold text-[#111111] uppercase tracking-wide">
+                    {getCategoryLabel(category)}
+                  </td>
+                </tr>,
                 // Line Items
                 ...items.flatMap((item) => {
-                  const percentDiff = calculatePercentDifference(item.ytdActual, item.annualBudget);
-                  const projection = calculateProjection(item.ytdActual);
-                  const proposedChange = calculateProposedChange(projection, item.percentChange);
-                  const monthly = calculateMonthly(proposedChange);
                   const isNoteExpanded = expandedNote === item.id;
+
+                  // ── Read-only row (reserve-study / reserve-labeled, excluded from budget flow) ──
+                  if (item.readOnly) {
+                    return [
+                      <tr key={item.id} className="border-b border-[#e5e5e5] opacity-60">
+                        <td className="px-6 py-4 text-sm text-[#525252] italic">{item.name}</td>
+                        <td className="px-6 py-4 text-sm text-[#737373] text-right font-mono">{formatCurrency(item.ytdActual)}</td>
+                        <td className="px-6 py-4 text-sm text-[#737373] text-right font-mono">{formatCurrency(item.annualBudget)}</td>
+                        <td className="px-6 py-4 text-sm text-[#a3a3a3] text-right">—</td>
+                        <td className="px-6 py-4 text-sm text-[#a3a3a3] text-right">—</td>
+                        <td className="px-6 py-4 text-sm text-[#a3a3a3] text-right text-xs">Excluded</td>
+                        <td className="px-6 py-4 text-sm text-[#a3a3a3] text-right">—</td>
+                        <td className="px-6 py-4 text-sm text-[#a3a3a3] text-right">—</td>
+                        <td className="px-6 py-4 text-center">
+                          <button disabled className="p-2 rounded text-[#d4d4d4] cursor-not-allowed">
+                            <MessageSquare className="w-4 h-4" />
+                          </button>
+                        </td>
+                      </tr>,
+                    ];
+                  }
+
+                  const projection = item.projection ?? 0;
+                  const proposedChange = calcProposed(item.annualBudget, item.percentChange);
+                  const monthly = calcMonthly(proposedChange);
+                  const percentDiff = calcPercentDiff(projection, item.annualBudget);
 
                   return [
                     <tr key={item.id} className="border-b border-[#e5e5e5] hover:bg-[#fafafa] transition-colors">
@@ -294,7 +175,7 @@ export function EnrichedView({ lineItems, onPercentChange, onNoteUpdate, units }
                                   type="number"
                                   step="100"
                                   value={Math.round(proposedChange)}
-                                  onChange={(e) => handleDollarChangeInput(item.id, e.target.value, projection)}
+                                  onChange={(e) => handleDollarChangeInput(item.id, e.target.value, item.annualBudget)}
                                   className="w-32 pl-6 text-right text-sm h-9 bg-white border-[#d4d4d4] focus:border-[#737373] focus:ring-1 focus:ring-[#737373] font-mono [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
                                 />
                                 <button
@@ -412,21 +293,21 @@ export function EnrichedView({ lineItems, onPercentChange, onNoteUpdate, units }
                 <tr key={`${category}-total`} className="bg-[#f5f5f5] font-semibold border-b-2 border-[#d4d4d4]">
                   <td className="px-6 py-4 text-sm text-[#111111]">{getCategoryLabel(category)} Total</td>
                   <td className="px-6 py-4 text-sm text-[#111111] text-right font-mono">
-                    {formatCurrency(calculateCategoryTotal(items, 'ytdActual'))}
+                    {formatCurrency(calcCategoryTotal(items, 'ytdActual'))}
                   </td>
                   <td className="px-6 py-4 text-sm text-[#111111] text-right font-mono">
-                    {formatCurrency(calculateCategoryTotal(items, 'annualBudget'))}
+                    {formatCurrency(calcCategoryTotal(items, 'annualBudget'))}
                   </td>
                   <td className="px-6 py-4 text-sm text-[#737373] text-right">—</td>
                   <td className="px-6 py-4 text-sm text-[#111111] text-right font-mono">
-                    {formatCurrency(calculateCategoryTotal(items, 'projection'))}
+                    {formatCurrency(calcCategoryTotal(items, 'projection'))}
                   </td>
                   <td className="px-6 py-4 text-sm text-[#737373] text-right">—</td>
                   <td className="px-6 py-4 text-sm font-bold text-[#111111] text-right font-mono">
-                    {formatCurrency(calculateCategoryTotal(items, 'proposedChange'))}
+                    {formatCurrency(calcCategoryTotal(items, 'proposedChange'))}
                   </td>
                   <td className="px-6 py-4 text-sm text-[#737373] text-right font-mono">
-                    {formatCurrency(calculateCategoryTotal(items, 'monthly'))}
+                    {formatCurrency(calcCategoryTotal(items, 'monthly'))}
                   </td>
                   <td className="px-6 py-4"></td>
                 </tr>

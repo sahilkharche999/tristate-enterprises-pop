@@ -227,11 +227,13 @@ export function SettingsScreen() {
                 <h3 className="text-lg font-medium text-[#111111]">Growth Factor Logic Formula</h3>
                 <div className="bg-white border border-[#E5E5E5] rounded-lg p-6">
                   <code className="text-sm text-[#111111] font-mono">
-                    Projection = (YTD Actual / Months Elapsed) × 12
+                    Projection = YTD Actual × Growth Factor
                     <br />
-                    Proposed Change = Projection × (1 + % Change / 100)
+                    Growth Factor = 12 / Months Elapsed in Fiscal Year
                     <br />
-                    Monthly Allocation = Proposed Change / 12
+                    Proposed = Annual Budget × (1 + % Change / 100)
+                    <br />
+                    Monthly = Proposed / 12
                   </code>
                 </div>
               </div>
@@ -241,11 +243,11 @@ export function SettingsScreen() {
                 <h3 className="text-lg font-medium text-[#111111]">Reserve Allocation Logic</h3>
                 <div className="bg-white border border-[#E5E5E5] rounded-lg p-6">
                   <code className="text-sm text-[#111111] font-mono">
-                    Total Reserve = Sum(All Reserve Line Items)
+                    Reserve Allocation = Single transfer line item (e.g. 90000 - Reserve Allocation/Transfer)
                     <br />
-                    Reserve % of Budget = (Total Reserve / Total Annual Budget) × 100
+                    Reserve study line items are excluded from the board-adjustable flow
                     <br />
-                    Minimum Recommended Reserve = 10% of Total Budget
+                    Reserve % of Budget = (Reserve Allocation / Total Operating Budget) × 100
                   </code>
                 </div>
               </div>

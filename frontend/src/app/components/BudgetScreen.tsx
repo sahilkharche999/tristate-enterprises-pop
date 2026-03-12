@@ -35,13 +35,20 @@ export function parseEnrichedResponse(enriched: SheetTable): LineItem[] {
 
     // Line item: col B non-empty
     if (colB != null && colB !== '') {
+      // Backend blanks AK:AZ (col AL = index 37) to null for reserve-study and
+      // reserve-labeled rows — those are excluded from the board-adjustable flow.
+      // null = excluded (show read-only); 0 = valid item whose YTD happens to be zero.
+      const excluded = row[37] == null;
+
       items.push({
         id: `item-${++idCounter}`,
         category: currentCategory,
         name: String(colB),
-        ytdActual: toNum(row[19]),      // col T (index 19)
-        annualBudget: toNum(row[32]),   // col AG (index 32)
+        ytdActual: toNum(row[19]),           // col T  (index 19)
+        annualBudget: toNum(row[32]),        // col AG (index 32)
         percentChange: toNum(row[38]) * 100, // col AM (index 38), decimal → display %
+        projection: excluded ? undefined : toNum(row[37]), // col AL (index 37)
+        readOnly: excluded || undefined,
       });
     }
   }
