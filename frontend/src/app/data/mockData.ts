@@ -7,6 +7,8 @@ export interface LineItem {
   percentChange: number; // display %, user-editable
   projection?: number;   // backend col AL: YTD × growth factor
   readOnly?: boolean;    // true = excluded from board-adjustable flow (reserve-study rows)
+  accountCode?: number;  // 60000 — parsed from "60000 - Electricity & Gas"
+  label?: string;        // "60000 - Electricity & Gas" — full string from col B
   note?: {
     title: string;
     body: string;
@@ -71,12 +73,66 @@ export const initialLineItems: LineItem[] = [
 ];
 
 export interface AISuggestion {
-  lineItemId: string;
+  lineItemId: string;         // maps to LineItem.id (string form of feedback_case_id)
   lineItemName: string;
-  currentPercent: number;
-  suggestedPercent: number;
-  confidence: number;
+  currentPercent: number;     // derived from lineItems state (frontend-side)
+  suggestedPercent: number;   // suggested_pct_change × 100
+  confidence: number;         // confidence × 100
   reason: string;
+  revisedByPass2?: boolean;
+  cbrMatch?: number | null;
+  mlBaseline?: number | null;
+  feedbackCaseId?: number;    // backend feedback_case_id for submitting feedback
+}
+
+// Backend suggestion shape — matches actual FastAPI JSON response (snake_case)
+export interface BackendSuggestion {
+  id: number;                    // feedback_case_id
+  account_code: number;
+  account_name: string;
+  suggested_pct_change: number;  // decimal, e.g. -0.094
+  reason: string;
+  confidence: number;            // 0.0–1.0
+  revised_by_pass2: boolean;
+  cbr_match: number | null;
+  ml_baseline: number | null;
+}
+
+export interface AISuggestionResponse {
+  run_id: number;
+  suggestions: BackendSuggestion[];
+  executive_summary: string;
+  coherence_score: 'high' | 'medium' | 'low';
+  total_budget_impact: string;
+  flagged_items: FlaggedItem[];
+}
+
+export interface FlaggedItem {
+  account_code: number;
+  issue: string;
+  revised_pct_change: number;
+  revised_reason: string;
+}
+
+export interface FeedbackDecision {
+  feedbackCaseId: number;
+  decision: 'accepted' | 'modified' | 'rejected';
+  finalPctChange: number;
+  note?: string;
+}
+
+export interface FeedbackResponse {
+  updated: number;
+  total_cases: number;
+  catboost_active: boolean;
+}
+
+export interface AIStatsResponse {
+  total_cases: number;
+  catboost_active: boolean;
+  last_training: string | null;
+  properties: string[];
+  sop_rules: number;
 }
 
 export const mockAISuggestions: AISuggestion[] = [

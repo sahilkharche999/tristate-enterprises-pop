@@ -2,13 +2,15 @@ import { useState, useEffect, useRef } from 'react';
 import { useParams, Link } from 'react-router';
 import { ArrowLeft, Settings, Upload, Download, FileText } from 'lucide-react';
 import { Button } from './ui/button';
-import { hoaList, mockAISuggestions, type LineItem, type AISuggestion } from '../data/mockData';
+import { hoaList, type LineItem, type AISuggestion, type AISuggestionResponse } from '../data/mockData';
 import { EnrichedView } from './EnrichedView';
 import { BudgetView } from './BudgetView';
 import { AISuggestionMode } from './AISuggestionMode';
 import { toast } from 'sonner';
 import { generateBudget, toNum } from '../api/macros';
 import type { SheetTable } from '../api/macros';
+import { exportEnrichedBudget } from '../lib/exportBudget';
+import { computeTimingInputs, parseMonth } from '../lib/fiscalYear';
 
 // ─── Utility ─────────────────────────────────────────────────────────────────
 
@@ -40,15 +42,21 @@ export function parseEnrichedResponse(enriched: SheetTable): LineItem[] {
       // null = excluded (show read-only); 0 = valid item whose YTD happens to be zero.
       const excluded = row[37] == null;
 
+      const colBStr = String(colB);
+      const labelParts = colBStr.split(' - ');
+      const parsedCode = labelParts.length >= 2 ? parseInt(labelParts[0].trim(), 10) : NaN;
+
       items.push({
         id: `item-${++idCounter}`,
         category: currentCategory,
-        name: String(colB),
+        name: colBStr,
         ytdActual: toNum(row[19]),           // col T  (index 19)
         annualBudget: toNum(row[32]),        // col AG (index 32)
         percentChange: toNum(row[38]) * 100, // col AM (index 38), decimal → display %
         projection: excluded ? undefined : toNum(row[37]), // col AL (index 37)
         readOnly: excluded || undefined,
+        accountCode: !isNaN(parsedCode) ? parsedCode : undefined,
+        label: colBStr,
       });
     }
   }
@@ -85,6 +93,11 @@ export function BudgetScreen({
   const [globalNote, setGlobalNote] = useState('');
   const [lastSaved, setLastSaved] = useState(new Date());
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [aiResponse, setAiResponse] = useState<AISuggestionResponse | null>(null);
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
+  const [statementMonth, setStatementMonth] = useState<number | null>(null);
+  const [uploadedGrowthFactor, setUploadedGrowthFactor] = useState<number | null>(null);
 
   // Auto-save effect
   useEffect(() => {
@@ -106,9 +119,15 @@ export function BudgetScreen({
 
     setUploadState('uploading');
     try {
-      const result = await generateBudget({ file, enrichOnly: true });
+      const result = await generateBudget({
+        file,
+        enrichOnly: true,
+        fiscalYearStartMonth: hoa ? parseMonth(hoa.fiscalYearStart) : 1,
+      });
       const parsed = parseEnrichedResponse(result.enriched);
       onLineItemsUpdate(parsed);
+      if (result.statement_month) setStatementMonth(result.statement_month);
+      setUploadedGrowthFactor(result.growth_factor ?? null);
       onFileUploaded?.(file);
       setUploadState('complete');
       toast.success('Income statement parsed successfully');
@@ -133,6 +152,34 @@ export function BudgetScreen({
         item.id === itemId ? { ...item, note: { title, body } } : item
       )
     );
+  };
+
+  const handleFetchAISuggestions = async () => {
+    if (!hoa) return;
+    if (aiLoading) return;
+    setAiLoading(true);
+    setAiError(null);
+    try {
+      const { getAISuggestions } = await import('../api/macros');
+      const totalBudget = lineItems.reduce((s, i) => s + (i.annualBudget || 0), 0);
+      const totalYtd = lineItems.reduce((s, i) => s + (i.ytdActual || 0), 0);
+      const timing = computeTimingInputs(hoa, statementMonth ?? undefined);
+      const result = await getAISuggestions({
+        lineItems,
+        propertyName: hoa.name || 'HOA',
+        totalAnnualBudget: totalBudget,
+        totalYtdActuals: totalYtd,
+        ...timing,
+        growthFactor: uploadedGrowthFactor ?? timing.growthFactor,
+        fiscalYear: hoa.year,
+      });
+      setAiResponse(result);
+    } catch (err: unknown) {
+      const apiErr = err as { message?: string };
+      setAiError(apiErr?.message || 'AI service unavailable');
+    } finally {
+      setAiLoading(false);
+    }
   };
 
   const handleApplyAISuggestions = (selectedSuggestions: AISuggestion[]) => {
@@ -315,7 +362,7 @@ export function BudgetScreen({
             </Button>
             <Button
               variant={currentView === 'ai' ? 'default' : 'outline'}
-              onClick={() => setCurrentView('ai')}
+              onClick={() => { setCurrentView('ai'); if (!aiResponse && !aiLoading) handleFetchAISuggestions(); }}
               className={
                 currentView === 'ai'
                   ? 'bg-[#111111] text-white hover:bg-[#262626] shadow-sm'
@@ -324,7 +371,11 @@ export function BudgetScreen({
             >
               AI Suggested % Change
             </Button>
-            <Button variant="outline" className="border-[#e5e5e5] text-[#525252] hover:bg-[#f5f5f5] hover:border-[#737373]">
+            <Button
+              variant="outline"
+              className="border-[#e5e5e5] text-[#525252] hover:bg-[#f5f5f5] hover:border-[#737373]"
+              onClick={() => exportEnrichedBudget(lineItems, hoa?.name ?? 'Budget')}
+            >
               <Download className="w-4 h-4 mr-2" />
               Download Enriched
             </Button>
@@ -354,9 +405,12 @@ export function BudgetScreen({
         {currentView === 'budget' && <BudgetView lineItems={lineItems} units={hoa.units} />}
         {currentView === 'ai' && (
           <AISuggestionMode
-            suggestions={mockAISuggestions}
+            aiResponse={aiResponse}
             lineItems={lineItems}
+            loading={aiLoading}
+            error={aiError}
             onApply={handleApplyAISuggestions}
+            onRefetch={handleFetchAISuggestions}
           />
         )}
       </main>

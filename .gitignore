@@ -47,3 +47,15 @@ node_modules
 .claude/
 openspec/
 docs/
+.agents/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+*.egg-info/
+
+# Data / runtime artifacts
+data/
+mockdata/

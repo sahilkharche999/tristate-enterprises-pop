@@ -22,12 +22,20 @@ COPY backend/app ./app
 # Copy repo-root pipeline modules needed at runtime
 COPY generate_budget.py generate_budget_pipeline.py ./
 
+# Copy AI pipeline module and data
+COPY ai_implementation/ ./ai_implementation/
+COPY data/ ./data/
+RUN pip install --no-cache-dir -r ai_implementation/requirements.txt
+
 # Expose port
 EXPOSE 8000
 
 # Environment defaults (can be overridden at runtime)
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
+
+# Seed the AI database (idempotent — skips if already seeded)
+RUN python -m ai_implementation.seed.seed_database || true
 
 # Run Uvicorn
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

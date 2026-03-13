@@ -237,12 +237,14 @@ async def generate_budget(
         # Determine growth factor if not provided
         resolved_growth_factor = growth_factor
         growth_factor_note = "configured value"
+        statement_month = None
         if resolved_growth_factor is None:
             try:
                 resolved_growth_factor, detected_months, source = await run_in_threadpool(
                     infer_growth_factor_from_input, input_path, fiscal_year_start_month
                 )
                 growth_factor_note = f"auto annualization 12/{detected_months} from {source}"
+                statement_month = (fiscal_year_start_month + detected_months - 2) % 12 + 1
             except Exception as e:
                 raise HTTPException(status_code=400, detail="Could not infer growth factor from input")
 
@@ -279,6 +281,7 @@ async def generate_budget(
         resp = {
             "growth_factor": resolved_growth_factor,
             "growth_factor_note": growth_factor_note,
+            "statement_month": statement_month,
             "enriched": enriched,
             "budget_preview": budget_preview,
         }
