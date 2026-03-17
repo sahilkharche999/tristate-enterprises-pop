@@ -6,13 +6,18 @@ import { type LineItem } from '../data/mockData';
 
 // ── Formatting ────────────────────────────────────────────────────────────────
 
-export const formatCurrency = (value: number) =>
-  new Intl.NumberFormat('en-US', {
-    style: 'currency',
-    currency: 'USD',
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 0,
-  }).format(value);
+const currencyFmt0 = new Intl.NumberFormat('en-US', {
+  style: 'currency', currency: 'USD', minimumFractionDigits: 0, maximumFractionDigits: 0,
+});
+const currencyFmt2 = new Intl.NumberFormat('en-US', {
+  style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2,
+});
+
+export const formatCurrency = (value: number, decimals: 0 | 2 = 0) =>
+  (decimals === 2 ? currencyFmt2 : currencyFmt0).format(value);
+
+export const formatTimestamp = (date: Date) =>
+  date.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' });
 
 // ── Category labels ───────────────────────────────────────────────────────────
 

@@ -1,38 +1,23 @@
-version: "3.9"
-
 services:
   backend:
-    build:
-      context: .
-      dockerfile: backend/Dockerfile
-    image: tristate-backend-image:latest
+    build: ./backend
     ports:
       - "8000:8000"
+    volumes:
+      - db-data:/app/app/ai_implementation/data
     environment:
-      - ALLOW_ORIGINS=*
+      - ALLOW_ORIGINS=http://localhost,http://localhost:80,http://localhost:5173,http://0.0.0.0,http://0.0.0.0:80
       - GROQ_API_KEY=${GROQ_API_KEY}
-    networks:
-      - popnet
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8000/openapi.json || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
 
   frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
-    image: tristate-frontend-image:latest
+    build: ./frontend
     ports:
       - "80:80"
     depends_on:
       - backend
-    networks:
-      - popnet
     restart: unless-stopped
 
-networks:
-  popnet:
-    driver: bridge
+volumes:
+  db-data:

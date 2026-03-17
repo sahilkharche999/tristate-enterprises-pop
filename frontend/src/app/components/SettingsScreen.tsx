@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useParams, Link } from 'react-router';
-import { ArrowLeft, Download, FolderOpen, Eye } from 'lucide-react';
+import { ArrowLeft, Download, FolderOpen, Eye, Database } from 'lucide-react';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
@@ -9,6 +9,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '.
 import { hoaList, getKnowledgeBaseFolders } from '../data/mockData';
 import { toast } from 'sonner';
 import { MacroToolsPanel } from './MacroToolsPanel';
+import { exportData } from '../api/macros';
 
 export function SettingsScreen() {
   const { id } = useParams<{ id: string }>();
@@ -80,6 +81,9 @@ export function SettingsScreen() {
             </TabsTrigger>
             <TabsTrigger value="knowledge" className="data-[state=active]:bg-white">
               Knowledge Base
+            </TabsTrigger>
+            <TabsTrigger value="data" className="data-[state=active]:bg-white">
+              Data Export
             </TabsTrigger>
           </TabsList>
 
@@ -290,7 +294,54 @@ export function SettingsScreen() {
             </div>
           </TabsContent>
 
-          {/* Tab 3: Knowledge Base */}
+          {/* Tab 3: Data Export */}
+          <TabsContent value="data" className="space-y-6">
+            <div className="bg-[#F7F7F7] border border-[#E5E5E5] rounded-lg p-8 space-y-6">
+              <div className="flex items-start gap-4">
+                <div className="w-12 h-12 bg-white border border-[#E5E5E5] rounded-lg flex items-center justify-center">
+                  <Database className="w-6 h-6 text-[#525252]" />
+                </div>
+                <div className="flex-1">
+                  <h3 className="text-lg font-medium text-[#111111]">Export Database</h3>
+                  <p className="text-sm text-[#666666] mt-1">
+                    Download all AI pipeline data including feedback cases, suggestion runs, user decisions, and SOP rules as a JSON file.
+                  </p>
+                </div>
+              </div>
+
+              <div className="bg-white border border-[#E5E5E5] rounded-lg p-6 space-y-4">
+                <div className="grid grid-cols-2 gap-4 text-sm">
+                  <div className="text-[#666666]">Format</div>
+                  <div className="text-[#111111] font-medium">JSON</div>
+                  <div className="text-[#666666]">Includes</div>
+                  <div className="text-[#111111]">Users, Properties, Suggestion Runs, Feedback Cases, SOP Rules</div>
+                </div>
+                <Button
+                  onClick={async () => {
+                    try {
+                      const data = await exportData();
+                      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement('a');
+                      a.href = url;
+                      a.download = `tri-state-export-${new Date().toISOString().slice(0, 10)}.json`;
+                      a.click();
+                      URL.revokeObjectURL(url);
+                      toast.success('Database exported successfully');
+                    } catch {
+                      toast.error('Failed to export database. Please try again.');
+                    }
+                  }}
+                  className="bg-[#111111] text-white hover:bg-[#262626] shadow-sm"
+                >
+                  <Download className="w-4 h-4 mr-2" />
+                  Export All Data
+                </Button>
+              </div>
+            </div>
+          </TabsContent>
+
+          {/* Tab 4: Knowledge Base */}
           <TabsContent value="knowledge" className="space-y-6">
             <div className="grid grid-cols-4 gap-6">
               {/* Folder List */}

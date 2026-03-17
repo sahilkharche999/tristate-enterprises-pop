@@ -1,11 +1,13 @@
 import { createBrowserRouter } from "react-router";
 import { LoginScreen } from "./components/LoginScreen";
+import { SignupScreen } from "./components/SignupScreen";
 import { HOAWorkspace } from "./components/HOAWorkspace";
 import { BudgetScreen } from "./components/BudgetScreen";
 import { SettingsScreen } from "./components/SettingsScreen";
 import { SettingsSelector } from "./components/SettingsSelector";
 import { BudgetScreenWrapper } from "./components/BudgetScreenWrapper";
 import { SyncHistoryScreen } from "./components/SyncHistoryScreen";
+import { ProtectedRoute } from "./components/ProtectedRoute";
 
 export const router = createBrowserRouter([
   {
@@ -13,23 +15,27 @@ export const router = createBrowserRouter([
     Component: LoginScreen,
   },
   {
+    path: "/signup",
+    Component: SignupScreen,
+  },
+  {
     path: "/workspace",
-    Component: HOAWorkspace,
+    element: <ProtectedRoute><HOAWorkspace /></ProtectedRoute>,
   },
   {
     path: "/settings",
-    Component: SettingsSelector,
+    element: <ProtectedRoute><SettingsSelector /></ProtectedRoute>,
   },
   {
     path: "/hoa/:id",
-    Component: BudgetScreenWrapper,
+    element: <ProtectedRoute><BudgetScreenWrapper /></ProtectedRoute>,
   },
   {
     path: "/hoa/:id/settings",
-    Component: SettingsScreen,
+    element: <ProtectedRoute><SettingsScreen /></ProtectedRoute>,
   },
   {
     path: "/hoa/:id/sync-history",
-    Component: SyncHistoryScreen,
+    element: <ProtectedRoute><SyncHistoryScreen /></ProtectedRoute>,
   },
 ]);

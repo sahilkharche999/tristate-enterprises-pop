@@ -4,16 +4,22 @@ This app exposes endpoints that accept an uploaded Excel file and parameters, ru
 pipeline-style computations and return JSON results. Configuration values are
 externalized via `app.config.settings` (pydantic.BaseSettings).
 """
-from .config import settings
-from .routers import macros
-from contextlib import asynccontextmanager
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+import asyncio
 import logging
 import sys
+from contextlib import asynccontextmanager
 
-# Basic logging configuration for the application. Containers and prod deployments
-# can override this via environment or a more advanced logging setup.
+from fastapi import Depends, FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from .config import settings
+from .routers import macros
+from .auth.router import router as auth_router
+from .auth.dependencies import get_current_user
+from .ai_implementation.database import init_db
+from .ai_implementation.seed.seed_database import run_seed
+from .ai_implementation.router import router as ai_router
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
@@ -23,24 +29,16 @@ logger = logging.getLogger(__name__)
 
 
 def create_app() -> FastAPI:
-    import os
-
-    # Add project root to path for ai_implementation imports
-    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    if project_root not in sys.path:
-        sys.path.insert(0, project_root)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        # Startup
         try:
-            from ai_implementation.database import init_db
             init_db()
             logger.info("AI pipeline database initialized")
+            await asyncio.to_thread(run_seed)
         except Exception as e:
-            logger.warning(f"AI pipeline DB init failed: {e}")
+            logger.warning(f"AI pipeline startup failed: {e}")
         yield
-        # Shutdown (nothing to clean up)
 
     app = FastAPI(title="VBA -> Python Macro Pipeline", lifespan=lifespan)
 
@@ -54,15 +52,18 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    app.include_router(macros.router, prefix="")
+    # Auth routes (unprotected)
+    app.include_router(auth_router)
 
-    # Mount AI Budget Pipeline router
-    try:
-        from ai_implementation.router import router as ai_router
-        app.include_router(ai_router, prefix="/ai", tags=["AI Pipeline"])
-        logger.info("AI Budget Pipeline router mounted at /ai")
-    except ImportError as e:
-        logger.warning(f"AI pipeline not available (missing deps?): {e}")
+    # Protected macro routes
+    app.include_router(macros.router, prefix="", dependencies=[Depends(get_current_user)])
+
+    # Protected AI routes
+    app.include_router(
+        ai_router, prefix="/ai", tags=["AI Pipeline"],
+        dependencies=[Depends(get_current_user)],
+    )
+    logger.info("AI Budget Pipeline router mounted at /ai")
 
     return app
 

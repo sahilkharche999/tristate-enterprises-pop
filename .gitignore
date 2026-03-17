@@ -57,5 +57,13 @@ venv/
 *.egg-info/
 
 # Data / runtime artifacts
-data/
 mockdata/
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+
+# Unused seed data files (not needed for seeding or app)
+backend/app/ai_implementation/seed/data/401 Income Statement Dec 2024.xlsx
+backend/app/ai_implementation/seed/data/Budget_Template.xlsx
+backend/app/ai_implementation/seed/data/Income Statement Esprit Park Aug 2025.xlsx

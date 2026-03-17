@@ -3,6 +3,7 @@ import { useParams, Link } from 'react-router';
 import { ArrowLeft, Download, Eye, RotateCcw, ChevronDown, ChevronRight, Settings } from 'lucide-react';
 import { Button } from './ui/button';
 import { hoaList } from '../data/mockData';
+import { formatCurrency } from '../lib/budget';
 import { toast } from 'sonner';
 import { 
   AlertDialog,
@@ -227,15 +228,6 @@ export function SyncHistoryScreen() {
       }
       return [...prev, snapshotId];
     });
-  };
-
-  const formatCurrency = (value: number) => {
-    return new Intl.NumberFormat('en-US', {
-      style: 'currency',
-      currency: 'USD',
-      minimumFractionDigits: 0,
-      maximumFractionDigits: 0,
-    }).format(value);
   };
 
   if (compareMode && selectedSnapshots.length === 2) {

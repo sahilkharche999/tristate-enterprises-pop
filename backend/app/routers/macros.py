@@ -1,14 +1,19 @@
 """HTTP router exposing macro-like endpoints."""
-from fastapi import APIRouter, File, UploadFile, Form, HTTPException, Response, BackgroundTasks
-from fastapi.concurrency import run_in_threadpool
-from ..services import macros_service
-from ..models.schemas import TableResponse, SumResponse, DupsResponse, SimpleResponse
-from ..config import settings
 import json
 import logging
 import os
-import tempfile
 import shutil
+import tempfile
+from typing import Optional
+
+from fastapi import APIRouter, File, UploadFile, Form, HTTPException, Response, BackgroundTasks
+from fastapi.concurrency import run_in_threadpool
+
+from ..config import settings
+from ..models.schemas import TableResponse, SumResponse, DupsResponse, SimpleResponse
+from ..services import macros_service
+from ..generate_budget_pipeline import BudgetPipeline
+from ..generate_budget import infer_growth_factor_from_input
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -150,14 +155,14 @@ async def run_pipeline(file: UploadFile = File(...), sheet: str = Form('Income S
 @router.post("/macros/generate-budget")
 async def generate_budget(
     file: UploadFile = File(...),
-    growth_factor: float | None = Form(None),
+    growth_factor: Optional[float] = Form(None),
     fiscal_year_start_month: int = Form(1),
-    reserve_contribution: float | None = Form(None),
-    template_file: UploadFile | None = File(None),
-    am_seed_file: UploadFile | None = File(None),
-    aliases_csv: UploadFile | None = File(None),
+    reserve_contribution: Optional[float] = Form(None),
+    template_file: Optional[UploadFile] = File(None),
+    am_seed_file: Optional[UploadFile] = File(None),
+    aliases_csv: Optional[UploadFile] = File(None),
     enrich_only: bool = Form(False),
-    percent_changes_json: str | None = Form(None),
+    percent_changes_json: Optional[str] = Form(None),
     background: BackgroundTasks = None,
 ):
     """Run the full budget pipeline reusing existing Python code in the repo.
@@ -202,37 +207,6 @@ async def generate_budget(
             aliases_path = await save_upload_tmp(aliases_csv)
             if background:
                 background.add_task(lambda p=aliases_path: os.path.exists(p) and os.remove(p))
-
-        # Ensure repo root is on sys.path so we can import pipeline modules
-        import sys
-        from pathlib import Path
-
-        # Allow overriding repo root via settings; otherwise walk upward to find modules
-        repo_root = settings.REPO_ROOT
-        if not repo_root:
-            curr = Path(__file__).resolve()
-            repo_root = None
-            for parent in curr.parents:
-                if (parent / "generate_budget_pipeline.py").exists() and (parent / "generate_budget.py").exists():
-                    repo_root = str(parent)
-                    break
-        if repo_root is None:
-            raise HTTPException(status_code=500, detail="Could not locate generate_budget modules in repository ancestors")
-        if repo_root not in sys.path:
-            sys.path.insert(0, repo_root)
-
-        # Import pipeline classes
-        try:
-            # import in threadpool to avoid blocking event loop with import system IO
-            def _import_pipeline():
-                import importlib
-                mod_pipeline = importlib.import_module('generate_budget_pipeline')
-                mod_gen = importlib.import_module('generate_budget')
-                return mod_pipeline.BudgetPipeline, mod_gen.infer_growth_factor_from_input
-
-            BudgetPipeline, infer_growth_factor_from_input = await run_in_threadpool(_import_pipeline)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail="Failed to import budget pipeline modules")
 
         # Determine growth factor if not provided
         resolved_growth_factor = growth_factor

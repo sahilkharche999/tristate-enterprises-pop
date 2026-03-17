@@ -1,0 +1,7 @@
+# Demo SOP notes for AI suggestion agent
+Avoid max cap unless variance is severe and stable.
+Small variance under 3% should usually remain unchanged.
+Low coverage rows should use conservative adjustments.
+Reserve and total rows must never be auto-adjusted.
+Prefer fewer edits with stronger evidence over blanket edits.
+Keep change direction aligned with projection variance.

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { MessageSquare, ChevronDown, ChevronUp, Percent, DollarSign } from 'lucide-react';
+import { MessageSquare, ChevronDown, Percent, DollarSign } from 'lucide-react';
 import { Input } from './ui/input';
 import { Button } from './ui/button';
 import { type LineItem } from '../data/mockData';
@@ -22,24 +22,19 @@ interface EnrichedViewProps {
 export function EnrichedView({ lineItems, onPercentChange, onNoteUpdate, units }: EnrichedViewProps) {
   const [expandedNote, setExpandedNote] = useState<string | null>(null);
   const [noteEdits, setNoteEdits] = useState<Record<string, { title: string; body: string }>>({});
-  const [calculating, setCalculating] = useState(false);
   const [inputMode, setInputMode] = useState<Record<string, 'percent' | 'dollar'>>({});
 
 
   const handlePercentChangeInput = (itemId: string, value: string) => {
     const numValue = parseFloat(value) || 0;
-    setCalculating(true);
     onPercentChange(itemId, numValue);
-    setTimeout(() => setCalculating(false), 300);
   };
 
   const handleDollarChangeInput = (itemId: string, dollarValue: string, annualBudget: number) => {
     const numValue = parseFloat(dollarValue) || 0;
     // Invert backend formula: proposed = annualBudget × (1 + % change)
     const percentChange = annualBudget > 0 ? ((numValue / annualBudget) - 1) * 100 : 0;
-    setCalculating(true);
     onPercentChange(itemId, percentChange);
-    setTimeout(() => setCalculating(false), 300);
   };
 
   const toggleInputMode = (itemId: string) => {
@@ -88,13 +83,6 @@ export function EnrichedView({ lineItems, onPercentChange, onNoteUpdate, units }
 
   return (
     <div className="space-y-8">
-      {/* Calculation Status */}
-      {calculating && (
-        <div className="fixed top-20 right-8 bg-[#111111] text-white px-4 py-2.5 rounded-lg text-sm shadow-lg z-50">
-          Recalculating...
-        </div>
-      )}
-
       {/* Table */}
       <div className="bg-white border border-[#e5e5e5] rounded-lg overflow-hidden shadow-sm">
         <div className="overflow-x-auto">

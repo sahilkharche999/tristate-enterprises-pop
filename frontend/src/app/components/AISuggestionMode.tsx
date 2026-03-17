@@ -5,7 +5,6 @@ import { submitAIFeedback } from '../api/macros';
 import {
   type AISuggestion,
   type AISuggestionResponse,
-  type BackendSuggestion,
   type FeedbackDecision,
   type LineItem,
 } from '../data/mockData';
@@ -43,6 +42,7 @@ export function AISuggestionMode({
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [rowDecisions, setRowDecisions] = useState<Record<string, 'accepted' | 'modified' | 'rejected'>>({});
   const [submitting, setSubmitting] = useState(false);
+  const [expandedReasons, setExpandedReasons] = useState<Set<string>>(new Set());
 
   // Map backend suggestions to frontend AISuggestion shape, keyed by LineItem.id via accountCode
   const suggestions: AISuggestion[] = useMemo(() => {
@@ -94,15 +94,20 @@ export function AISuggestionMode({
 
   const handleApply = async () => {
     const selected = suggestions.filter((s) => selectedIds.has(s.lineItemId));
-    if (aiResponse?.run_id && selected.length > 0) {
+    if (aiResponse?.run_id) {
       setSubmitting(true);
       try {
-        const decisions: FeedbackDecision[] = selected.map((s) => ({
-          feedbackCaseId: s.feedbackCaseId ?? 0,
-          decision: rowDecisions[s.lineItemId] ?? 'accepted',
-          finalPctChange: s.suggestedPercent / 100,
-        }));
-        await submitAIFeedback({ runId: aiResponse.run_id, decisions });
+        // Send ALL decisions (accepted + rejected) so the backend learns from both
+        const decisions: FeedbackDecision[] = suggestions
+          .filter((s) => rowDecisions[s.lineItemId] === 'accepted' || rowDecisions[s.lineItemId] === 'rejected')
+          .map((s) => ({
+            feedbackCaseId: s.feedbackCaseId ?? 0,
+            decision: rowDecisions[s.lineItemId] ?? 'accepted',
+            finalPctChange: rowDecisions[s.lineItemId] === 'rejected' ? 0 : s.suggestedPercent / 100,
+          }));
+        if (decisions.length > 0) {
+          await submitAIFeedback({ runId: aiResponse.run_id, decisions });
+        }
       } catch {
         // Non-blocking — apply even if feedback fails
       } finally {
@@ -276,8 +281,16 @@ export function AISuggestionMode({
                     <td className={`px-4 py-4 text-sm font-medium text-right ${getConfidenceColor(suggestion.confidence)}`}>
                       {suggestion.confidence.toFixed(0)}%
                     </td>
-                    <td className="px-4 py-4 max-w-xs">
-                      <p className="text-sm text-[#111111] leading-relaxed line-clamp-3">
+                    <td
+                      className="px-4 py-4 max-w-xs cursor-pointer"
+                      onClick={() => setExpandedReasons(prev => {
+                        const next = new Set(prev);
+                        if (next.has(suggestion.lineItemId)) next.delete(suggestion.lineItemId);
+                        else next.add(suggestion.lineItemId);
+                        return next;
+                      })}
+                    >
+                      <p className={`text-sm text-[#111111] leading-relaxed ${expandedReasons.has(suggestion.lineItemId) ? '' : 'line-clamp-3'}`}>
                         {suggestion.reason}
                       </p>
                     </td>

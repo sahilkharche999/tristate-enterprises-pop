@@ -4,7 +4,7 @@ import { Button } from './ui/button';
 import { hoaList, type LineItem } from '../data/mockData';
 import { toNum } from '../api/macros';
 import type { SheetTable } from '../api/macros';
-import { calcProposed } from '../lib/budget';
+import { calcProposed, formatCurrency, formatTimestamp } from '../lib/budget';
 
 // ─── parseBudgetPreview ───────────────────────────────────────────────────────
 
@@ -71,16 +71,9 @@ export function GeneratedBudgetScreen({
   const [, setSearchParams] = useSearchParams();
   const hoa = hoaList.find((h) => h.id === id);
 
-  const formatCurrency = (value: number) => {
-    return new Intl.NumberFormat('en-US', {
-      style: 'currency',
-      currency: 'USD',
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-    }).format(value);
-  };
+  const fmtCurrency2 = (value: number) => formatCurrency(value, 2);
 
-  const formatTimestamp = (date: Date) => {
+  const formatTimestampLocal = (date: Date) => {
     return date.toLocaleString('en-US', {
       month: 'short',
       day: 'numeric',
@@ -265,7 +258,7 @@ export function GeneratedBudgetScreen({
         <div className="flex items-center justify-between mb-8 pb-8 border-b border-[#e5e5e5]">
           <Button
             variant="outline"
-            onClick={() => navigate(`/hoa/${id}`)}
+            onClick={() => navigate(`/hoa/${id}?view=enriched`)}
             className="border-[#e5e5e5] text-[#525252] hover:bg-[#f5f5f5] hover:text-[#111111]"
           >
             Back to Enriched View

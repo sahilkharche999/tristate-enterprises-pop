@@ -1,12 +1,16 @@
 import { useState } from 'react';
-import { Link } from 'react-router';
-import { Search, Settings, LayoutList, LayoutGrid, Filter, X } from 'lucide-react';
+import { Link, useNavigate } from 'react-router';
+import { Search, Settings, LayoutList, LayoutGrid, Filter, X, LogOut } from 'lucide-react';
 import { Input } from './ui/input';
 import { Button } from './ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 import { hoaList } from '../data/mockData';
+import { useAuth } from '../context/AuthContext';
+import { getStatusColor } from '../lib/statusColors';
 
 export function HOAWorkspace() {
+  const navigate = useNavigate();
+  const auth = useAuth();
   const [searchQuery, setSearchQuery] = useState('');
   const [viewMode, setViewMode] = useState<'list' | 'card'>('list');
   const [filterYear, setFilterYear] = useState<string>('all');
@@ -53,19 +57,6 @@ export function HOAWorkspace() {
     setFilterCity('all');
   };
 
-  const getStatusColor = (status: string) => {
-    switch (status) {
-      case 'Completed':
-        return 'bg-[#d1fae5] text-[#065f46] border-[#a7f3d0]';
-      case 'In Progress':
-        return 'bg-[#dbeafe] text-[#1e40af] border-[#bfdbfe]';
-      case 'Not Started':
-        return 'bg-[#f5f5f5] text-[#525252] border-[#e5e5e5]';
-      default:
-        return 'bg-[#f5f5f5] text-[#525252] border-[#e5e5e5]';
-    }
-  };
-
   return (
     <div className="min-h-screen bg-[#fafafa]">
       {/* Header */}
@@ -75,11 +66,24 @@ export function HOAWorkspace() {
             <h1 className="text-2xl font-semibold text-[#111111] tracking-tight">Tri-State Enterprises</h1>
             <p className="text-sm text-[#737373] mt-0.5">HOA Budget Management System</p>
           </div>
-          <Link to="/settings">
-            <Button variant="ghost" size="icon" className="hover:bg-[#f5f5f5]">
-              <Settings className="w-5 h-5 text-[#525252]" />
+          <div className="flex items-center gap-3">
+            {auth.user && (
+              <span className="text-sm text-[#737373]">{auth.user.name}</span>
+            )}
+            <Link to="/settings">
+              <Button variant="ghost" size="icon" className="hover:bg-[#f5f5f5]">
+                <Settings className="w-5 h-5 text-[#525252]" />
+              </Button>
+            </Link>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="hover:bg-[#f5f5f5]"
+              onClick={async () => { await auth.logout(); navigate('/'); }}
+            >
+              <LogOut className="w-5 h-5 text-[#525252]" />
             </Button>
-          </Link>
+          </div>
         </div>
       </header>
 

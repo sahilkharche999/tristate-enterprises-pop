@@ -9,6 +9,7 @@ import { AISuggestionMode } from './AISuggestionMode';
 import { toast } from 'sonner';
 import { generateBudget, toNum } from '../api/macros';
 import type { SheetTable } from '../api/macros';
+import { formatTimestamp } from '../lib/budget';
 import { exportEnrichedBudget } from '../lib/exportBudget';
 import { computeTimingInputs, parseMonth } from '../lib/fiscalYear';
 
@@ -74,6 +75,9 @@ interface BudgetScreenProps {
   budgetGenerated: boolean;
   isGenerating?: boolean;
   initialView?: 'enriched' | 'budget' | 'ai';
+  fileAlreadyUploaded?: boolean;
+  savedAiResponse?: AISuggestionResponse | null;
+  onAiResponseChange?: (response: AISuggestionResponse | null) => void;
 }
 
 export function BudgetScreen({
@@ -84,16 +88,23 @@ export function BudgetScreen({
   budgetGenerated,
   isGenerating = false,
   initialView = 'enriched',
+  fileAlreadyUploaded = false,
+  savedAiResponse = null,
+  onAiResponseChange,
 }: BudgetScreenProps) {
   const { id } = useParams<{ id: string }>();
   const hoa = hoaList.find((h) => h.id === id);
 
-  const [uploadState, setUploadState] = useState<'initial' | 'uploading' | 'complete'>('initial');
+  const [uploadState, setUploadState] = useState<'initial' | 'uploading' | 'complete'>(fileAlreadyUploaded ? 'complete' : 'initial');
   const [currentView, setCurrentView] = useState<'enriched' | 'budget' | 'ai'>(initialView);
   const [globalNote, setGlobalNote] = useState('');
   const [lastSaved, setLastSaved] = useState(new Date());
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [aiResponse, setAiResponse] = useState<AISuggestionResponse | null>(null);
+  const [aiResponse, _setAiResponse] = useState<AISuggestionResponse | null>(savedAiResponse);
+  const setAiResponse = (r: AISuggestionResponse | null) => {
+    _setAiResponse(r);
+    onAiResponseChange?.(r);
+  };
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
   const [statementMonth, setStatementMonth] = useState<number | null>(null);
@@ -196,15 +207,6 @@ export function BudgetScreen({
     toast.success(`Applied ${selectedSuggestions.length} AI suggestions`);
   };
 
-  const formatTimestamp = (date: Date) => {
-    return date.toLocaleString('en-US', {
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-    });
-  };
-
   if (!hoa) {
     return (
       <div className="min-h-screen bg-white flex items-center justify-center">
@@ -221,7 +223,7 @@ export function BudgetScreen({
         <header className="border-b border-[#e5e5e5] bg-white sticky top-0 z-10 shadow-sm">
           <div className="px-8 py-6 flex items-center justify-between">
             <div className="flex items-center gap-6">
-              <Link to="/" className="p-2 hover:bg-[#f5f5f5] rounded-lg transition-colors">
+              <Link to="/workspace" className="p-2 hover:bg-[#f5f5f5] rounded-lg transition-colors">
                 <ArrowLeft className="w-5 h-5 text-[#525252]" />
               </Link>
               <div>
@@ -280,7 +282,7 @@ export function BudgetScreen({
         <div className="px-8 py-6">
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-6">
-              <Link to="/" className="p-2 hover:bg-[#f5f5f5] rounded-lg transition-colors">
+              <Link to="/workspace" className="p-2 hover:bg-[#f5f5f5] rounded-lg transition-colors">
                 <ArrowLeft className="w-5 h-5 text-[#525252]" />
               </Link>
               <div>

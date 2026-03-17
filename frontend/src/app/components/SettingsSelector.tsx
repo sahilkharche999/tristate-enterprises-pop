@@ -3,6 +3,7 @@ import { Link } from 'react-router';
 import { Search, Settings as SettingsIcon, ArrowLeft } from 'lucide-react';
 import { Input } from './ui/input';
 import { hoaList } from '../data/mockData';
+import { getStatusColor } from '../lib/statusColors';
 
 export function SettingsSelector() {
   const [searchQuery, setSearchQuery] = useState('');
@@ -11,26 +12,13 @@ export function SettingsSelector() {
     hoa.name.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
-  const getStatusColor = (status: string) => {
-    switch (status) {
-      case 'Completed':
-        return 'bg-[#d1fae5] text-[#065f46] border-[#a7f3d0]';
-      case 'In Progress':
-        return 'bg-[#dbeafe] text-[#1e40af] border-[#bfdbfe]';
-      case 'Not Started':
-        return 'bg-[#f5f5f5] text-[#525252] border-[#e5e5e5]';
-      default:
-        return 'bg-[#f5f5f5] text-[#525252] border-[#e5e5e5]';
-    }
-  };
-
   return (
     <div className="min-h-screen bg-[#fafafa]">
       {/* Header */}
       <header className="border-b border-[#e5e5e5] bg-white shadow-sm">
         <div className="px-8 py-6 flex items-center justify-between">
           <div className="flex items-center gap-6">
-            <Link to="/" className="p-2 hover:bg-[#f5f5f5] rounded-lg transition-colors">
+            <Link to="/workspace" className="p-2 hover:bg-[#f5f5f5] rounded-lg transition-colors">
               <ArrowLeft className="w-5 h-5 text-[#111111]" />
             </Link>
             <div>

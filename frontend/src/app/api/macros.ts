@@ -1,4 +1,18 @@
-const BASE_URL = (import.meta.env.VITE_API_URL as string) || 'http://localhost:8000';
+import { BASE_URL } from './config';
+
+// ─── Auth Token Injection ────────────────────────────────────────────────────
+
+let _getAccessToken: (() => string | null) | null = null;
+
+/** Called by AuthProvider to inject the token accessor. */
+export function setTokenAccessor(fn: () => string | null) {
+  _getAccessToken = fn;
+}
+
+function authHeaders(): HeadersInit {
+  const token = _getAccessToken?.();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
 
 // ─── Response Types ───────────────────────────────────────────────────────────
 
@@ -71,6 +85,10 @@ async function extractErrorMessage(res: Response): Promise<string> {
 
 async function handleResponse<T>(res: Response): Promise<T> {
   if (res.ok) return res.json() as Promise<T>;
+  if (res.status === 401) {
+    window.location.href = '/';
+    throw { status: 401, message: 'Session expired' };
+  }
   throw { status: res.status, message: await extractErrorMessage(res) };
 }
 
@@ -94,14 +112,14 @@ export async function generateBudget(params: {
   if (params.percentChanges) fd.append('percent_changes_json', JSON.stringify(params.percentChanges));
   if (params.fiscalYearStartMonth != null) fd.append('fiscal_year_start_month', String(params.fiscalYearStartMonth));
   if (params.growthFactor != null) fd.append('growth_factor', String(params.growthFactor));
-  const res = await fetch(`${BASE_URL}/macros/generate-budget`, { method: 'POST', body: fd });
+  const res = await fetch(`${BASE_URL}/macros/generate-budget`, { method: 'POST', body: fd, headers: authHeaders() });
   return handleResponse<GenerateBudgetResponse>(res);
 }
 
 export async function removeProtection(params: { file: File }): Promise<Blob> {
   const fd = new FormData();
   fd.append('file', params.file);
-  const res = await fetch(`${BASE_URL}/macros/remove-protection`, { method: 'POST', body: fd });
+  const res = await fetch(`${BASE_URL}/macros/remove-protection`, { method: 'POST', body: fd, headers: authHeaders() });
   return handleBlobResponse(res);
 }
 
@@ -109,7 +127,7 @@ export async function runPipeline(params: { file: File; sheet?: string }): Promi
   const fd = new FormData();
   fd.append('file', params.file);
   if (params.sheet) fd.append('sheet', params.sheet);
-  const res = await fetch(`${BASE_URL}/macros/run-pipeline`, { method: 'POST', body: fd });
+  const res = await fetch(`${BASE_URL}/macros/run-pipeline`, { method: 'POST', body: fd, headers: authHeaders() });
   return handleResponse<RunPipelineResponse>(res);
 }
 
@@ -117,7 +135,7 @@ export async function paymentSearch(params: { file: File; sheet?: string }): Pro
   const fd = new FormData();
   fd.append('file', params.file);
   if (params.sheet) fd.append('sheet', params.sheet);
-  const res = await fetch(`${BASE_URL}/macros/payment-search`, { method: 'POST', body: fd });
+  const res = await fetch(`${BASE_URL}/macros/payment-search`, { method: 'POST', body: fd, headers: authHeaders() });
   return handleResponse<TableResponse>(res);
 }
 
@@ -134,7 +152,7 @@ export async function sumAndFormat(params: {
   fd.append('start_cell', params.startCell);
   fd.append('row_count', String(params.rowCount));
   if (params.targetCol) fd.append('target_col', params.targetCol);
-  const res = await fetch(`${BASE_URL}/macros/sum-and-format`, { method: 'POST', body: fd });
+  const res = await fetch(`${BASE_URL}/macros/sum-and-format`, { method: 'POST', body: fd, headers: authHeaders() });
   return handleResponse<SumResponse>(res);
 }
 
@@ -149,7 +167,7 @@ export async function achSum(params: {
   fd.append('sheet', params.sheet);
   fd.append('start_cell', params.startCell);
   if (params.findText) fd.append('find_text', params.findText);
-  const res = await fetch(`${BASE_URL}/macros/ach-sum`, { method: 'POST', body: fd });
+  const res = await fetch(`${BASE_URL}/macros/ach-sum`, { method: 'POST', body: fd, headers: authHeaders() });
   return handleResponse<SumResponse>(res);
 }
 
@@ -158,7 +176,7 @@ export async function oneCell(params: { file: File; sheet: string; startCell: st
   fd.append('file', params.file);
   fd.append('sheet', params.sheet);
   fd.append('start_cell', params.startCell);
-  const res = await fetch(`${BASE_URL}/macros/one-cell`, { method: 'POST', body: fd });
+  const res = await fetch(`${BASE_URL}/macros/one-cell`, { method: 'POST', body: fd, headers: authHeaders() });
   return handleResponse<SimpleResponse>(res);
 }
 
@@ -171,7 +189,7 @@ export async function findDups(params: {
   fd.append('file', params.file);
   fd.append('sheet', params.sheet);
   if (params.lookupCol) fd.append('lookup_col', params.lookupCol);
-  const res = await fetch(`${BASE_URL}/macros/find-dups`, { method: 'POST', body: fd });
+  const res = await fetch(`${BASE_URL}/macros/find-dups`, { method: 'POST', body: fd, headers: authHeaders() });
   return handleResponse<DupsResponse>(res);
 }
 
@@ -188,7 +206,7 @@ export async function cumulativeSum(params: {
   fd.append('start_row', String(params.startRow));
   fd.append('start_col', String(params.startCol));
   fd.append('end_row', String(params.endRow));
-  const res = await fetch(`${BASE_URL}/macros/cumulative-sum`, { method: 'POST', body: fd });
+  const res = await fetch(`${BASE_URL}/macros/cumulative-sum`, { method: 'POST', body: fd, headers: authHeaders() });
   return handleResponse<CumulativeSumResponse>(res);
 }
 
@@ -242,7 +260,7 @@ export async function getAISuggestions(params: {
 
   const res = await fetch(`${BASE_URL}/ai/suggest`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify(body),
   });
   return handleResponse<import('../data/mockData').AISuggestionResponse>(res);
@@ -263,13 +281,18 @@ export async function submitAIFeedback(params: {
   };
   const res = await fetch(`${BASE_URL}/ai/feedback`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify(body),
   });
   return handleResponse<import('../data/mockData').FeedbackResponse>(res);
 }
 
 export async function getAIStats(): Promise<import('../data/mockData').AIStatsResponse> {
-  const res = await fetch(`${BASE_URL}/ai/stats`);
+  const res = await fetch(`${BASE_URL}/ai/stats`, { headers: authHeaders() });
   return handleResponse<import('../data/mockData').AIStatsResponse>(res);
+}
+
+export async function exportData(): Promise<Record<string, unknown>> {
+  const res = await fetch(`${BASE_URL}/ai/export`, { headers: authHeaders() });
+  return handleResponse<Record<string, unknown>>(res);
 }

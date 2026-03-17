@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useSearchParams } from 'react-router';
 import { BudgetScreen } from './BudgetScreen';
 import { GeneratedBudgetScreen } from './GeneratedBudgetScreen';
-import { initialLineItems, type LineItem } from '../data/mockData';
+import { initialLineItems, type LineItem, type AISuggestionResponse } from '../data/mockData';
 import { toast } from 'sonner';
 import { generateBudget } from '../api/macros';
 import type { SheetTable } from '../api/macros';
@@ -10,7 +10,10 @@ import type { SheetTable } from '../api/macros';
 function buildPercentChangesMap(lineItems: LineItem[]): Record<string, number> {
   const map: Record<string, number> = {};
   for (const item of lineItems) {
-    map[item.name] = item.percentChange / 100;
+    // Use the full label (e.g. "60000 - Electricity & Gas") for stable matching
+    // Falls back to name if label is not available
+    const key = item.label || item.name;
+    map[key] = item.percentChange / 100;
   }
   return map;
 }
@@ -28,6 +31,7 @@ export function BudgetScreenWrapper() {
   const [growthFactor, setGrowthFactor] = useState<number | undefined>(undefined);
   const [growthFactorNote, setGrowthFactorNote] = useState<string | undefined>(undefined);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [aiResponse, setAiResponse] = useState<AISuggestionResponse | null>(null);
 
   const runGenerateBudget = async (navigateToPreview: boolean) => {
     if (!uploadedFile) {
@@ -94,6 +98,9 @@ export function BudgetScreenWrapper() {
       budgetGenerated={budgetVersion > 0}
       isGenerating={isGenerating}
       initialView={initialView as 'enriched' | 'budget' | 'ai'}
+      fileAlreadyUploaded={uploadedFile !== null}
+      savedAiResponse={aiResponse}
+      onAiResponseChange={setAiResponse}
     />
   );
 }
