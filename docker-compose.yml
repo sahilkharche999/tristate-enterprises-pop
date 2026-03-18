@@ -9,6 +9,7 @@ services:
       - ALLOW_ORIGINS=http://localhost,http://localhost:80,http://localhost:5173,http://0.0.0.0,http://0.0.0.0:80
       - GROQ_API_KEY=${GROQ_API_KEY}
       - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - COOKIE_SECURE=false
     restart: unless-stopped
 
   frontend:

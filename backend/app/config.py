@@ -42,8 +42,8 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
-    # Cookie security (set True in production with HTTPS)
-    COOKIE_SECURE: bool = False
+    # Cookie security (True for HTTPS/production, set False for local dev)
+    COOKIE_SECURE: bool = True
 
     # AI Pipeline
     GROQ_API_KEY: str = ""

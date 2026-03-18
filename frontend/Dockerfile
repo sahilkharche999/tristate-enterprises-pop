@@ -10,6 +10,10 @@ RUN corepack enable && corepack prepare pnpm@latest --activate
 COPY package.json pnpm-lock.yaml ./
 RUN pnpm install --frozen-lockfile --prefer-offline
 
+# Accept backend URL at build time (Railway sets this)
+ARG VITE_API_URL=http://localhost:8000
+ENV VITE_API_URL=$VITE_API_URL
+
 # Copy source and build
 COPY . .
 RUN pnpm run build
