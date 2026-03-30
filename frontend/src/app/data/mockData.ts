@@ -9,6 +9,8 @@ export interface LineItem {
   readOnly?: boolean;    // true = excluded from board-adjustable flow (reserve-study rows)
   accountCode?: number;  // 60000 — parsed from "60000 - Electricity & Gas"
   label?: string;        // "60000 - Electricity & Gas" — full string from col B
+  reserveGroup?: 'component' | 'income' | 'transfer' | null;
+  rawSection?: string | null;
   note?: {
     title: string;
     body: string;
@@ -28,17 +30,7 @@ export interface HOA {
   city: string;
 }
 
-export const hoaList: HOA[] = [
-  { id: '1', name: 'Esprit park', fiscalYear: 'April–March', status: 'Not Started', units: 120, taxId: '12-3456789', fiscalYearStart: 'April', fiscalYearEnd: 'March', year: 2025, city: 'San Francisco' },
-  { id: '2', name: 'July Heights HOA', fiscalYear: 'July–June', status: 'In Progress', units: 85, taxId: '98-7654321', fiscalYearStart: 'July', fiscalYearEnd: 'June', year: 2025, city: 'Oakland' },
-  { id: '3', name: 'October Ridge HOA', fiscalYear: 'Oct–Sept', status: 'Completed', units: 200, taxId: '45-6789012', fiscalYearStart: 'October', fiscalYearEnd: 'September', year: 2024, city: 'Berkeley' },
-  { id: '4', name: '131 Missouri', fiscalYear: 'Jan–Dec', status: 'In Progress', units: 64, taxId: '78-9012345', fiscalYearStart: 'January', fiscalYearEnd: 'December', year: 2025, city: 'San Francisco' },
-  { id: '5', name: '450 Sutter', fiscalYear: 'Jan–Dec', status: 'Not Started', units: 150, taxId: '23-4567890', fiscalYearStart: 'January', fiscalYearEnd: 'December', year: 2026, city: 'San Francisco' },
-  { id: '6', name: '880 Market', fiscalYear: 'Jan–Dec', status: 'Completed', units: 180, taxId: '34-5678901', fiscalYearStart: 'January', fiscalYearEnd: 'December', year: 2024, city: 'San Francisco' },
-  { id: '7', name: '22 Fremont', fiscalYear: 'Jan–Dec', status: 'In Progress', units: 95, taxId: '56-7890123', fiscalYearStart: 'January', fiscalYearEnd: 'December', year: 2025, city: 'San Jose' },
-  { id: '8', name: '555 Mission', fiscalYear: 'Jan–Dec', status: 'Not Started', units: 110, taxId: '67-8901234', fiscalYearStart: 'January', fiscalYearEnd: 'December', year: 2026, city: 'San Francisco' },
-  { id: '9', name: '401 HOA', fiscalYear: 'Jan–Dec 2025', status: 'In Progress', units: 48, taxId: '89-0123456', fiscalYearStart: 'January', fiscalYearEnd: 'December', year: 2025, city: 'Palo Alto' },
-];
+// hoaList removed — HOA records are now served by the backend API (/hoa).
 
 export const initialLineItems: LineItem[] = [
   // Income Section
@@ -135,17 +127,6 @@ export interface AIStatsResponse {
   sop_rules: number;
 }
 
-export const mockAISuggestions: AISuggestion[] = [
-  { lineItemId: 'op-1', lineItemName: 'Insurance', currentPercent: 0, suggestedPercent: 8.5, confidence: 92, reason: 'Industry average insurance premium increase. Market analysis shows 7-10% increases across commercial property insurance.' },
-  { lineItemId: 'op-3', lineItemName: 'Utilities – Electric', currentPercent: 0, suggestedPercent: 6.2, confidence: 88, reason: 'Local utility rate adjustment scheduled for Q1 2025. Rate increase confirmed by utility provider.' },
-  { lineItemId: 'op-4', lineItemName: 'Utilities – Water', currentPercent: 0, suggestedPercent: 5.5, confidence: 85, reason: 'Municipal water rate increase approved. Historical average increase of 5-6% annually.' },
-  { lineItemId: 'op-6', lineItemName: 'Management Fees', currentPercent: 0, suggestedPercent: 3.2, confidence: 95, reason: 'Contractual CPI adjustment clause. Based on confirmed CPI data for previous 12 months.' },
-  { lineItemId: 'op-8', lineItemName: 'Repairs & Maintenance', currentPercent: 0, suggestedPercent: 12.5, confidence: 78, reason: 'Building age factor and deferred maintenance backlog. Historical trend shows increasing maintenance needs.' },
-  { lineItemId: 'op-12', lineItemName: 'Legal & Accounting', currentPercent: 0, suggestedPercent: 7.0, confidence: 82, reason: 'Professional service fee escalation. Market rates for HOA legal and accounting services increasing.' },
-  { lineItemId: 'res-1', lineItemName: 'Roof Replacement Reserve', currentPercent: 0, suggestedPercent: 15.0, confidence: 90, reason: 'Reserve study recommendation. Current funding level below recommended targets for anticipated replacement timeline.' },
-  { lineItemId: 'op-2', lineItemName: 'Landscaping', currentPercent: 0, suggestedPercent: 4.8, confidence: 86, reason: 'Labor cost increases in landscaping industry. Drought conditions may increase water and replacement plant costs.' },
-];
-
 export interface KnowledgeBaseFolder {
   id: string;
   name: string;
@@ -159,10 +140,9 @@ export interface KnowledgeBaseFile {
   status?: string;
 }
 
-// Knowledge Base is now HOA-specific
+// Knowledge Base is mock-only — will be replaced by backend API in Phase 5
 export const getKnowledgeBaseFolders = (hoaId: string): KnowledgeBaseFolder[] => {
-  const hoa = hoaList.find((h) => h.id === hoaId);
-  const hoaName = hoa?.name || 'HOA';
+  const hoaName = 'HOA';
   
   return [
     {
@@ -232,4 +212,3 @@ export const getKnowledgeBaseFolders = (hoaId: string): KnowledgeBaseFolder[] =>
     },
   ];
 };
-

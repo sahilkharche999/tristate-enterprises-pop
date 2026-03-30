@@ -14,7 +14,7 @@ import logging
 import sqlite3
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import openpyxl
 
@@ -30,14 +30,244 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
 DATA_DIR = Path(__file__).parent / "data"
 PROPERTY_NAME = "Esprit Park Owners Association"
+PRIMARY_PORTFOLIO_HOA_CODE = "1"
+
+PORTFOLIO_SEED: list[dict[str, Any]] = [
+    {
+        "hoa_code": "1",
+        "name": "Esprit park",
+        "legacy_names": [PROPERTY_NAME],
+        "units": 120,
+        "tax_id": "12-3456789",
+        "fiscal_year_start_month": 4,
+        "fiscal_year_end_month": 3,
+        "portfolio_year": 2025,
+        "city": "San Francisco",
+        "workflow_status": "Not Started",
+    },
+    {
+        "hoa_code": "2",
+        "name": "July Heights HOA",
+        "units": 85,
+        "tax_id": "98-7654321",
+        "fiscal_year_start_month": 7,
+        "fiscal_year_end_month": 6,
+        "portfolio_year": 2025,
+        "city": "Oakland",
+        "workflow_status": "In Progress",
+    },
+    {
+        "hoa_code": "3",
+        "name": "October Ridge HOA",
+        "units": 200,
+        "tax_id": "45-6789012",
+        "fiscal_year_start_month": 10,
+        "fiscal_year_end_month": 9,
+        "portfolio_year": 2024,
+        "city": "Berkeley",
+        "workflow_status": "Completed",
+    },
+    {
+        "hoa_code": "4",
+        "name": "131 Missouri",
+        "units": 64,
+        "tax_id": "78-9012345",
+        "fiscal_year_start_month": 1,
+        "fiscal_year_end_month": 12,
+        "portfolio_year": 2025,
+        "city": "San Francisco",
+        "workflow_status": "In Progress",
+    },
+    {
+        "hoa_code": "5",
+        "name": "450 Sutter",
+        "units": 150,
+        "tax_id": "23-4567890",
+        "fiscal_year_start_month": 1,
+        "fiscal_year_end_month": 12,
+        "portfolio_year": 2026,
+        "city": "San Francisco",
+        "workflow_status": "Not Started",
+    },
+    {
+        "hoa_code": "6",
+        "name": "880 Market",
+        "units": 180,
+        "tax_id": "34-5678901",
+        "fiscal_year_start_month": 1,
+        "fiscal_year_end_month": 12,
+        "portfolio_year": 2024,
+        "city": "San Francisco",
+        "workflow_status": "Completed",
+    },
+    {
+        "hoa_code": "7",
+        "name": "22 Fremont",
+        "units": 95,
+        "tax_id": "56-7890123",
+        "fiscal_year_start_month": 1,
+        "fiscal_year_end_month": 12,
+        "portfolio_year": 2025,
+        "city": "San Jose",
+        "workflow_status": "In Progress",
+    },
+    {
+        "hoa_code": "8",
+        "name": "555 Mission",
+        "units": 110,
+        "tax_id": "67-8901234",
+        "fiscal_year_start_month": 1,
+        "fiscal_year_end_month": 12,
+        "portfolio_year": 2026,
+        "city": "San Francisco",
+        "workflow_status": "Not Started",
+    },
+    {
+        "hoa_code": "9",
+        "name": "401 HOA",
+        "units": 48,
+        "tax_id": "89-0123456",
+        "fiscal_year_start_month": 1,
+        "fiscal_year_end_month": 12,
+        "portfolio_year": 2025,
+        "city": "Palo Alto",
+        "workflow_status": "In Progress",
+    },
+]
+
+
+def sync_portfolio_properties(db: sqlite3.Connection) -> int:
+    """Backfill the current HOA portfolio without overwriting user-edited fields."""
+    seeded = 0
+    for seed in PORTFOLIO_SEED:
+        candidate_names = [seed["name"], *seed.get("legacy_names", [])]
+        placeholders = ", ".join("?" for _ in candidate_names)
+        row = db.execute(
+            f"""
+            SELECT id, hoa_code, name, tax_id, units, fiscal_year_start_month,
+                   fiscal_year_end_month, city, portfolio_year, workflow_status
+              FROM properties
+             WHERE hoa_code = ?
+                OR name IN ({placeholders})
+             LIMIT 1
+            """,
+            (seed["hoa_code"], *candidate_names),
+        ).fetchone()
+
+        if row is None:
+            db.execute(
+                """
+                INSERT INTO properties (
+                    hoa_code,
+                    name,
+                    tax_id,
+                    units,
+                    fiscal_year_start_month,
+                    fiscal_year_end_month,
+                    city,
+                    portfolio_year,
+                    workflow_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    seed["hoa_code"],
+                    seed["name"],
+                    seed["tax_id"],
+                    seed["units"],
+                    seed["fiscal_year_start_month"],
+                    seed["fiscal_year_end_month"],
+                    seed["city"],
+                    seed["portfolio_year"],
+                    seed["workflow_status"],
+                ),
+            )
+            seeded += 1
+            continue
+
+        if not row["hoa_code"]:
+            db.execute(
+                """
+                UPDATE properties
+                   SET hoa_code = ?,
+                       tax_id = ?,
+                       units = ?,
+                       fiscal_year_start_month = ?,
+                       fiscal_year_end_month = ?,
+                       city = ?,
+                       portfolio_year = ?,
+                       workflow_status = ?
+                 WHERE id = ?
+                """,
+                (
+                    seed["hoa_code"],
+                    seed["tax_id"],
+                    seed["units"],
+                    seed["fiscal_year_start_month"],
+                    seed["fiscal_year_end_month"],
+                    seed["city"],
+                    seed["portfolio_year"],
+                    seed["workflow_status"],
+                    row["id"],
+                ),
+            )
+            continue
+
+        db.execute(
+            """
+            UPDATE properties
+               SET fiscal_year_end_month = COALESCE(fiscal_year_end_month, ?),
+                   city = CASE
+                     WHEN city IS NULL OR TRIM(city) = '' THEN ?
+                     ELSE city
+                   END,
+                   portfolio_year = COALESCE(portfolio_year, ?),
+                   workflow_status = CASE
+                     WHEN workflow_status IS NULL OR TRIM(workflow_status) = '' THEN ?
+                     ELSE workflow_status
+                   END
+             WHERE id = ?
+            """,
+            (
+                seed["fiscal_year_end_month"],
+                seed["city"],
+                seed["portfolio_year"],
+                seed["workflow_status"],
+                row["id"],
+            ),
+        )
+
+    db.commit()
+    return seeded
 
 
 def get_or_create_property(db: sqlite3.Connection) -> int:
     """Get or create the Esprit Park property. Returns property_id."""
-    row = db.execute("SELECT id FROM properties WHERE name = ?", (PROPERTY_NAME,)).fetchone()
+    sync_portfolio_properties(db)
+    row = db.execute(
+        "SELECT id FROM properties WHERE hoa_code = ? OR name = ? LIMIT 1",
+        (PRIMARY_PORTFOLIO_HOA_CODE, PROPERTY_NAME),
+    ).fetchone()
     if row:
         return row[0]
-    cur = db.execute("INSERT INTO properties (name, units) VALUES (?, ?)", (PROPERTY_NAME, None))
+    cur = db.execute(
+        """
+        INSERT INTO properties (
+            hoa_code, name, tax_id, units, fiscal_year_start_month,
+            fiscal_year_end_month, city, portfolio_year, workflow_status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            PRIMARY_PORTFOLIO_HOA_CODE,
+            PROPERTY_NAME,
+            "12-3456789",
+            120,
+            4,
+            3,
+            "San Francisco",
+            2025,
+            "Not Started",
+        ),
+    )
     db.commit()
     return cur.lastrowid
 
@@ -493,6 +723,8 @@ def run_seed(force: bool = False) -> dict:
     db = get_db()
 
     try:
+        portfolio_seeded = sync_portfolio_properties(db)
+
         # Check if already seeded
         if not force:
             existing = db.execute(
@@ -500,12 +732,13 @@ def run_seed(force: bool = False) -> dict:
             ).fetchone()[0]
             if existing >= 50:
                 logger.info(f"Database already has {existing} accepted cases, skipping seed. Use force=True to re-seed.")
-                return {"existing": existing, "skipped": True}
+                return {"existing": existing, "portfolio_seeded": portfolio_seeded, "skipped": True}
 
         property_id = get_or_create_property(db)
         logger.info(f"Property ID: {property_id}")
 
         counts = {
+            "portfolio_seeded": portfolio_seeded,
             "sop_rules": seed_sop_rules(db),
             "casebase": seed_casebase(db, property_id),
             "excel_2025": seed_excel_2025(db, property_id),

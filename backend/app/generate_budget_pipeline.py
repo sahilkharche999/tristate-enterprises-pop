@@ -447,11 +447,7 @@ class IncomeStatementEnricher:
             if row_type == 'section' and self._is_reserve_section_start(label):
                 in_reserve_block = True
 
-            # Reserve-study section is excluded from board-adjustable flow.
-            if in_reserve_block or self._is_reserve_label(label):
-                for col in self._all_output_columns():
-                    ws.cell(row=row, column=col).value = None
-                continue
+            # Reserve rows now receive enrichment calculations like operating items.
 
             if row_type == 'total':
                 total_rows.append(row)
@@ -711,7 +707,8 @@ class BudgetPipeline:
                  growth_factor_note: Optional[str] = None,
                  am_seed_workbook: Optional[str] = None,
                  aliases_path: Optional[str] = None,
-                 enrich_only: bool = False):
+                 enrich_only: bool = False,
+                 hoa_name: str = ''):
         self.input_path = input_path
         self.intermediate_path = intermediate_path
         self.output_path = output_path
@@ -722,6 +719,7 @@ class BudgetPipeline:
         self.am_seed_workbook = am_seed_workbook
         self.aliases_path = aliases_path
         self.enrich_only = enrich_only
+        self.hoa_name = hoa_name
 
     def run(self):
         """Execute the full pipeline."""
@@ -787,6 +785,7 @@ class BudgetPipeline:
             growth_factor=self.growth_factor,
             template_path=self.template_path,
             label_aliases=self._load_aliases(),
+            hoa_name=self.hoa_name,
         )
         generator.generate(reserve_contribution=self.reserve_contribution)
 

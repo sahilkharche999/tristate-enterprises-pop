@@ -4,6 +4,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from 'react';
@@ -13,7 +14,7 @@ import {
   logout as logoutApi,
   refreshToken as refreshTokenApi,
 } from '../api/auth';
-import { setTokenAccessor } from '../api/macros';
+import { setTokenAccessor } from '../api/http';
 
 interface AuthContextType {
   user: User | null;
@@ -30,15 +31,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [accessToken, setAccessToken] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const accessTokenRef = useRef<string | null>(null);
 
   const isAuthenticated = !!user && !!accessToken;
 
-  // Keep macros.ts in sync with the current access token
   useEffect(() => {
-    setTokenAccessor(() => accessToken);
-  }, [accessToken]);
+    setTokenAccessor(() => accessTokenRef.current);
+  }, []);
 
   const handleLogin = useCallback((response: AuthResponse) => {
+    accessTokenRef.current = response.access_token;
     setUser(response.user);
     setAccessToken(response.access_token);
   }, []);
@@ -49,6 +51,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } catch {
       // Clear local state regardless
     }
+    accessTokenRef.current = null;
     setUser(null);
     setAccessToken(null);
   }, []);
@@ -60,6 +63,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       try {
         const response = await refreshTokenApi();
         if (!cancelled) {
+          accessTokenRef.current = response.access_token;
           setUser(response.user);
           setAccessToken(response.access_token);
         }
@@ -82,9 +86,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       async () => {
         try {
           const response = await refreshTokenApi();
+          accessTokenRef.current = response.access_token;
           setUser(response.user);
           setAccessToken(response.access_token);
         } catch {
+          accessTokenRef.current = null;
           setUser(null);
           setAccessToken(null);
         }

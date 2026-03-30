@@ -19,6 +19,8 @@ from .auth.dependencies import get_current_user
 from .ai_implementation.database import init_db
 from .ai_implementation.seed.seed_database import run_seed
 from .ai_implementation.router import router as ai_router
+from .routers.budget_history import router as budget_history_router
+from .routers.hoa import router as hoa_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -57,6 +59,10 @@ def create_app() -> FastAPI:
 
     # Protected macro routes
     app.include_router(macros.router, prefix="", dependencies=[Depends(get_current_user)])
+
+    # Protected HOA routes
+    app.include_router(hoa_router, prefix="", dependencies=[Depends(get_current_user)])
+    app.include_router(budget_history_router, prefix="", dependencies=[Depends(get_current_user)])
 
     # Protected AI routes
     app.include_router(

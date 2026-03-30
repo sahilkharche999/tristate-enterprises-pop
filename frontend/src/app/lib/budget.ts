@@ -45,6 +45,63 @@ export const calcPercentDiff = (projection: number, annualBudget: number): numbe
   return ((projection - annualBudget) / annualBudget) * 100;
 };
 
+export const normalizeReserveInflationRate = (rate?: number | null): number =>
+  typeof rate === 'number' && Number.isFinite(rate) ? Math.max(rate, 0) : 0;
+
+export const isReserveComponent = (item: LineItem): boolean => {
+  if (item.category !== 'reserve' || !item.readOnly) {
+    return false;
+  }
+  if (item.reserveGroup) {
+    return item.reserveGroup === 'component';
+  }
+  const section = (item.rawSection || '').trim().toLowerCase();
+  if (section === 'reserve expense' || section === 'reserve expenses (per reserve study)') {
+    return true;
+  }
+  const normalizedLabel = (item.label || item.name || '').trim().toLowerCase();
+  if (
+    normalizedLabel.includes('reserve income') ||
+    normalizedLabel.includes('allocation/transfer') ||
+    normalizedLabel.includes('interest earned reserve') ||
+    normalizedLabel.includes('change in asset value')
+  ) {
+    return false;
+  }
+  return normalizedLabel.includes('reserve');
+};
+
+export const calcReserveAdjustedAmount = (item: LineItem, reserveInflationRate?: number | null): number => {
+  const normalizedRate = normalizeReserveInflationRate(reserveInflationRate);
+  if (!isReserveComponent(item) || item.annualBudget <= 0) {
+    return item.annualBudget;
+  }
+  return item.annualBudget * (1 + normalizedRate);
+};
+
+export const calcDisplayProposed = (item: LineItem, reserveInflationRate?: number | null): number => {
+  if (isReserveComponent(item)) {
+    return calcReserveAdjustedAmount(item, reserveInflationRate);
+  }
+  if (item.readOnly) {
+    return 0;
+  }
+  return calcProposed(item.annualBudget, item.percentChange);
+};
+
+export const calcDisplayMonthly = (item: LineItem, reserveInflationRate?: number | null): number =>
+  calcMonthly(calcDisplayProposed(item, reserveInflationRate));
+
+export const calcSettingsDerivedReservePercent = (
+  item: LineItem,
+  reserveInflationRate?: number | null,
+): number => {
+  if (!isReserveComponent(item) || item.annualBudget <= 0) {
+    return 0;
+  }
+  return normalizeReserveInflationRate(reserveInflationRate) * 100;
+};
+
 // ── Category aggregation ──────────────────────────────────────────────────────
 
 export type TotalField = 'ytdActual' | 'annualBudget' | 'projection' | 'proposedChange' | 'monthly';
@@ -57,5 +114,26 @@ export const calcCategoryTotal = (items: LineItem[], field: TotalField): number 
     if (field === 'proposedChange') return sum + calcProposed(item.annualBudget, item.percentChange);
     if (field === 'monthly')        return sum + calcMonthly(calcProposed(item.annualBudget, item.percentChange));
     if (field === 'annualBudget')   return sum + item.annualBudget;
+    return sum + item.ytdActual;
+  }, 0);
+
+export const calcDisplayCategoryTotal = (
+  items: LineItem[],
+  field: TotalField,
+  reserveInflationRate?: number | null,
+): number =>
+  items.reduce((sum, item) => {
+    if (field === 'projection') {
+      return sum + (item.readOnly ? 0 : (item.projection ?? 0));
+    }
+    if (field === 'proposedChange') {
+      return sum + calcDisplayProposed(item, reserveInflationRate);
+    }
+    if (field === 'monthly') {
+      return sum + calcDisplayMonthly(item, reserveInflationRate);
+    }
+    if (field === 'annualBudget') {
+      return sum + item.annualBudget;
+    }
     return sum + item.ytdActual;
   }, 0);

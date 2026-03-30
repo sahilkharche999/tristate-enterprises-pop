@@ -3,6 +3,7 @@ frontend/node_modules/
 backend/.venv/
 .pnp
 .pnp.js
+node_modules/
 
 # Environment variables
 .env
@@ -41,13 +42,16 @@ Thumbs.db
 # Cache
 .eslintcache
 .cache/
-node_modules
+.pytest_cache/
 
 # Project tooling
 .claude/
 openspec/
 docs/
 .agents/
+
+# Planning artifacts (generated, not source code)
+.planning/
 
 # Python
 __pycache__/
@@ -62,6 +66,20 @@ mockdata/
 *.db-shm
 *.db-wal
 *.db-journal
+
+# Client data files in project root (not source code)
+/Tri-State Budget.xlsx
+/Tri-State Product Delivery Draft 6.xlsx
+/*.xlsx
+/*.pdf
+
+# Root data/ folder (copies of seed files, not needed in repo)
+/data/
+
+# Backend runtime storage (uploads, generated budgets, temp files)
+backend/tmp/
+backend/data/
+backend/app/ai_implementation/data/budget_ai.db*
 
 # Unused seed data files (not needed for seeding or app)
 backend/app/ai_implementation/seed/data/401 Income Statement Dec 2024.xlsx

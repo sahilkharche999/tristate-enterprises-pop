@@ -1,18 +1,5 @@
 import { BASE_URL } from './config';
-
-// ─── Auth Token Injection ────────────────────────────────────────────────────
-
-let _getAccessToken: (() => string | null) | null = null;
-
-/** Called by AuthProvider to inject the token accessor. */
-export function setTokenAccessor(fn: () => string | null) {
-  _getAccessToken = fn;
-}
-
-function authHeaders(): HeadersInit {
-  const token = _getAccessToken?.();
-  return token ? { Authorization: `Bearer ${token}` } : {};
-}
+import { authHeaders, handleBlobResponse, handleResponse } from './http';
 
 // ─── Response Types ───────────────────────────────────────────────────────────
 
@@ -68,33 +55,6 @@ export interface CumulativeSumResponse {
 /** Coerce a cell value from an Excel response to a number. */
 export function toNum(v: CellValue): number {
   return typeof v === 'number' ? v : parseFloat(String(v ?? 0)) || 0;
-}
-
-// ─── Error Handling ───────────────────────────────────────────────────────────
-
-async function extractErrorMessage(res: Response): Promise<string> {
-  let message = res.statusText;
-  try {
-    const body = await res.json();
-    if (body?.detail) message = typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail);
-  } catch {
-    // ignore parse failure
-  }
-  return message;
-}
-
-async function handleResponse<T>(res: Response): Promise<T> {
-  if (res.ok) return res.json() as Promise<T>;
-  if (res.status === 401) {
-    window.location.href = '/';
-    throw { status: 401, message: 'Session expired' };
-  }
-  throw { status: res.status, message: await extractErrorMessage(res) };
-}
-
-async function handleBlobResponse(res: Response): Promise<Blob> {
-  if (res.ok) return res.blob();
-  throw { status: res.status, message: await extractErrorMessage(res) };
 }
 
 // ─── API Functions ────────────────────────────────────────────────────────────

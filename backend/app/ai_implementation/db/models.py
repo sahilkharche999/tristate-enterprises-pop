@@ -25,6 +25,15 @@ FEATURE_COLUMNS = [
 
 _CREATED_AT_DEFAULT = text("datetime('now')")
 
+# Draft states are explicit to keep the one-active-draft behavior auditable.
+BUDGET_DRAFT_ACTIVE = "active"
+BUDGET_DRAFT_SUPERSEDED = "superseded"
+BUDGET_DRAFT_GENERATED = "generated"
+
+# Version stages are locked business terms for the sync-history workflow.
+BUDGET_VERSION_STAGE_INTERIM = "Interim"
+BUDGET_VERSION_STAGE_FINAL = "Final"
+
 
 # ── Models ───────────────────────────────────────────────────────────────────
 
@@ -33,8 +42,15 @@ class Property(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(Text, nullable=False, unique=True)
+    hoa_code = Column(Text)
+    tax_id = Column(Text)
     units = Column(Integer)
+    reserve_inflation_rate = Column(Float, nullable=False, default=0.0)
     fiscal_year_start_month = Column(Integer, default=1)
+    fiscal_year_end_month = Column(Integer, default=12)
+    city = Column(Text)
+    portfolio_year = Column(Integer)
+    workflow_status = Column(Text, default="Not Started")
     created_at = Column(Text, server_default=_CREATED_AT_DEFAULT)
 
     runs = relationship("SuggestionRun", back_populates="property", lazy="raise")
@@ -122,3 +138,153 @@ class User(Base):
     name = Column(Text, nullable=False)
     hashed_password = Column(Text, nullable=False)
     created_at = Column(Text, server_default=_CREATED_AT_DEFAULT)
+
+
+class BudgetUpload(Base):
+    __tablename__ = "budget_uploads"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    property_id = Column(Integer, ForeignKey("properties.id"), nullable=False)
+    original_filename = Column(Text, nullable=False)
+    storage_key = Column(Text, nullable=False, unique=True)
+    content_type = Column(Text)
+    byte_size = Column(Integer)
+    sha256 = Column(Text, nullable=False)
+    enrichment_status = Column(Text, nullable=False)
+    line_items_json = Column(Text)
+    budget_preview_json = Column(Text)
+    statement_month = Column(Integer)
+    growth_factor = Column(Float)
+    growth_factor_note = Column(Text)
+    uploaded_by_user_id = Column(Integer, ForeignKey("users.id"))
+    uploaded_by_name = Column(Text, nullable=False)
+    created_at = Column(Text, server_default=_CREATED_AT_DEFAULT)
+
+    property = relationship("Property", lazy="raise")
+    uploaded_by = relationship("User", lazy="raise")
+
+
+class BudgetDraft(Base):
+    __tablename__ = "budget_drafts"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    property_id = Column(Integer, ForeignKey("properties.id"), nullable=False)
+    source_upload_id = Column(Integer, ForeignKey("budget_uploads.id"))
+    reopened_from_version_id = Column(Integer, ForeignKey("budget_versions.id"))
+    status = Column(Text, nullable=False, default=BUDGET_DRAFT_ACTIVE)
+    line_items_json = Column(Text, nullable=False)
+    global_note = Column(Text)
+    statement_month = Column(Integer)
+    growth_factor = Column(Float)
+    growth_factor_note = Column(Text)
+    reserve_inflation_rate = Column(Float, nullable=False, default=0.0)
+    reserve_inflation_note = Column(Text)
+    budget_preview_json = Column(Text)
+    enriched_storage_key = Column(Text)
+    created_by_user_id = Column(Integer, ForeignKey("users.id"))
+    updated_by_user_id = Column(Integer, ForeignKey("users.id"))
+    actor_name = Column(Text, nullable=False)
+    created_at = Column(Text, server_default=_CREATED_AT_DEFAULT)
+    updated_at = Column(Text, server_default=_CREATED_AT_DEFAULT)
+
+    property = relationship("Property", lazy="raise")
+    source_upload = relationship("BudgetUpload", foreign_keys=[source_upload_id], lazy="raise")
+    reopened_from_version = relationship(
+        "BudgetVersion",
+        foreign_keys=[reopened_from_version_id],
+        lazy="raise",
+    )
+    created_by = relationship("User", foreign_keys=[created_by_user_id], lazy="raise")
+    updated_by = relationship("User", foreign_keys=[updated_by_user_id], lazy="raise")
+
+
+class BudgetVersion(Base):
+    __tablename__ = "budget_versions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    property_id = Column(Integer, ForeignKey("properties.id"), nullable=False)
+    source_upload_id = Column(Integer, ForeignKey("budget_uploads.id"))
+    source_draft_id = Column(Integer, ForeignKey("budget_drafts.id"))
+    reopened_from_version_id = Column(Integer, ForeignKey("budget_versions.id"))
+    storage_key = Column(Text)
+    output_storage_key = Column(Text)
+    version_number = Column(Integer, nullable=False)
+    version_code = Column(Text, nullable=False)
+    stage = Column(Text, nullable=False, default=BUDGET_VERSION_STAGE_INTERIM)
+    label = Column(Text)
+    summary_note = Column(Text)
+    line_items_json = Column(Text, nullable=False)
+    budget_preview_json = Column(Text)
+    total_income = Column(Float, nullable=False)
+    total_expense = Column(Float, nullable=False)
+    net_operating_income = Column(Float, nullable=False)
+    growth_factor = Column(Float)
+    growth_factor_note = Column(Text)
+    reserve_inflation_rate = Column(Float, nullable=False, default=0.0)
+    reserve_inflation_note = Column(Text)
+    statement_month = Column(Integer)
+    fiscal_year_start_month = Column(Integer, nullable=False)
+    fiscal_year_end_month = Column(Integer, nullable=False)
+    created_by_user_id = Column(Integer, ForeignKey("users.id"))
+    created_by_name = Column(Text, nullable=False)
+    actor_name = Column(Text, nullable=False)
+    created_at = Column(Text, server_default=_CREATED_AT_DEFAULT)
+
+    property = relationship("Property", lazy="raise")
+    source_upload = relationship("BudgetUpload", foreign_keys=[source_upload_id], lazy="raise")
+    source_draft = relationship("BudgetDraft", foreign_keys=[source_draft_id], lazy="raise")
+    reopened_from_version = relationship(
+        "BudgetVersion",
+        remote_side=[id],
+        foreign_keys=[reopened_from_version_id],
+        lazy="raise",
+    )
+    created_by = relationship("User", foreign_keys=[created_by_user_id], lazy="raise")
+
+
+class BudgetNote(Base):
+    __tablename__ = "budget_notes"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    property_id = Column(Integer, ForeignKey("properties.id"), nullable=False)
+    upload_id = Column(Integer, ForeignKey("budget_uploads.id"))
+    draft_id = Column(Integer, ForeignKey("budget_drafts.id"))
+    version_id = Column(Integer, ForeignKey("budget_versions.id"))
+    note_scope = Column(Text, nullable=False)
+    line_item_key = Column(Text)
+    title = Column(Text, nullable=False)
+    body = Column(Text, nullable=False)
+    created_by_user_id = Column(Integer, ForeignKey("users.id"))
+    created_by_name = Column(Text, nullable=False)
+    actor_name = Column(Text, nullable=False)
+    created_at = Column(Text, server_default=_CREATED_AT_DEFAULT)
+
+    property = relationship("Property", lazy="raise")
+    upload = relationship("BudgetUpload", lazy="raise")
+    draft = relationship("BudgetDraft", lazy="raise")
+    version = relationship("BudgetVersion", lazy="raise")
+    created_by = relationship("User", lazy="raise")
+
+
+class BudgetAuditEvent(Base):
+    __tablename__ = "budget_audit_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    property_id = Column(Integer, ForeignKey("properties.id"), nullable=False)
+    upload_id = Column(Integer, ForeignKey("budget_uploads.id"))
+    draft_id = Column(Integer, ForeignKey("budget_drafts.id"))
+    version_id = Column(Integer, ForeignKey("budget_versions.id"))
+    note_id = Column(Integer, ForeignKey("budget_notes.id"))
+    event_type = Column(Text, nullable=False)
+    summary = Column(Text, nullable=False)
+    actor_user_id = Column(Integer, ForeignKey("users.id"))
+    actor_name = Column(Text, nullable=False)
+    payload_json = Column(Text)
+    created_at = Column(Text, server_default=_CREATED_AT_DEFAULT)
+
+    property = relationship("Property", lazy="raise")
+    upload = relationship("BudgetUpload", lazy="raise")
+    draft = relationship("BudgetDraft", lazy="raise")
+    version = relationship("BudgetVersion", lazy="raise")
+    note = relationship("BudgetNote", lazy="raise")
+    actor = relationship("User", lazy="raise")

@@ -13,7 +13,7 @@ from ..models.schemas import EnrichedLineItem, LineItemInput
 logger = logging.getLogger(__name__)
 
 # Load seasonality weights once at module import
-_SEASONALITY_PATH = Path(__file__).parent.parent / "data" / "seasonality.json"
+_SEASONALITY_PATH = Path(__file__).parent / "seasonality.json"
 _seasonality_weights: dict[str, list[float]] = {}
 
 

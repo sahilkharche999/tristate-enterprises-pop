@@ -1,7 +1,9 @@
 import { useState } from 'react';
 import { MessageSquare, ChevronDown, Percent, DollarSign } from 'lucide-react';
+import { toast } from 'sonner';
 import { Input } from './ui/input';
 import { Button } from './ui/button';
+import { saveBudgetNote } from '../api/budgetHistory';
 import { type LineItem } from '../data/mockData';
 import {
   formatCurrency,
@@ -9,20 +11,37 @@ import {
   calcProposed,
   calcMonthly,
   calcPercentDiff,
-  calcCategoryTotal,
+  calcDisplayCategoryTotal,
+  calcDisplayMonthly,
+  calcDisplayProposed,
+  calcSettingsDerivedReservePercent,
+  isReserveComponent,
 } from '../lib/budget';
+import { getErrorMessage } from '../lib/errors';
 
 interface EnrichedViewProps {
+  hoaId: string;
+  draftId: number | null;
   lineItems: LineItem[];
   onPercentChange: (itemId: string, newPercent: number) => void;
-  onNoteUpdate: (itemId: string, title: string, body: string) => void;
+  onNoteSaved: (itemId: string, title: string, body: string) => void;
   units: number;
+  reserveInflationRate: number;
 }
 
-export function EnrichedView({ lineItems, onPercentChange, onNoteUpdate, units }: EnrichedViewProps) {
+export function EnrichedView({
+  hoaId,
+  draftId,
+  lineItems,
+  onPercentChange,
+  onNoteSaved,
+  units,
+  reserveInflationRate,
+}: EnrichedViewProps) {
   const [expandedNote, setExpandedNote] = useState<string | null>(null);
   const [noteEdits, setNoteEdits] = useState<Record<string, { title: string; body: string }>>({});
   const [inputMode, setInputMode] = useState<Record<string, 'percent' | 'dollar'>>({});
+  const [savingNoteId, setSavingNoteId] = useState<string | null>(null);
 
 
   const handlePercentChangeInput = (itemId: string, value: string) => {
@@ -59,10 +78,32 @@ export function EnrichedView({ lineItems, onPercentChange, onNoteUpdate, units }
     }
   };
 
-  const saveNote = (itemId: string) => {
+  const saveNote = async (itemId: string) => {
+    if (!draftId) {
+      toast.error('Upload an income statement before saving notes.');
+      return;
+    }
+
     const edit = noteEdits[itemId];
-    if (edit) {
-      onNoteUpdate(itemId, edit.title, edit.body);
+    const item = lineItems.find((entry) => entry.id === itemId);
+    if (edit && item) {
+      setSavingNoteId(itemId);
+      try {
+        await saveBudgetNote(hoaId, {
+          draft_id: draftId,
+          note_scope: 'line_item',
+          line_item_key: String(item.accountCode ?? item.label ?? item.name),
+          title: edit.title,
+          body: edit.body,
+        });
+        onNoteSaved(itemId, edit.title, edit.body);
+        toast.success('Note saved to sync history.');
+        setExpandedNote(null);
+      } catch (error) {
+        toast.error(getErrorMessage(error, 'Failed to save note.'));
+      } finally {
+        setSavingNoteId(null);
+      }
     }
   };
 
@@ -76,10 +117,10 @@ export function EnrichedView({ lineItems, onPercentChange, onNoteUpdate, units }
 
   // Total Annual Budget = expenses only (operating + reserve), same pattern as BudgetView
   const totalAnnualBudget =
-    calcCategoryTotal(groupedItems['operating'] || [], 'proposedChange') +
-    calcCategoryTotal(groupedItems['reserve'] || [], 'proposedChange');
+    calcDisplayCategoryTotal(groupedItems['operating'] || [], 'proposedChange', reserveInflationRate) +
+    calcDisplayCategoryTotal(groupedItems['reserve'] || [], 'proposedChange', reserveInflationRate);
 
-  const perUnitMonthly = totalAnnualBudget / 12 / units;
+  const perUnitMonthly = units > 0 ? totalAnnualBudget / 12 / units : null;
 
   return (
     <div className="space-y-8">
@@ -114,6 +155,34 @@ export function EnrichedView({ lineItems, onPercentChange, onNoteUpdate, units }
 
                   // ── Read-only row (reserve-study / reserve-labeled, excluded from budget flow) ──
                   if (item.readOnly) {
+                    if (isReserveComponent(item)) {
+                      const adjustedReserveAmount = calcDisplayProposed(item, reserveInflationRate);
+                      const adjustedMonthly = calcDisplayMonthly(item, reserveInflationRate);
+                      const settingsPercent = calcSettingsDerivedReservePercent(item, reserveInflationRate);
+                      return [
+                        <tr key={item.id} className="border-b border-[#e5e5e5] bg-[#fcfcfc]">
+                          <td className="px-6 py-4 text-sm text-[#525252] italic">{item.name}</td>
+                          <td className="px-6 py-4 text-sm text-[#737373] text-right font-mono">{formatCurrency(item.ytdActual)}</td>
+                          <td className="px-6 py-4 text-sm text-[#737373] text-right font-mono">{formatCurrency(item.annualBudget)}</td>
+                          <td className="px-6 py-4 text-sm text-[#a3a3a3] text-right">—</td>
+                          <td className="px-6 py-4 text-sm text-[#a3a3a3] text-right">—</td>
+                          <td className="px-6 py-4 text-right text-xs font-medium text-[#525252]">
+                            Settings {settingsPercent.toFixed(1)}%
+                          </td>
+                          <td className="px-6 py-4 text-sm font-semibold text-[#111111] text-right font-mono">
+                            {formatCurrency(adjustedReserveAmount)}
+                          </td>
+                          <td className="px-6 py-4 text-sm text-[#737373] text-right font-mono">
+                            {formatCurrency(adjustedMonthly)}
+                          </td>
+                          <td className="px-6 py-4 text-center">
+                            <button disabled className="p-2 rounded text-[#d4d4d4] cursor-not-allowed">
+                              <MessageSquare className="w-4 h-4" />
+                            </button>
+                          </td>
+                        </tr>,
+                      ];
+                    }
                     return [
                       <tr key={item.id} className="border-b border-[#e5e5e5] opacity-60">
                         <td className="px-6 py-4 text-sm text-[#525252] italic">{item.name}</td>
@@ -256,11 +325,12 @@ export function EnrichedView({ lineItems, onPercentChange, onNoteUpdate, units }
                             />
                             <div className="flex gap-2">
                               <Button
-                                onClick={() => saveNote(item.id)}
+                                onClick={() => void saveNote(item.id)}
+                                disabled={savingNoteId === item.id}
                                 className="bg-[#111111] text-white hover:bg-[#262626] shadow-sm"
                                 size="sm"
                               >
-                                Save Note
+                                {savingNoteId === item.id ? 'Saving...' : 'Save Note'}
                               </Button>
                               <Button
                                 onClick={() => setExpandedNote(null)}
@@ -281,21 +351,21 @@ export function EnrichedView({ lineItems, onPercentChange, onNoteUpdate, units }
                 <tr key={`${category}-total`} className="bg-[#f5f5f5] font-semibold border-b-2 border-[#d4d4d4]">
                   <td className="px-6 py-4 text-sm text-[#111111]">{getCategoryLabel(category)} Total</td>
                   <td className="px-6 py-4 text-sm text-[#111111] text-right font-mono">
-                    {formatCurrency(calcCategoryTotal(items, 'ytdActual'))}
+                    {formatCurrency(calcDisplayCategoryTotal(items, 'ytdActual', reserveInflationRate))}
                   </td>
                   <td className="px-6 py-4 text-sm text-[#111111] text-right font-mono">
-                    {formatCurrency(calcCategoryTotal(items, 'annualBudget'))}
+                    {formatCurrency(calcDisplayCategoryTotal(items, 'annualBudget', reserveInflationRate))}
                   </td>
                   <td className="px-6 py-4 text-sm text-[#737373] text-right">—</td>
                   <td className="px-6 py-4 text-sm text-[#111111] text-right font-mono">
-                    {formatCurrency(calcCategoryTotal(items, 'projection'))}
+                    {formatCurrency(calcDisplayCategoryTotal(items, 'projection', reserveInflationRate))}
                   </td>
                   <td className="px-6 py-4 text-sm text-[#737373] text-right">—</td>
                   <td className="px-6 py-4 text-sm font-bold text-[#111111] text-right font-mono">
-                    {formatCurrency(calcCategoryTotal(items, 'proposedChange'))}
+                    {formatCurrency(calcDisplayCategoryTotal(items, 'proposedChange', reserveInflationRate))}
                   </td>
                   <td className="px-6 py-4 text-sm text-[#737373] text-right font-mono">
-                    {formatCurrency(calcCategoryTotal(items, 'monthly'))}
+                    {formatCurrency(calcDisplayCategoryTotal(items, 'monthly', reserveInflationRate))}
                   </td>
                   <td className="px-6 py-4"></td>
                 </tr>
@@ -317,7 +387,9 @@ export function EnrichedView({ lineItems, onPercentChange, onNoteUpdate, units }
         </div>
         <div className="bg-white border border-[#e5e5e5] rounded-lg p-6 shadow-sm">
           <div className="text-xs font-medium text-[#737373] mb-2 uppercase tracking-wide">Per Unit Monthly</div>
-          <div className="text-3xl font-semibold text-[#111111]">{formatCurrency(perUnitMonthly)}</div>
+          <div className="text-3xl font-semibold text-[#111111]">
+            {perUnitMonthly == null ? '—' : formatCurrency(perUnitMonthly)}
+          </div>
         </div>
       </div>
     </div>

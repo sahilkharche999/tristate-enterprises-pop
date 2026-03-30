@@ -5,6 +5,7 @@ services:
       - "8000:8000"
     volumes:
       - db-data:/app/app/ai_implementation/data
+      - budget-storage:/app/data/budget-storage
     environment:
       - ALLOW_ORIGINS=http://localhost,http://localhost:80,http://localhost:5173,http://0.0.0.0,http://0.0.0.0:80
       - GROQ_API_KEY=${GROQ_API_KEY}
@@ -22,3 +23,4 @@ services:
 
 volumes:
   db-data:
+  budget-storage:

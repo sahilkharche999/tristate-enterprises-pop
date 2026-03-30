@@ -1,12 +1,29 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router';
-import { Search, Settings, LayoutList, LayoutGrid, Filter, X, LogOut } from 'lucide-react';
+import { Search, Settings, LayoutList, LayoutGrid, Filter, X, LogOut, Plus } from 'lucide-react';
 import { Input } from './ui/input';
 import { Button } from './ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
-import { hoaList } from '../data/mockData';
+import { Label } from './ui/label';
+import { createHOA, listHOAs } from '../api/hoa';
 import { useAuth } from '../context/AuthContext';
+import { getErrorMessage } from '../lib/errors';
 import { getStatusColor } from '../lib/statusColors';
+import { MONTH_NAMES, monthNameToNumber, toHOAViewModel, type HOAViewModel } from '../lib/hoa';
+
+interface CreateHoaFormState {
+  name: string;
+  units: string;
+  fiscalYearStart: string;
+  fiscalYearEnd: string;
+}
+
+const DEFAULT_CREATE_FORM: CreateHoaFormState = {
+  name: '',
+  units: '',
+  fiscalYearStart: MONTH_NAMES[0],
+  fiscalYearEnd: MONTH_NAMES[11],
+};
 
 export function HOAWorkspace() {
   const navigate = useNavigate();
@@ -17,38 +34,72 @@ export function HOAWorkspace() {
   const [filterStatus, setFilterStatus] = useState<string>('all');
   const [filterUnits, setFilterUnits] = useState<string>('all');
   const [filterCity, setFilterCity] = useState<string>('all');
+  const [hoas, setHoas] = useState<HOAViewModel[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [isCreateOpen, setIsCreateOpen] = useState(false);
+  const [createForm, setCreateForm] = useState<CreateHoaFormState>(DEFAULT_CREATE_FORM);
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [isCreating, setIsCreating] = useState(false);
 
-  // Get unique years, unit ranges, and cities
-  const uniqueYears = Array.from(new Set(hoaList.map((hoa) => hoa.year))).sort((a, b) => b - a);
-  const uniqueCities = Array.from(new Set(hoaList.map((hoa) => hoa.city))).sort();
+  useEffect(() => {
+    let cancelled = false;
 
-  const filteredHOAs = hoaList.filter((hoa) => {
-    // Text search filter
-    const matchesSearch = hoa.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                          hoa.fiscalYear.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                          hoa.units.toString().includes(searchQuery) ||
-                          hoa.year.toString().includes(searchQuery) ||
-                          hoa.city.toLowerCase().includes(searchQuery.toLowerCase());
+    async function loadPortfolio() {
+      setIsLoading(true);
+      setLoadError(null);
+      try {
+        const response = await listHOAs();
+        if (!cancelled) {
+          setHoas(response.map(toHOAViewModel));
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setLoadError(getErrorMessage(error, 'Failed to load the HOA portfolio.'));
+        }
+      } finally {
+        if (!cancelled) {
+          setIsLoading(false);
+        }
+      }
+    }
 
-    // Year filter
+    loadPortfolio();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const uniqueYears = Array.from(new Set(hoas.map((hoa) => hoa.year))).sort((a, b) => b - a);
+  const uniqueCities = Array.from(new Set(hoas.map((hoa) => hoa.city))).sort();
+
+  const filteredHOAs = hoas.filter((hoa) => {
+    const matchesSearch =
+      hoa.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      hoa.fiscalYear.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      hoa.units.toString().includes(searchQuery) ||
+      hoa.year.toString().includes(searchQuery) ||
+      hoa.city.toLowerCase().includes(searchQuery.toLowerCase());
+
     const matchesYear = filterYear === 'all' || hoa.year.toString() === filterYear;
-
-    // Status filter
     const matchesStatus = filterStatus === 'all' || hoa.status === filterStatus;
 
-    // Units filter
     let matchesUnits = true;
     if (filterUnits === 'small') matchesUnits = hoa.units < 100;
     else if (filterUnits === 'medium') matchesUnits = hoa.units >= 100 && hoa.units < 150;
     else if (filterUnits === 'large') matchesUnits = hoa.units >= 150;
 
-    // City filter
     const matchesCity = filterCity === 'all' || hoa.city === filterCity;
 
     return matchesSearch && matchesYear && matchesStatus && matchesUnits && matchesCity;
   });
 
-  const activeFiltersCount = [filterYear !== 'all', filterStatus !== 'all', filterUnits !== 'all', filterCity !== 'all'].filter(Boolean).length;
+  const activeFiltersCount = [
+    filterYear !== 'all',
+    filterStatus !== 'all',
+    filterUnits !== 'all',
+    filterCity !== 'all',
+  ].filter(Boolean).length;
 
   const clearAllFilters = () => {
     setFilterYear('all');
@@ -57,9 +108,55 @@ export function HOAWorkspace() {
     setFilterCity('all');
   };
 
+  const handleCreateFieldChange = (field: keyof CreateHoaFormState, value: string) => {
+    setCreateForm((current) => ({ ...current, [field]: value }));
+    setCreateError(null);
+  };
+
+  const closeCreateModal = () => {
+    if (isCreating) {
+      return;
+    }
+    setIsCreateOpen(false);
+    setCreateForm(DEFAULT_CREATE_FORM);
+    setCreateError(null);
+  };
+
+  const handleCreateHoa = async () => {
+    const trimmedName = createForm.name.trim();
+    if (!trimmedName) {
+      setCreateError('HOA name is required.');
+      return;
+    }
+
+    const parsedUnits = Number(createForm.units);
+    if (!Number.isInteger(parsedUnits) || parsedUnits <= 0) {
+      setCreateError('Units must be a positive whole number.');
+      return;
+    }
+
+    setIsCreating(true);
+    setCreateError(null);
+    try {
+      const created = await createHOA({
+        name: trimmedName,
+        units: parsedUnits,
+        fiscal_year_start_month: monthNameToNumber(createForm.fiscalYearStart),
+        fiscal_year_end_month: monthNameToNumber(createForm.fiscalYearEnd),
+      });
+      setHoas((current) => [toHOAViewModel(created), ...current]);
+      setIsCreateOpen(false);
+      setCreateForm(DEFAULT_CREATE_FORM);
+      navigate(`/hoa/${created.id}`);
+    } catch (error) {
+      setCreateError(getErrorMessage(error, 'Failed to create the HOA.'));
+    } finally {
+      setIsCreating(false);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-[#fafafa]">
-      {/* Header */}
       <header className="border-b border-[#e5e5e5] bg-white shadow-sm sticky top-0 z-10">
         <div className="px-8 py-6 flex items-center justify-between">
           <div>
@@ -87,9 +184,7 @@ export function HOAWorkspace() {
         </div>
       </header>
 
-      {/* Main Content */}
       <main className="max-w-7xl mx-auto px-8 py-12">
-        {/* Search Bar & View Toggle */}
         <div className="mb-6 flex items-center gap-4">
           <div className="relative flex-1">
             <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-[#a3a3a3]" />
@@ -127,9 +222,15 @@ export function HOAWorkspace() {
               <LayoutGrid className="w-4 h-4" />
             </Button>
           </div>
+          <Button
+            onClick={() => setIsCreateOpen(true)}
+            className="bg-[#111111] text-white hover:bg-[#262626] shadow-sm"
+          >
+            <Plus className="w-4 h-4 mr-2" />
+            New HOA
+          </Button>
         </div>
 
-        {/* Filters */}
         <div className="mb-6 flex items-center gap-4 flex-wrap">
           <div className="flex items-center gap-2 text-sm text-[#525252]">
             <Filter className="w-4 h-4" />
@@ -205,8 +306,15 @@ export function HOAWorkspace() {
           </div>
         </div>
 
-        {/* List View */}
-        {viewMode === 'list' && (
+        {isLoading ? (
+          <div className="bg-white border border-[#e5e5e5] rounded-lg p-8 text-sm text-[#737373] shadow-sm">
+            Loading HOA portfolio...
+          </div>
+        ) : loadError ? (
+          <div className="bg-white border border-[#e5e5e5] rounded-lg p-8 text-sm text-[#b91c1c] shadow-sm">
+            {loadError}
+          </div>
+        ) : viewMode === 'list' ? (
           <div className="space-y-3">
             {filteredHOAs.map((hoa) => (
               <Link
@@ -234,10 +342,7 @@ export function HOAWorkspace() {
               </Link>
             ))}
           </div>
-        )}
-
-        {/* Card View */}
-        {viewMode === 'card' && (
+        ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
             {filteredHOAs.map((hoa) => (
               <Link
@@ -276,6 +381,124 @@ export function HOAWorkspace() {
           </div>
         )}
       </main>
+
+      {isCreateOpen ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-6">
+          <div className="w-full max-w-2xl rounded-2xl border border-[#e5e5e5] bg-white shadow-2xl">
+            <div className="flex items-start justify-between border-b border-[#e5e5e5] px-8 py-6">
+              <div>
+                <h2 className="text-xl font-semibold text-[#111111]">Create New HOA</h2>
+                <p className="mt-1 text-sm text-[#666666]">
+                  Add the HOA with the minimum setup needed to start the upload workflow.
+                </p>
+              </div>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="hover:bg-[#f5f5f5]"
+                onClick={closeCreateModal}
+                disabled={isCreating}
+              >
+                <X className="w-5 h-5 text-[#525252]" />
+              </Button>
+            </div>
+
+            <div className="space-y-6 px-8 py-6">
+              <div className="space-y-2">
+                <Label htmlFor="createHoaName">HOA Name</Label>
+                <Input
+                  id="createHoaName"
+                  value={createForm.name}
+                  onChange={(e) => handleCreateFieldChange('name', e.target.value)}
+                  className="bg-white border-[#E5E5E5]"
+                  placeholder="North Harbor HOA"
+                  disabled={isCreating}
+                />
+              </div>
+
+              <div className="grid grid-cols-1 gap-6 md:grid-cols-3">
+                <div className="space-y-2">
+                  <Label htmlFor="createHoaUnits">Units</Label>
+                  <Input
+                    id="createHoaUnits"
+                    type="number"
+                    min="1"
+                    step="1"
+                    value={createForm.units}
+                    onChange={(e) => handleCreateFieldChange('units', e.target.value)}
+                    className="bg-white border-[#E5E5E5]"
+                    disabled={isCreating}
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="createHoaFiscalStart">Fiscal Year Start</Label>
+                  <Select
+                    value={createForm.fiscalYearStart}
+                    onValueChange={(value) => handleCreateFieldChange('fiscalYearStart', value)}
+                    disabled={isCreating}
+                  >
+                    <SelectTrigger id="createHoaFiscalStart" className="bg-white border-[#E5E5E5]">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {MONTH_NAMES.map((month) => (
+                        <SelectItem key={month} value={month}>
+                          {month}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="createHoaFiscalEnd">Fiscal Year End</Label>
+                  <Select
+                    value={createForm.fiscalYearEnd}
+                    onValueChange={(value) => handleCreateFieldChange('fiscalYearEnd', value)}
+                    disabled={isCreating}
+                  >
+                    <SelectTrigger id="createHoaFiscalEnd" className="bg-white border-[#E5E5E5]">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {MONTH_NAMES.map((month) => (
+                        <SelectItem key={month} value={month}>
+                          {month}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+
+              {createError ? (
+                <div className="rounded-lg border border-[#fecaca] bg-[#fef2f2] px-4 py-3 text-sm text-[#b91c1c]">
+                  {createError}
+                </div>
+              ) : null}
+            </div>
+
+            <div className="flex items-center justify-end gap-3 border-t border-[#e5e5e5] px-8 py-6">
+              <Button
+                variant="outline"
+                className="border-[#e5e5e5]"
+                onClick={closeCreateModal}
+                disabled={isCreating}
+              >
+                Cancel
+              </Button>
+              <Button
+                onClick={handleCreateHoa}
+                className="bg-[#111111] text-white hover:bg-[#262626] shadow-sm disabled:opacity-60"
+                disabled={isCreating}
+              >
+                {isCreating ? 'Creating...' : 'Create HOA'}
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

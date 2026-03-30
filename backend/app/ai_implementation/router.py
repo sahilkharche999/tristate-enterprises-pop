@@ -49,7 +49,7 @@ async def suggest(request: SuggestRequest, session: Session = Depends(get_sessio
         return response
     except Exception as e:
         logger.exception("Pipeline error")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="AI suggestion pipeline failed. Check server logs for details.")
 
 
 @router.post("/feedback", response_model=FeedbackResponse)
@@ -79,7 +79,7 @@ async def feedback(request: FeedbackRequest, session: Session = Depends(get_sess
     except Exception as e:
         session.rollback()
         logger.exception("Feedback error")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Feedback submission failed. Check server logs for details.")
 
 
 @router.get("/stats", response_model=StatsResponse)

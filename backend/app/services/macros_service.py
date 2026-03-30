@@ -379,8 +379,8 @@ def remove_protection_return_bytes(path: str) -> bytes:
             data = f.read()
         try:
             os.remove(out_path)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Temp file cleanup failed: %s", e)
         duration = time.perf_counter() - start
         logger.info("remove_protection_return_bytes done: path=%s out_bytes=%d duration=%.3fs", path, len(data), duration)
         return data

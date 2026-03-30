@@ -14,6 +14,7 @@ from pydantic_settings import BaseSettings
 logger = logging.getLogger(__name__)
 
 _INSECURE_DEFAULT = "CHANGE-ME-IN-PRODUCTION"
+_BACKEND_ROOT = Path(__file__).resolve().parents[1]
 
 
 class Settings(BaseSettings):
@@ -26,6 +27,11 @@ class Settings(BaseSettings):
 
     # Temporary directory for uploaded/processed files
     TEMP_DIR: str = Field(default_factory=lambda: os.path.join(os.getcwd(), "tmp"))
+
+    # Managed retained-file root for durable budget history artifacts
+    BUDGET_STORAGE_ROOT: str = Field(
+        default_factory=lambda: str(_BACKEND_ROOT / "data" / "budget-storage")
+    )
 
     # Maximum number of rows to include in budget preview
     MAX_PREVIEW_ROWS: int = 200

@@ -1,150 +1,186 @@
-import { useState, useEffect, useRef } from 'react';
-import { useParams, Link } from 'react-router';
-import { ArrowLeft, Settings, Upload, Download, FileText } from 'lucide-react';
-import { Button } from './ui/button';
-import { hoaList, type LineItem, type AISuggestion, type AISuggestionResponse } from '../data/mockData';
-import { EnrichedView } from './EnrichedView';
-import { BudgetView } from './BudgetView';
-import { AISuggestionMode } from './AISuggestionMode';
+import { useEffect, useRef, useState } from 'react';
+import { Link } from 'react-router';
+import { ArrowLeft, Download, FileText, Settings, Trash2, Upload } from 'lucide-react';
 import { toast } from 'sonner';
-import { generateBudget, toNum } from '../api/macros';
-import type { SheetTable } from '../api/macros';
+
+import { Button } from './ui/button';
+import { AISuggestionMode } from './AISuggestionMode';
+import { BudgetView } from './BudgetView';
+import { DraftBaselineComparePanel } from './DraftBaselineComparePanel';
+import { EnrichedView } from './EnrichedView';
+import {
+  deleteActiveDraft,
+  downloadBudgetDraftEnriched,
+  mapBudgetHistoryLineItems,
+  mapEditorLineItemsToBudgetHistory,
+  saveBudgetDraft,
+  uploadBudgetSource,
+  type BudgetDraftPayload,
+} from '../api/budgetHistory';
+import { type AISuggestion, type AISuggestionResponse, type LineItem } from '../data/mockData';
+import type { HOARecord } from '../api/hoa';
 import { formatTimestamp } from '../lib/budget';
-import { exportEnrichedBudget } from '../lib/exportBudget';
-import { computeTimingInputs, parseMonth } from '../lib/fiscalYear';
+import { getErrorMessage } from '../lib/errors';
+import { computeTimingInputs } from '../lib/fiscalYear';
+import { formatFiscalYearLabel } from '../lib/hoa';
 
-// ─── Utility ─────────────────────────────────────────────────────────────────
-
-export function parseEnrichedResponse(enriched: SheetTable): LineItem[] {
-  const items: LineItem[] = [];
-  let currentCategory: LineItem['category'] = 'operating';
-  let idCounter = 0;
-
-  for (const row of enriched.rows) {
-    const colA = row[0];
-    const colB = row[1];
-
-    // Skip rows where both col A and col B are empty
-    if ((colA == null || colA === '') && (colB == null || colB === '')) continue;
-
-    // Section header: col A non-empty, col B empty
-    if (colA != null && colA !== '' && (colB == null || colB === '')) {
-      const header = String(colA).toLowerCase();
-      if (header.includes('income')) currentCategory = 'income';
-      else if (header.includes('reserve')) currentCategory = 'reserve';
-      else currentCategory = 'operating';
-      continue;
-    }
-
-    // Line item: col B non-empty
-    if (colB != null && colB !== '') {
-      // Backend blanks AK:AZ (col AL = index 37) to null for reserve-study and
-      // reserve-labeled rows — those are excluded from the board-adjustable flow.
-      // null = excluded (show read-only); 0 = valid item whose YTD happens to be zero.
-      const excluded = row[37] == null;
-
-      const colBStr = String(colB);
-      const labelParts = colBStr.split(' - ');
-      const parsedCode = labelParts.length >= 2 ? parseInt(labelParts[0].trim(), 10) : NaN;
-
-      items.push({
-        id: `item-${++idCounter}`,
-        category: currentCategory,
-        name: colBStr,
-        ytdActual: toNum(row[19]),           // col T  (index 19)
-        annualBudget: toNum(row[32]),        // col AG (index 32)
-        percentChange: toNum(row[38]) * 100, // col AM (index 38), decimal → display %
-        projection: excluded ? undefined : toNum(row[37]), // col AL (index 37)
-        readOnly: excluded || undefined,
-        accountCode: !isNaN(parsedCode) ? parsedCode : undefined,
-        label: colBStr,
-      });
-    }
-  }
-
-  return items;
+interface GenerateBudgetRequest {
+  draftId: number;
+  lineItems: LineItem[];
+  globalNote: string;
+  statementMonth: number | null;
+  growthFactor: number | null;
+  growthFactorNote: string;
 }
 
-// ─── Component ────────────────────────────────────────────────────────────────
-
 interface BudgetScreenProps {
+  hoa: HOARecord;
+  hoaId: string;
   lineItems: LineItem[];
   onLineItemsUpdate: (lineItems: LineItem[]) => void;
-  onGenerateBudget: () => void;
-  onFileUploaded?: (file: File) => void;
+  onGenerateBudget: (payload: GenerateBudgetRequest) => Promise<void>;
+  onDraftChange?: (draft: BudgetDraftPayload) => void;
+  onDraftDeleted?: () => void;
   budgetGenerated: boolean;
   isGenerating?: boolean;
   initialView?: 'enriched' | 'budget' | 'ai';
-  fileAlreadyUploaded?: boolean;
   savedAiResponse?: AISuggestionResponse | null;
   onAiResponseChange?: (response: AISuggestionResponse | null) => void;
+  activeDraft?: BudgetDraftPayload | null;
+}
+
+function downloadBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function normalizedDraftSnapshot(
+  lineItems: LineItem[],
+  globalNote: string,
+  statementMonth: number | null,
+  growthFactor: number | null,
+  growthFactorNote: string,
+) {
+  return JSON.stringify({
+    line_items: mapEditorLineItemsToBudgetHistory(lineItems),
+    global_note: globalNote || null,
+    statement_month: statementMonth,
+    growth_factor: growthFactor,
+    growth_factor_note: growthFactorNote || null,
+  });
 }
 
 export function BudgetScreen({
+  hoa,
+  hoaId,
   lineItems,
   onLineItemsUpdate,
   onGenerateBudget,
-  onFileUploaded,
+  onDraftChange,
+  onDraftDeleted,
   budgetGenerated,
   isGenerating = false,
   initialView = 'enriched',
-  fileAlreadyUploaded = false,
   savedAiResponse = null,
   onAiResponseChange,
+  activeDraft = null,
 }: BudgetScreenProps) {
-  const { id } = useParams<{ id: string }>();
-  const hoa = hoaList.find((h) => h.id === id);
-
-  const [uploadState, setUploadState] = useState<'initial' | 'uploading' | 'complete'>(fileAlreadyUploaded ? 'complete' : 'initial');
+  const [uploadState, setUploadState] = useState<'initial' | 'uploading' | 'complete'>(
+    activeDraft ? 'complete' : 'initial',
+  );
   const [currentView, setCurrentView] = useState<'enriched' | 'budget' | 'ai'>(initialView);
-  const [globalNote, setGlobalNote] = useState('');
-  const [lastSaved, setLastSaved] = useState(new Date());
+  const [draftId, setDraftId] = useState<number | null>(activeDraft?.id ?? null);
+  const [globalNote, setGlobalNote] = useState(activeDraft?.global_note ?? '');
+  const [lastSaved, setLastSaved] = useState<Date | null>(
+    activeDraft?.updated_at ? new Date(activeDraft.updated_at) : null,
+  );
+  const [statementMonth, setStatementMonth] = useState<number | null>(activeDraft?.statement_month ?? null);
+  const [workingGrowthFactor, setWorkingGrowthFactor] = useState<number | null>(
+    activeDraft?.growth_factor ?? null,
+  );
+  const [growthFactorNote, setGrowthFactorNote] = useState(activeDraft?.growth_factor_note ?? '');
+  const [isComparePanelOpen, setIsComparePanelOpen] = useState(false);
+  const [isSavingDraft, setIsSavingDraft] = useState(false);
+  const [isDeletingDraft, setIsDeletingDraft] = useState(false);
+  const [isDownloadingEnriched, setIsDownloadingEnriched] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [aiResponse, _setAiResponse] = useState<AISuggestionResponse | null>(savedAiResponse);
-  const setAiResponse = (r: AISuggestionResponse | null) => {
-    _setAiResponse(r);
-    onAiResponseChange?.(r);
-  };
+  const [aiResponse, internalSetAiResponse] = useState<AISuggestionResponse | null>(savedAiResponse);
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
-  const [statementMonth, setStatementMonth] = useState<number | null>(null);
-  const [uploadedGrowthFactor, setUploadedGrowthFactor] = useState<number | null>(null);
+  const activeReserveInflationRate =
+    typeof hoa.reserve_inflation_rate === 'number' && Number.isFinite(hoa.reserve_inflation_rate)
+      ? hoa.reserve_inflation_rate
+      : 0;
 
-  // Auto-save effect
+  const fiscalYearLabel = formatFiscalYearLabel(
+    hoa.fiscal_year_start_month,
+    hoa.fiscal_year_end_month,
+  );
+
+  const setAiResponse = (response: AISuggestionResponse | null) => {
+    internalSetAiResponse(response);
+    onAiResponseChange?.(response);
+  };
+
   useEffect(() => {
-    const timer = setTimeout(() => {
-      setLastSaved(new Date());
-    }, 1000);
-    return () => clearTimeout(timer);
-  }, [lineItems, globalNote]);
+    setCurrentView(initialView);
+  }, [initialView]);
+
+  useEffect(() => {
+    setAiResponse(savedAiResponse);
+  }, [savedAiResponse]);
+
+  useEffect(() => {
+    if (!activeDraft) {
+      setDraftId(null);
+      setGlobalNote('');
+      setLastSaved(null);
+      setStatementMonth(null);
+      setWorkingGrowthFactor(null);
+      setGrowthFactorNote('');
+      setIsComparePanelOpen(false);
+      setUploadState('initial');
+      return;
+    }
+
+    setDraftId(activeDraft.id);
+    setGlobalNote(activeDraft.global_note ?? '');
+    setLastSaved(activeDraft.updated_at ? new Date(activeDraft.updated_at) : null);
+    setStatementMonth(activeDraft.statement_month ?? null);
+    setWorkingGrowthFactor(activeDraft.growth_factor ?? null);
+    setGrowthFactorNote(activeDraft.growth_factor_note ?? '');
+    setUploadState('complete');
+  }, [activeDraft]);
 
   const handleSelectFile = () => {
     fileInputRef.current?.click();
   };
 
-  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
+  const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
     if (!file) return;
-    // Reset input so the same file can be re-selected if needed
-    e.target.value = '';
+    event.target.value = '';
 
     setUploadState('uploading');
     try {
-      const result = await generateBudget({
-        file,
-        enrichOnly: true,
-        fiscalYearStartMonth: hoa ? parseMonth(hoa.fiscalYearStart) : 1,
-      });
-      const parsed = parseEnrichedResponse(result.enriched);
-      onLineItemsUpdate(parsed);
-      if (result.statement_month) setStatementMonth(result.statement_month);
-      setUploadedGrowthFactor(result.growth_factor ?? null);
-      onFileUploaded?.(file);
+      const response = await uploadBudgetSource(hoaId, file);
+      const mappedLineItems = mapBudgetHistoryLineItems(response.draft.line_items);
+      onLineItemsUpdate(mappedLineItems);
+      setDraftId(response.draft.id);
+      setGlobalNote(response.draft.global_note ?? '');
+      setStatementMonth(response.draft.statement_month ?? null);
+      setWorkingGrowthFactor(response.draft.growth_factor ?? null);
+      setGrowthFactorNote(response.draft.growth_factor_note ?? '');
+      setLastSaved(response.draft.updated_at ? new Date(response.draft.updated_at) : null);
+      onDraftChange?.(response.draft);
       setUploadState('complete');
-      toast.success('Income statement parsed successfully');
-    } catch (err: unknown) {
-      const apiErr = err as { status?: number; message?: string };
-      toast.error(apiErr?.message || 'Upload failed. Please try again.');
+      toast.success('Income statement uploaded and draft created.');
+    } catch (error) {
+      toast.error(getErrorMessage(error, 'Upload failed. Please try again.'));
       setUploadState('initial');
     }
   };
@@ -152,28 +188,176 @@ export function BudgetScreen({
   const handlePercentChange = (itemId: string, newPercent: number) => {
     onLineItemsUpdate(
       lineItems.map((item) =>
-        item.id === itemId ? { ...item, percentChange: newPercent } : item
-      )
+        item.id === itemId ? { ...item, percentChange: newPercent } : item,
+      ),
     );
   };
 
-  const handleNoteUpdate = (itemId: string, title: string, body: string) => {
-    onLineItemsUpdate(
-      lineItems.map((item) =>
-        item.id === itemId ? { ...item, note: { title, body } } : item
-      )
+  const handleSaveDraft = async () => {
+    try {
+      await persistDraftSnapshot();
+      toast.success('Draft saved.');
+    } catch (error) {
+      toast.error(getErrorMessage(error, 'Failed to save draft.'));
+    }
+  };
+
+  // Auto-save: debounce 2s after line items, notes, or growth factor change
+  const autoSaveRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isMountedRef = useRef(false);
+
+  useEffect(() => {
+    // Skip the initial mount — only auto-save on subsequent changes
+    if (!isMountedRef.current) {
+      isMountedRef.current = true;
+      return;
+    }
+    if (!draftId || isSavingDraft) return;
+
+    if (autoSaveRef.current) clearTimeout(autoSaveRef.current);
+    autoSaveRef.current = setTimeout(async () => {
+      try {
+        await persistDraftSnapshot();
+        setLastSaved(new Date());
+      } catch {
+        // Silent — manual save is still available as fallback
+      }
+    }, 2000);
+
+    return () => {
+      if (autoSaveRef.current) clearTimeout(autoSaveRef.current);
+    };
+  }, [lineItems, globalNote, workingGrowthFactor, growthFactorNote]);
+
+  const handleDiscardDraft = async () => {
+    if (!draftId) return;
+    if (!window.confirm('Discard this draft? This cannot be undone.')) return;
+
+    setIsDeletingDraft(true);
+    try {
+      await deleteActiveDraft(hoaId);
+      onDraftDeleted?.();
+    } catch (error) {
+      toast.error(getErrorMessage(error, 'Failed to discard draft.'));
+    } finally {
+      setIsDeletingDraft(false);
+    }
+  };
+
+  const persistDraftSnapshot = async (): Promise<BudgetDraftPayload> => {
+    if (!draftId) {
+      throw new Error('Upload an income statement first.');
+    }
+
+    setIsSavingDraft(true);
+    try {
+      const response = await saveBudgetDraft(hoaId, {
+        draft_id: draftId,
+        line_items: mapEditorLineItemsToBudgetHistory(lineItems),
+        global_note: globalNote || null,
+        statement_month: statementMonth,
+        growth_factor: workingGrowthFactor,
+        growth_factor_note: growthFactorNote || null,
+      });
+      onDraftChange?.(response.draft);
+      setLastSaved(response.draft.updated_at ? new Date(response.draft.updated_at) : new Date());
+      return response.draft;
+    } catch (error) {
+      throw error;
+    } finally {
+      setIsSavingDraft(false);
+    }
+  };
+
+  const hasUnsavedDraftChanges = (() => {
+    if (!activeDraft) {
+      return Boolean(draftId);
+    }
+
+    const persistedEditorSnapshot = normalizedDraftSnapshot(
+      mapBudgetHistoryLineItems(activeDraft.line_items),
+      activeDraft.global_note ?? '',
+      activeDraft.statement_month ?? null,
+      activeDraft.growth_factor ?? null,
+      activeDraft.growth_factor_note ?? '',
     );
+    const workingSnapshot = normalizedDraftSnapshot(
+      lineItems,
+      globalNote,
+      statementMonth,
+      workingGrowthFactor,
+      growthFactorNote,
+    );
+    return persistedEditorSnapshot !== workingSnapshot;
+  })();
+
+  const ensurePersistedDraftSnapshot = async (): Promise<BudgetDraftPayload> => {
+    let persistedDraft = activeDraft;
+    if (!persistedDraft || hasUnsavedDraftChanges) {
+      persistedDraft = await persistDraftSnapshot();
+    }
+    if (!persistedDraft) {
+      throw new Error('Draft unavailable.');
+    }
+    return persistedDraft;
+  };
+
+  const handleDownloadEnriched = async () => {
+    if (!draftId) {
+      toast.error('Upload an income statement first.');
+      return;
+    }
+
+    setIsDownloadingEnriched(true);
+    try {
+      const persistedDraft = await ensurePersistedDraftSnapshot();
+      const blob = await downloadBudgetDraftEnriched(hoaId, persistedDraft.id);
+      downloadBlob(blob, `draft-${persistedDraft.id}-enriched.xlsx`);
+      toast.success(`Draft ${persistedDraft.id} enriched workbook downloaded.`);
+    } catch (error) {
+      toast.error(getErrorMessage(error, 'Failed to download the enriched draft.'));
+    } finally {
+      setIsDownloadingEnriched(false);
+    }
+  };
+
+  const handleNoteSaved = (itemId: string, title: string, body: string) => {
+    onLineItemsUpdate(
+      lineItems.map((entry) =>
+        entry.id === itemId ? { ...entry, note: { title, body } } : entry,
+      ),
+    );
+  };
+
+  const handleGenerateBudgetClick = async () => {
+    if (!draftId) {
+      toast.error('Upload an income statement first.');
+      return;
+    }
+
+    try {
+      const persistedDraft = await ensurePersistedDraftSnapshot();
+      await onGenerateBudget({
+        draftId: persistedDraft.id,
+        lineItems,
+        globalNote,
+        statementMonth,
+        growthFactor: workingGrowthFactor,
+        growthFactorNote,
+      });
+    } catch (error) {
+      toast.error(getErrorMessage(error, 'Failed to generate budget. Please try again.'));
+    }
   };
 
   const handleFetchAISuggestions = async () => {
-    if (!hoa) return;
     if (aiLoading) return;
     setAiLoading(true);
     setAiError(null);
     try {
       const { getAISuggestions } = await import('../api/macros');
-      const totalBudget = lineItems.reduce((s, i) => s + (i.annualBudget || 0), 0);
-      const totalYtd = lineItems.reduce((s, i) => s + (i.ytdActual || 0), 0);
+      const totalBudget = lineItems.reduce((sum, item) => sum + (item.annualBudget || 0), 0);
+      const totalYtd = lineItems.reduce((sum, item) => sum + (item.ytdActual || 0), 0);
       const timing = computeTimingInputs(hoa, statementMonth ?? undefined);
       const result = await getAISuggestions({
         lineItems,
@@ -181,13 +365,13 @@ export function BudgetScreen({
         totalAnnualBudget: totalBudget,
         totalYtdActuals: totalYtd,
         ...timing,
-        growthFactor: uploadedGrowthFactor ?? timing.growthFactor,
-        fiscalYear: hoa.year,
+        growthFactor: workingGrowthFactor ?? timing.growthFactor,
+        fiscalYear: hoa.portfolio_year ?? new Date().getFullYear(),
+        statementMonth: statementMonth ?? timing.statementMonth,
       });
       setAiResponse(result);
-    } catch (err: unknown) {
-      const apiErr = err as { message?: string };
-      setAiError(apiErr?.message || 'AI service unavailable');
+    } catch (error) {
+      setAiError(getErrorMessage(error, 'AI service unavailable'));
     } finally {
       setAiLoading(false);
     }
@@ -196,63 +380,53 @@ export function BudgetScreen({
   const handleApplyAISuggestions = (selectedSuggestions: AISuggestion[]) => {
     onLineItemsUpdate(
       lineItems.map((item) => {
-        const suggestion = selectedSuggestions.find((s) => s.lineItemId === item.id);
+        const suggestion = selectedSuggestions.find((entry) => entry.lineItemId === item.id);
         if (suggestion) {
           return { ...item, percentChange: suggestion.suggestedPercent };
         }
         return item;
-      })
+      }),
     );
     setCurrentView('enriched');
     toast.success(`Applied ${selectedSuggestions.length} AI suggestions`);
   };
 
-  if (!hoa) {
-    return (
-      <div className="min-h-screen bg-white flex items-center justify-center">
-        <p className="text-[#666666]">HOA not found</p>
-      </div>
-    );
-  }
-
-  // Upload State
   if (uploadState === 'initial' || uploadState === 'uploading') {
     return (
       <div className="min-h-screen bg-[#fafafa]">
-        {/* Header */}
-        <header className="border-b border-[#e5e5e5] bg-white sticky top-0 z-10 shadow-sm">
-          <div className="px-8 py-6 flex items-center justify-between">
+        <header className="sticky top-0 z-10 border-b border-[#e5e5e5] bg-white shadow-sm">
+          <div className="flex items-center justify-between px-8 py-6">
             <div className="flex items-center gap-6">
-              <Link to="/workspace" className="p-2 hover:bg-[#f5f5f5] rounded-lg transition-colors">
-                <ArrowLeft className="w-5 h-5 text-[#525252]" />
+              <Link to="/workspace" className="rounded-lg p-2 transition-colors hover:bg-[#f5f5f5]">
+                <ArrowLeft className="h-5 w-5 text-[#525252]" />
               </Link>
               <div>
                 <h1 className="text-xl font-semibold text-[#111111]">{hoa.name}</h1>
-                <p className="text-sm text-[#737373]">Fiscal Year: {hoa.fiscalYear}</p>
+                <p className="text-sm text-[#737373]">Fiscal Year: {fiscalYearLabel}</p>
               </div>
             </div>
-            <Link to={`/hoa/${id}/settings`}>
+            <Link to={`/hoa/${hoaId}/settings`}>
               <Button variant="ghost" size="icon" className="hover:bg-[#f5f5f5]">
-                <Settings className="w-5 h-5 text-[#525252]" />
+                <Settings className="h-5 w-5 text-[#525252]" />
               </Button>
             </Link>
           </div>
         </header>
 
-        {/* Upload Card */}
-        <main className="max-w-3xl mx-auto px-8 py-16">
-          <div className="bg-white border-2 border-dashed border-[#d4d4d4] rounded-xl p-16 text-center shadow-sm">
+        <main className="mx-auto max-w-3xl px-8 py-16">
+          <div className="rounded-xl border-2 border-dashed border-[#d4d4d4] bg-white p-16 text-center shadow-sm">
             <div className="flex flex-col items-center gap-6">
-              <div className="w-16 h-16 bg-[#f5f5f5] rounded-full flex items-center justify-center">
-                <Upload className="w-8 h-8 text-[#525252]" />
+              <div className="flex h-16 w-16 items-center justify-center rounded-full bg-[#f5f5f5]">
+                <Upload className="h-8 w-8 text-[#525252]" />
               </div>
               <div>
-                <h2 className="text-xl font-semibold text-[#111111] mb-2">Upload Income Statement</h2>
+                <h2 className="mb-2 text-xl font-semibold text-[#111111]">Upload Income Statement</h2>
                 <p className="text-sm text-[#737373]">
-                  {uploadState === 'uploading' ? 'Parsing document...' : 'Upload your Excel or CSV file to begin'}
+                  {uploadState === 'uploading'
+                    ? 'Parsing document and creating a persisted draft...'
+                    : 'Upload your Excel or CSV file to begin'}
                 </p>
               </div>
-              {/* Hidden file input */}
               <input
                 ref={fileInputRef}
                 type="file"
@@ -263,7 +437,7 @@ export function BudgetScreen({
               <Button
                 onClick={handleSelectFile}
                 disabled={uploadState === 'uploading'}
-                className="bg-[#111111] text-white hover:bg-[#262626] px-6 py-2.5 shadow-sm"
+                className="bg-[#111111] px-6 py-2.5 text-white shadow-sm hover:bg-[#262626]"
               >
                 {uploadState === 'uploading' ? 'Processing...' : 'Select File'}
               </Button>
@@ -274,79 +448,109 @@ export function BudgetScreen({
     );
   }
 
-  // Main Budget Screen
   return (
     <div className="min-h-screen bg-[#fafafa]">
-      {/* Sticky Header */}
-      <header className="border-b border-[#e5e5e5] bg-white sticky top-0 z-10 shadow-sm">
+      <header className="sticky top-0 z-10 border-b border-[#e5e5e5] bg-white shadow-sm">
         <div className="px-8 py-6">
-          <div className="flex items-center justify-between mb-4">
+          <div className="mb-4 flex items-center justify-between">
             <div className="flex items-center gap-6">
-              <Link to="/workspace" className="p-2 hover:bg-[#f5f5f5] rounded-lg transition-colors">
-                <ArrowLeft className="w-5 h-5 text-[#525252]" />
+              <Link to="/workspace" className="rounded-lg p-2 transition-colors hover:bg-[#f5f5f5]">
+                <ArrowLeft className="h-5 w-5 text-[#525252]" />
               </Link>
               <div>
                 <h1 className="text-xl font-semibold text-[#111111]">{hoa.name}</h1>
-                <div className="flex items-center gap-3 mt-1">
-                  <p className="text-sm text-[#737373]">Fiscal Year: {hoa.fiscalYear}</p>
+                <div className="mt-1 flex items-center gap-3">
+                  <p className="text-sm text-[#737373]">Fiscal Year: {fiscalYearLabel}</p>
                   <span className="text-[#d4d4d4]">•</span>
-                  <p className="text-xs text-[#737373]">Macro v1.2</p>
+                  <p className="text-xs text-[#737373]">Draft {draftId ?? 'Unavailable'}</p>
                 </div>
               </div>
             </div>
             <div className="flex items-center gap-4">
               <div className="text-right">
-                <span className="text-xs text-[#a3a3a3]">Auto-saved</span>
-                <p className="text-sm text-[#525252] font-medium">{formatTimestamp(lastSaved)}</p>
+                <span className="text-xs text-[#a3a3a3]">Last Saved</span>
+                <p className="text-sm font-medium text-[#525252]">
+                  {lastSaved ? formatTimestamp(lastSaved) : 'Not saved yet'}
+                </p>
               </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleSaveDraft}
+                disabled={isSavingDraft || isGenerating || !draftId}
+                className="border-[#d4d4d4] text-[#111111] hover:border-[#a3a3a3] hover:bg-[#f5f5f5]"
+              >
+                {isSavingDraft ? 'Saving...' : 'Save Draft'}
+              </Button>
+              {draftId && !budgetGenerated && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void handleDiscardDraft()}
+                  disabled={isDeletingDraft || isSavingDraft || isGenerating}
+                  className="border-red-200 text-red-600 hover:border-red-300 hover:bg-red-50"
+                >
+                  <Trash2 className="mr-1.5 h-3.5 w-3.5" />
+                  {isDeletingDraft ? 'Discarding...' : 'Discard Draft'}
+                </Button>
+              )}
               <div className="h-8 w-px bg-[#e5e5e5]"></div>
-              <Link to={`/hoa/${id}/sync-history`}>
-                <Button variant="outline" size="sm" className="border-[#d4d4d4] text-[#111111] hover:bg-[#f5f5f5] hover:border-[#a3a3a3] font-medium px-4">
+              <Link to={`/hoa/${hoaId}/sync-history`}>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="border-[#d4d4d4] px-4 font-medium text-[#111111] hover:border-[#a3a3a3] hover:bg-[#f5f5f5]"
+                >
                   View Past Sync
                 </Button>
               </Link>
-              <Link to={`/hoa/${id}/settings`}>
+              <Link to={`/hoa/${hoaId}/settings`}>
                 <Button variant="ghost" size="icon" className="hover:bg-[#f5f5f5]">
-                  <Settings className="w-5 h-5 text-[#525252]" />
+                  <Settings className="h-5 w-5 text-[#525252]" />
                 </Button>
               </Link>
             </div>
           </div>
 
-          {/* Global Context Note */}
           <div className="border-t border-[#e5e5e5] pt-4">
             <details className="group">
-              <summary className="cursor-pointer text-sm font-medium text-[#111111] flex items-center gap-2 hover:text-[#525252] transition-colors">
-                <FileText className="w-4 h-4" />
+              <summary className="flex cursor-pointer items-center gap-2 text-sm font-medium text-[#111111] transition-colors hover:text-[#525252]">
+                <FileText className="h-4 w-4" />
                 Context Note
-                <span className="text-[#737373] text-xs ml-2 font-normal">
+                <span className="ml-2 text-xs font-normal text-[#737373]">
                   (Strategic notes, board decisions, inflation assumptions)
                 </span>
               </summary>
-              <div className="mt-4">
+              <div className="mt-4 space-y-3">
                 <textarea
                   value={globalNote}
-                  onChange={(e) => setGlobalNote(e.target.value)}
+                  onChange={(event) => setGlobalNote(event.target.value)}
                   placeholder="Add strategic fiscal year notes, board decisions, inflation assumptions..."
-                  className="w-full min-h-24 p-4 bg-white border border-[#e5e5e5] rounded-lg text-sm text-[#111111] placeholder:text-[#a3a3a3] resize-y focus:border-[#737373] focus:ring-1 focus:ring-[#737373] shadow-sm"
+                  className="min-h-24 w-full resize-y rounded-lg border border-[#e5e5e5] bg-white p-4 text-sm text-[#111111] shadow-sm placeholder:text-[#a3a3a3] focus:border-[#737373] focus:ring-1 focus:ring-[#737373]"
                 />
+                {workingGrowthFactor != null && (
+                  <p className="text-xs text-[#737373]">
+                    Growth factor {workingGrowthFactor.toFixed(4)}
+                    {growthFactorNote ? ` • ${growthFactorNote}` : ''}
+                    {statementMonth ? ` • statement month ${statementMonth}` : ''}
+                  </p>
+                )}
               </div>
             </details>
           </div>
         </div>
       </header>
 
-      {/* Action Bar */}
-      <div className="border-b border-[#e5e5e5] bg-white sticky top-[140px] z-20 shadow-md">
-        <div className="px-8 py-5 flex items-center justify-between backdrop-blur-sm bg-white/95">
+      <div className="sticky top-[140px] z-20 border-b border-[#e5e5e5] bg-white shadow-md">
+        <div className="flex items-center justify-between bg-white/95 px-8 py-5 backdrop-blur-sm">
           <div className="flex items-center gap-2">
             <Button
               variant={currentView === 'enriched' ? 'default' : 'outline'}
               onClick={() => setCurrentView('enriched')}
               className={
                 currentView === 'enriched'
-                  ? 'bg-[#111111] text-white hover:bg-[#262626] shadow-sm'
-                  : 'border-[#e5e5e5] text-[#525252] hover:bg-[#f5f5f5] hover:border-[#737373]'
+                  ? 'bg-[#111111] text-white shadow-sm hover:bg-[#262626]'
+                  : 'border-[#e5e5e5] text-[#525252] hover:border-[#737373] hover:bg-[#f5f5f5]'
               }
             >
               View Enriched
@@ -356,37 +560,51 @@ export function BudgetScreen({
               onClick={() => setCurrentView('budget')}
               className={
                 currentView === 'budget'
-                  ? 'bg-[#111111] text-white hover:bg-[#262626] shadow-sm'
-                  : 'border-[#e5e5e5] text-[#525252] hover:bg-[#f5f5f5] hover:border-[#737373]'
+                  ? 'bg-[#111111] text-white shadow-sm hover:bg-[#262626]'
+                  : 'border-[#e5e5e5] text-[#525252] hover:border-[#737373] hover:bg-[#f5f5f5]'
               }
             >
               View Budget
             </Button>
             <Button
               variant={currentView === 'ai' ? 'default' : 'outline'}
-              onClick={() => { setCurrentView('ai'); if (!aiResponse && !aiLoading) handleFetchAISuggestions(); }}
+              onClick={() => setCurrentView('ai')}
               className={
                 currentView === 'ai'
-                  ? 'bg-[#111111] text-white hover:bg-[#262626] shadow-sm'
-                  : 'border-[#e5e5e5] text-[#525252] hover:bg-[#f5f5f5] hover:border-[#737373]'
+                  ? 'bg-[#111111] text-white shadow-sm hover:bg-[#262626]'
+                  : 'border-[#e5e5e5] text-[#525252] hover:border-[#737373] hover:bg-[#f5f5f5]'
               }
             >
               AI Suggested % Change
             </Button>
             <Button
               variant="outline"
-              className="border-[#e5e5e5] text-[#525252] hover:bg-[#f5f5f5] hover:border-[#737373]"
-              onClick={() => exportEnrichedBudget(lineItems, hoa?.name ?? 'Budget')}
+              className="border-[#e5e5e5] text-[#525252] hover:border-[#737373] hover:bg-[#f5f5f5]"
+              onClick={() => void handleDownloadEnriched()}
+              disabled={!draftId || isDownloadingEnriched || isSavingDraft || isGenerating}
             >
-              <Download className="w-4 h-4 mr-2" />
-              Download Enriched
+              <Download className="mr-2 h-4 w-4" />
+              {isDownloadingEnriched ? 'Downloading...' : 'Download Enriched'}
             </Button>
+            {draftId && currentView === 'enriched' && (
+              <Button
+                variant={isComparePanelOpen ? 'default' : 'outline'}
+                onClick={() => setIsComparePanelOpen((open) => !open)}
+                className={
+                  isComparePanelOpen
+                    ? 'bg-[#111111] text-white shadow-sm hover:bg-[#262626]'
+                    : 'border-[#e5e5e5] text-[#525252] hover:border-[#737373] hover:bg-[#f5f5f5]'
+                }
+              >
+                {isComparePanelOpen ? 'Hide Baseline Compare' : 'Compare to Baseline'}
+              </Button>
+            )}
           </div>
           {currentView === 'enriched' && (
             <Button
-              onClick={onGenerateBudget}
-              disabled={isGenerating}
-              className="bg-[#111111] text-white hover:bg-[#262626] shadow-sm"
+              onClick={handleGenerateBudgetClick}
+              disabled={isGenerating || !draftId}
+              className="bg-[#111111] text-white shadow-sm hover:bg-[#262626]"
             >
               {isGenerating ? 'Generating...' : budgetGenerated ? 'Regenerate Budget' : 'Generate Budget'}
             </Button>
@@ -394,17 +612,38 @@ export function BudgetScreen({
         </div>
       </div>
 
-      {/* Main Content */}
       <main className="px-8 py-8">
         {currentView === 'enriched' && (
-          <EnrichedView
+          <>
+            {draftId && isComparePanelOpen ? (
+              <div className="mb-8">
+                <DraftBaselineComparePanel
+                  hoaId={hoaId}
+                  draftId={draftId}
+                  onPersistDraftSnapshot={ensurePersistedDraftSnapshot}
+                  isPersistingDraft={isSavingDraft}
+                  isGenerating={isGenerating}
+                />
+              </div>
+            ) : null}
+            <EnrichedView
+              hoaId={hoaId}
+              draftId={draftId}
+              lineItems={lineItems}
+              onPercentChange={handlePercentChange}
+              onNoteSaved={handleNoteSaved}
+              units={hoa.units}
+              reserveInflationRate={activeReserveInflationRate}
+            />
+          </>
+        )}
+        {currentView === 'budget' && (
+          <BudgetView
             lineItems={lineItems}
-            onPercentChange={handlePercentChange}
-            onNoteUpdate={handleNoteUpdate}
             units={hoa.units}
+            reserveInflationRate={activeReserveInflationRate}
           />
         )}
-        {currentView === 'budget' && <BudgetView lineItems={lineItems} units={hoa.units} />}
         {currentView === 'ai' && (
           <AISuggestionMode
             aiResponse={aiResponse}

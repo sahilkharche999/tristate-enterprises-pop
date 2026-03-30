@@ -1,12 +1,20 @@
 import { type LineItem } from '../data/mockData';
-import { formatCurrency, getCategoryLabel, calcProposed, calcMonthly, calcCategoryTotal } from '../lib/budget';
+import {
+  calcDisplayCategoryTotal,
+  calcDisplayMonthly,
+  calcDisplayProposed,
+  formatCurrency,
+  getCategoryLabel,
+  isReserveComponent,
+} from '../lib/budget';
 
 interface BudgetViewProps {
   lineItems: LineItem[];
   units: number;
+  reserveInflationRate: number;
 }
 
-export function BudgetView({ lineItems, units }: BudgetViewProps) {
+export function BudgetView({ lineItems, units, reserveInflationRate }: BudgetViewProps) {
   const groupedItems = lineItems.reduce((acc, item) => {
     if (!acc[item.category]) {
       acc[item.category] = [];
@@ -15,8 +23,16 @@ export function BudgetView({ lineItems, units }: BudgetViewProps) {
     return acc;
   }, {} as Record<string, LineItem[]>);
 
-  const totalOperating = calcCategoryTotal(groupedItems['operating'] || [], 'proposedChange');
-  const totalReserve = calcCategoryTotal(groupedItems['reserve'] || [], 'proposedChange');
+  const totalOperating = calcDisplayCategoryTotal(
+    groupedItems['operating'] || [],
+    'proposedChange',
+    reserveInflationRate,
+  );
+  const totalReserve = calcDisplayCategoryTotal(
+    groupedItems['reserve'] || [],
+    'proposedChange',
+    reserveInflationRate,
+  );
   // Total annual requirement = expenses only (operating + reserve), not income
   const totalAnnual = totalOperating + totalReserve;
   const monthlyPerUnit = totalAnnual / 12 / units;
@@ -47,6 +63,23 @@ export function BudgetView({ lineItems, units }: BudgetViewProps) {
                 // Line Items
                 ...items.map((item) => {
                   if (item.readOnly) {
+                    if (isReserveComponent(item)) {
+                      const finalApproved = calcDisplayProposed(item, reserveInflationRate);
+                      const monthly = calcDisplayMonthly(item, reserveInflationRate);
+                      return (
+                        <tr key={item.id} className="border-b border-[#E5E5E5] h-14 bg-[#fcfcfc]">
+                          <td className="px-6 py-4 text-sm text-[#525252] italic">{item.name}</td>
+                          <td className="px-6 py-4 text-sm text-[#666666] text-right">{formatCurrency(item.ytdActual)}</td>
+                          <td className="px-6 py-4 text-sm text-[#a3a3a3] text-right">—</td>
+                          <td className="px-6 py-4 text-sm font-medium text-[#111111] text-right">
+                            {formatCurrency(finalApproved)}
+                          </td>
+                          <td className="px-6 py-4 text-sm text-[#666666] text-right">
+                            {formatCurrency(monthly)}
+                          </td>
+                        </tr>
+                      );
+                    }
                     return (
                       <tr key={item.id} className="border-b border-[#E5E5E5] h-14 opacity-60">
                         <td className="px-6 py-4 text-sm text-[#525252] italic">{item.name}</td>
@@ -59,8 +92,8 @@ export function BudgetView({ lineItems, units }: BudgetViewProps) {
                   }
 
                   const projection = item.projection ?? 0;
-                  const proposedChange = calcProposed(item.annualBudget, item.percentChange);
-                  const monthly = calcMonthly(proposedChange);
+                  const proposedChange = calcDisplayProposed(item, reserveInflationRate);
+                  const monthly = calcDisplayMonthly(item, reserveInflationRate);
 
                   return (
                     <tr
@@ -87,16 +120,16 @@ export function BudgetView({ lineItems, units }: BudgetViewProps) {
                 <tr key={`${category}-total`} className="bg-[#F7F7F7] font-medium border-b border-[#E5E5E5]">
                   <td className="px-6 py-3 text-sm text-[#111111]">{getCategoryLabel(category)} Total</td>
                   <td className="px-6 py-3 text-sm text-[#666666] text-right">
-                    {formatCurrency(calcCategoryTotal(items, 'ytdActual'))}
+                    {formatCurrency(calcDisplayCategoryTotal(items, 'ytdActual', reserveInflationRate))}
                   </td>
                   <td className="px-6 py-3 text-sm text-[#666666] text-right">
-                    {formatCurrency(calcCategoryTotal(items, 'projection'))}
+                    {formatCurrency(calcDisplayCategoryTotal(items, 'projection', reserveInflationRate))}
                   </td>
                   <td className="px-6 py-3 text-sm font-medium text-[#111111] text-right">
-                    {formatCurrency(calcCategoryTotal(items, 'proposedChange'))}
+                    {formatCurrency(calcDisplayCategoryTotal(items, 'proposedChange', reserveInflationRate))}
                   </td>
                   <td className="px-6 py-3 text-sm text-[#666666] text-right">
-                    {formatCurrency(calcCategoryTotal(items, 'monthly'))}
+                    {formatCurrency(calcDisplayCategoryTotal(items, 'monthly', reserveInflationRate))}
                   </td>
                 </tr>
               ])}

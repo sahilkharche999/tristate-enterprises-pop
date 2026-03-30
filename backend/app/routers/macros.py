@@ -264,5 +264,5 @@ async def generate_budget(
         # Cleanup temporary files and dirs; background tasks handle file deletes
         try:
             shutil.rmtree(tempdir, ignore_errors=True)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Temp dir cleanup failed: %s", e)

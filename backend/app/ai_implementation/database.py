@@ -7,6 +7,7 @@ import contextlib
 import logging
 import sqlite3
 from pathlib import Path
+from typing import Iterable
 
 from .config import settings
 from .db.session import engine
@@ -14,6 +15,109 @@ from .db.session import engine
 logger = logging.getLogger(__name__)
 
 _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
+
+_PROPERTY_COLUMN_DEFINITIONS: dict[str, str] = {
+    "hoa_code": "TEXT",
+    "tax_id": "TEXT",
+    "reserve_inflation_rate": "REAL DEFAULT 0",
+    "fiscal_year_end_month": "INTEGER DEFAULT 12",
+    "city": "TEXT",
+    "portfolio_year": "INTEGER",
+    "workflow_status": "TEXT DEFAULT 'Not Started'",
+}
+
+_BUDGET_DRAFT_COLUMN_DEFINITIONS: dict[str, str] = {
+    "enriched_storage_key": "TEXT",
+    "reserve_inflation_rate": "REAL DEFAULT 0",
+    "reserve_inflation_note": "TEXT",
+}
+
+_BUDGET_VERSION_COLUMN_DEFINITIONS: dict[str, str] = {
+    "reserve_inflation_rate": "REAL DEFAULT 0",
+    "reserve_inflation_note": "TEXT",
+}
+
+
+def _iter_missing_property_columns(raw_conn: sqlite3.Connection) -> Iterable[tuple[str, str]]:
+    existing_columns = {
+        row[1]
+        for row in raw_conn.execute("PRAGMA table_info(properties)").fetchall()
+    }
+    for column_name, column_sql in _PROPERTY_COLUMN_DEFINITIONS.items():
+        if column_name not in existing_columns:
+            yield column_name, column_sql
+
+
+def ensure_property_columns() -> None:
+    """Brownfield migration path for Phase 1 HOA settings columns."""
+    raw_conn = engine.raw_connection()
+    try:
+        missing_columns = list(_iter_missing_property_columns(raw_conn))
+        for column_name, column_sql in missing_columns:
+            logger.info("Adding missing properties.%s column", column_name)
+            raw_conn.execute(f"ALTER TABLE properties ADD COLUMN {column_name} {column_sql}")
+
+        raw_conn.execute(
+            """
+            UPDATE properties
+               SET fiscal_year_end_month = CASE
+                     WHEN fiscal_year_end_month IS NULL
+                     THEN ((COALESCE(fiscal_year_start_month, 1) + 10) % 12) + 1
+                     ELSE fiscal_year_end_month
+                   END,
+                   workflow_status = COALESCE(NULLIF(TRIM(workflow_status), ''), 'Not Started')
+            """
+        )
+        raw_conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_properties_hoa_code ON properties(hoa_code)")
+        raw_conn.commit()
+    finally:
+        raw_conn.close()
+
+
+def _iter_missing_budget_draft_columns(raw_conn: sqlite3.Connection) -> Iterable[tuple[str, str]]:
+    existing_columns = {
+        row[1]
+        for row in raw_conn.execute("PRAGMA table_info(budget_drafts)").fetchall()
+    }
+    for column_name, column_sql in _BUDGET_DRAFT_COLUMN_DEFINITIONS.items():
+        if column_name not in existing_columns:
+            yield column_name, column_sql
+
+
+def ensure_budget_draft_columns() -> None:
+    """Brownfield migration path for draft artifact persistence columns."""
+    raw_conn = engine.raw_connection()
+    try:
+        missing_columns = list(_iter_missing_budget_draft_columns(raw_conn))
+        for column_name, column_sql in missing_columns:
+            logger.info("Adding missing budget_drafts.%s column", column_name)
+            raw_conn.execute(f"ALTER TABLE budget_drafts ADD COLUMN {column_name} {column_sql}")
+        raw_conn.commit()
+    finally:
+        raw_conn.close()
+
+
+def _iter_missing_budget_version_columns(raw_conn: sqlite3.Connection) -> Iterable[tuple[str, str]]:
+    existing_columns = {
+        row[1]
+        for row in raw_conn.execute("PRAGMA table_info(budget_versions)").fetchall()
+    }
+    for column_name, column_sql in _BUDGET_VERSION_COLUMN_DEFINITIONS.items():
+        if column_name not in existing_columns:
+            yield column_name, column_sql
+
+
+def ensure_budget_version_columns() -> None:
+    """Brownfield migration path for version reserve inflation columns."""
+    raw_conn = engine.raw_connection()
+    try:
+        missing_columns = list(_iter_missing_budget_version_columns(raw_conn))
+        for column_name, column_sql in missing_columns:
+            logger.info("Adding missing budget_versions.%s column", column_name)
+            raw_conn.execute(f"ALTER TABLE budget_versions ADD COLUMN {column_name} {column_sql}")
+        raw_conn.commit()
+    finally:
+        raw_conn.close()
 
 
 def init_db() -> None:
@@ -26,6 +130,9 @@ def init_db() -> None:
         logger.info("Database schema initialized.")
     finally:
         raw_conn.close()
+    ensure_property_columns()
+    ensure_budget_draft_columns()
+    ensure_budget_version_columns()
 
 
 # ── Backward-compatible shims (used by seed script) ──

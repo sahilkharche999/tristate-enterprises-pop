@@ -10,7 +10,8 @@ NO VALUES ARE COPIED - everything is calculated from source data.
 import argparse
 import builtins
 from openpyxl import load_workbook, Workbook
-from openpyxl.styles import Font, PatternFill, Alignment
+from datetime import datetime, timezone
+from openpyxl.styles import Border, Font, PatternFill, Alignment, Side
 from openpyxl.utils import get_column_letter
 import os
 import re
@@ -254,8 +255,10 @@ class LineItem:
     row_num: int
     label: str
     annual_budget: float
-    row_type: str  # 'item', 'title', 'total', 'empty'
+    row_type: str  # 'item', 'title', 'total', 'reserve_item', 'reserve_title', 'empty'
     section: str
+    ytd_actual: float = 0.0
+    account_code: str = ''
 
 
 class BudgetGenerator:
@@ -274,10 +277,13 @@ class BudgetGenerator:
         "reserve expenses (per reserve study)",
     }
 
+    COL_YTD_ACTUAL = 'T'      # YTD Actual values
+
     def __init__(self, input_path: str, output_path: str,
                  use_proposed: bool = True, growth_factor: float = None,
                  template_path: str = None, label_aliases: dict = None,
-                 sheet_name: str = "Income Statement"):
+                 sheet_name: str = "Income Statement",
+                 hoa_name: str = ''):
         """
         Initialize the generator.
 
@@ -291,6 +297,7 @@ class BudgetGenerator:
                            output is written into a copy of this template instead of from scratch.
             label_aliases: Dict mapping source labels to template labels for items
                            renamed between files (e.g. account code changes).
+            hoa_name: HOA property name for the budget header.
         """
         self.input_path = input_path
         self.output_path = output_path
@@ -303,6 +310,7 @@ class BudgetGenerator:
         self.template_path = template_path
         self.label_aliases = label_aliases or {}
         self.sheet_name = sheet_name
+        self.hoa_name = hoa_name
         self.line_items: List[LineItem] = []
         self._net_income = 0  # Will be calculated
 
@@ -365,6 +373,8 @@ class BudgetGenerator:
             'section': item.section,
             'source_row': item.row_num,
             'annual_budget_read': item.annual_budget,
+            'ytd_actual': item.ytd_actual,
+            'account_code': item.account_code,
         }
 
     def _build_item_row(self, item: LineItem) -> Dict:
@@ -413,7 +423,7 @@ class BudgetGenerator:
 
     @staticmethod
     def _is_total_row(item: LineItem) -> bool:
-        return item.row_type == 'total'
+        return item.row_type in ('total', 'reserve_total')
 
     def _print_sample_items(self, limit: int = 10):
         print("  Sample of data read (first 10 items with values):")
@@ -472,6 +482,7 @@ class BudgetGenerator:
             col_a = ws[f'{self.COL_SECTION}{row}'].value
             col_b = ws[f'{self.COL_LABEL}{row}'].value
             annual_budget_raw = ws[f'{source_col}{row}'].value
+            ytd_actual_raw = ws[f'{self.COL_YTD_ACTUAL}{row}'].value
 
             label = ''
             if col_b:
@@ -483,6 +494,13 @@ class BudgetGenerator:
                 continue
 
             annual_budget = self._parse_budget_value(annual_budget_raw)
+            ytd_actual = self._parse_budget_value(ytd_actual_raw)
+
+            # Extract account code from label (e.g. "40000 - Assessment Income" → "40000")
+            account_code = ''
+            account_match = re.match(r'^(\d{4,6})\s*[-–—]', label)
+            if account_match:
+                account_code = account_match.group(1)
 
             row_type = 'item'
             if 'Total' in label:
@@ -493,9 +511,14 @@ class BudgetGenerator:
                 if self._is_reserve_section_start(label):
                     in_reserve_block = True
 
-            # Reserve-study rows are excluded from board-adjustable budgeting flow.
+            # Tag reserve rows with dedicated types so they flow through the pipeline.
             if in_reserve_block or self._is_reserve_label(label):
-                continue
+                if row_type == 'title':
+                    row_type = 'reserve_title'
+                elif row_type == 'total':
+                    row_type = 'reserve_total'
+                else:
+                    row_type = 'reserve_item'
 
             if annual_budget != 0:
                 values_found += 1
@@ -513,7 +536,9 @@ class BudgetGenerator:
                 label=label,
                 annual_budget=annual_budget,
                 row_type=row_type,
-                section=current_section or ''
+                section=current_section or '',
+                ytd_actual=ytd_actual,
+                account_code=account_code,
             )
             self.line_items.append(item)
             items_read += 1
@@ -546,7 +571,7 @@ class BudgetGenerator:
         budget_rows = []
 
         for item in self.line_items:
-            if item.row_type == 'item' and item.annual_budget != 0:
+            if item.row_type in ('item', 'reserve_item') and item.annual_budget != 0:
                 row_data = self._build_item_row(item)
             elif self._is_total_row(item):
                 row_data = self._build_total_row(item)
@@ -564,9 +589,9 @@ class BudgetGenerator:
         total = 0.0
         for idx in range(total_index - 1, -1, -1):
             prev_row = budget_rows[idx]
-            if prev_row['type'] == 'title' and prev_row['label'] == section_name:
+            if prev_row['type'] in ('title', 'reserve_title') and prev_row['label'] == section_name:
                 break
-            if prev_row['type'] == 'item' and prev_row.get('proposed'):
+            if prev_row['type'] in ('item', 'reserve_item') and prev_row.get('proposed'):
                 total += prev_row['proposed']
         return total
 
@@ -592,10 +617,14 @@ class BudgetGenerator:
             'Total General Maintenance': 'General Maintenance',
             'Total Landscape Maintenance': 'Landscape Maintenance',
             'Total Pool/Spa Maintenance': 'Pool/Spa Maintenance',
+            'Total Allocation to Reserves': 'Allocation to Reserves',
+            'Total Reserve Expense': 'Reserve Expense',
+            'Total Reserve Expenses (Per Reserve Study)': 'Reserve Expenses (Per Reserve Study)',
+            'Total Reserve Income': 'Reserve Income',
         }
 
         for i, row in enumerate(budget_rows):
-            if row['type'] == 'total' and row['label'] in total_mappings:
+            if row['type'] in ('total', 'reserve_total') and row['label'] in total_mappings:
                 section_name = total_mappings[row['label']]
                 total = self._sum_section_items(budget_rows, i, section_name)
 
@@ -723,30 +752,30 @@ class BudgetGenerator:
         print()
 
     def calculate_percentages(self, budget_rows: List[Dict]):
-        """Calculate each item's share of its section total."""
+        """Calculate each item's share of its section total (section_share)."""
         print("  Calculating percentages...")
 
         section_totals = {}
         for row in budget_rows:
-            if row['type'] == 'total' and row.get('budget_total'):
+            if row['type'] in ('total', 'reserve_total') and row.get('budget_total'):
                 section_totals[row['label']] = row['budget_total']
 
         current_section_total = None
 
         for row in budget_rows:
-            if row['type'] == 'title':
+            if row['type'] in ('title', 'reserve_title'):
                 total_name = f"Total {row['label']}"
                 current_section_total = section_totals.get(total_name)
 
-            if row['type'] == 'item' and current_section_total and row.get('budget_total'):
-                row['percent'] = row['budget_total'] / current_section_total
+            if row['type'] in ('item', 'reserve_item') and current_section_total and row.get('budget_total'):
+                row['section_share'] = row['budget_total'] / current_section_total
 
         print()
 
     def write_budget_excel(self, budget_rows: List[Dict]):
-        """Write calculated rows to a new workbook."""
+        """Write budget rows to a client-ready workbook in the reference format."""
         print("=" * 70)
-        print("STEP 3: WRITING OUTPUT FILE")
+        print("STEP 3: WRITING OUTPUT FILE (REFERENCE FORMAT)")
         print("=" * 70)
         print(f"Output: {self.output_path}")
         print()
@@ -755,78 +784,164 @@ class BudgetGenerator:
         ws = wb.active
         ws.title = "Budget"
 
-        header_fill = PatternFill(start_color="FF9999", end_color="FF9999", fill_type="solid")
-        bold = Font(bold=True)
-
-        ws['A1'] = "Esprit Park Owners Association"
-        ws.merge_cells('A1:G1')
-        ws['A1'].font = bold
-        ws['A1'].alignment = Alignment(horizontal='center')
-        ws['A1'].fill = header_fill
-
-        budget_year = self._infer_budget_year()
-        h1_title = (
-            f"Operating and Cash Flow Statement for {budget_year}"
-            if budget_year
-            else "Operating and Cash Flow Statement"
+        # --- Styles ---
+        header_fill = PatternFill(start_color="333333", end_color="333333", fill_type="solid")
+        header_font = Font(bold=True, color="FFFFFF", size=11)
+        section_fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
+        bold = Font(bold=True, size=11)
+        normal = Font(size=11)
+        currency_fmt = '$#,##0'
+        pct_fmt = '0.00%'
+        thin_border = Border(
+            left=Side(style='thin', color='D4D4D4'),
+            right=Side(style='thin', color='D4D4D4'),
+            top=Side(style='thin', color='D4D4D4'),
+            bottom=Side(style='thin', color='D4D4D4'),
         )
-        ws['H1'] = h1_title
-        ws.merge_cells('H1:N1')
-        ws['H1'].font = bold
-        ws['H1'].alignment = Alignment(horizontal='center')
-        ws['H1'].fill = header_fill
+        total_border = Border(
+            left=Side(style='thin', color='D4D4D4'),
+            right=Side(style='thin', color='D4D4D4'),
+            top=Side(style='medium', color='999999'),
+            bottom=Side(style='thin', color='D4D4D4'),
+        )
 
-        for col in ['O', 'P', 'Q']:
-            ws[f'{col}1'].fill = header_fill
+        # --- Row 1: Title ---
+        budget_year = self._infer_budget_year()
+        hoa_label = self.hoa_name or "HOA"
+        title = f"{hoa_label} — Proposed Budget"
+        if budget_year:
+            title += f" {budget_year}"
+        ws['A1'] = title
+        ws.merge_cells('A1:H1')
+        ws['A1'].font = Font(bold=True, size=14)
 
-        increase_pct = 0.0
-        ws['A2'] = f"{increase_pct:.1f}% Increase"
-        ws['A2'].font = bold
+        # --- Row 2: Export date ---
+        ws['A2'] = f"Exported: {datetime.now(timezone.utc).strftime('%B %d, %Y')}"
+        ws['A2'].font = Font(size=10, color="737373")
 
-        headers = [''] + self.MONTHS + ['', '', 'Total', 'Budget']
+        # --- Row 4: Column headers ---
+        headers = ['Account Code', 'Line Item', 'YTD Actual', 'Annual Budget',
+                   '% Change', 'Proposed Budget', 'Monthly', 'Notes']
         for i, h in enumerate(headers):
-            col = get_column_letter(i + 1)
-            ws[f'{col}3'] = h
-            if h:
-                ws[f'{col}3'].font = bold
+            cell = ws.cell(row=4, column=i + 1, value=h)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = Alignment(horizontal='center' if i >= 2 else 'left')
+            cell.border = thin_border
 
-        current_row = 4
+        # --- Data rows ---
+        current_row = 5
+        seen_labels = set()
+
         for row_data in budget_rows:
-            ws[f'A{current_row}'] = row_data['label']
+            label = row_data['label']
+            row_type = row_data['type']
 
-            if row_data['type'] in ['title', 'total', 'cashflow', 'cumulative']:
-                ws[f'A{current_row}'].font = bold
+            # Skip duplicate total rows
+            if row_type in ('total', 'reserve_total', 'cashflow', 'cumulative'):
+                if label in seen_labels:
+                    continue
+                seen_labels.add(label)
 
-            for i, month in enumerate(self.MONTHS):
-                col = get_column_letter(2 + i)
-                val = row_data.get(month)
-                if val is not None:
-                    ws[f'{col}{current_row}'] = round(val, 2)
-                    ws[f'{col}{current_row}'].number_format = '#,##0.00'
+            # Skip the redundant "Total Operating Expense" if we already have "Total Expense"
+            if label == 'Total Operating Expense' and 'Total Expense' in seen_labels:
+                continue
+            if label == 'Total Expense' and 'Total Operating Expense' in seen_labels:
+                continue
 
-            annual_label = row_data.get('annual_label', row_data['label'])
-            ws[f'O{current_row}'] = annual_label
-            if row_data['type'] in ['title', 'total', 'cashflow', 'cumulative']:
-                ws[f'O{current_row}'].font = bold
+            # Section headers (title rows)
+            if row_type in ('title', 'reserve_title'):
+                section_label = label.upper()
+                ws.cell(row=current_row, column=1, value='')
+                cell = ws.cell(row=current_row, column=2, value=section_label)
+                cell.font = bold
+                cell.fill = section_fill
+                for col in range(1, 9):
+                    ws.cell(row=current_row, column=col).fill = section_fill
+                    ws.cell(row=current_row, column=col).border = thin_border
+                current_row += 1
+                continue
 
-            pct = row_data.get('percent')
-            if pct is not None:
-                ws[f'P{current_row}'] = pct
-                ws[f'P{current_row}'].number_format = '0.00%'
+            # Total / summary rows
+            if row_type in ('total', 'reserve_total', 'cashflow', 'cumulative'):
+                ws.cell(row=current_row, column=1, value='')
+                cell_b = ws.cell(row=current_row, column=2, value=label)
+                cell_b.font = bold
 
-            budget_val = row_data.get('budget_total')
-            if budget_val is not None:
-                ws[f'Q{current_row}'] = round(budget_val, 2)
-                ws[f'Q{current_row}'].number_format = '#,##0.00'
+                budget_val = row_data.get('budget_total')
+                proposed = row_data.get('proposed', budget_val)
+                monthly = row_data.get('monthly', (proposed or 0) / 12 if proposed else None)
+                ytd = row_data.get('ytd_actual', 0)
+                annual = row_data.get('annual_budget_read', budget_val)
+
+                if ytd:
+                    cell_c = ws.cell(row=current_row, column=3, value=round(ytd))
+                    cell_c.number_format = currency_fmt
+                    cell_c.font = bold
+                if annual:
+                    cell_d = ws.cell(row=current_row, column=4, value=round(annual))
+                    cell_d.number_format = currency_fmt
+                    cell_d.font = bold
+                if proposed is not None:
+                    cell_f = ws.cell(row=current_row, column=6, value=round(proposed))
+                    cell_f.number_format = currency_fmt
+                    cell_f.font = bold
+                if monthly is not None:
+                    cell_g = ws.cell(row=current_row, column=7, value=round(monthly))
+                    cell_g.number_format = currency_fmt
+                    cell_g.font = bold
+
+                for col in range(1, 9):
+                    ws.cell(row=current_row, column=col).border = total_border
+
+                current_row += 1
+                continue
+
+            # Regular item rows
+            account_code = row_data.get('account_code', '')
+            ws.cell(row=current_row, column=1, value=account_code).font = normal
+
+            cell_b = ws.cell(row=current_row, column=2, value=label)
+            cell_b.font = normal
+
+            ytd = row_data.get('ytd_actual', 0)
+            if ytd:
+                cell_c = ws.cell(row=current_row, column=3, value=round(ytd))
+                cell_c.number_format = currency_fmt
+
+            annual = row_data.get('annual_budget_read', 0)
+            if annual:
+                cell_d = ws.cell(row=current_row, column=4, value=round(annual))
+                cell_d.number_format = currency_fmt
+
+            pct_change = row_data.get('percent_change', 0)
+            cell_e = ws.cell(row=current_row, column=5, value=(pct_change or 0) / 100.0)
+            cell_e.number_format = pct_fmt
+
+            proposed = row_data.get('proposed', row_data.get('budget_total', 0))
+            if proposed:
+                cell_f = ws.cell(row=current_row, column=6, value=round(proposed))
+                cell_f.number_format = currency_fmt
+
+            monthly = row_data.get('monthly', 0)
+            if monthly:
+                cell_g = ws.cell(row=current_row, column=7, value=round(monthly, 2))
+                cell_g.number_format = currency_fmt
+
+            for col in range(1, 9):
+                ws.cell(row=current_row, column=col).border = thin_border
 
             current_row += 1
 
-        ws.column_dimensions['A'].width = 40
-        for i in range(2, 14):
-            ws.column_dimensions[get_column_letter(i)].width = 12
-        ws.column_dimensions['O'].width = 35
-        ws.column_dimensions['P'].width = 10
-        ws.column_dimensions['Q'].width = 15
+        # --- Column widths ---
+        ws.column_dimensions['A'].width = 14
+        ws.column_dimensions['B'].width = 42
+        ws.column_dimensions['C'].width = 16
+        ws.column_dimensions['D'].width = 16
+        ws.column_dimensions['E'].width = 12
+        ws.column_dimensions['F'].width = 18
+        ws.column_dimensions['G'].width = 14
+        ws.column_dimensions['H'].width = 25
 
         os.makedirs(os.path.dirname(self.output_path), exist_ok=True)
         wb.save(self.output_path)
@@ -857,18 +972,7 @@ class BudgetGenerator:
             if label and label.strip():
                 label_to_row[label.strip()] = row
 
-        # Remove reserve rows from output template entirely (labels + numeric cells).
-        for label, row_idx in list(label_to_row.items()):
-            if self._is_reserve_label(label):
-                ws.cell(row=row_idx, column=1).value = None
-                ws.cell(row=row_idx, column=15).value = None
-                for col in range(2, 14):
-                    ws.cell(row=row_idx, column=col).value = None
-                ws.cell(row=row_idx, column=16).value = None
-                ws.cell(row=row_idx, column=17).value = None
-
-        increase_pct = 0.0
-        ws.cell(row=2, column=1, value=f"{increase_pct:.1f}% Increase")
+        # Reserve rows are now included in the output.
 
         filled = 0
         missing = []
@@ -880,7 +984,7 @@ class BudgetGenerator:
             excel_row = label_to_row.get(template_label)
 
             if excel_row is None:
-                if row_data['type'] in ('item', 'total', 'cashflow', 'cumulative'):
+                if row_data['type'] in ('item', 'reserve_item', 'total', 'reserve_total', 'cashflow', 'cumulative'):
                     missing.append(label)
                 continue
 
@@ -889,7 +993,7 @@ class BudgetGenerator:
             filled_rows.add(excel_row)
 
             # Keep section/title rows non-numeric in the output template.
-            if row_data['type'] == 'title':
+            if row_data['type'] in ('title', 'reserve_title'):
                 for col in range(2, 14):
                     ws.cell(row=excel_row, column=col).value = None
                 ws.cell(row=excel_row, column=16).value = None
@@ -903,10 +1007,9 @@ class BudgetGenerator:
                     ws.cell(row=excel_row, column=2 + i, value=round(val, 2))
                     ws.cell(row=excel_row, column=2 + i).number_format = '#,##0.00'
 
-            pct = row_data.get('percent')
-            if pct is not None:
-                ws.cell(row=excel_row, column=16, value=pct)
-                ws.cell(row=excel_row, column=16).number_format = '0.00%'
+            pct_change = row_data.get('percent_change', 0)
+            ws.cell(row=excel_row, column=16, value=(pct_change or 0) / 100.0)
+            ws.cell(row=excel_row, column=16).number_format = '0.00%'
 
             budget_val = row_data.get('budget_total')
             if budget_val is not None:
