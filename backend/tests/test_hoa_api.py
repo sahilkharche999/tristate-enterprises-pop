@@ -8,6 +8,7 @@ def test_list_hoas(client):
     payload = response.json()
     assert len(payload) == 9
     assert payload[0]["hoa_code"] == "1"
+    # fiscal_year_end_month auto-derived from start_month=4 → end=3 (March)
     assert payload[0]["fiscal_year_end_month"] == 3
 
 
@@ -30,7 +31,6 @@ def test_update_hoa(client):
         "units": 52,
         "reserve_inflation_rate": 0.04,
         "fiscal_year_start_month": 2,
-        "fiscal_year_end_month": 1,
     }
 
     update_response = client.put("/hoa/9", json=update_payload)
@@ -46,6 +46,7 @@ def test_update_hoa(client):
     assert payload["units"] == 52
     assert payload["reserve_inflation_rate"] == 0.04
     assert payload["fiscal_year_start_month"] == 2
+    # Auto-derived: start=2 (Feb) → end=1 (Jan)
     assert payload["fiscal_year_end_month"] == 1
 
 
@@ -54,7 +55,6 @@ def test_create_hoa(client):
         "name": "New Harbor HOA",
         "units": 88,
         "fiscal_year_start_month": 5,
-        "fiscal_year_end_month": 4,
     }
 
     create_response = client.post("/hoa", json=create_payload)
@@ -64,6 +64,7 @@ def test_create_hoa(client):
     assert payload["name"] == "New Harbor HOA"
     assert payload["units"] == 88
     assert payload["fiscal_year_start_month"] == 5
+    # Auto-derived: start=5 (May) → end=4 (April)
     assert payload["fiscal_year_end_month"] == 4
     assert payload["hoa_code"] == ""
     assert payload["tax_id"] == ""
@@ -84,7 +85,6 @@ def test_create_hoa_duplicate_name_returns_conflict(client):
         "name": "Esprit park",
         "units": 120,
         "fiscal_year_start_month": 1,
-        "fiscal_year_end_month": 12,
     }
 
     response = client.post("/hoa", json=create_payload)
@@ -110,10 +110,11 @@ def test_hoa_requests_do_not_run_migrations(client, monkeypatch):
         json={
             "name": "Esprit Park Owners Association",
             "fiscal_year_start_month": 4,
-            "fiscal_year_end_month": 3,
         },
     )
     assert update_response.status_code == 200
+    # Verify auto-derived: start=4 (Apr) → end=3 (Mar)
+    assert update_response.json()["fiscal_year_end_month"] == 3
 
     create_response = client.post(
         "/hoa",
@@ -121,7 +122,8 @@ def test_hoa_requests_do_not_run_migrations(client, monkeypatch):
             "name": "Migration Safe HOA",
             "units": 42,
             "fiscal_year_start_month": 1,
-            "fiscal_year_end_month": 12,
         },
     )
     assert create_response.status_code == 200
+    # Verify auto-derived: start=1 (Jan) → end=12 (Dec)
+    assert create_response.json()["fiscal_year_end_month"] == 12

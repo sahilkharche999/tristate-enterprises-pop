@@ -120,6 +120,7 @@ class BudgetUploadResponse(BaseModel):
     upload_id: int
     draft: BudgetDraftPayload
     timeline_event: BudgetTimelineEvent
+    warnings: list[str] = []
 
 
 class BudgetDraftSaveRequest(BaseModel):
@@ -129,7 +130,7 @@ class BudgetDraftSaveRequest(BaseModel):
     statement_month: Optional[int] = Field(default=None, ge=1, le=12)
     growth_factor: Optional[float] = None
     growth_factor_note: Optional[str] = None
-    reserve_inflation_rate: float = 0.0
+    reserve_inflation_rate: Optional[float] = None
     reserve_inflation_note: Optional[str] = None
 
 

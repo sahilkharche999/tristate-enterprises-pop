@@ -291,13 +291,8 @@ function readRecord(value: JsonValue | undefined): JsonObject {
 
 function inferCategory(record: JsonObject, label: string, accountCode?: number): LineItem['category'] {
   const explicit = pickString(record.category, record.category_name, readRecord(record.raw).Category);
-  if (explicit === 'income' || explicit === 'operating' || explicit === 'reserve') {
+  if (explicit === 'income' || explicit === 'operating' || explicit === 'reserve' || explicit === 'reserve_income' || explicit === 'reserve_expense') {
     return explicit;
-  }
-
-  const normalizedLabel = label.toLowerCase();
-  if (normalizedLabel.includes('reserve')) {
-    return 'reserve';
   }
   if (
     normalizedLabel.includes('income') ||

@@ -23,10 +23,12 @@ export const formatTimestamp = (date: Date) =>
 
 export const getCategoryLabel = (category: string): string => {
   switch (category) {
-    case 'income':    return 'INCOME';
-    case 'operating': return 'OPERATING EXPENSES';
-    case 'reserve':   return 'RESERVE CONTRIBUTIONS';
-    default:          return category.toUpperCase();
+    case 'income':          return 'INCOME';
+    case 'operating':       return 'OPERATING EXPENSES';
+    case 'reserve':         return 'RESERVE CONTRIBUTIONS';
+    case 'reserve_income':  return 'RESERVE INCOME';
+    case 'reserve_expense': return 'RESERVE EXPENSES';
+    default:                return category.toUpperCase().replace('_', ' ');
   }
 };
 
@@ -48,27 +50,26 @@ export const calcPercentDiff = (projection: number, annualBudget: number): numbe
 export const normalizeReserveInflationRate = (rate?: number | null): number =>
   typeof rate === 'number' && Number.isFinite(rate) ? Math.max(rate, 0) : 0;
 
+export const isReserveCategory = (category: string): boolean =>
+  category === 'reserve' || category === 'reserve_income' || category === 'reserve_expense';
+
 export const isReserveComponent = (item: LineItem): boolean => {
-  if (item.category !== 'reserve' || !item.readOnly) {
+  if (!isReserveCategory(item.category) || !item.readOnly) {
     return false;
   }
   if (item.reserveGroup) {
     return item.reserveGroup === 'component';
   }
+  // reserve_expense items that are read-only are reserve study components
+  if (item.category === 'reserve_expense') {
+    return true;
+  }
+  // Legacy fallback for old data with category='reserve'
   const section = (item.rawSection || '').trim().toLowerCase();
   if (section === 'reserve expense' || section === 'reserve expenses (per reserve study)') {
     return true;
   }
-  const normalizedLabel = (item.label || item.name || '').trim().toLowerCase();
-  if (
-    normalizedLabel.includes('reserve income') ||
-    normalizedLabel.includes('allocation/transfer') ||
-    normalizedLabel.includes('interest earned reserve') ||
-    normalizedLabel.includes('change in asset value')
-  ) {
-    return false;
-  }
-  return normalizedLabel.includes('reserve');
+  return false;
 };
 
 export const calcReserveAdjustedAmount = (item: LineItem, reserveInflationRate?: number | null): number => {

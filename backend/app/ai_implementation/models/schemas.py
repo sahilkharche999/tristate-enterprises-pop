@@ -14,6 +14,7 @@ class LineItemInput(BaseModel):
     annual_budget: float
     projection: Optional[float] = None
     current_pct_change: Optional[float] = 0.0
+    read_only: bool = False  # Section-based: True for reserve study items
 
 
 class SuggestRequest(BaseModel):

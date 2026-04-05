@@ -115,10 +115,11 @@ export function EnrichedView({
     return acc;
   }, {} as Record<string, LineItem[]>);
 
-  // Total Annual Budget = expenses only (operating + reserve), same pattern as BudgetView
+  // Total Annual Budget = expenses only (operating + reserve expenses), not reserve income
   const totalAnnualBudget =
     calcDisplayCategoryTotal(groupedItems['operating'] || [], 'proposedChange', reserveInflationRate) +
-    calcDisplayCategoryTotal(groupedItems['reserve'] || [], 'proposedChange', reserveInflationRate);
+    calcDisplayCategoryTotal(groupedItems['reserve'] || [], 'proposedChange', reserveInflationRate) +
+    calcDisplayCategoryTotal(groupedItems['reserve_expense'] || [], 'proposedChange', reserveInflationRate);
 
   const perUnitMonthly = units > 0 ? totalAnnualBudget / 12 / units : null;
 
@@ -224,52 +225,38 @@ export function EnrichedView({
                       </td>
                       <td className="px-6 py-4 text-right">
                         <div className="flex flex-col gap-1">
-                          <div className="relative flex items-center gap-1">
+                          <div className="flex items-center rounded-md border border-[#d4d4d4] bg-white overflow-hidden focus-within:border-[#737373] focus-within:ring-1 focus-within:ring-[#737373]">
                             {inputMode[item.id] === 'dollar' ? (
-                              <>
-                                <span className="absolute left-3 text-xs text-[#737373] pointer-events-none">$</span>
-                                <Input
-                                  type="number"
-                                  step="100"
-                                  value={Math.round(proposedChange)}
-                                  onChange={(e) => handleDollarChangeInput(item.id, e.target.value, item.annualBudget)}
-                                  className="w-32 pl-6 text-right text-sm h-9 bg-white border-[#d4d4d4] focus:border-[#737373] focus:ring-1 focus:ring-[#737373] font-mono [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
-                                />
-                                <button
-                                  onClick={() => toggleInputMode(item.id)}
-                                  className="p-2 rounded bg-[#f5f5f5] text-[#737373] hover:bg-[#e5e5e5] hover:text-[#525252] transition-colors"
-                                  title="Switch to percentage"
-                                >
-                                  <DollarSign className="w-3.5 h-3.5" />
-                                </button>
-                              </>
+                              <input
+                                type="number"
+                                step="100"
+                                value={Math.round(proposedChange)}
+                                onChange={(e) => handleDollarChangeInput(item.id, e.target.value, item.annualBudget)}
+                                className="w-20 text-right text-sm h-8 px-2 bg-transparent border-0 outline-none font-mono [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                              />
                             ) : (
-                              <>
-                                <Input
-                                  type="number"
-                                  step="0.1"
-                                  value={item.percentChange}
-                                  onChange={(e) => handlePercentChangeInput(item.id, e.target.value)}
-                                  className="w-24 text-right text-sm h-9 bg-white border-[#d4d4d4] focus:border-[#737373] focus:ring-1 focus:ring-[#737373] font-mono [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
-                                />
-                                <span className="text-xs text-[#737373] ml-0.5">%</span>
-                                <button
-                                  onClick={() => toggleInputMode(item.id)}
-                                  className="p-2 rounded bg-[#f5f5f5] text-[#737373] hover:bg-[#e5e5e5] hover:text-[#525252] transition-colors"
-                                  title="Switch to dollar amount"
-                                >
-                                  <Percent className="w-3.5 h-3.5" />
-                                </button>
-                              </>
+                              <input
+                                type="number"
+                                step="0.1"
+                                value={item.percentChange}
+                                onChange={(e) => handlePercentChangeInput(item.id, e.target.value)}
+                                className="w-16 text-right text-sm h-8 px-2 bg-transparent border-0 outline-none font-mono [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                              />
                             )}
+                            <button
+                              onClick={() => toggleInputMode(item.id)}
+                              className="h-8 px-2.5 border-l border-[#d4d4d4] bg-[#f5f5f5] text-[#525252] hover:bg-[#e5e5e5] transition-colors flex items-center select-none shrink-0 text-xs font-medium"
+                              title={inputMode[item.id] === 'dollar' ? 'Switch to percentage' : 'Switch to dollar amount'}
+                            >
+                              {inputMode[item.id] === 'dollar' ? '$' : '%'}
+                            </button>
                           </div>
-                          {/* Display both values */}
                           {item.percentChange !== 0 && (
-                            <div className="text-[10px] text-[#737373] text-right font-mono">
+                            <div className="text-[10px] text-[#a3a3a3] text-right font-mono mt-0.5">
                               {inputMode[item.id] === 'dollar' ? (
                                 <span>{item.percentChange > 0 ? '+' : ''}{item.percentChange.toFixed(1)}%</span>
                               ) : (
-                                <span>{proposedChange > projection ? '+' : ''}{formatCurrency(proposedChange - projection)}</span>
+                                <span>{proposedChange >= projection ? '+' : ''}{formatCurrency(proposedChange - projection)}</span>
                               )}
                             </div>
                           )}

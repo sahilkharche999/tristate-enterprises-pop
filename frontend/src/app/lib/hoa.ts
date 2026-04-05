@@ -24,7 +24,6 @@ export interface HOAViewModel {
   units: number;
   taxId: string;
   fiscalYearStart: string;
-  fiscalYearEnd: string;
   year: number;
   city: string;
 }
@@ -44,9 +43,6 @@ export function formatFiscalYearLabel(startMonth: number, endMonth: number): str
 }
 
 export function toHOAViewModel(hoa: HOARecord): HOAViewModel {
-  const fiscalYearStart = monthNumberToName(hoa.fiscal_year_start_month);
-  const fiscalYearEnd = monthNumberToName(hoa.fiscal_year_end_month);
-
   return {
     id: String(hoa.id),
     hoaCode: hoa.hoa_code,
@@ -55,8 +51,7 @@ export function toHOAViewModel(hoa: HOARecord): HOAViewModel {
     status: hoa.workflow_status || 'Not Started',
     units: hoa.units ?? 0,
     taxId: hoa.tax_id || '',
-    fiscalYearStart,
-    fiscalYearEnd,
+    fiscalYearStart: monthNumberToName(hoa.fiscal_year_start_month),
     year: hoa.portfolio_year ?? new Date().getFullYear(),
     city: hoa.city || 'Unknown',
   };

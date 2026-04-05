@@ -26,7 +26,7 @@ router = APIRouter(prefix="/auth", tags=["Authentication"])
 
 REFRESH_COOKIE = "refresh_token"
 COOKIE_MAX_AGE = app_settings.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60  # seconds
-COOKIE_SAMESITE = "none"
+COOKIE_SAMESITE = "none" if app_settings.COOKIE_SECURE else "lax"
 
 
 def _set_refresh_cookie(response: Response, token: str):
@@ -37,7 +37,7 @@ def _set_refresh_cookie(response: Response, token: str):
         secure=app_settings.COOKIE_SECURE,
         samesite=COOKIE_SAMESITE,
         max_age=COOKIE_MAX_AGE,
-        path="/auth",
+        path="/",
     )
 
 
@@ -112,7 +112,7 @@ async def refresh(request: Request, response: Response, session: Session = Depen
 async def logout(response: Response):
     response.delete_cookie(
         REFRESH_COOKIE,
-        path="/auth",
+        path="/",
         secure=app_settings.COOKIE_SECURE,
         samesite=COOKIE_SAMESITE,
     )

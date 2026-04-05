@@ -16,6 +16,12 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..generate_budget import infer_growth_factor_from_input
 from ..generate_budget_pipeline import BudgetPipeline
+from ..services.income_statement_parser import (
+    parse_rows_with_sections,
+    detect_columns,
+    _parse_financial_float as _parse_financial_float_new,
+    _match_section_header,
+)
 from ..models.budget_history import (
     BudgetDraftCompareBaselineOption,
     BudgetDraftCompareOptionsResponse,
@@ -60,20 +66,10 @@ from ..ai_implementation.db.models import (
     Property,
 )
 
-_COL_SECTION_INDEX = 0
-_COL_LABEL_INDEX = 1
-_COL_YTD_ACTUAL_INDEX = 19
-_COL_ANNUAL_BUDGET_INDEX = 32
+# Enriched workbook output column indices (fixed positions added by the pipeline)
+# These are NOT input indices — they reference AK/AL columns written by IncomeStatementEnricher.
 _COL_PROJECTION_INDEX = 37
 _COL_PERCENT_CHANGE_INDEX = 38
-_RESERVE_EXPENSE_SECTION_TITLES = {
-    "reserve expense",
-    "reserve expenses (per reserve study)",
-}
-_RESERVE_EXCLUDED_SECTION_TITLES = {
-    "allocation to reserves",
-    "reserve income",
-}
 
 
 def _now_text() -> str:
@@ -123,6 +119,40 @@ def _write_temp_workbook(file_bytes: bytes, original_filename: str) -> str:
     os.close(fd)
     Path(path).write_bytes(file_bytes)
     return path
+
+
+def _ensure_xlsx(temp_input_path: str) -> str:
+    """Convert .xls or .pdf to .xlsx for pipeline processing. Returns the .xlsx path."""
+    ext = Path(temp_input_path).suffix.lower()
+    if ext == ".xls":
+        from .income_statement_parser import _read_xls_rows
+        from openpyxl import Workbook as _Workbook
+        rows = _read_xls_rows(temp_input_path)
+        wb = _Workbook()
+        ws = wb.active
+        ws.title = "Income Statement"
+        for r, row in enumerate(rows, start=1):
+            for c, val in enumerate(row, start=1):
+                ws.cell(row=r, column=c, value=val)
+        xlsx_path = temp_input_path.replace(".xls", ".xlsx")
+        wb.save(xlsx_path)
+        wb.close()
+        return xlsx_path
+    elif ext == ".pdf":
+        from .income_statement_parser import _read_pdf_rows
+        from openpyxl import Workbook as _Workbook
+        rows = _read_pdf_rows(temp_input_path)
+        wb = _Workbook()
+        ws = wb.active
+        ws.title = "Income Statement"
+        for r, row in enumerate(rows, start=1):
+            for c, val in enumerate(row, start=1):
+                ws.cell(row=r, column=c, value=val)
+        xlsx_path = temp_input_path.rsplit(".", 1)[0] + ".xlsx"
+        wb.save(xlsx_path)
+        wb.close()
+        return xlsx_path
+    return temp_input_path
 
 
 def _draft_enriched_storage_key(hoa_id: int, draft_id: int) -> str:
@@ -247,9 +277,8 @@ def _find_matching_line_item(
 def _is_reserve_item(item: Optional[dict[str, Any]]) -> bool:
     if not item:
         return False
-    if _line_item_category(item) == "reserve":
-        return True
-    return _is_reserve_label(_line_item_label(item))
+    cat = _line_item_category(item)
+    return cat in ("reserve", "reserve_income", "reserve_expense")
 
 
 def _reserve_group_for_item(item: Optional[dict[str, Any]]) -> Optional[str]:
@@ -262,17 +291,15 @@ def _reserve_group_for_item(item: Optional[dict[str, Any]]) -> Optional[str]:
         return explicit_group
     normalized_label = _normalize_compare_text(_line_item_label(item))
     normalized_section = _normalize_compare_text(item.get("raw", {}).get("section") if item else "")
-    if normalized_section == "reserve income":
+    if normalized_section == "reserve income" or "reserve income" in normalized_section:
         return "income"
-    if normalized_section == "allocation to reserves":
+    if "allocation to reserves" in normalized_section or normalized_section == "allocation to reserves":
         return "transfer"
-    if normalized_section in _RESERVE_EXPENSE_SECTION_TITLES:
+    # Reserve expense items default to component
+    if "reserve expense" in normalized_section:
         return "component"
-    if "reserve income" in normalized_label:
-        return "income"
-    if "interest earned reserve" in normalized_label:
-        return "income"
-    if "change in asset value" in normalized_label:
+    # Label-based fallbacks for pre-existing data
+    if "reserve income" in normalized_label or "interest earned reserve" in normalized_label or "change in asset value" in normalized_label:
         return "income"
     if "allocation/transfer" in normalized_label or "transfer" in normalized_label:
         return "transfer"
@@ -331,37 +358,30 @@ def _extract_account_code(label: str) -> Optional[int]:
     return int(head) if head.isdigit() else None
 
 
-def _is_reserve_expense_section_start(label: str) -> bool:
-    return (label or "").strip().lower() in _RESERVE_EXPENSE_SECTION_TITLES
-
-
-def _is_reserve_label(label: str) -> bool:
-    return "reserve" in (label or "").strip().lower()
-
-
-def _is_reserve_study_label(label: str) -> bool:
-    normalized = (label or "").strip().lower()
-    return "reserve study" in normalized
-
-
 def _infer_category(label: str, account_code: Optional[int], section: str) -> str:
-    normalized_label = (label or "").strip().lower()
+    """Infer category from section state. Falls back to account code ranges.
+
+    IMPORTANT: Does NOT check label keywords. Section position is authoritative.
+    """
     normalized_section = (section or "").strip().lower()
 
-    if "reserve" in normalized_label:
+    # Section state is the primary signal (from section state machine)
+    if normalized_section.startswith("operating income") or normalized_section.startswith("income"):
+        return "income"
+    if normalized_section.startswith("operating expense") or normalized_section.startswith("operating"):
+        return "operating"
+    if normalized_section.startswith("reserve"):
         return "reserve"
-    if normalized_section == "operating income":
-        return "income"
-    if (
-        "income" in normalized_label
-        or "revenue" in normalized_label
-        or "assessment" in normalized_label
-        or "late fee" in normalized_label
-        or "interest" in normalized_label
-    ):
-        return "income"
-    if account_code is not None and account_code < 5000:
-        return "income"
+
+    # Fallback to account code ranges when no section header matched
+    if account_code is not None:
+        if 40000 <= account_code <= 49999:
+            return "income"
+        if 50000 <= account_code <= 89999:
+            return "operating"
+        if account_code >= 90000:
+            return "reserve"
+
     return "operating"
 
 
@@ -370,7 +390,7 @@ def _line_items_to_percent_changes(line_items: list[dict[str, Any]]) -> dict[str
     for item in line_items:
         if item.get("read_only") or item.get("readOnly"):
             continue
-        label = str(item.get("label") or item.get("name") or "").strip()
+        label = macros_service._normalize_label(str(item.get("label") or item.get("name") or ""))
         if not label:
             continue
         raw_percent_change = item.get("percent_change")
@@ -382,84 +402,57 @@ def _line_items_to_percent_changes(line_items: list[dict[str, Any]]) -> dict[str
     return changes
 
 
-def _table_to_line_items(table: dict[str, Any]) -> list[dict[str, Any]]:
+def _table_to_line_items(table: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
+    """Returns (line_items, warnings)."""
+    warnings: list[str] = []
     headers = [str(header or f"column_{index}") for index, header in enumerate(table.get("headers", []), start=1)]
 
     if "Label" not in headers:
-        line_items: list[dict[str, Any]] = []
-        current_section = ""
-        in_reserve_expense_block = False
-
-        for row in table.get("rows", []):
-            if not isinstance(row, list):
-                continue
-
-            section_label = str(row[_COL_SECTION_INDEX]).strip() if len(row) > _COL_SECTION_INDEX and row[_COL_SECTION_INDEX] else ""
-            item_label = str(row[_COL_LABEL_INDEX]).strip() if len(row) > _COL_LABEL_INDEX and row[_COL_LABEL_INDEX] else ""
-            label = item_label or section_label
-            if not label:
-                continue
-
-            if section_label and not item_label:
-                if label.strip().lower() != "income":
-                    current_section = label
-                in_reserve_expense_block = _is_reserve_expense_section_start(label)
-                continue
-
-            if label.lower().startswith("total "):
-                continue
-
-            account_code = _extract_account_code(label)
-            read_only = (
-                _is_reserve_label(label)
-                or current_section.strip().lower() in _RESERVE_EXCLUDED_SECTION_TITLES
-                or in_reserve_expense_block
-                or _is_reserve_study_label(label)
+        # Raw income statement layout — use section-aware parser
+        rows = table.get("rows", [])
+        col_indices = detect_columns([table.get("headers", [])] + rows[:9])
+        detection_tier = col_indices.pop("_detection_tier", 1)
+        if detection_tier == 3:
+            warnings.append(
+                "Heads up \u2014 the column layout in your file looks a bit different from what we "
+                "usually see. The numbers might not line up perfectly. If anything looks off, try "
+                "re-uploading the standard monthly income statement from your accounting software."
             )
-            if in_reserve_expense_block or current_section.strip().lower() in _RESERVE_EXCLUDED_SECTION_TITLES:
-                category = "reserve"
-            else:
-                category = _infer_category(label, account_code, current_section)
+        # Scan all header/early rows for enrichment column labels (written by pipeline at row 5)
+        for scan_row in ([table.get("headers", [])] + rows[:9]):
+            for ci, cell in enumerate(scan_row or []):
+                cell_text = str(cell or "").strip().lower()
+                if cell_text == "projection" and "projection" not in col_indices:
+                    col_indices["projection"] = ci
+                elif cell_text in ("% change", "percent change") and "percent_change" not in col_indices:
+                    col_indices["percent_change"] = ci
+        col_indices.setdefault("projection", _COL_PROJECTION_INDEX)
+        col_indices.setdefault("percent_change", _COL_PERCENT_CHANGE_INDEX)
+        return parse_rows_with_sections(rows, col_indices), warnings
 
-            line_items.append(
-                {
-                    "line_item_key": str(account_code or label),
-                    "account_code": account_code,
-                    "category": category,
-                    "label": label,
-                    "ytd_actual": _parse_float(row[_COL_YTD_ACTUAL_INDEX] if len(row) > _COL_YTD_ACTUAL_INDEX else None),
-                    "annual_budget": _parse_float(row[_COL_ANNUAL_BUDGET_INDEX] if len(row) > _COL_ANNUAL_BUDGET_INDEX else None),
-                    "projection": _parse_float(row[_COL_PROJECTION_INDEX] if len(row) > _COL_PROJECTION_INDEX else None),
-                    "percent_change": _parse_float(row[_COL_PERCENT_CHANGE_INDEX] if len(row) > _COL_PERCENT_CHANGE_INDEX else None),
-                    "read_only": read_only,
-                    "raw": {
-                        "section": current_section or None,
-                        "label": item_label or None,
-                    },
-                }
-            )
-
-        return line_items
-
+    # Pre-processed table with "Label" header (from enriched/generated workbook)
     line_items: list[dict[str, Any]] = []
     for row in table.get("rows", []):
         item = {header: row[index] if index < len(row) else None for index, header in enumerate(headers)}
         label = item.get("Label") or item.get("Account Name") or item.get("Description") or f"Line Item {len(line_items) + 1}"
         account_code = item.get("Account Code") or item.get("Account")
         line_item_key = str(account_code or label)
+        section = item.get("Section") or item.get("section") or ""
+        category = _infer_category(str(label), _extract_account_code(str(account_code or label)), section)
         normalized = {
             "line_item_key": line_item_key,
             "account_code": account_code,
             "label": label,
+            "category": category,
             "ytd_actual": item.get("YTD Actual"),
             "annual_budget": item.get("Annual Budget"),
             "projection": item.get("Projection"),
             "percent_change": item.get("% Change") or item.get("Percent Change"),
-            "read_only": _is_reserve_label(str(label)),
+            "read_only": category == "reserve_expense",  # only reserve study expense items are read-only
             "raw": item,
         }
         line_items.append(normalized)
-    return line_items
+    return line_items, warnings
 
 
 def _extract_totals_from_preview(preview: Optional[dict[str, Any]]) -> tuple[float, float, float]:
@@ -733,6 +726,8 @@ def _render_draft_snapshot_from_upload(
     temp_input_path = _write_temp_workbook(source_path.read_bytes(), upload.original_filename)
     temp_output_dir = Path(tempfile.mkdtemp(prefix="budget_draft_snapshot_"))
     try:
+        temp_input_path = _ensure_xlsx(temp_input_path)
+
         macros_service.write_percent_changes_by_label(
             temp_input_path,
             "Income Statement",
@@ -838,7 +833,8 @@ def create_upload(
     session.add(upload)
     session.flush()
 
-    upload.storage_key = _relative_storage_path("hoa", hoa_id, "uploads", upload.id, "source.xlsx")
+    _ext = Path(original_filename).suffix.lower() or ".xlsx"
+    upload.storage_key = _relative_storage_path("hoa", hoa_id, "uploads", upload.id, f"source{_ext}")
     _write_atomic_bytes(_budget_storage_path(upload.storage_key), file_bytes)
 
     upload_received_event = _create_audit_event(
@@ -854,9 +850,11 @@ def create_upload(
     temp_input_path = _write_temp_workbook(file_bytes, original_filename)
     temp_output_dir = Path(tempfile.mkdtemp(prefix="budget_history_"))
     try:
+        temp_input_path = _ensure_xlsx(temp_input_path)
+
         growth_factor, detected_months, source = infer_growth_factor_from_input(
             temp_input_path,
-            hoa.fiscal_year_start_month or 1,
+            fiscal_year_start_month=hoa.fiscal_year_start_month or 1,
         )
         growth_factor_note = f"auto annualization 12/{detected_months} from {source}"
         statement_month = _extract_statement_month(hoa.fiscal_year_start_month or 1, detected_months)
@@ -873,7 +871,7 @@ def create_upload(
         pipeline.run()
         enriched = macros_service.read_sheet_as_table(intermediate_path, "Income Statement")
         preview = macros_service.read_first_sheet_preview(output_path, settings.MAX_PREVIEW_ROWS)
-        line_items = _table_to_line_items(enriched)
+        line_items, parse_warnings = _table_to_line_items(enriched)
 
         _replace_active_draft(session, hoa_id, timestamp)
         draft = BudgetDraft(
@@ -924,6 +922,7 @@ def create_upload(
             upload_id=upload.id,
             draft=_serialize_draft(draft, upload),
             timeline_event=_serialize_timeline_event(upload_received_event),
+            warnings=parse_warnings,
         )
     except Exception as exc:
         upload.enrichment_status = "failed"
@@ -1046,7 +1045,12 @@ def save_draft(
     draft.statement_month = payload.statement_month
     draft.growth_factor = payload.growth_factor
     draft.growth_factor_note = payload.growth_factor_note
-    draft.reserve_inflation_rate = payload.reserve_inflation_rate
+    # Use explicitly provided inflation rate, or fall back to HOA setting
+    draft.reserve_inflation_rate = (
+        payload.reserve_inflation_rate
+        if payload.reserve_inflation_rate is not None
+        else (hoa.reserve_inflation_rate or 0.0)
+    )
     draft.reserve_inflation_note = payload.reserve_inflation_note
     draft.updated_by_user_id = actor["id"]
     draft.actor_name = _actor_name(actor)
@@ -1348,6 +1352,8 @@ def create_budget_version(
     temp_input_path = _write_temp_workbook(source_path.read_bytes(), upload.original_filename)
     temp_output_dir = Path(tempfile.mkdtemp(prefix="budget_version_"))
     try:
+        temp_input_path = _ensure_xlsx(temp_input_path)
+
         macros_service.write_percent_changes_by_label(
             temp_input_path,
             "Income Statement",

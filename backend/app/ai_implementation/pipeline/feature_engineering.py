@@ -157,7 +157,13 @@ def enrich_all_items(
         level_2 = hierarchy["account_level_2"]
 
         seasonality_index = get_seasonality_index(level_2, statement_month)
-        is_read_only = hierarchy["is_reserve"] and (item.annual_budget == 0 or item.annual_budget is None)
+        # Use section-based classification instead of account code hierarchy.
+        # item.read_only is set by the section state machine:
+        #   True only for items in "reserve" section under "Reserve Expenses (Per Reserve Study)"
+        # Backward-compatible fallback: old drafts without read_only from parser
+        is_read_only = item.read_only or (
+            hierarchy["is_reserve"] and (item.annual_budget == 0 or item.annual_budget is None)
+        )
 
         if is_read_only:
             enriched.append(EnrichedLineItem(

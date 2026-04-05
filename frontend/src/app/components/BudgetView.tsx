@@ -32,8 +32,12 @@ export function BudgetView({ lineItems, units, reserveInflationRate }: BudgetVie
     groupedItems['reserve'] || [],
     'proposedChange',
     reserveInflationRate,
+  ) + calcDisplayCategoryTotal(
+    groupedItems['reserve_expense'] || [],
+    'proposedChange',
+    reserveInflationRate,
   );
-  // Total annual requirement = expenses only (operating + reserve), not income
+  // Total annual requirement = expenses only (operating + reserve expenses), not reserve income
   const totalAnnual = totalOperating + totalReserve;
   const monthlyPerUnit = totalAnnual / 12 / units;
 

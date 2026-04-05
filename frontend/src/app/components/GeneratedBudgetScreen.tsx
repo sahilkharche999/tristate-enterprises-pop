@@ -119,7 +119,7 @@ export function GeneratedBudgetScreen({
         const proposed = calcProposed(item.annualBudget, item.percentChange);
         if (item.category === 'income') accumulator.totalIncome += proposed;
         else if (item.category === 'operating') accumulator.totalOperatingExpense += proposed;
-        else if (item.category === 'reserve') accumulator.totalReserveContributions += proposed;
+        else if (item.category === 'reserve' || item.category === 'reserve_income' || item.category === 'reserve_expense') accumulator.totalReserveContributions += proposed;
         return accumulator;
       },
       { totalIncome: 0, totalOperatingExpense: 0, totalReserveContributions: 0 },

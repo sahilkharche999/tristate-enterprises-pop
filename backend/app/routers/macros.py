@@ -215,7 +215,7 @@ async def generate_budget(
         if resolved_growth_factor is None:
             try:
                 resolved_growth_factor, detected_months, source = await run_in_threadpool(
-                    infer_growth_factor_from_input, input_path, fiscal_year_start_month
+                    lambda: infer_growth_factor_from_input(input_path, fiscal_year_start_month=fiscal_year_start_month)
                 )
                 growth_factor_note = f"auto annualization 12/{detected_months} from {source}"
                 statement_month = (fiscal_year_start_month + detected_months - 2) % 12 + 1

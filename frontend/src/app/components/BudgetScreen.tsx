@@ -17,7 +17,7 @@ import {
   uploadBudgetSource,
   type BudgetDraftPayload,
 } from '../api/budgetHistory';
-import { type AISuggestion, type AISuggestionResponse, type LineItem } from '../data/mockData';
+import { type AISuggestion, type AISuggestionResponse, type FeedbackDecision, type LineItem } from '../data/mockData';
 import type { HOARecord } from '../api/hoa';
 import { formatTimestamp } from '../lib/budget';
 import { getErrorMessage } from '../lib/errors';
@@ -109,6 +109,9 @@ export function BudgetScreen({
   const [isDownloadingEnriched, setIsDownloadingEnriched] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [aiResponse, internalSetAiResponse] = useState<AISuggestionResponse | null>(savedAiResponse);
+  const [appliedSuggestionSnapshot, setAppliedSuggestionSnapshot] = useState<
+    Map<string, { feedbackCaseId: number; appliedPercent: number }> | null
+  >(null);
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
   const activeReserveInflationRate =
@@ -124,6 +127,9 @@ export function BudgetScreen({
   const setAiResponse = (response: AISuggestionResponse | null) => {
     internalSetAiResponse(response);
     onAiResponseChange?.(response);
+    if (!response) {
+      setAppliedSuggestionSnapshot(null);
+    }
   };
 
   useEffect(() => {
@@ -179,6 +185,13 @@ export function BudgetScreen({
       onDraftChange?.(response.draft);
       setUploadState('complete');
       toast.success('Income statement uploaded and draft created.');
+      // Show parser warnings (e.g. Tier 3 fallback)
+      const warnings = (response as Record<string, unknown>).warnings as string[] | undefined;
+      if (warnings?.length) {
+        for (const w of warnings) {
+          toast.warning(w, { duration: 10000 });
+        }
+      }
     } catch (error) {
       toast.error(getErrorMessage(error, 'Upload failed. Please try again.'));
       setUploadState('initial');
@@ -321,12 +334,63 @@ export function BudgetScreen({
     }
   };
 
-  const handleNoteSaved = (itemId: string, title: string, body: string) => {
-    onLineItemsUpdate(
-      lineItems.map((entry) =>
-        entry.id === itemId ? { ...entry, note: { title, body } } : entry,
-      ),
+  const handleNoteSaved = async (itemId: string, title: string, body: string) => {
+    const updatedItems = lineItems.map((entry) =>
+      entry.id === itemId ? { ...entry, note: { title, body } } : entry,
     );
+    onLineItemsUpdate(updatedItems);
+
+    // Persist the note into the draft immediately so it survives page refresh
+    if (draftId) {
+      try {
+        const response = await saveBudgetDraft(hoaId, {
+          draft_id: draftId,
+          line_items: mapEditorLineItemsToBudgetHistory(updatedItems),
+          global_note: globalNote || null,
+          statement_month: statementMonth,
+          growth_factor: workingGrowthFactor,
+          growth_factor_note: growthFactorNote || null,
+        });
+        onDraftChange?.(response.draft);
+        setLastSaved(response.draft.updated_at ? new Date(response.draft.updated_at) : new Date());
+      } catch {
+        // Auto-save will catch it on the next cycle
+      }
+    }
+  };
+
+  const submitImplicitAiFeedback = async () => {
+    if (!aiResponse?.run_id || !appliedSuggestionSnapshot || appliedSuggestionSnapshot.size === 0) {
+      return;
+    }
+
+    const decisions: FeedbackDecision[] = [];
+    for (const [lineItemId, { feedbackCaseId, appliedPercent }] of appliedSuggestionSnapshot) {
+      const currentItem = lineItems.find((item) => item.id === lineItemId);
+      if (!currentItem) continue;
+
+      const currentPercent = currentItem.percentChange;
+      const wasEdited = Math.abs(currentPercent - appliedPercent) > 0.001;
+
+      decisions.push({
+        feedbackCaseId,
+        decision: wasEdited ? 'modified' : 'accepted',
+        finalPctChange: currentPercent / 100,
+        note: wasEdited
+          ? `Edited after AI suggestion (AI: ${appliedPercent.toFixed(1)}%, final: ${currentPercent.toFixed(1)}%)`
+          : undefined,
+      });
+    }
+
+    if (decisions.length > 0) {
+      try {
+        const { submitAIFeedback } = await import('../api/macros');
+        await submitAIFeedback({ runId: aiResponse.run_id, decisions });
+      } catch {
+        // Fire-and-forget: don't block generation
+      }
+      setAppliedSuggestionSnapshot(null);
+    }
   };
 
   const handleGenerateBudgetClick = async () => {
@@ -334,6 +398,8 @@ export function BudgetScreen({
       toast.error('Upload an income statement first.');
       return;
     }
+
+    void submitImplicitAiFeedback();
 
     try {
       const persistedDraft = await ensurePersistedDraftSnapshot();
@@ -378,6 +444,17 @@ export function BudgetScreen({
   };
 
   const handleApplyAISuggestions = (selectedSuggestions: AISuggestion[]) => {
+    const snapshot = new Map<string, { feedbackCaseId: number; appliedPercent: number }>();
+    for (const s of selectedSuggestions) {
+      if (s.feedbackCaseId != null) {
+        snapshot.set(s.lineItemId, {
+          feedbackCaseId: s.feedbackCaseId,
+          appliedPercent: s.suggestedPercent,
+        });
+      }
+    }
+    setAppliedSuggestionSnapshot(snapshot);
+
     onLineItemsUpdate(
       lineItems.map((item) => {
         const suggestion = selectedSuggestions.find((entry) => entry.lineItemId === item.id);
@@ -424,13 +501,13 @@ export function BudgetScreen({
                 <p className="text-sm text-[#737373]">
                   {uploadState === 'uploading'
                     ? 'Parsing document and creating a persisted draft...'
-                    : 'Upload your Excel or CSV file to begin'}
+                    : 'Upload your Excel or PDF income statement to begin'}
                 </p>
               </div>
               <input
                 ref={fileInputRef}
                 type="file"
-                accept=".xlsx,.xls"
+                accept=".xlsx,.xls,.pdf"
                 className="hidden"
                 onChange={handleFileChange}
               />

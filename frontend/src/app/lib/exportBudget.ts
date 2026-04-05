@@ -109,7 +109,7 @@ export function exportEnrichedBudget(lineItems: LineItem[], hoaName: string): vo
   );
 
   // ── Category sections ───────────────────────────────────────────────────────
-  const categories: Array<'income' | 'operating' | 'reserve'> = ['income', 'operating', 'reserve'];
+  const categories: Array<string> = ['income', 'operating', 'reserve', 'reserve_income', 'reserve_expense'];
 
   for (const cat of categories) {
     const catItems = lineItems.filter((item) => item.category === cat);
@@ -178,7 +178,7 @@ export function exportEnrichedBudget(lineItems: LineItem[], hoaName: string): vo
 
   // ── Grand Total row ─────────────────────────────────────────────────────────
   const opItems  = lineItems.filter((i) => i.category === 'operating');
-  const resItems = lineItems.filter((i) => i.category === 'reserve');
+  const resItems = lineItems.filter((i) => i.category === 'reserve' || i.category === 'reserve_income' || i.category === 'reserve_expense');
 
   const totalProposed =
     calcCategoryTotal(opItems,  'proposedChange') +

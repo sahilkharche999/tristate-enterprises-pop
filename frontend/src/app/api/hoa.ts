@@ -23,14 +23,14 @@ export interface HOAUpdatePayload {
   units?: number;
   reserve_inflation_rate?: number;
   fiscal_year_start_month: number;
-  fiscal_year_end_month: number;
+  city?: string;
 }
 
 export interface HOACreatePayload {
   name: string;
   units: number;
   fiscal_year_start_month: number;
-  fiscal_year_end_month: number;
+  city?: string;
 }
 
 export async function listHOAs(): Promise<HOARecord[]> {

@@ -186,7 +186,6 @@ def test_reserve_inflation_persists_to_version_and_audit(client, budget_compare_
             "units": 48,
             "reserve_inflation_rate": 0.05,
             "fiscal_year_start_month": 1,
-            "fiscal_year_end_month": 12,
         },
     )
 

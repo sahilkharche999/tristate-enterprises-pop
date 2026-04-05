@@ -14,7 +14,7 @@ import {
   logout as logoutApi,
   refreshToken as refreshTokenApi,
 } from '../api/auth';
-import { setTokenAccessor } from '../api/http';
+import { setTokenAccessor, setTokenUpdater } from '../api/http';
 
 interface AuthContextType {
   user: User | null;
@@ -37,6 +37,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     setTokenAccessor(() => accessTokenRef.current);
+    setTokenUpdater((token: string) => {
+      accessTokenRef.current = token;
+      setAccessToken(token);
+    });
   }, []);
 
   const handleLogin = useCallback((response: AuthResponse) => {
@@ -80,24 +84,37 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   // Silent refresh: 1 minute before the 30-min access token expires
+  const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   useEffect(() => {
     if (!accessToken) return;
-    const timeout = setTimeout(
-      async () => {
+
+    if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+
+    refreshTimerRef.current = setTimeout(async () => {
+      // Retry up to 3 times with 2s gaps before giving up
+      for (let attempt = 0; attempt < 3; attempt++) {
         try {
           const response = await refreshTokenApi();
           accessTokenRef.current = response.access_token;
           setUser(response.user);
           setAccessToken(response.access_token);
+          return; // success — new timer will be set by the re-render
         } catch {
-          accessTokenRef.current = null;
-          setUser(null);
-          setAccessToken(null);
+          if (attempt < 2) {
+            await new Promise((r) => setTimeout(r, 2000));
+          }
         }
-      },
-      29 * 60 * 1000, // 29 minutes
-    );
-    return () => clearTimeout(timeout);
+      }
+      // All retries failed — log out
+      accessTokenRef.current = null;
+      setUser(null);
+      setAccessToken(null);
+    }, 29 * 60 * 1000);
+
+    return () => {
+      if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+    };
   }, [accessToken]);
 
   const value = useMemo<AuthContextType>(

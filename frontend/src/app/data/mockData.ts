@@ -1,6 +1,6 @@
 export interface LineItem {
   id: string;
-  category: 'income' | 'operating' | 'reserve';
+  category: 'income' | 'operating' | 'reserve' | 'reserve_income' | 'reserve_expense';
   name: string;
   ytdActual: number;
   annualBudget: number;
@@ -25,7 +25,6 @@ export interface HOA {
   units: number;
   taxId: string;
   fiscalYearStart: string;
-  fiscalYearEnd: string;
   year: number;
   city: string;
 }

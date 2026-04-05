@@ -28,7 +28,8 @@ class HOACreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     units: int = Field(ge=1, le=100000)
     fiscal_year_start_month: int = Field(ge=1, le=12)
-    fiscal_year_end_month: int = Field(ge=1, le=12)
+    fiscal_year_end_month: Optional[int] = Field(default=None, ge=1, le=12)
+    city: Optional[str] = Field(default=None, max_length=255)
 
 
 class HOAUpdateRequest(BaseModel):
@@ -38,4 +39,5 @@ class HOAUpdateRequest(BaseModel):
     units: Optional[int] = Field(default=None, ge=1, le=100000)
     reserve_inflation_rate: Optional[float] = Field(default=None, ge=0)
     fiscal_year_start_month: int = Field(ge=1, le=12)
-    fiscal_year_end_month: int = Field(ge=1, le=12)
+    fiscal_year_end_month: Optional[int] = Field(default=None, ge=1, le=12)
+    city: Optional[str] = Field(default=None, max_length=255)

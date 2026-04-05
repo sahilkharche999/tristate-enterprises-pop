@@ -55,7 +55,7 @@ class FakeBudgetPipeline:
 
 
 def fake_write_percent_changes_by_label(path: str, sheet: str, changes):
-    return None
+    return len(changes) if changes else 0
 
 
 def fake_infer_growth_factor_from_input(input_path: str, fiscal_year_start_month: int):

@@ -15,14 +15,14 @@ interface CreateHoaFormState {
   name: string;
   units: string;
   fiscalYearStart: string;
-  fiscalYearEnd: string;
+  city: string;
 }
 
 const DEFAULT_CREATE_FORM: CreateHoaFormState = {
   name: '',
   units: '',
   fiscalYearStart: MONTH_NAMES[0],
-  fiscalYearEnd: MONTH_NAMES[11],
+  city: '',
 };
 
 export function HOAWorkspace() {
@@ -142,7 +142,7 @@ export function HOAWorkspace() {
         name: trimmedName,
         units: parsedUnits,
         fiscal_year_start_month: monthNameToNumber(createForm.fiscalYearStart),
-        fiscal_year_end_month: monthNameToNumber(createForm.fiscalYearEnd),
+        city: createForm.city.trim() || undefined,
       });
       setHoas((current) => [toHOAViewModel(created), ...current]);
       setIsCreateOpen(false);
@@ -432,6 +432,18 @@ export function HOAWorkspace() {
                 </div>
 
                 <div className="space-y-2">
+                  <Label htmlFor="createHoaCity">City</Label>
+                  <Input
+                    id="createHoaCity"
+                    value={createForm.city}
+                    onChange={(e) => handleCreateFieldChange('city', e.target.value)}
+                    className="bg-white border-[#E5E5E5]"
+                    placeholder="San Francisco"
+                    disabled={isCreating}
+                  />
+                </div>
+
+                <div className="space-y-2">
                   <Label htmlFor="createHoaFiscalStart">Fiscal Year Start</Label>
                   <Select
                     value={createForm.fiscalYearStart}
@@ -451,25 +463,6 @@ export function HOAWorkspace() {
                   </Select>
                 </div>
 
-                <div className="space-y-2">
-                  <Label htmlFor="createHoaFiscalEnd">Fiscal Year End</Label>
-                  <Select
-                    value={createForm.fiscalYearEnd}
-                    onValueChange={(value) => handleCreateFieldChange('fiscalYearEnd', value)}
-                    disabled={isCreating}
-                  >
-                    <SelectTrigger id="createHoaFiscalEnd" className="bg-white border-[#E5E5E5]">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {MONTH_NAMES.map((month) => (
-                        <SelectItem key={month} value={month}>
-                          {month}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
               </div>
 
               {createError ? (

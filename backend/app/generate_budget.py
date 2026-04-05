@@ -15,8 +15,10 @@ from openpyxl.styles import Border, Font, PatternFill, Alignment, Side
 from openpyxl.utils import get_column_letter
 import os
 import re
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
+from .services.income_statement_parser import _match_section_header
 
 
 QUIET_MODE = True
@@ -133,6 +135,66 @@ def _elapsed_months_from_fiscal_start(report_month: int, fiscal_year_start_month
     return ((report_month - fiscal_year_start_month) % 12) + 1
 
 
+def _read_header_cells(input_path: str, sheet_name: str = "Income Statement") -> list:
+    """Read first 7 rows x first 9 columns for growth factor / year inference.
+
+    Supports .xlsx (openpyxl), .xls (xlrd), and .pdf (pdfplumber text).
+    Returns a list of lists where each inner list is a row of cell values.
+    """
+    ext = Path(input_path).suffix.lower()
+
+    if ext == ".xls":
+        import xlrd
+        wb = xlrd.open_workbook(input_path)
+        try:
+            ws = wb.sheet_by_name(sheet_name)
+        except xlrd.XLRDError:
+            ws = wb.sheet_by_index(0)
+        cells = []
+        for r in range(min(7, ws.nrows)):
+            row = []
+            for c in range(min(9, ws.ncols)):
+                v = ws.cell_value(r, c)
+                row.append(None if v == "" else v)
+            cells.append(row)
+        return cells
+
+    elif ext == ".pdf":
+        import pdfplumber
+        with pdfplumber.open(input_path) as pdf:
+            if not pdf.pages:
+                return []
+            page = pdf.pages[0]
+            words = page.extract_words(x_tolerance=3, y_tolerance=3)
+            if len(words) < 5:
+                return []
+            lines_by_y: dict = {}
+            for w in words:
+                y_key = round(w['top'] / 2) * 2
+                lines_by_y.setdefault(y_key, []).append(w)
+            rows = []
+            for y_key in sorted(lines_by_y.keys())[:7]:
+                line_words = sorted(lines_by_y[y_key], key=lambda w: w['x0'])
+                line_text = ' '.join(w['text'] for w in line_words)
+                rows.append([line_text])
+            return rows
+
+    else:
+        # .xlsx or .xlsm — use openpyxl
+        wb = load_workbook(input_path, data_only=True)
+        try:
+            ws = wb[sheet_name] if sheet_name in wb.sheetnames else wb.active
+            cells = []
+            for r in range(1, 8):
+                row = []
+                for c in range(1, 10):
+                    row.append(ws.cell(row=r, column=c).value)
+                cells.append(row)
+            return cells
+        finally:
+            wb.close()
+
+
 def infer_growth_factor_from_input(
     input_path: str,
     default_factor: Optional[float] = DEFAULT_GROWTH_FACTOR,
@@ -145,31 +207,26 @@ def infer_growth_factor_from_input(
     if not os.path.exists(input_path):
         raise FileNotFoundError(f"Input workbook not found: {input_path}")
 
-    wb = load_workbook(input_path, data_only=True)
-    try:
-        ws = wb[sheet_name] if sheet_name in wb.sheetnames else wb.active
-        for row in range(1, 7):
-            for col in range(1, 9):
-                value = ws.cell(row=row, column=col).value
-                if not isinstance(value, str):
-                    continue
-                text = value.strip()
-                covered_months = _months_covered_from_date_tokens(text)
-                if covered_months and covered_months > 1:
-                    factor = 12.0 / covered_months
-                    source = f"{ws.title}!{ws.cell(row=row, column=col).coordinate}"
-                    return factor, covered_months, source
+    cells = _read_header_cells(input_path, sheet_name)
+    for row_idx, row in enumerate(cells):
+        for col_idx, value in enumerate(row):
+            if not isinstance(value, str):
+                continue
+            text = value.strip()
+            covered_months = _months_covered_from_date_tokens(text)
+            if covered_months and covered_months > 1:
+                factor = 12.0 / covered_months
+                source = f"row{row_idx + 1}!col{col_idx + 1}"
+                return factor, covered_months, source
 
-                month = _extract_month_from_text(text)
-                if month:
-                    elapsed_months = _elapsed_months_from_fiscal_start(
-                        month, fiscal_year_start_month
-                    )
-                    factor = 12.0 / elapsed_months
-                    source = f"{ws.title}!{ws.cell(row=row, column=col).coordinate}"
-                    return factor, elapsed_months, source
-    finally:
-        wb.close()
+            month = _extract_month_from_text(text)
+            if month:
+                elapsed_months = _elapsed_months_from_fiscal_start(
+                    month, fiscal_year_start_month
+                )
+                factor = 12.0 / elapsed_months
+                source = f"row{row_idx + 1}!col{col_idx + 1}"
+                return factor, elapsed_months, source
 
     month_from_filename = _extract_month_from_text(os.path.basename(input_path))
     if month_from_filename:
@@ -195,20 +252,15 @@ def infer_statement_year_from_input(
     if not os.path.exists(input_path):
         raise FileNotFoundError(f"Input workbook not found: {input_path}")
 
-    wb = load_workbook(input_path, data_only=True)
-    try:
-        ws = wb[sheet_name] if sheet_name in wb.sheetnames else wb.active
-        for row in range(1, 7):
-            for col in range(1, 9):
-                value = ws.cell(row=row, column=col).value
-                if not isinstance(value, str):
-                    continue
-                year = _extract_year_from_text(value.strip())
-                if year:
-                    source = f"{ws.title}!{ws.cell(row=row, column=col).coordinate}"
-                    return year, source
-    finally:
-        wb.close()
+    cells = _read_header_cells(input_path, sheet_name)
+    for row_idx, row in enumerate(cells):
+        for col_idx, value in enumerate(row):
+            if not isinstance(value, str):
+                continue
+            year = _extract_year_from_text(value.strip())
+            if year:
+                source = f"row{row_idx + 1}!col{col_idx + 1}"
+                return year, source
 
     filename_year = _extract_year_from_text(os.path.basename(input_path))
     if filename_year:
@@ -271,6 +323,8 @@ class BudgetGenerator:
     COL_SECTION = 'A'         # Section headers
     COL_ANNUAL_BUDGET = 'AG'  # Annual Budget (original) values
     COL_PROPOSED = 'AN'       # Proposed values (after % Change adjustment)
+    # Legacy constant — kept for reference but no longer used.
+    # Section detection now delegates to income_statement_parser._match_section_header()
     RESERVE_SECTION_START_TITLES = {
         "reserve income",
         "reserve expense",
@@ -283,7 +337,8 @@ class BudgetGenerator:
                  use_proposed: bool = True, growth_factor: float = None,
                  template_path: str = None, label_aliases: dict = None,
                  sheet_name: str = "Income Statement",
-                 hoa_name: str = ''):
+                 hoa_name: str = '',
+                 col_overrides: dict = None):
         """
         Initialize the generator.
 
@@ -298,6 +353,7 @@ class BudgetGenerator:
             label_aliases: Dict mapping source labels to template labels for items
                            renamed between files (e.g. account code changes).
             hoa_name: HOA property name for the budget header.
+            col_overrides: Dict with 1-based column positions from enricher (COL_T, COL_AG, COL_AN).
         """
         self.input_path = input_path
         self.output_path = output_path
@@ -313,14 +369,25 @@ class BudgetGenerator:
         self.hoa_name = hoa_name
         self.line_items: List[LineItem] = []
         self._net_income = 0  # Will be calculated
+        self.DATA_START_ROW = 6  # default, overridden by col_overrides
+        # Apply enricher column overrides if provided
+        if col_overrides:
+            self.COL_YTD_ACTUAL = get_column_letter(col_overrides["COL_T"])
+            self.COL_ANNUAL_BUDGET = get_column_letter(col_overrides["COL_AG"])
+            self.COL_PROPOSED = get_column_letter(col_overrides["COL_AN"])
+            if "DATA_START_ROW" in col_overrides:
+                self.DATA_START_ROW = col_overrides["DATA_START_ROW"]
 
-    @classmethod
-    def _is_reserve_section_start(cls, label: str) -> bool:
-        return (label or "").strip().lower() in cls.RESERVE_SECTION_START_TITLES
+    @staticmethod
+    def _is_reserve_section_start(label: str) -> bool:
+        result = _match_section_header(label)
+        return result is not None and result.startswith("reserve")
 
     @staticmethod
     def _is_reserve_label(label: str) -> bool:
-        return "reserve" in (label or "").strip().lower()
+        # Section-based: delegate to section header matcher instead of keyword search
+        result = _match_section_header(label)
+        return result is not None and result.startswith("reserve")
 
     def _infer_budget_year(self) -> Optional[int]:
         """Infer budget year as statement year + 1 from input workbook metadata."""
@@ -470,7 +537,7 @@ class BudgetGenerator:
         })
 
         wb = load_workbook(self.input_path, data_only=True)
-        ws = wb[self.sheet_name]
+        ws = wb[self.sheet_name] if self.sheet_name in wb.sheetnames else wb.active
 
         self.line_items = []
         current_section = None
@@ -478,7 +545,7 @@ class BudgetGenerator:
         items_read = 0
         values_found = 0
 
-        for row in range(6, ws.max_row + 1):
+        for row in range(self.DATA_START_ROW, ws.max_row + 1):
             col_a = ws[f'{self.COL_SECTION}{row}'].value
             col_b = ws[f'{self.COL_LABEL}{row}'].value
             annual_budget_raw = ws[f'{source_col}{row}'].value

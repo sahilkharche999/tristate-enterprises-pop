@@ -8,7 +8,6 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 import { getKnowledgeBaseFolders } from '../data/mockData';
 import { toast } from 'sonner';
-import { MacroToolsPanel } from './MacroToolsPanel';
 import { exportData } from '../api/macros';
 import { getHOA, updateHOA, type HOARecord } from '../api/hoa';
 import { getErrorMessage } from '../lib/errors';
@@ -18,24 +17,24 @@ interface SettingsFormState {
   name: string;
   hoaId: string;
   fiscalYearStart: string;
-  fiscalYearEnd: string;
   taxId: string;
   units: string;
+  city: string;
   reserveInflationRate: string;
   allocationType: string;
   driveFolderPath: string;
 }
 
-type ValidationField = 'name' | 'units' | 'fiscalYearStart' | 'fiscalYearEnd' | 'reserveInflationRate';
+type ValidationField = 'name' | 'units' | 'fiscalYearStart' | 'reserveInflationRate';
 type ValidationErrors = Partial<Record<ValidationField, string>>;
 
 const DEFAULT_FORM: SettingsFormState = {
   name: '',
   hoaId: '',
   fiscalYearStart: 'January',
-  fiscalYearEnd: 'December',
   taxId: '',
   units: '',
+  city: '',
   reserveInflationRate: '0.0',
   allocationType: 'Flat',
   driveFolderPath: '/Tri-State/HOAs/401-HOA',
@@ -62,9 +61,9 @@ function buildFormState(hoa: HOARecord, previous?: SettingsFormState): SettingsF
     name: hoa.name,
     hoaId: hoa.hoa_code,
     fiscalYearStart: monthNumberToName(hoa.fiscal_year_start_month),
-    fiscalYearEnd: monthNumberToName(hoa.fiscal_year_end_month),
     taxId: hoa.tax_id,
     units: String(hoa.units),
+    city: hoa.city || '',
     reserveInflationRate: formatReserveInflationRate(hoa.reserve_inflation_rate),
   };
 }
@@ -80,7 +79,6 @@ function validateForm(form: SettingsFormState): ValidationErrors {
   }
 
   if (!form.fiscalYearStart) errors.fiscalYearStart = 'Fiscal year start month is required.';
-  if (!form.fiscalYearEnd) errors.fiscalYearEnd = 'Fiscal year end month is required.';
   if (form.reserveInflationRate.trim()) {
     const reserveInflationRate = Number(form.reserveInflationRate);
     if (!Number.isFinite(reserveInflationRate) || reserveInflationRate < 0) {
@@ -164,11 +162,11 @@ export function SettingsScreen() {
       const payload = {
         name: hoaConfig.name.trim(),
         fiscal_year_start_month: monthNameToNumber(hoaConfig.fiscalYearStart),
-        fiscal_year_end_month: monthNameToNumber(hoaConfig.fiscalYearEnd),
         reserve_inflation_rate: parseReserveInflationRate(hoaConfig.reserveInflationRate),
         ...(hoaConfig.hoaId.trim() ? { hoa_code: hoaConfig.hoaId.trim() } : {}),
         ...(hoaConfig.taxId.trim() ? { tax_id: hoaConfig.taxId.trim() } : {}),
         ...(hoaConfig.units.trim() ? { units: Number(hoaConfig.units) } : {}),
+        city: hoaConfig.city.trim(),
       };
       const savedHoa = await updateHOA(id, payload);
       setHoa(savedHoa);
@@ -181,12 +179,6 @@ export function SettingsScreen() {
       setIsSaving(false);
     }
   };
-
-  const macroVersions = [
-    { version: 'v1.2', description: 'Inflation adjusted', date: 'Feb 15, 2025' },
-    { version: 'v1.1', description: 'Historical average', date: 'Jan 10, 2025' },
-    { version: 'v1.0', description: 'Base model', date: 'Dec 1, 2024' },
-  ];
 
   if (isLoading) {
     return (
@@ -232,9 +224,6 @@ export function SettingsScreen() {
           <TabsList className="bg-[#F7F7F7] border border-[#E5E5E5]">
             <TabsTrigger value="database" className="data-[state=active]:bg-white">
               HOA Database Configuration
-            </TabsTrigger>
-            <TabsTrigger value="macro" className="data-[state=active]:bg-white">
-              Macro & Logic Settings
             </TabsTrigger>
             <TabsTrigger value="knowledge" className="data-[state=active]:bg-white">
               Knowledge Base
@@ -317,27 +306,6 @@ export function SettingsScreen() {
                     <p className="text-xs text-[#b91c1c]">{validationErrors.fiscalYearStart}</p>
                   )}
                 </div>
-                <div className="space-y-2">
-                  <Label htmlFor="fiscalEnd">Fiscal Year End</Label>
-                  <Select
-                    value={hoaConfig.fiscalYearEnd}
-                    onValueChange={(value) => handleFieldChange('fiscalYearEnd', value)}
-                  >
-                    <SelectTrigger id="fiscalEnd" className="bg-white border-[#E5E5E5]">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {MONTH_NAMES.map((month) => (
-                        <SelectItem key={month} value={month}>
-                          {month}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  {validationErrors.fiscalYearEnd && (
-                    <p className="text-xs text-[#b91c1c]">{validationErrors.fiscalYearEnd}</p>
-                  )}
-                </div>
               </div>
 
               <div className="grid grid-cols-2 gap-6">
@@ -365,147 +333,40 @@ export function SettingsScreen() {
                 </div>
               </div>
 
-              <div className="space-y-2">
-                <Label htmlFor="template">Budget Template Selector</Label>
-                <Select
-                  value={hoaConfig.allocationType}
-                  onValueChange={(value) => handleFieldChange('allocationType', value)}
-                >
-                  <SelectTrigger id="template" className="bg-white border-[#E5E5E5]">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="Flat">Standard Budget Template</SelectItem>
-                    <SelectItem value="Detailed">Detailed Budget Template</SelectItem>
-                    <SelectItem value="Simplified">Simplified Budget Template</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="driveFolderPath">Google Drive Folder Path</Label>
-                <Input
-                  id="driveFolderPath"
-                  value={hoaConfig.driveFolderPath}
-                  onChange={(e) => handleFieldChange('driveFolderPath', e.target.value)}
-                  className="bg-white border-[#E5E5E5]"
-                />
-                <p className="text-xs text-[#666666]">Path to your HOA&apos;s Google Drive folder for document storage</p>
+              <div className="grid grid-cols-2 gap-6">
+                <div className="space-y-2">
+                  <Label htmlFor="city">City</Label>
+                  <Input
+                    id="city"
+                    value={hoaConfig.city}
+                    onChange={(e) => handleFieldChange('city', e.target.value)}
+                    className="bg-white border-[#E5E5E5]"
+                    placeholder="San Francisco"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="reserveInflationRate">Reserve Inflation Rate (%)</Label>
+                  <div className="flex items-center gap-3">
+                    <Input
+                      id="reserveInflationRate"
+                      type="number"
+                      step="0.1"
+                      min="0"
+                      value={hoaConfig.reserveInflationRate}
+                      onChange={(e) => handleFieldChange('reserveInflationRate', e.target.value)}
+                      className="bg-white border-[#E5E5E5]"
+                    />
+                    <span className="text-sm text-[#666666]">%</span>
+                  </div>
+                  {validationErrors.reserveInflationRate && (
+                    <p className="text-xs text-[#b91c1c]">{validationErrors.reserveInflationRate}</p>
+                  )}
+                  <p className="text-xs text-[#666666]">Applied to reserve study components in draft screens. Reserve rows stay read-only.</p>
+                </div>
               </div>
             </div>
           </TabsContent>
 
-          <TabsContent value="macro" className="space-y-6">
-            <div className="bg-[#F7F7F7] border border-[#E5E5E5] rounded-lg p-8 space-y-8">
-              <div className="space-y-4">
-                <h3 className="text-lg font-medium text-[#111111]">Current Macro Version</h3>
-                <div className="bg-white border border-[#E5E5E5] rounded-lg p-6">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <div className="text-sm font-medium text-[#111111]">Deterministic Macro v1.2</div>
-                      <div className="text-sm text-[#666666] mt-1">Last Updated: Feb 15, 2025</div>
-                    </div>
-                    <Button variant="outline" className="border-[#E5E5E5]">
-                      <Download className="w-4 h-4 mr-2" />
-                      Download
-                    </Button>
-                  </div>
-                </div>
-              </div>
-
-              <MacroToolsPanel />
-
-              <div className="space-y-4">
-                <h3 className="text-lg font-medium text-[#111111]">Growth Factor Logic Formula</h3>
-                <div className="bg-white border border-[#E5E5E5] rounded-lg p-6">
-                  <code className="text-sm text-[#111111] font-mono">
-                    Projection = YTD Actual × Growth Factor
-                    <br />
-                    Growth Factor = 12 / Months Elapsed in Fiscal Year
-                    <br />
-                    Proposed = Annual Budget × (1 + % Change / 100)
-                    <br />
-                    Monthly = Proposed / 12
-                  </code>
-                </div>
-              </div>
-
-              <div className="space-y-4">
-                <h3 className="text-lg font-medium text-[#111111]">Reserve Inflation Setting</h3>
-                <div className="bg-white border border-[#E5E5E5] rounded-lg p-6 space-y-3">
-                  <div className="max-w-sm space-y-2">
-                    <Label htmlFor="reserveInflationRate">Reserve Inflation Rate (%)</Label>
-                    <div className="flex items-center gap-3">
-                      <Input
-                        id="reserveInflationRate"
-                        type="number"
-                        step="0.1"
-                        min="0"
-                        value={hoaConfig.reserveInflationRate}
-                        onChange={(e) => handleFieldChange('reserveInflationRate', e.target.value)}
-                        className="bg-white border-[#E5E5E5]"
-                      />
-                      <span className="text-sm text-[#666666]">%</span>
-                    </div>
-                    {validationErrors.reserveInflationRate && (
-                      <p className="text-xs text-[#b91c1c]">{validationErrors.reserveInflationRate}</p>
-                    )}
-                  </div>
-                  <p className="text-sm text-[#666666]">
-                    This HOA-level rate is used to reflect reserve component amounts in draft screens. Reserve rows stay read-only.
-                  </p>
-                </div>
-              </div>
-
-              <div className="space-y-4">
-                <h3 className="text-lg font-medium text-[#111111]">Reserve Allocation Logic</h3>
-                <div className="bg-white border border-[#E5E5E5] rounded-lg p-6">
-                  <code className="text-sm text-[#111111] font-mono">
-                    Reserve Allocation = Single transfer line item (e.g. 90000 - Reserve Allocation/Transfer)
-                    <br />
-                    Reserve study line items are excluded from the board-adjustable flow
-                    <br />
-                    Reserve % of Budget = (Reserve Allocation / Total Operating Budget) × 100
-                  </code>
-                </div>
-              </div>
-
-              <div className="space-y-4">
-                <h3 className="text-lg font-medium text-[#111111]">Version History</h3>
-                <div className="bg-white border border-[#E5E5E5] rounded-lg overflow-hidden">
-                  <table className="w-full">
-                    <thead className="bg-[#F7F7F7] border-b border-[#E5E5E5]">
-                      <tr>
-                        <th className="text-left px-6 py-3 text-sm font-medium text-[#111111]">Version</th>
-                        <th className="text-left px-6 py-3 text-sm font-medium text-[#111111]">Description</th>
-                        <th className="text-left px-6 py-3 text-sm font-medium text-[#111111]">Date</th>
-                        <th className="text-right px-6 py-3 text-sm font-medium text-[#111111]">Action</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {macroVersions.map((version) => (
-                        <tr key={version.version} className="border-b border-[#E5E5E5]">
-                          <td className="px-6 py-4 text-sm text-[#111111]">{version.version}</td>
-                          <td className="px-6 py-4 text-sm text-[#666666]">{version.description}</td>
-                          <td className="px-6 py-4 text-sm text-[#666666]">{version.date}</td>
-                          <td className="px-6 py-4 text-right">
-                            <div className="flex items-center justify-end gap-1">
-                              <Button variant="ghost" size="sm" className="text-[#111111]">
-                                <Eye className="w-4 h-4" />
-                              </Button>
-                              <Button variant="ghost" size="sm" className="text-[#111111]">
-                                <Download className="w-4 h-4" />
-                              </Button>
-                            </div>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            </div>
-          </TabsContent>
 
           <TabsContent value="data" className="space-y-6">
             <div className="bg-[#F7F7F7] border border-[#E5E5E5] rounded-lg p-8 space-y-6">

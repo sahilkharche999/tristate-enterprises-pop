@@ -9,6 +9,11 @@ from ..ai_implementation.db import Property
 from ..models.hoa import HOACreateRequest, HOADetail, HOAListItem, HOAUpdateRequest
 
 
+def _derive_fiscal_year_end(start_month: int) -> int:
+    """A fiscal year is always 12 months: start=4 (April) → end=3 (March)."""
+    return ((start_month + 10) % 12) + 1
+
+
 def _hoa_payload(property_row: Property) -> dict[str, object]:
     return {
         "id": property_row.id,
@@ -55,8 +60,8 @@ def create_hoa(session: Session, payload: HOACreateRequest) -> HOADetail:
         units=payload.units,
         reserve_inflation_rate=0.0,
         fiscal_year_start_month=payload.fiscal_year_start_month,
-        fiscal_year_end_month=payload.fiscal_year_end_month,
-        city="",
+        fiscal_year_end_month=_derive_fiscal_year_end(payload.fiscal_year_start_month),
+        city=(payload.city or "").strip(),
         portfolio_year=datetime.now().year,
         workflow_status="Not Started",
     )
@@ -81,7 +86,9 @@ def update_hoa(session: Session, hoa_id: int, payload: HOAUpdateRequest) -> Opti
     if payload.reserve_inflation_rate is not None:
         row.reserve_inflation_rate = payload.reserve_inflation_rate
     row.fiscal_year_start_month = payload.fiscal_year_start_month
-    row.fiscal_year_end_month = payload.fiscal_year_end_month
+    row.fiscal_year_end_month = _derive_fiscal_year_end(payload.fiscal_year_start_month)
+    if payload.city is not None:
+        row.city = payload.city.strip()
     session.commit()
     session.refresh(row)
     return _serialize_hoa(row)

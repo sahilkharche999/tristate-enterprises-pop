@@ -67,6 +67,10 @@ mockdata/
 *.db-wal
 *.db-journal
 
+# Client documents (sensitive financial data, not source code)
+Example Income Statements/
+Tri State Documents/
+
 # Client data files in project root (not source code)
 /Tri-State Budget.xlsx
 /Tri-State Product Delivery Draft 6.xlsx

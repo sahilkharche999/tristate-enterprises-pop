@@ -14,6 +14,7 @@ from .generate_budget import (
     BudgetGenerator,
     infer_growth_factor_from_input,
 )
+from .services.income_statement_parser import _match_section_header, detect_columns
 
 
 QUIET_MODE = True
@@ -128,6 +129,7 @@ class IncomeStatementEnricher:
 
     COL_A = 1
     COL_B = 2
+    # Default column positions (Esprit Park layout) — overridden by detect_columns
     COL_T = 20   # YTD Actual
     COL_AG = 33  # Annual Budget
     COL_AK = 37  # % Diff
@@ -135,11 +137,6 @@ class IncomeStatementEnricher:
     COL_AM = 39  # % Change
     COL_AN = 40  # Proposed
     COL_AO = 41  # Jan (first monthly column)
-    RESERVE_SECTION_START_TITLES = {
-        "reserve income",
-        "reserve expense",
-        "reserve expenses (per reserve study)",
-    }
 
     def __init__(
         self,
@@ -162,6 +159,55 @@ class IncomeStatementEnricher:
         self.sheet_name = sheet_name
         self.am_seed_by_row: Dict[int, float] = {}
         self.an_seed_by_row: Dict[int, float] = {}
+        self._detect_input_columns()
+
+    # Row where enrichment headers are written and data starts on the next row
+    HEADER_ROW = 5
+    DATA_START_ROW = 6
+
+    def _detect_input_columns(self):
+        """Detect column positions and data start row from the input file."""
+        try:
+            wb = load_workbook(self.input_path, data_only=True)
+            ws = wb[self.sheet_name] if self.sheet_name in wb.sheetnames else wb.active
+
+            # Detect data start row: find the first row with a recognized section
+            # header (from the parser) or a line item with an account code in col B.
+            # This correctly skips title rows, date rows, and column headers.
+            from .services.income_statement_parser import _match_section_header, _extract_account_code
+            for r in range(1, min(20, ws.max_row + 1)):
+                a = str(ws.cell(row=r, column=self.COL_A).value or "").strip()
+                b = str(ws.cell(row=r, column=self.COL_B).value or "").strip()
+                if _match_section_header(a) is not None:
+                    # Found a section header like "Operating Income"
+                    self.DATA_START_ROW = r
+                    self.HEADER_ROW = r - 1
+                    break
+                if b and _extract_account_code(b) is not None:
+                    # Found a line item with account code like "40000 - Assessment Income"
+                    self.DATA_START_ROW = r
+                    self.HEADER_ROW = r - 1
+                    break
+
+            # Detect column positions
+            scan_rows = []
+            for row in ws.iter_rows(min_row=1, max_row=min(self.DATA_START_ROW + 4, ws.max_row), values_only=True):
+                scan_rows.append(list(row))
+            wb.close()
+            if scan_rows:
+                col_map = detect_columns(scan_rows)
+                if "ytd_actual" in col_map:
+                    self.COL_T = col_map["ytd_actual"] + 1
+                if "annual_budget" in col_map:
+                    self.COL_AG = col_map["annual_budget"] + 1
+                max_data_col = max(self.COL_T, self.COL_AG)
+                self.COL_AK = max_data_col + 4
+                self.COL_AL = max_data_col + 5
+                self.COL_AM = max_data_col + 6
+                self.COL_AN = max_data_col + 7
+                self.COL_AO = max_data_col + 8
+        except Exception:
+            pass
 
     @staticmethod
     def _parse_percent_change(raw_value) -> Optional[float]:
@@ -236,7 +282,7 @@ class IncomeStatementEnricher:
             value_maps[target_col_letter] = {}
         target = value_maps[target_col_letter]
 
-        for row in range(6, ws_formula.max_row + 1):
+        for row in range(self.DATA_START_ROW, ws_formula.max_row + 1):
             raw = ws_formula.cell(row=row, column=col).value
 
             if raw is None:
@@ -303,14 +349,11 @@ class IncomeStatementEnricher:
             raise FileNotFoundError(f"AM seed workbook not found: {self.am_seed_workbook}")
 
         wb_data = load_workbook(self.am_seed_workbook, data_only=True)
-        if "Income Statement" not in wb_data.sheetnames:
-            wb_data.close()
-            raise ValueError(f"'Income Statement' sheet not found in {self.am_seed_workbook}")
-        ws_data = wb_data["Income Statement"]
+        ws_data = wb_data[self.sheet_name] if self.sheet_name in wb_data.sheetnames else wb_data.active
 
         ag_vals = {}
         am_vals = {}
-        for row in range(6, ws_data.max_row + 1):
+        for row in range(self.DATA_START_ROW, ws_data.max_row + 1):
             ag_vals[row] = self._safe_float(ws_data.cell(row=row, column=self.COL_AG).value)
             parsed_am = self._parse_percent_change(ws_data.cell(row=row, column=self.COL_AM).value)
             if parsed_am is not None:
@@ -319,7 +362,7 @@ class IncomeStatementEnricher:
         wb_data.close()
 
         wb_formula = load_workbook(self.am_seed_workbook, data_only=False)
-        ws_formula = wb_formula["Income Statement"]
+        ws_formula = wb_formula[self.sheet_name] if self.sheet_name in wb_formula.sheetnames else wb_formula.active
         value_maps = {'AG': ag_vals, 'AM': am_vals}
         evaluated_an = self._evaluate_column_formulas(ws_formula, self.COL_AN, value_maps)
         wb_formula.close()
@@ -373,18 +416,10 @@ class IncomeStatementEnricher:
             return str(col_a).strip()
         return ''
 
-    @classmethod
-    def _is_reserve_section_start(cls, label: str) -> bool:
-        return (label or "").strip().lower() in cls.RESERVE_SECTION_START_TITLES
-
-    @staticmethod
-    def _is_reserve_label(label: str) -> bool:
-        return "reserve" in (label or "").strip().lower()
-
     def add_headers(self, ws):
-        """Write column headers (row 5) and growth factor (AL4)."""
-        ws.cell(row=4, column=self.COL_AL, value=self.GROWTH_FACTOR)
-        ws.cell(row=4, column=self.COL_AL).font = Font(bold=True)
+        """Write column headers and growth factor above data start row."""
+        ws.cell(row=self.HEADER_ROW - 1, column=self.COL_AL, value=self.GROWTH_FACTOR)
+        ws.cell(row=self.HEADER_ROW - 1, column=self.COL_AL).font = Font(bold=True)
 
         headers = {
             self.COL_AK: '% Diff',
@@ -393,14 +428,14 @@ class IncomeStatementEnricher:
             self.COL_AN: 'Proposed',
         }
         for col, label in headers.items():
-            ws.cell(row=5, column=col, value=label)
-            ws.cell(row=5, column=col).font = Font(bold=True)
+            ws.cell(row=self.HEADER_ROW, column=col, value=label)
+            ws.cell(row=self.HEADER_ROW, column=col).font = Font(bold=True)
 
         for i, month in enumerate(self.MONTHS):
-            ws.cell(row=5, column=self.COL_AO + i, value=month)
-            ws.cell(row=5, column=self.COL_AO + i).font = Font(bold=True)
+            ws.cell(row=self.HEADER_ROW, column=self.COL_AO + i, value=month)
+            ws.cell(row=self.HEADER_ROW, column=self.COL_AO + i).font = Font(bold=True)
 
-        print("    Added headers: AK-AZ (row 5) and growth factor in AL4")
+        print(f"    Added headers: row {self.HEADER_ROW}, growth factor in row {self.HEADER_ROW - 1}")
 
     @staticmethod
     def _ensure_min_column_width(ws, col_idx: int, min_width: float):
@@ -438,16 +473,18 @@ class IncomeStatementEnricher:
         """Calculate and write AK-AZ for all line item rows. Returns list of total rows found."""
         total_rows = []
         items_processed = 0
-        in_reserve_block = False
+        current_section = "operating"  # section state machine
 
-        for row in range(6, ws.max_row + 1):
+        for row in range(self.DATA_START_ROW, ws.max_row + 1):
             row_type = self._classify_row(ws, row)
             label = self._get_label(ws, row)
 
-            if row_type == 'section' and self._is_reserve_section_start(label):
-                in_reserve_block = True
+            if row_type == 'section':
+                new_section = _match_section_header(label)
+                if new_section is not None:
+                    current_section = new_section
 
-            # Reserve rows now receive enrichment calculations like operating items.
+            # All items receive enrichment calculations regardless of section.
 
             if row_type == 'total':
                 total_rows.append(row)
@@ -661,7 +698,7 @@ class IncomeStatementEnricher:
         print("  Copied input file to intermediate location")
 
         wb = load_workbook(self.output_path)
-        ws = wb[self.sheet_name]
+        ws = wb[self.sheet_name] if self.sheet_name in wb.sheetnames else wb.active
 
         print(f"  Sheet: '{self.sheet_name}' ({ws.max_row} rows, {ws.max_column} cols)")
         print(f"  Growth Factor: {self.GROWTH_FACTOR:.6f} ({self.growth_factor_note})")
@@ -679,7 +716,7 @@ class IncomeStatementEnricher:
         _debug_breakpoint("PIPELINE_GROWTH_FACTOR", {
             "sheet": "Income Statement",
             "configured_growth_factor": self.GROWTH_FACTOR,
-            "cell_AL4": ws.cell(row=4, column=self.COL_AL).value,
+            "cell_growth_factor": ws.cell(row=self.HEADER_ROW - 1, column=self.COL_AL).value,
         })
 
         print("\n  Processing line items (VBA Module 6 formulas):")
@@ -749,16 +786,20 @@ class BudgetPipeline:
             am_seed_workbook=self.am_seed_workbook,
         )
         enricher.enrich()
+        # Propagate detected positions for downstream BudgetGenerator
+        self._enricher_columns = {
+            "COL_T": enricher.COL_T,
+            "COL_AG": enricher.COL_AG,
+            "COL_AN": enricher.COL_AN,
+            "DATA_START_ROW": enricher.DATA_START_ROW,
+        }
 
         intermediate_wb = load_workbook(self.intermediate_path, data_only=True)
-        intermediate_ws = intermediate_wb["Income Statement"]
+        intermediate_ws = intermediate_wb.active
         _debug_breakpoint("PIPELINE_INTERMEDIATE_CHECK", {
             "intermediate_path": self.intermediate_path,
-            "AL4_growth_factor": intermediate_ws["AL4"].value,
-            "row16_AG_annual_budget": intermediate_ws["AG16"].value,
-            "row16_AM_percent_change": intermediate_ws["AM16"].value,
-            "row16_AN_proposed": intermediate_ws["AN16"].value,
-            "row19_AN_total_income": intermediate_ws["AN19"].value,
+            "enricher_data_start": enricher.DATA_START_ROW,
+            "enricher_header_row": enricher.HEADER_ROW,
         })
         intermediate_wb.close()
 
@@ -786,6 +827,7 @@ class BudgetPipeline:
             template_path=self.template_path,
             label_aliases=self._load_aliases(),
             hoa_name=self.hoa_name,
+            col_overrides=getattr(self, '_enricher_columns', None),
         )
         generator.generate(reserve_contribution=self.reserve_contribution)
 
