@@ -99,7 +99,7 @@ def test_provider_interface_is_importable_without_groq_specifics():
 
 
 def test_config_exposes_separate_document_vlm_settings():
-    assert hasattr(settings, "DOCUMENT_VLM_PROVIDER")
-    assert hasattr(settings, "DOCUMENT_VLM_MODEL")
+    assert hasattr(settings, "GEMINI_API_KEY")
+    assert hasattr(settings, "GEMINI_MODEL")
     assert hasattr(settings, "DOCUMENT_VLM_ENABLED")
     assert hasattr(settings, "DOCUMENT_VLM_MAX_PAGES")
