@@ -1,6 +1,7 @@
 """Durable HOA-scoped budget history service."""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -16,11 +17,27 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..generate_budget import infer_growth_factor_from_input
 from ..generate_budget_pipeline import BudgetPipeline
+from ..models.financial_document_extraction import (
+    DocumentExtractionFailure,
+    ExtractedFinancialStatement,
+    ExtractedStatementLineItem,
+)
 from ..services.income_statement_parser import (
     parse_rows_with_sections,
     detect_columns,
     _parse_financial_float as _parse_financial_float_new,
     _match_section_header,
+)
+from ..services.financial_document_router import choose_financial_document_route
+from ..services.financial_statement_validation import (
+    has_blocking_validation_issues,
+    validate_extracted_statement,
+)
+from ..services.normalized_statement_workbook import build_normalized_statement_workbook
+from ..services.pdf_vlm_extractor import extract_pdf_statement
+from ..services.statement_period_inference import (
+    extract_pdf_statement_period_hint,
+    infer_growth_factor_from_statement_period,
 )
 from ..models.budget_history import (
     BudgetDraftCompareBaselineOption,
@@ -161,6 +178,80 @@ def _draft_enriched_storage_key(hoa_id: int, draft_id: int) -> str:
 
 def _extract_statement_month(fiscal_year_start_month: int, detected_months: int) -> int:
     return (fiscal_year_start_month + detected_months - 2) % 12 + 1
+
+
+def _canonical_statement_from_line_items(
+    line_items: list[dict[str, Any]],
+    *,
+    family: str,
+) -> ExtractedFinancialStatement:
+    canonical_items: list[ExtractedStatementLineItem] = []
+    for item in line_items:
+        raw_section = str(item.get("raw", {}).get("section") or item.get("section") or item.get("category") or "")
+        account_code = item.get("account_code")
+        canonical_items.append(
+            ExtractedStatementLineItem(
+                account_code_text=None if account_code is None else str(account_code),
+                label=str(item.get("label") or item.get("name") or ""),
+                section_label=raw_section or None,
+                section_kind=str(item.get("category") or "") or None,
+                ytd_actual=_parse_float(item.get("ytd_actual")) if item.get("ytd_actual") is not None else None,
+                annual_budget=_parse_float(item.get("annual_budget")) if item.get("annual_budget") is not None else None,
+            )
+        )
+    return ExtractedFinancialStatement(
+        document_family=family,
+        report_type="income_statement",
+        line_items=canonical_items,
+        confidence=1.0,
+    )
+
+
+def _build_review_required_response(
+    session: Session,
+    *,
+    hoa_id: int,
+    actor: dict[str, Any],
+    upload: BudgetUpload,
+    original_filename: str,
+    reason: str,
+    code: str,
+    warnings: Optional[list[str]] = None,
+) -> BudgetUploadResponse:
+    upload.enrichment_status = "failed"
+    review_event = _create_audit_event(
+        session,
+        hoa_id=hoa_id,
+        actor=actor,
+        event_type="enrichment_review_required",
+        summary=f"Review required for {original_filename}",
+        upload_id=upload.id,
+        payload={"code": code, "reason": reason},
+    )
+    session.commit()
+    return BudgetUploadResponse(
+        upload_id=upload.id,
+        draft=None,
+        timeline_event=_serialize_timeline_event(review_event),
+        warnings=warnings or [],
+        review_required=True,
+        review_reason=reason,
+    )
+
+
+def _extract_pdf_statement_sync(path: str) -> ExtractedFinancialStatement | DocumentExtractionFailure:
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        import concurrent.futures
+
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            return pool.submit(asyncio.run, extract_pdf_statement(path)).result()
+
+    return asyncio.run(extract_pdf_statement(path))
 
 
 def _parse_float(value: Any) -> float:
@@ -847,15 +938,50 @@ def create_upload(
         payload={"filename": original_filename, "sha256": sha256},
     )
 
+    route = choose_financial_document_route(original_filename, content_type)
     temp_input_path = _write_temp_workbook(file_bytes, original_filename)
+    cleanup_paths = {temp_input_path}
     temp_output_dir = Path(tempfile.mkdtemp(prefix="budget_history_"))
     try:
-        temp_input_path = _ensure_xlsx(temp_input_path)
+        statement_period_hint: str | None = None
+        if route.path == "pdf_vlm":
+            pdf_source_path = temp_input_path
+            pdf_result = _extract_pdf_statement_sync(temp_input_path)
+            if isinstance(pdf_result, DocumentExtractionFailure):
+                return _build_review_required_response(
+                    session,
+                    hoa_id=hoa_id,
+                    actor=actor,
+                    upload=upload,
+                    original_filename=original_filename,
+                    reason=pdf_result.message,
+                    code=pdf_result.code,
+                    warnings=[pdf_result.message],
+                )
 
-        growth_factor, detected_months, source = infer_growth_factor_from_input(
-            temp_input_path,
-            fiscal_year_start_month=hoa.fiscal_year_start_month or 1,
-        )
+            statement_period_hint = pdf_result.statement_period or extract_pdf_statement_period_hint(pdf_source_path)
+            normalized_path = build_normalized_statement_workbook(pdf_result)
+            cleanup_paths.add(normalized_path)
+            temp_input_path = normalized_path
+        else:
+            normalized_path = _ensure_xlsx(temp_input_path)
+            cleanup_paths.add(normalized_path)
+            temp_input_path = normalized_path
+
+        growth_factor = None
+        if statement_period_hint:
+            inferred = infer_growth_factor_from_statement_period(
+                statement_period_hint,
+                hoa.fiscal_year_start_month or 1,
+            )
+            if inferred is not None:
+                growth_factor, detected_months, source = inferred
+
+        if growth_factor is None:
+            growth_factor, detected_months, source = infer_growth_factor_from_input(
+                temp_input_path,
+                fiscal_year_start_month=hoa.fiscal_year_start_month or 1,
+            )
         growth_factor_note = f"auto annualization 12/{detected_months} from {source}"
         statement_month = _extract_statement_month(hoa.fiscal_year_start_month or 1, detected_months)
         intermediate_path = str(temp_output_dir / "Income_Statement_Enriched.xlsx")
@@ -872,6 +998,24 @@ def create_upload(
         enriched = macros_service.read_sheet_as_table(intermediate_path, "Income Statement")
         preview = macros_service.read_first_sheet_preview(output_path, settings.MAX_PREVIEW_ROWS)
         line_items, parse_warnings = _table_to_line_items(enriched)
+        canonical_statement = _canonical_statement_from_line_items(
+            line_items,
+            family=route.family or ("pdf_visual_document" if route.path == "pdf_vlm" else "known_clean_excel_workbook"),
+        )
+        canonical_issues = validate_extracted_statement(canonical_statement)
+        if has_blocking_validation_issues(canonical_issues):
+            review_reason = "Extraction requires review because the parsed statement failed confidence checks."
+            warnings = [issue["message"] for issue in canonical_issues]
+            return _build_review_required_response(
+                session,
+                hoa_id=hoa_id,
+                actor=actor,
+                upload=upload,
+                original_filename=original_filename,
+                reason=review_reason,
+                code="validation_failed",
+                warnings=parse_warnings + warnings,
+            )
 
         _replace_active_draft(session, hoa_id, timestamp)
         draft = BudgetDraft(
@@ -938,8 +1082,9 @@ def create_upload(
         session.commit()
         raise
     finally:
-        if os.path.exists(temp_input_path):
-            os.remove(temp_input_path)
+        for cleanup_path in cleanup_paths:
+            if cleanup_path and os.path.exists(cleanup_path):
+                os.remove(cleanup_path)
         shutil.rmtree(temp_output_dir, ignore_errors=True)
 
 

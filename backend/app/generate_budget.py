@@ -173,10 +173,15 @@ def _read_header_cells(input_path: str, sheet_name: str = "Income Statement") ->
                 y_key = round(w['top'] / 2) * 2
                 lines_by_y.setdefault(y_key, []).append(w)
             rows = []
-            for y_key in sorted(lines_by_y.keys())[:7]:
+            for y_key in sorted(lines_by_y.keys()):
                 line_words = sorted(lines_by_y[y_key], key=lambda w: w['x0'])
                 line_text = ' '.join(w['text'] for w in line_words)
+                # Skip single-character artifact lines (watermarks, sidebar text)
+                if len(line_text.strip()) <= 1:
+                    continue
                 rows.append([line_text])
+                if len(rows) >= 10:
+                    break
             return rows
 
     else:

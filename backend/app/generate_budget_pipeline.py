@@ -418,8 +418,10 @@ class IncomeStatementEnricher:
 
     def add_headers(self, ws):
         """Write column headers and growth factor above data start row."""
-        ws.cell(row=self.HEADER_ROW - 1, column=self.COL_AL, value=self.GROWTH_FACTOR)
-        ws.cell(row=self.HEADER_ROW - 1, column=self.COL_AL).font = Font(bold=True)
+        growth_factor_row = self.HEADER_ROW - 1
+        if growth_factor_row >= 1:
+            ws.cell(row=growth_factor_row, column=self.COL_AL, value=self.GROWTH_FACTOR)
+            ws.cell(row=growth_factor_row, column=self.COL_AL).font = Font(bold=True)
 
         headers = {
             self.COL_AK: '% Diff',
@@ -435,7 +437,10 @@ class IncomeStatementEnricher:
             ws.cell(row=self.HEADER_ROW, column=self.COL_AO + i, value=month)
             ws.cell(row=self.HEADER_ROW, column=self.COL_AO + i).font = Font(bold=True)
 
-        print(f"    Added headers: row {self.HEADER_ROW}, growth factor in row {self.HEADER_ROW - 1}")
+        print(
+            f"    Added headers: row {self.HEADER_ROW}, "
+            f"growth factor in row {growth_factor_row if growth_factor_row >= 1 else 'skipped'}"
+        )
 
     @staticmethod
     def _ensure_min_column_width(ws, col_idx: int, min_width: float):
@@ -716,7 +721,11 @@ class IncomeStatementEnricher:
         _debug_breakpoint("PIPELINE_GROWTH_FACTOR", {
             "sheet": "Income Statement",
             "configured_growth_factor": self.GROWTH_FACTOR,
-            "cell_growth_factor": ws.cell(row=self.HEADER_ROW - 1, column=self.COL_AL).value,
+            "cell_growth_factor": (
+                ws.cell(row=self.HEADER_ROW - 1, column=self.COL_AL).value
+                if self.HEADER_ROW - 1 >= 1
+                else None
+            ),
         })
 
         print("\n  Processing line items (VBA Module 6 formulas):")

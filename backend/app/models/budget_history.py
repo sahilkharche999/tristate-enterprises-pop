@@ -118,9 +118,11 @@ class BudgetHistoryResponse(BaseModel):
 
 class BudgetUploadResponse(BaseModel):
     upload_id: int
-    draft: BudgetDraftPayload
+    draft: Optional[BudgetDraftPayload] = None
     timeline_event: BudgetTimelineEvent
-    warnings: list[str] = []
+    warnings: list[str] = Field(default_factory=list)
+    review_required: bool = False
+    review_reason: Optional[str] = None
 
 
 class BudgetDraftSaveRequest(BaseModel):

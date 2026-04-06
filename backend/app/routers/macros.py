@@ -1,4 +1,5 @@
 """HTTP router exposing macro-like endpoints."""
+from __future__ import annotations
 import json
 import logging
 import os
@@ -10,8 +11,17 @@ from fastapi import APIRouter, File, UploadFile, Form, HTTPException, Response, 
 from fastapi.concurrency import run_in_threadpool
 
 from ..config import settings
+from ..models.financial_document_extraction import DocumentExtractionFailure
 from ..models.schemas import TableResponse, SumResponse, DupsResponse, SimpleResponse
 from ..services import macros_service
+from ..services.financial_document_router import choose_financial_document_route
+from ..services.normalized_statement_workbook import build_normalized_statement_workbook
+from ..services.pdf_vlm_extractor import extract_pdf_statement
+from ..services.statement_period_inference import (
+    extract_pdf_statement_period_hint,
+    infer_growth_factor_from_statement_period,
+    select_statement_period_hint,
+)
 from ..generate_budget_pipeline import BudgetPipeline
 from ..generate_budget import infer_growth_factor_from_input
 
@@ -176,6 +186,17 @@ async def generate_budget(
     if background:
         background.add_task(lambda p=input_path: os.path.exists(p) and os.remove(p))
 
+    route = choose_financial_document_route(file.filename or "upload.xlsx", file.content_type)
+    statement_period_hint: str | None = None
+    if route.path == "pdf_vlm":
+        extraction = await extract_pdf_statement(input_path)
+        if isinstance(extraction, DocumentExtractionFailure):
+            raise HTTPException(status_code=422, detail=extraction.message)
+        statement_period_hint = extraction.statement_period or extract_pdf_statement_period_hint(input_path)
+        input_path = await run_in_threadpool(build_normalized_statement_workbook, extraction)
+        if background:
+            background.add_task(lambda p=input_path: os.path.exists(p) and os.remove(p))
+
     # Apply percent changes from JSON before pipeline runs (writes to AM column by label)
     if percent_changes_json:
         try:
@@ -214,9 +235,16 @@ async def generate_budget(
         statement_month = None
         if resolved_growth_factor is None:
             try:
-                resolved_growth_factor, detected_months, source = await run_in_threadpool(
-                    lambda: infer_growth_factor_from_input(input_path, fiscal_year_start_month=fiscal_year_start_month)
+                inferred = infer_growth_factor_from_statement_period(
+                    statement_period_hint,
+                    fiscal_year_start_month,
                 )
+                if inferred is None:
+                    resolved_growth_factor, detected_months, source = await run_in_threadpool(
+                        lambda: infer_growth_factor_from_input(input_path, fiscal_year_start_month=fiscal_year_start_month)
+                    )
+                else:
+                    resolved_growth_factor, detected_months, source = inferred
                 growth_factor_note = f"auto annualization 12/{detected_months} from {source}"
                 statement_month = (fiscal_year_start_month + detected_months - 2) % 12 + 1
             except Exception as e:
