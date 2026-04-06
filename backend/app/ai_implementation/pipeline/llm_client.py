@@ -11,7 +11,7 @@ from ...config import settings
 
 logger = logging.getLogger(__name__)
 
-# Module-level singleton (same pattern as old _groq_client)
+# Module-level singleton
 _gemini_client: Optional[genai.Client] = None
 
 

@@ -9,8 +9,8 @@ Provides:
   not by label keywords (fixes "reserve" label misclassification).
 - Column auto-detection: 3-tier strategy:
     1. Alias matching (multi-row header aware)
-    2. Groq LLM zero-shot mapping (if fewer than 2 aliases matched)
-    3. Hardcoded fallback indices (if Groq also fails)
+    2. LLM zero-shot mapping (if fewer than 2 aliases matched)
+    3. Hardcoded fallback indices (if LLM also fails)
 - Multi-format file reading: .xlsx (openpyxl), .xls (xlrd), .pdf (pdfplumber)
 - Financial float parsing: handles $, commas, parentheses negatives, dashes
 - Row-level validation: deferred (YTD vs Annual comparison is cross-period, needs YTD Budget extraction)
@@ -89,10 +89,10 @@ _RESERVE_STUDY_SUBHEADERS = {
     "reserve expenses per reserve study",
 }
 
-_GROQ_REQUIRED_COLUMNS = ("ytd_actual", "annual_budget", "variance")
-_GROQ_PROMPT_MAX_COLUMNS = 40
-_GROQ_LEFT_SHIFT_LIMIT = 5
-_GROQ_NUMERIC_CONFIDENCE_RATIO = 0.6
+_LLM_REQUIRED_COLUMNS = ("ytd_actual", "annual_budget", "variance")
+_LLM_PROMPT_MAX_COLUMNS = 40
+_LLM_LEFT_SHIFT_LIMIT = 5
+_LLM_NUMERIC_CONFIDENCE_RATIO = 0.6
 
 
 # ---------------------------------------------------------------------------
@@ -136,9 +136,9 @@ def _is_numeric_cell(value: Any) -> bool:
 
 
 def _max_visible_prompt_width(header_rows: list, sample_rows: list) -> int:
-    """Return the max visible width Groq can reference from the compressed prompt."""
+    """Return the max visible width LLM can reference from the compressed prompt."""
     widths = [
-        min(len(row), _GROQ_PROMPT_MAX_COLUMNS)
+        min(len(row), _LLM_PROMPT_MAX_COLUMNS)
         for row in [*header_rows, *sample_rows]
         if row is not None
     ]
@@ -167,35 +167,35 @@ def _build_line_item_sample_rows(rows: list, limit: int = 5) -> list:
     return sample_rows
 
 
-def _reject_groq_mapping(reason: str, mapping: Optional[dict], detail: str = "") -> None:
-    """Log a rejected Groq mapping with a stable reason code."""
+def _reject_llm_mapping(reason: str, mapping: Optional[dict], detail: str = "") -> None:
+    """Log a rejected LLM mapping with a stable reason code."""
     suffix = f" ({detail})" if detail else ""
-    logger.warning("Rejecting Groq column mapping [%s]: %s%s", reason, mapping, suffix)
+    logger.warning("Rejecting LLM column mapping [%s]: %s%s", reason, mapping, suffix)
 
 
-def _sanitize_groq_column_map(col_map: Optional[dict], max_prompt_width: int) -> Optional[dict]:
-    """Reject malformed or impossible Groq column suggestions before validation."""
+def _sanitize_llm_column_map(col_map: Optional[dict], max_prompt_width: int) -> Optional[dict]:
+    """Reject malformed or impossible LLM column suggestions before validation."""
     if not col_map or max_prompt_width <= 0:
-        _reject_groq_mapping("out_of_range", col_map, "no visible prompt columns")
+        _reject_llm_mapping("out_of_range", col_map, "no visible prompt columns")
         return None
 
     sanitized: dict[str, int] = {}
-    for key in _GROQ_REQUIRED_COLUMNS:
+    for key in _LLM_REQUIRED_COLUMNS:
         if key not in col_map or type(col_map[key]) is not int:
-            _reject_groq_mapping("invalid_type", col_map, f"{key} must be int")
+            _reject_llm_mapping("invalid_type", col_map, f"{key} must be int")
             return None
 
         idx = col_map[key]
         if idx < 0:
-            _reject_groq_mapping("negative", col_map, f"{key}={idx}")
+            _reject_llm_mapping("negative", col_map, f"{key}={idx}")
             return None
         if idx >= max_prompt_width:
-            _reject_groq_mapping("out_of_range", col_map, f"{key}={idx}, width={max_prompt_width}")
+            _reject_llm_mapping("out_of_range", col_map, f"{key}={idx}, width={max_prompt_width}")
             return None
         sanitized[key] = idx
 
     if len(set(sanitized.values())) != len(sanitized):
-        _reject_groq_mapping("duplicate", sanitized)
+        _reject_llm_mapping("duplicate", sanitized)
         return None
 
     return sanitized
@@ -209,38 +209,38 @@ def _numeric_ratio_for_column(data_rows: list, col_idx: int) -> float:
     return numeric_count / len(data_rows)
 
 
-def _repair_groq_column_left(col_idx: int, data_rows: list) -> Optional[int]:
+def _repair_llm_column_left(col_idx: int, data_rows: list) -> Optional[int]:
     """Accept the proposed column or shift left to the first high-confidence numeric column."""
-    for offset in range(_GROQ_LEFT_SHIFT_LIMIT + 1):
+    for offset in range(_LLM_LEFT_SHIFT_LIMIT + 1):
         candidate = col_idx - offset
         if candidate < 0:
             break
-        if _numeric_ratio_for_column(data_rows, candidate) >= _GROQ_NUMERIC_CONFIDENCE_RATIO:
+        if _numeric_ratio_for_column(data_rows, candidate) >= _LLM_NUMERIC_CONFIDENCE_RATIO:
             return candidate
     return None
 
 
-def _validate_groq_columns_against_data(col_map: Optional[dict], data_rows: list) -> Optional[dict]:
-    """Require Groq-proposed columns to prove themselves on actual line-item rows."""
+def _validate_llm_columns_against_data(col_map: Optional[dict], data_rows: list) -> Optional[dict]:
+    """Require LLM-proposed columns to prove themselves on actual line-item rows."""
     if not col_map:
         return None
     if not data_rows:
-        _reject_groq_mapping("low_confidence", col_map, "no line-item sample rows")
+        _reject_llm_mapping("low_confidence", col_map, "no line-item sample rows")
         return None
 
     validated: dict[str, int] = {}
     for key, col_idx in col_map.items():
-        repaired = _repair_groq_column_left(col_idx, data_rows)
+        repaired = _repair_llm_column_left(col_idx, data_rows)
         if repaired is None:
             ratio = _numeric_ratio_for_column(data_rows, col_idx)
-            _reject_groq_mapping("low_confidence", col_map, f"{key}={col_idx}, ratio={ratio:.2f}")
+            _reject_llm_mapping("low_confidence", col_map, f"{key}={col_idx}, ratio={ratio:.2f}")
             return None
         if repaired != col_idx:
-            logger.info("Groq column %s adjusted LEFT from %d to %d", key, col_idx, repaired)
+            logger.info("LLM column %s adjusted LEFT from %d to %d", key, col_idx, repaired)
         validated[key] = repaired
 
     if len(set(validated.values())) != len(validated):
-        _reject_groq_mapping("duplicate", validated, "after left-shift repair")
+        _reject_llm_mapping("duplicate", validated, "after left-shift repair")
         return None
 
     return validated
@@ -369,9 +369,9 @@ def _llm_column_fallback(header_rows: list, sample_rows: list) -> Optional[dict]
     # Compress: take header rows + up to 3 sample data rows
     compressed = []
     for row in header_rows:
-        compressed.append([str(cell) if cell is not None else "" for cell in row[:_GROQ_PROMPT_MAX_COLUMNS]])
+        compressed.append([str(cell) if cell is not None else "" for cell in row[:_LLM_PROMPT_MAX_COLUMNS]])
     for row in sample_rows[:3]:
-        compressed.append([str(cell) if cell is not None else "" for cell in row[:_GROQ_PROMPT_MAX_COLUMNS]])
+        compressed.append([str(cell) if cell is not None else "" for cell in row[:_LLM_PROMPT_MAX_COLUMNS]])
 
     # Format as a readable table for the LLM
     table_text = ""
@@ -480,9 +480,9 @@ def detect_columns(rows: list) -> dict:
     1. Alias matching against known header terms (multi-row header aware).
        - For multi-row headers like Esprit Park (group row + detail row),
          find group spans first, then locate "Actual"/"Variance" within groups.
-    2. If fewer than 2 required columns found -> Groq LLM zero-shot mapping
+    2. If fewer than 2 required columns found -> LLM zero-shot mapping
        with headers + 3 sample rows (per CONTEXT.md locked decision).
-    3. If Groq also fails -> hardcoded fallback indices.
+    3. If LLM also fails -> hardcoded fallback indices.
 
     Returns _FALLBACK_COLUMNS if all tiers fail.
     """
@@ -589,8 +589,8 @@ def detect_columns(rows: list) -> dict:
     line_item_sample_rows = _build_line_item_sample_rows(rows)
     max_prompt_width = _max_visible_prompt_width(header_rows, sample_rows)
     llm_result = _llm_column_fallback(header_rows, sample_rows)
-    llm_result = _sanitize_groq_column_map(llm_result, max_prompt_width)
-    llm_result = _validate_groq_columns_against_data(llm_result, line_item_sample_rows)
+    llm_result = _sanitize_llm_column_map(llm_result, max_prompt_width)
+    llm_result = _validate_llm_columns_against_data(llm_result, line_item_sample_rows)
     if llm_result is not None and len(llm_result) >= 2:
         for key in _FALLBACK_COLUMNS:
             llm_result.setdefault(key, _FALLBACK_COLUMNS[key])
@@ -1013,7 +1013,7 @@ def parse_income_statement(
 
     This is the main entry point. It:
     1. Reads the file using the appropriate format reader (_read_rows)
-    2. Auto-detects column positions from headers (with Groq LLM fallback)
+    2. Auto-detects column positions from headers (with LLM fallback)
     3. Walks rows with the section state machine
     4. Returns classified, validated line items
 
