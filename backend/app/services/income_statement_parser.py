@@ -344,10 +344,10 @@ def _extract_account_code(label: str) -> Optional[int]:
 # Column auto-detection
 # ---------------------------------------------------------------------------
 
-def _groq_column_fallback(header_rows: list, sample_rows: list) -> Optional[dict]:
-    """Tier 2: LLM fallback via existing Groq integration.
+def _llm_column_fallback(header_rows: list, sample_rows: list) -> Optional[dict]:
+    """Tier 2: LLM fallback for zero-shot column detection.
 
-    Sends header rows + up to 3 sample data rows to Groq for zero-shot
+    Sends header rows + up to 3 sample data rows to LLM for zero-shot
     schema mapping. Uses sheet compression to minimize tokens.
 
     Args:
@@ -356,7 +356,7 @@ def _groq_column_fallback(header_rows: list, sample_rows: list) -> Optional[dict
 
     Returns:
         Dict with keys {ytd_actual, annual_budget, variance} (0-based indices),
-        or None if Groq fails.
+        or None if LLM fails.
     """
     import asyncio
     from pydantic import BaseModel
@@ -407,7 +407,7 @@ def _groq_column_fallback(header_rows: list, sample_rows: list) -> Optional[dict
     ]
 
     try:
-        from ..ai_implementation.pipeline.groq_client import call_groq
+        from ..ai_implementation.pipeline.llm_client import call_llm
 
         try:
             loop = asyncio.get_running_loop()
@@ -419,10 +419,10 @@ def _groq_column_fallback(header_rows: list, sample_rows: list) -> Optional[dict
 
             with concurrent.futures.ThreadPoolExecutor() as pool:
                 result = pool.submit(
-                    asyncio.run, call_groq(messages, ColumnMapping, temperature=0.0, timeout=15.0)
+                    asyncio.run, call_llm(messages, ColumnMapping, temperature=0.0, timeout=15.0)
                 ).result()
         else:
-            result = asyncio.run(call_groq(messages, ColumnMapping, temperature=0.0, timeout=15.0))
+            result = asyncio.run(call_llm(messages, ColumnMapping, temperature=0.0, timeout=15.0))
 
         if result is not None:
             mapping = {
@@ -430,11 +430,11 @@ def _groq_column_fallback(header_rows: list, sample_rows: list) -> Optional[dict
                 "annual_budget": result.annual_budget,
                 "variance": result.variance,
             }
-            logger.info("Groq column detection succeeded: %s", mapping)
+            logger.info("LLM column detection succeeded: %s", mapping)
             return mapping
 
     except Exception as e:
-        logger.warning("Groq column fallback failed: %s", e)
+        logger.warning("LLM column fallback failed: %s", e)
 
     return None
 
@@ -583,20 +583,20 @@ def detect_columns(rows: list) -> dict:
         logger.debug("Column detection tier 1 (alias): %s", matched)
         return matched
 
-    # -- Tier 2: Groq LLM fallback --
+    # -- Tier 2: LLM fallback --
     header_rows = scan_rows
     sample_rows = rows[10:15] if len(rows) > 10 else rows[5:]
     line_item_sample_rows = _build_line_item_sample_rows(rows)
     max_prompt_width = _max_visible_prompt_width(header_rows, sample_rows)
-    groq_result = _groq_column_fallback(header_rows, sample_rows)
-    groq_result = _sanitize_groq_column_map(groq_result, max_prompt_width)
-    groq_result = _validate_groq_columns_against_data(groq_result, line_item_sample_rows)
-    if groq_result is not None and len(groq_result) >= 2:
+    llm_result = _llm_column_fallback(header_rows, sample_rows)
+    llm_result = _sanitize_groq_column_map(llm_result, max_prompt_width)
+    llm_result = _validate_groq_columns_against_data(llm_result, line_item_sample_rows)
+    if llm_result is not None and len(llm_result) >= 2:
         for key in _FALLBACK_COLUMNS:
-            groq_result.setdefault(key, _FALLBACK_COLUMNS[key])
-        groq_result["_detection_tier"] = 2
-        logger.info("Column detection tier 2 (Groq LLM): %s", groq_result)
-        return groq_result
+            llm_result.setdefault(key, _FALLBACK_COLUMNS[key])
+        llm_result["_detection_tier"] = 2
+        logger.info("Column detection tier 2 (LLM): %s", llm_result)
+        return llm_result
 
     # -- Tier 3: Hardcoded fallback --
     logger.warning("Column detection: all tiers failed, using hardcoded fallback %s", _FALLBACK_COLUMNS)

@@ -4,7 +4,7 @@ from typing import Any, Optional
 
 from ..models.schemas import LLMPass1Result, LLMPass2Result, LLMPass2FlaggedItem
 from ..models.prompts import build_pass2_system_prompt, build_pass2_user_prompt
-from ..pipeline.groq_client import call_groq
+from ..pipeline.llm_client import call_llm
 
 logger = logging.getLogger(__name__)
 
@@ -88,10 +88,10 @@ async def run_pass2(
         {"role": "user", "content": user_msg},
     ]
 
-    result = await call_groq(messages, LLMPass2Result)
+    result = await call_llm(messages, LLMPass2Result)
 
     if result is None:
-        logger.warning("Pass 2 Groq call failed, returning degraded summary")
+        logger.warning("Pass 2 LLM call failed, returning degraded summary")
         return LLMPass2Result(
             executive_summary="AI service unavailable; suggestions based on historical data only.",
             coherence_score="medium",

@@ -1,4 +1,4 @@
-"""LLM Pass 1: Per-item budget suggestion via 3 concurrent Groq batches."""
+"""LLM Pass 1: Per-item budget suggestion via 3 concurrent LLM batches."""
 import asyncio
 import logging
 from typing import Any, Optional
@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from ..db.models import SOPRule
 from ..models.schemas import EnrichedLineItem, LLMPass1Result
 from ..models.prompts import build_pass1_system_prompt, build_pass1_user_prompt
-from ..pipeline.groq_client import call_groq
+from ..pipeline.llm_client import call_llm
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
@@ -58,7 +58,7 @@ def _item_to_dict(
 
 
 def _fallback_result(item: EnrichedLineItem, cbr_results: dict, ml_results: dict) -> LLMPass1Result:
-    """Return a fallback suggestion when Groq is unavailable."""
+    """Return a fallback suggestion when LLM is unavailable."""
     cbr_anchor, cbr_sim = cbr_results.get(item.account_code, (None, None))
     ml_baseline = ml_results.get(item.account_code)
     pct = cbr_anchor if cbr_anchor is not None else (ml_baseline if ml_baseline is not None else 0.0)
@@ -106,7 +106,7 @@ async def process_batch(
     cbr_results: dict[int, tuple[Optional[float], Optional[float]]],
     ml_results: dict[int, float],
 ) -> list[LLMPass1Result]:
-    """Process a single batch of items through Groq Pass 1."""
+    """Process a single batch of items through LLM Pass 1."""
     if not batch:
         return []
 
@@ -119,10 +119,10 @@ async def process_batch(
         {"role": "user", "content": user_msg},
     ]
 
-    result = await call_groq(messages, Pass1BatchResult)
+    result = await call_llm(messages, Pass1BatchResult)
 
     if result is None:
-        logger.warning(f"Groq Pass 1 failed for batch of {len(batch)} items, using fallback")
+        logger.warning(f"LLM Pass 1 failed for batch of {len(batch)} items, using fallback")
         return [_fallback_result(item, cbr_results, ml_results) for item in batch]
 
     result_map = {r.account_code: r for r in result.results}
@@ -145,7 +145,7 @@ async def run_pass1(
 ) -> list[LLMPass1Result]:
     """Run Pass 1: 3 async batches via asyncio.gather().
 
-    Loads SOP rules from database, dispatches 3 concurrent Groq calls.
+    Loads SOP rules from database, dispatches 3 concurrent LLM calls.
     """
     sop_rules = list(session.scalars(
         select(SOPRule.rule_text).where(SOPRule.active == 1).order_by(SOPRule.id)
