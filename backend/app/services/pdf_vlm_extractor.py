@@ -1,6 +1,8 @@
 """LLM-first PDF extraction with schema enforcement and deterministic validation.
 
-Uses pdfplumber text extraction + Gemini (hybrid text + image mode) for single-call extraction.
+Uses pdfplumber text extraction + Groq LLM (text mode) instead of vision.
+The 70B text model is far more accurate at structured reasoning than the
+17B vision model, and pdfplumber preserves exact numeric values from the PDF.
 """
 from __future__ import annotations
 
@@ -32,10 +34,10 @@ logger = logging.getLogger(__name__)
 
 
 def render_pdf_pages(path: str, max_pages: Optional[int] = None) -> list[RenderedPage]:
-    """Render PDF pages to PNG bytes for the hybrid ingestion path.
+    """Render PDF pages to PNG bytes for the VLM path.
 
     Kept for backward compatibility with tests and the VisionStatementExtractor
-    protocol.
+    protocol. Not used by the text-based extraction path.
     """
     try:
         import fitz  # type: ignore
@@ -167,6 +169,82 @@ _SYSTEM_PROMPT = (
 )
 
 
+class GroqTextStatementExtractor:
+    """Extract financial statements using Groq text LLM + pdfplumber text.
+
+    Processes each page separately to stay within token limits, then merges
+    all line items into a single statement.
+    """
+
+    async def extract_from_text(
+        self,
+        pdf_text: str,
+        *,
+        schema: type[ExtractedFinancialStatement],
+        prompt_context: DocumentPromptContext,
+    ) -> ExtractedFinancialStatement:
+        from ..ai_implementation.pipeline.groq_client import call_groq_vision
+        import asyncio
+
+        # Split into per-page chunks
+        pages = _split_pages(pdf_text)
+        all_line_items: list[dict[str, Any]] = []
+        statement_period: Optional[str] = None
+
+        for page_num, page_text in enumerate(pages, start=1):
+            user_content = (
+                f"Filename: {prompt_context.filename}\n"
+                f"Page: {page_num} of {len(pages)}\n"
+                f"Notes: {' | '.join(prompt_context.notes) if prompt_context.notes else 'none'}\n\n"
+                f"DOCUMENT TEXT (page {page_num}):\n{page_text}\n\n"
+                "Extract every detail line item from this page. Do not stop early."
+            )
+
+            messages = [
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "user", "content": user_content},
+            ]
+
+            result = await call_groq_vision(messages, schema, temperature=0.0, timeout=60.0)
+            if result is None:
+                logger.warning("Page %d extraction returned None, skipping", page_num)
+                continue
+
+            if isinstance(result, ExtractedFinancialStatement):
+                for item in result.line_items:
+                    item_dict = item.model_dump()
+                    item_dict["page_number"] = page_num
+                    all_line_items.append(item_dict)
+                if result.statement_period and not statement_period:
+                    statement_period = result.statement_period
+            elif isinstance(result, dict):
+                for item in result.get("line_items", []):
+                    if isinstance(item, dict):
+                        item["page_number"] = page_num
+                        all_line_items.append(item)
+                if result.get("statement_period") and not statement_period:
+                    statement_period = result["statement_period"]
+
+            # Rate limit buffer between pages
+            if page_num < len(pages):
+                await asyncio.sleep(2)
+
+        if not all_line_items:
+            raise RuntimeError("Groq text extraction returned no line items from any page.")
+
+        # Merge into single statement
+        merged = ExtractedFinancialStatement.model_validate({
+            "document_family": "pdf_visual_document",
+            "report_type": "income_statement",
+            "statement_period": statement_period,
+            "line_items": all_line_items,
+            "totals": [],
+            "validation_issues": [],
+            "confidence": 0.0,
+        })
+        return merged
+
+
 def _split_pages(pdf_text: str) -> list[str]:
     """Split PDF text into per-page chunks based on '--- Page N ---' markers."""
     parts = re.split(r"--- Page \d+ ---\n?", pdf_text)
@@ -174,48 +252,28 @@ def _split_pages(pdf_text: str) -> list[str]:
     return [p.strip() for p in parts if p.strip()]
 
 
-async def _extract_full_document(
-    pdf_path: str,
-    prompt_context: DocumentPromptContext,
-    schema: type[ExtractedFinancialStatement],
-    max_pages: int,
-) -> Optional[ExtractedFinancialStatement]:
-    """Extract full document via single Gemini call with hybrid text+image content.
+# Keep the vision extractor for backward compatibility with tests
+class GroqVisionStatementExtractor:
+    """Legacy provider-backed extractor using Groq vision. Delegates to text path."""
 
-    Per D-11: sends both pdfplumber text (exact numerics) and page images (visual context).
-    Per D-12: one API call for the entire document instead of per-page splitting.
-    """
-    from ..ai_implementation.pipeline.llm_client import call_llm_vision
+    async def extract_statement(
+        self,
+        pages: list[RenderedPage],
+        *,
+        schema: type[ExtractedFinancialStatement],
+        prompt_context: DocumentPromptContext,
+    ) -> ExtractedFinancialStatement:
+        from ..ai_implementation.pipeline.groq_client import call_groq_vision
 
-    pdf_text = _extract_pdf_text_table(pdf_path, max_pages=max_pages)
-    rendered_pages = render_pdf_pages(pdf_path, max_pages=max_pages)
+        messages = [
+            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "user", "content": "Extract all line items from this document."},
+        ]
 
-    # Build multimodal content: text first, then all page images
-    user_content_parts = []
-    user_content_parts.append({
-        "type": "text",
-        "text": (
-            f"Filename: {prompt_context.filename}\n"
-            f"Notes: {' | '.join(prompt_context.notes) if prompt_context.notes else 'none'}\n\n"
-            f"DOCUMENT TEXT (all pages):\n{pdf_text}\n\n"
-            "Extract every detail line item. Do not stop early."
-        ),
-    })
-    for page in rendered_pages:
-        if page.content is not None:
-            user_content_parts.append({
-                "type": "image",
-                "data": page.content,
-                "mime_type": page.mime_type,
-            })
-
-    messages = [
-        {"role": "system", "content": _SYSTEM_PROMPT},
-        {"role": "user", "content": user_content_parts},
-    ]
-
-    # Higher timeout for full-document processing (was 60s per page)
-    return await call_llm_vision(messages, schema, temperature=0.0, timeout=90.0)
+        result = await call_groq_vision(messages, schema, temperature=0.0, timeout=60.0)
+        if result is None:
+            raise RuntimeError("Groq vision extraction returned no structured result.")
+        return result
 
 
 async def extract_pdf_statement(
@@ -226,7 +284,7 @@ async def extract_pdf_statement(
 ) -> ExtractedFinancialStatement | DocumentExtractionFailure:
     """Extract a canonical financial statement from a PDF.
 
-    Primary path: pdfplumber text extraction + Gemini hybrid text+image model (single call).
+    Primary path: pdfplumber text extraction + Groq 70B text model.
     Falls back to vision path if a custom provider is supplied.
     """
     prompt_context = DocumentPromptContext(
@@ -247,13 +305,17 @@ async def extract_pdf_statement(
                     prompt_context=prompt_context,
                 )
             else:
-                # Default path: hybrid text+image single-call extraction
-                raw_result = await _extract_full_document(
-                    path, prompt_context, ExtractedFinancialStatement,
-                    max_pages=max_pages or settings.DOCUMENT_VLM_MAX_PAGES,
+                # Default path: text extraction
+                pdf_text = _extract_pdf_text_table(
+                    path, max_pages=max_pages or settings.DOCUMENT_VLM_MAX_PAGES
                 )
-                if raw_result is None:
-                    raise RuntimeError("Gemini extraction returned no structured result.")
+                logger.info("PDF text extracted: %d characters", len(pdf_text))
+                extractor = GroqTextStatementExtractor()
+                raw_result = await extractor.extract_from_text(
+                    pdf_text,
+                    schema=ExtractedFinancialStatement,
+                    prompt_context=prompt_context,
+                )
 
             statement = (
                 raw_result
