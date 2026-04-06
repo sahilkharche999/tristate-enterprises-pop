@@ -3,7 +3,7 @@ Unit tests for backend/app/services/income_statement_parser.py
 
 Tests cover:
 - Section state machine classification
-- Column auto-detection (3-tier: alias, Groq LLM, hardcoded fallback)
+- Column auto-detection (3-tier: alias, LLM, hardcoded fallback)
 - Financial float parsing
 - .xls file reading (xlrd)
 - PDF text extraction (pdfplumber)
@@ -268,95 +268,95 @@ class TestColumnDetection(unittest.TestCase):
         self.assertIsInstance(result["ytd_actual"], int)
         self.assertIsInstance(result["annual_budget"], int)
 
-    def test_column_detection_alias_fallback_triggers_groq(self):
-        """When alias matching finds fewer than 2 columns, Groq fallback is called."""
+    def test_column_detection_alias_fallback_triggers_llm(self):
+        """When alias matching finds fewer than 2 columns, LLM fallback is called."""
         unrecognizable_rows = self._unrecognizable_rows_with_data()
 
-        groq_return = {"ytd_actual": 15, "annual_budget": 28, "variance": 22}
+        llm_return = {"ytd_actual": 15, "annual_budget": 28, "variance": 22}
 
-        with patch.object(income_statement_parser, "_groq_column_fallback", return_value=groq_return) as mock_groq:
+        with patch.object(income_statement_parser, "_llm_column_fallback", return_value=llm_return) as mock_llm:
             result = detect_columns(unrecognizable_rows)
 
-        mock_groq.assert_called_once()
+        mock_llm.assert_called_once()
         self.assertEqual(result["ytd_actual"], 15)
         self.assertEqual(result["annual_budget"], 28)
         self.assertEqual(result["variance"], 22)
 
-    def test_column_detection_groq_failure_falls_back_to_hardcoded(self):
-        """When alias matching fails AND Groq returns None, use hardcoded fallback."""
+    def test_column_detection_llm_failure_falls_back_to_hardcoded(self):
+        """When alias matching fails AND LLM returns None, use hardcoded fallback."""
         unrecognizable_rows = [
             [None] * 40,
             ["Foo", "Bar", "Baz"] + [None] * 37,
         ]
 
-        with patch.object(income_statement_parser, "_groq_column_fallback", return_value=None):
+        with patch.object(income_statement_parser, "_llm_column_fallback", return_value=None):
             result = detect_columns(unrecognizable_rows)
 
         self.assertEqual(result["ytd_actual"], _FALLBACK_COLUMNS["ytd_actual"])
         self.assertEqual(result["annual_budget"], _FALLBACK_COLUMNS["annual_budget"])
         self.assertEqual(result["_detection_tier"], 3)
 
-    def test_column_detection_partial_match_triggers_groq(self):
-        """When only 1 column recognized (fewer than 2), triggers Groq fallback tier."""
+    def test_column_detection_partial_match_triggers_llm(self):
+        """When only 1 column recognized (fewer than 2), triggers LLM fallback tier."""
         # Only "Annual Budget" header present — not enough for alias match (need >= 2)
         partial_rows = [
             [None] * 40,
             [None] * 10 + ["Annual Budget"] + [None] * 29,
         ] + [_line_item_row("50000 - test") for _ in range(5)]
 
-        groq_return = {"ytd_actual": 10, "annual_budget": 10, "variance": 11}
+        llm_return = {"ytd_actual": 10, "annual_budget": 10, "variance": 11}
 
-        with patch.object(income_statement_parser, "_groq_column_fallback", return_value=groq_return) as mock_groq:
+        with patch.object(income_statement_parser, "_llm_column_fallback", return_value=llm_return) as mock_llm:
             result = detect_columns(partial_rows)
 
-        mock_groq.assert_called_once()
+        mock_llm.assert_called_once()
         self.assertIn("ytd_actual", result)
 
-    def test_column_detection_rejects_negative_groq_indices(self):
+    def test_column_detection_rejects_negative_llm_indices(self):
         rows = self._unrecognizable_rows_with_data()
-        groq_return = {"ytd_actual": -1, "annual_budget": 28, "variance": 22}
+        llm_return = {"ytd_actual": -1, "annual_budget": 28, "variance": 22}
 
-        with patch.object(income_statement_parser, "_groq_column_fallback", return_value=groq_return):
+        with patch.object(income_statement_parser, "_llm_column_fallback", return_value=llm_return):
             result = detect_columns(rows)
 
         self.assertEqual(result["ytd_actual"], _FALLBACK_COLUMNS["ytd_actual"])
         self.assertEqual(result["annual_budget"], _FALLBACK_COLUMNS["annual_budget"])
 
-    def test_column_detection_rejects_out_of_range_groq_indices(self):
+    def test_column_detection_rejects_out_of_range_llm_indices(self):
         rows = self._unrecognizable_rows_with_data()
-        groq_return = {"ytd_actual": 15, "annual_budget": 41, "variance": 22}
+        llm_return = {"ytd_actual": 15, "annual_budget": 41, "variance": 22}
 
-        with patch.object(income_statement_parser, "_groq_column_fallback", return_value=groq_return):
+        with patch.object(income_statement_parser, "_llm_column_fallback", return_value=llm_return):
             result = detect_columns(rows)
 
         self.assertEqual(result["ytd_actual"], _FALLBACK_COLUMNS["ytd_actual"])
         self.assertEqual(result["annual_budget"], _FALLBACK_COLUMNS["annual_budget"])
 
-    def test_column_detection_rejects_duplicate_groq_indices(self):
+    def test_column_detection_rejects_duplicate_llm_indices(self):
         rows = self._unrecognizable_rows_with_data()
-        groq_return = {"ytd_actual": 15, "annual_budget": 15, "variance": 22}
+        llm_return = {"ytd_actual": 15, "annual_budget": 15, "variance": 22}
 
-        with patch.object(income_statement_parser, "_groq_column_fallback", return_value=groq_return):
+        with patch.object(income_statement_parser, "_llm_column_fallback", return_value=llm_return):
             result = detect_columns(rows)
 
         self.assertEqual(result["ytd_actual"], _FALLBACK_COLUMNS["ytd_actual"])
         self.assertEqual(result["annual_budget"], _FALLBACK_COLUMNS["annual_budget"])
 
-    def test_column_detection_rejects_low_confidence_groq_mapping(self):
+    def test_column_detection_rejects_low_confidence_llm_mapping(self):
         rows = self._unrecognizable_rows_with_data()
-        groq_return = {"ytd_actual": 3, "annual_budget": 4, "variance": 5}
+        llm_return = {"ytd_actual": 3, "annual_budget": 4, "variance": 5}
 
-        with patch.object(income_statement_parser, "_groq_column_fallback", return_value=groq_return):
+        with patch.object(income_statement_parser, "_llm_column_fallback", return_value=llm_return):
             result = detect_columns(rows)
 
         self.assertEqual(result["ytd_actual"], _FALLBACK_COLUMNS["ytd_actual"])
         self.assertEqual(result["annual_budget"], _FALLBACK_COLUMNS["annual_budget"])
 
-    def test_column_detection_repairs_groq_header_positions_leftward(self):
+    def test_column_detection_repairs_llm_header_positions_leftward(self):
         rows = self._unrecognizable_rows_with_data(col_ytd=19, col_ab=32, col_var=26)
-        groq_return = {"ytd_actual": 20, "annual_budget": 34, "variance": 28}
+        llm_return = {"ytd_actual": 20, "annual_budget": 34, "variance": 28}
 
-        with patch.object(income_statement_parser, "_groq_column_fallback", return_value=groq_return):
+        with patch.object(income_statement_parser, "_llm_column_fallback", return_value=llm_return):
             result = detect_columns(rows)
 
         self.assertEqual(result["ytd_actual"], 19)
