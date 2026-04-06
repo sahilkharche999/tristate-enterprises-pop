@@ -51,10 +51,10 @@ class Settings(BaseSettings):
     # Cookie security (True for HTTPS/production, set False for local dev)
     COOKIE_SECURE: bool = True
 
-    # AI Pipeline
-    GROQ_API_KEY: str = ""
+    # AI Pipeline (Gemini)
+    GEMINI_API_KEY: str = ""
+    GEMINI_MODEL: str = "gemini-3.1-flash-lite-preview"
     DB_PATH: str = str(Path(__file__).parent / "ai_implementation" / "data" / "budget_ai.db")
-    MODEL_NAME: str = "llama-3.3-70b-versatile"
     CBR_THRESHOLD: float = 0.95
     CATBOOST_ENABLED: bool = False  # Set True to enable CatBoost ML stage
     CATBOOST_MIN_CASES: int = 100
