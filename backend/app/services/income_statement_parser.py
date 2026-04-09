@@ -32,9 +32,24 @@ import logging
 import re
 import unicodedata
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional, get_args
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Canonical section taxonomy — single source of truth for section classification.
+# ---------------------------------------------------------------------------
+# Imported by: budget_history_service, normalized_statement_workbook,
+# financial_document_extraction (Pydantic model), and taxonomy invariant tests.
+#
+# Every layer of the pipeline (Gemini extraction, parser state machine,
+# `_infer_category`, frontend LineItem) MUST use these exact strings.
+SectionKind = Literal["income", "operating", "reserve_income", "reserve_expense"]
+SECTION_KINDS: tuple[str, ...] = get_args(SectionKind)
+
+# Sections whose items are displayed as read-only (not editable, not in totals).
+# Changing this single constant changes read-only behavior everywhere.
+READ_ONLY_SECTIONS: frozenset[str] = frozenset({"reserve_income", "reserve_expense"})
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -417,10 +432,17 @@ def _llm_column_fallback(header_rows: list, sample_rows: list) -> Optional[dict]
         if loop and loop.is_running():
             import concurrent.futures
 
+            def _run_in_new_loop():
+                new_loop = asyncio.new_event_loop()
+                try:
+                    return new_loop.run_until_complete(
+                        call_llm(messages, ColumnMapping, temperature=0.0, timeout=15.0)
+                    )
+                finally:
+                    new_loop.close()
+
             with concurrent.futures.ThreadPoolExecutor() as pool:
-                result = pool.submit(
-                    asyncio.run, call_llm(messages, ColumnMapping, temperature=0.0, timeout=15.0)
-                ).result()
+                result = pool.submit(_run_in_new_loop).result()
         else:
             result = asyncio.run(call_llm(messages, ColumnMapping, temperature=0.0, timeout=15.0))
 
@@ -672,7 +694,7 @@ def parse_rows_with_sections(
             continue
 
         account_code = _extract_account_code(label)
-        is_read_only = current_section == "reserve_expense" and in_reserve_study_block
+        is_read_only = current_section in READ_ONLY_SECTIONS
 
         ytd_idx = col_indices.get("ytd_actual", _FALLBACK_COLUMNS["ytd_actual"])
         annual_idx = col_indices.get("annual_budget", _FALLBACK_COLUMNS["annual_budget"])

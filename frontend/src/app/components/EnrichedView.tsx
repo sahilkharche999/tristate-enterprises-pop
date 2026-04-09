@@ -256,7 +256,7 @@ export function EnrichedView({
                               {inputMode[item.id] === 'dollar' ? (
                                 <span>{item.percentChange > 0 ? '+' : ''}{item.percentChange.toFixed(1)}%</span>
                               ) : (
-                                <span>{proposedChange >= projection ? '+' : ''}{formatCurrency(proposedChange - projection)}</span>
+                                <span>{proposedChange >= item.annualBudget ? '+' : ''}{formatCurrency(proposedChange - item.annualBudget)}</span>
                               )}
                             </div>
                           )}
@@ -334,25 +334,28 @@ export function EnrichedView({
                     ] : [])
                   ];
                 }),
-                // Category Total
+                // Category Total — per-category subtotal row. Passes includeReadOnly=true
+                // so read-only reserve categories sum their real values instead of
+                // collapsing to $0. proposedChange/monthly stay 0 for read-only items
+                // via calcDisplayProposed (read-only items have no proposed changes).
                 <tr key={`${category}-total`} className="bg-[#f5f5f5] font-semibold border-b-2 border-[#d4d4d4]">
                   <td className="px-6 py-4 text-sm text-[#111111]">{getCategoryLabel(category)} Total</td>
                   <td className="px-6 py-4 text-sm text-[#111111] text-right font-mono">
-                    {formatCurrency(calcDisplayCategoryTotal(items, 'ytdActual', reserveInflationRate))}
+                    {formatCurrency(calcDisplayCategoryTotal(items, 'ytdActual', reserveInflationRate, true))}
                   </td>
                   <td className="px-6 py-4 text-sm text-[#111111] text-right font-mono">
-                    {formatCurrency(calcDisplayCategoryTotal(items, 'annualBudget', reserveInflationRate))}
+                    {formatCurrency(calcDisplayCategoryTotal(items, 'annualBudget', reserveInflationRate, true))}
                   </td>
                   <td className="px-6 py-4 text-sm text-[#737373] text-right">—</td>
                   <td className="px-6 py-4 text-sm text-[#111111] text-right font-mono">
-                    {formatCurrency(calcDisplayCategoryTotal(items, 'projection', reserveInflationRate))}
+                    {formatCurrency(calcDisplayCategoryTotal(items, 'projection', reserveInflationRate, true))}
                   </td>
                   <td className="px-6 py-4 text-sm text-[#737373] text-right">—</td>
                   <td className="px-6 py-4 text-sm font-bold text-[#111111] text-right font-mono">
-                    {formatCurrency(calcDisplayCategoryTotal(items, 'proposedChange', reserveInflationRate))}
+                    {formatCurrency(calcDisplayCategoryTotal(items, 'proposedChange', reserveInflationRate, true))}
                   </td>
                   <td className="px-6 py-4 text-sm text-[#737373] text-right font-mono">
-                    {formatCurrency(calcDisplayCategoryTotal(items, 'monthly', reserveInflationRate))}
+                    {formatCurrency(calcDisplayCategoryTotal(items, 'monthly', reserveInflationRate, true))}
                   </td>
                   <td className="px-6 py-4"></td>
                 </tr>

@@ -88,7 +88,7 @@ async def run_pass2(
         {"role": "user", "content": user_msg},
     ]
 
-    result = await call_llm(messages, LLMPass2Result)
+    result = await call_llm(messages, LLMPass2Result, timeout=30.0)
 
     if result is None:
         logger.warning("Pass 2 LLM call failed, returning degraded summary")

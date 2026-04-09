@@ -116,6 +116,16 @@ class BudgetHistoryResponse(BaseModel):
     notes: list[BudgetNoteRecord] = Field(default_factory=list)
 
 
+class ExtractionQualityWarning(BaseModel):
+    """Plain-language warning shown to non-technical users when an upload
+    succeeded but the extraction took a degraded path."""
+
+    code: str  # machine-readable identifier (e.g. "scanned_pdf_vision_only")
+    title: str
+    body: str
+    severity: str = "warning"  # "warning" | "info"
+
+
 class BudgetUploadResponse(BaseModel):
     upload_id: int
     draft: Optional[BudgetDraftPayload] = None
@@ -123,6 +133,12 @@ class BudgetUploadResponse(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     review_required: bool = False
     review_reason: Optional[str] = None
+    # Set when the extractor took a degraded path (e.g. scanned-PDF
+    # vision-only fallback). The frontend renders this as a one-shot
+    # dismissible dialog telling the user to double-check the numbers.
+    # None means the upload used the normal high-confidence path; no
+    # quality warning is needed.
+    extraction_quality_warning: Optional[ExtractionQualityWarning] = None
 
 
 class BudgetDraftSaveRequest(BaseModel):

@@ -28,6 +28,7 @@ def validate_extracted_statement(statement: ExtractedFinancialStatement) -> list
 
     populated_numeric_rows = 0
     zero_only_rows = 0
+    annual_budget_populated_rows = 0
     seen_keys: set[tuple[str, str]] = set()
     duplicate_keys: set[tuple[str, str]] = set()
 
@@ -46,6 +47,12 @@ def validate_extracted_statement(statement: ExtractedFinancialStatement) -> list
             populated_numeric_rows += 1
         else:
             zero_only_rows += 1
+
+        # Track annual_budget coverage separately. The downstream tool's whole
+        # job is to propose next year's annual budget — a parse with no annual
+        # budget data is unusable even if other numeric columns survived.
+        if item.annual_budget is not None and not _is_effectively_zero(item.annual_budget):
+            annual_budget_populated_rows += 1
 
         dup_key = ((item.account_code_text or "").strip().lower(), item.label.strip().lower())
         if dup_key in seen_keys:
@@ -68,6 +75,33 @@ def validate_extracted_statement(statement: ExtractedFinancialStatement) -> list
                 "severity": "error",
                 "message": "Most extracted line items are zero-only, which suggests a low-confidence parse.",
                 "details": {"zero_only_rows": zero_only_rows, "line_item_count": len(line_items)},
+            }
+        )
+
+    # Reject parses with no usable annual budget data. The upload flow is
+    # specifically designed to take an income statement and suggest next
+    # year's annual budget per line item. Without annual budget figures the
+    # downstream draft is empty in the only column that matters, so it is
+    # better to reject the upload with a clear message than to silently
+    # create a useless draft. Threshold: at least 30% of rows must have a
+    # non-zero annual_budget value.
+    annual_budget_coverage = annual_budget_populated_rows / max(len(line_items), 1)
+    if annual_budget_coverage < 0.30:
+        issues.append(
+            {
+                "code": "missing_annual_budget_coverage",
+                "severity": "error",
+                "message": (
+                    "This statement does not include annual budget figures, so the "
+                    "tool cannot use it to draft next year's budget. Please upload a "
+                    "year-end income statement (or one that explicitly shows the annual "
+                    "budget column for every line item)."
+                ),
+                "details": {
+                    "annual_budget_populated_rows": annual_budget_populated_rows,
+                    "line_item_count": len(line_items),
+                    "coverage_ratio": round(annual_budget_coverage, 4),
+                },
             }
         )
 

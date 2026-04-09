@@ -120,20 +120,24 @@ export function BudgetView({ lineItems, units, reserveInflationRate }: BudgetVie
                     </tr>
                   );
                 }),
-                // Category Total
+                // Category Total — per-category subtotal row. Passes includeReadOnly=true
+                // for ytdActual/projection so read-only reserve items contribute to their
+                // own category's subtotal (otherwise a category where every item is
+                // read-only would always display $0). proposedChange/monthly naturally
+                // stay 0 for read-only items via calcDisplayProposed.
                 <tr key={`${category}-total`} className="bg-[#F7F7F7] font-medium border-b border-[#E5E5E5]">
                   <td className="px-6 py-3 text-sm text-[#111111]">{getCategoryLabel(category)} Total</td>
                   <td className="px-6 py-3 text-sm text-[#666666] text-right">
-                    {formatCurrency(calcDisplayCategoryTotal(items, 'ytdActual', reserveInflationRate))}
+                    {formatCurrency(calcDisplayCategoryTotal(items, 'ytdActual', reserveInflationRate, true))}
                   </td>
                   <td className="px-6 py-3 text-sm text-[#666666] text-right">
-                    {formatCurrency(calcDisplayCategoryTotal(items, 'projection', reserveInflationRate))}
+                    {formatCurrency(calcDisplayCategoryTotal(items, 'projection', reserveInflationRate, true))}
                   </td>
                   <td className="px-6 py-3 text-sm font-medium text-[#111111] text-right">
-                    {formatCurrency(calcDisplayCategoryTotal(items, 'proposedChange', reserveInflationRate))}
+                    {formatCurrency(calcDisplayCategoryTotal(items, 'proposedChange', reserveInflationRate, true))}
                   </td>
                   <td className="px-6 py-3 text-sm text-[#666666] text-right">
-                    {formatCurrency(calcDisplayCategoryTotal(items, 'monthly', reserveInflationRate))}
+                    {formatCurrency(calcDisplayCategoryTotal(items, 'monthly', reserveInflationRate, true))}
                   </td>
                 </tr>
               ])}

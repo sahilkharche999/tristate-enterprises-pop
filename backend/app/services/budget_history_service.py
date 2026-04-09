@@ -4,12 +4,15 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import shutil
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -27,6 +30,9 @@ from ..services.income_statement_parser import (
     detect_columns,
     _parse_financial_float as _parse_financial_float_new,
     _match_section_header,
+    _classify_by_account_code,
+    SECTION_KINDS,
+    READ_ONLY_SECTIONS,
 )
 from ..services.financial_document_router import choose_financial_document_route
 from ..services.financial_statement_validation import (
@@ -60,6 +66,7 @@ from ..models.budget_history import (
     BudgetNoteSaveResponse,
     BudgetTimelineEvent,
     BudgetUploadResponse,
+    ExtractionQualityWarning,
     BudgetVersionCompareCard,
     BudgetVersionCompareResponse,
     BudgetVersionDetail,
@@ -186,6 +193,10 @@ def _canonical_statement_from_line_items(
     family: str,
 ) -> ExtractedFinancialStatement:
     canonical_items: list[ExtractedStatementLineItem] = []
+
+    def _opt_float(value: Any) -> Optional[float]:
+        return _parse_float(value) if value is not None else None
+
     for item in line_items:
         raw_section = str(item.get("raw", {}).get("section") or item.get("section") or item.get("category") or "")
         account_code = item.get("account_code")
@@ -194,9 +205,18 @@ def _canonical_statement_from_line_items(
                 account_code_text=None if account_code is None else str(account_code),
                 label=str(item.get("label") or item.get("name") or ""),
                 section_label=raw_section or None,
-                section_kind=str(item.get("category") or "") or None,
-                ytd_actual=_parse_float(item.get("ytd_actual")) if item.get("ytd_actual") is not None else None,
-                annual_budget=_parse_float(item.get("annual_budget")) if item.get("annual_budget") is not None else None,
+                section_kind=_coerce_canonical_section_kind(item.get("category")),
+                # Pass through every numeric field the validator can use.
+                # Previously only ytd_actual and annual_budget were forwarded,
+                # which made Cummins Park-style "budgeted but no actual yet"
+                # rows look zero-only and trip the validator.
+                current_actual=_opt_float(item.get("current_actual")),
+                current_budget=_opt_float(item.get("current_budget")),
+                current_variance=_opt_float(item.get("current_variance")),
+                ytd_actual=_opt_float(item.get("ytd_actual")),
+                ytd_budget=_opt_float(item.get("ytd_budget")),
+                ytd_variance=_opt_float(item.get("ytd_variance")),
+                annual_budget=_opt_float(item.get("annual_budget")),
             )
         )
     return ExtractedFinancialStatement(
@@ -449,31 +469,43 @@ def _extract_account_code(label: str) -> Optional[int]:
     return int(head) if head.isdigit() else None
 
 
+def _coerce_canonical_section_kind(value: Any) -> Optional[str]:
+    """Coerce a category value into canonical 4-value taxonomy, or None.
+
+    Used by `_canonical_statement_from_line_items` to ensure emitted
+    `section_kind` values always match SECTION_KINDS.
+    """
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    return text if text in SECTION_KINDS else None
+
+
 def _infer_category(label: str, account_code: Optional[int], section: str) -> str:
-    """Infer category from section state. Falls back to account code ranges.
+    """Infer canonical 4-value category from section state.
+
+    Returns one of SECTION_KINDS: "income", "operating",
+    "reserve_income", "reserve_expense".
+
+    Delegates to the parser's `_match_section_header` (same prefix logic as
+    parse_rows_with_sections) so the PDF pre-processed path stays in lockstep
+    with the raw Excel path. Falls back to account-code ranges when no
+    section header text matches.
 
     IMPORTANT: Does NOT check label keywords. Section position is authoritative.
     """
-    normalized_section = (section or "").strip().lower()
+    # Direct match against canonical values (for already-classified rows)
+    raw_normalized = (section or "").strip().lower()
+    if raw_normalized in SECTION_KINDS:
+        return raw_normalized
 
-    # Section state is the primary signal (from section state machine)
-    if normalized_section.startswith("operating income") or normalized_section.startswith("income"):
-        return "income"
-    if normalized_section.startswith("operating expense") or normalized_section.startswith("operating"):
-        return "operating"
-    if normalized_section.startswith("reserve"):
-        return "reserve"
+    # Section header prefix match (same logic as the raw-statement parser)
+    matched = _match_section_header(section or "")
+    if matched is not None:
+        return matched
 
-    # Fallback to account code ranges when no section header matched
-    if account_code is not None:
-        if 40000 <= account_code <= 49999:
-            return "income"
-        if 50000 <= account_code <= 89999:
-            return "operating"
-        if account_code >= 90000:
-            return "reserve"
-
-    return "operating"
+    # Fallback to account code ranges (returns one of SECTION_KINDS)
+    return _classify_by_account_code(account_code)
 
 
 def _line_items_to_percent_changes(line_items: list[dict[str, Any]]) -> dict[str, float]:
@@ -525,21 +557,49 @@ def _table_to_line_items(table: dict[str, Any]) -> tuple[list[dict[str, Any]], l
     line_items: list[dict[str, Any]] = []
     for row in table.get("rows", []):
         item = {header: row[index] if index < len(row) else None for index, header in enumerate(headers)}
-        label = item.get("Label") or item.get("Account Name") or item.get("Description") or f"Line Item {len(line_items) + 1}"
-        account_code = item.get("Account Code") or item.get("Account")
+
+        # Skip section header marker rows. The normalized workbook inserts rows
+        # where col A (Section) has the header text and all other cols are None.
+        # These are structural markers, NOT line items, and must not produce
+        # ghost "Line Item N" entries in the output.
+        raw_label = item.get("Label") or item.get("Account Name") or item.get("Description")
+        raw_account_code = item.get("Account Code") or item.get("Account")
+        if not raw_label and not raw_account_code:
+            continue
+
+        label = raw_label or f"Line Item {len(line_items) + 1}"
+        account_code = raw_account_code
         line_item_key = str(account_code or label)
         section = item.get("Section") or item.get("section") or ""
-        category = _infer_category(str(label), _extract_account_code(str(account_code or label)), section)
+        category = _infer_category(
+            str(label),
+            _extract_account_code(str(account_code or label)),
+            section,
+        )
         normalized = {
             "line_item_key": line_item_key,
             "account_code": account_code,
             "label": label,
             "category": category,
+            # Project ALL seven numeric columns from the enriched workbook so
+            # downstream validation (`validate_extracted_statement`) can see
+            # them. Cummins Park exposed why this matters: that PDF has rows
+            # with current/ytd budgets but $0 actuals, so dropping ytd_budget
+            # and current_budget made every "no actual spend yet" row look
+            # zero-only and tripped `suspicious_zero_heavy_output`.
+            "current_actual": item.get("Current Actual"),
+            "current_budget": item.get("Current Budget"),
+            "current_variance": item.get("Current Variance"),
             "ytd_actual": item.get("YTD Actual"),
+            "ytd_budget": item.get("YTD Budget"),
+            "ytd_variance": item.get("YTD Variance"),
             "annual_budget": item.get("Annual Budget"),
             "projection": item.get("Projection"),
             "percent_change": item.get("% Change") or item.get("Percent Change"),
-            "read_only": category == "reserve_expense",  # only reserve study expense items are read-only
+            # Use shared constant so read-only logic is consistent with the parser
+            # and the taxonomy definition. Adding a new read-only section means
+            # changing ONE constant (READ_ONLY_SECTIONS), not this check.
+            "read_only": category in READ_ONLY_SECTIONS,
             "raw": item,
         }
         line_items.append(normalized)
@@ -959,6 +1019,31 @@ def create_upload(
                     warnings=[pdf_result.message],
                 )
 
+            # Diagnostic: log a sample of what Gemini returned BEFORE the
+            # XLSX round-trip. Used to debug "missing_numeric_coverage"
+            # validation failures — lets us see whether numerics were lost
+            # at the model boundary or during the workbook round-trip below.
+            try:
+                _sample = pdf_result.line_items[:5]
+                logger.info(
+                    "PDF extraction sample (post-Gemini, pre-roundtrip): %d items, first 5 = %s",
+                    len(pdf_result.line_items),
+                    [
+                        {
+                            "label": getattr(item, "label", None),
+                            "section_kind": getattr(item, "section_kind", None),
+                            "current_actual": getattr(item, "current_actual", None),
+                            "current_budget": getattr(item, "current_budget", None),
+                            "ytd_actual": getattr(item, "ytd_actual", None),
+                            "ytd_budget": getattr(item, "ytd_budget", None),
+                            "annual_budget": getattr(item, "annual_budget", None),
+                        }
+                        for item in _sample
+                    ],
+                )
+            except Exception as _log_exc:
+                logger.debug("Could not log PDF extraction sample: %s", _log_exc)
+
             statement_period_hint = pdf_result.statement_period or extract_pdf_statement_period_hint(pdf_source_path)
             normalized_path = build_normalized_statement_workbook(pdf_result)
             cleanup_paths.add(normalized_path)
@@ -986,6 +1071,11 @@ def create_upload(
         statement_month = _extract_statement_month(hoa.fiscal_year_start_month or 1, detected_months)
         intermediate_path = str(temp_output_dir / "Income_Statement_Enriched.xlsx")
         output_path = str(temp_output_dir / "Budget_Pipeline.xlsx")
+        # PDF extraction: pass known column positions so enricher skips detection
+        pdf_known_columns = (
+            {"ytd_actual": 6, "annual_budget": 9}
+            if route.path == "pdf_vlm" else None
+        )
         pipeline = BudgetPipeline(
             input_path=temp_input_path,
             intermediate_path=intermediate_path,
@@ -993,11 +1083,41 @@ def create_upload(
             growth_factor=growth_factor,
             growth_factor_note=growth_factor_note,
             enrich_only=False,
+            known_columns=pdf_known_columns,
         )
         pipeline.run()
         enriched = macros_service.read_sheet_as_table(intermediate_path, "Income Statement")
         preview = macros_service.read_first_sheet_preview(output_path, settings.MAX_PREVIEW_ROWS)
         line_items, parse_warnings = _table_to_line_items(enriched)
+        # Diagnostic: log a sample of items AFTER the XLSX round-trip.
+        # Compare against the post-Gemini sample logged earlier to see
+        # whether numerics survived BudgetPipeline column detection and
+        # _table_to_line_items.
+        if route.path == "pdf_vlm":
+            try:
+                _sample_after = line_items[:5]
+                logger.info(
+                    "PDF extraction sample (post-roundtrip, pre-validation): %d items, first 5 = %s",
+                    len(line_items),
+                    [
+                        {
+                            "label": item.get("label"),
+                            "category": item.get("category"),
+                            "ytd_actual": item.get("ytd_actual"),
+                            "annual_budget": item.get("annual_budget"),
+                            "projection": item.get("projection"),
+                            "raw_keys": list((item.get("raw") or {}).keys())[:12],
+                        }
+                        for item in _sample_after
+                    ],
+                )
+                logger.info(
+                    "Enriched workbook headers (%d total) = %s",
+                    len(enriched.get("headers", [])),
+                    enriched.get("headers", []),
+                )
+            except Exception as _log_exc:
+                logger.debug("Could not log post-roundtrip sample: %s", _log_exc)
         canonical_statement = _canonical_statement_from_line_items(
             line_items,
             family=route.family or ("pdf_visual_document" if route.path == "pdf_vlm" else "known_clean_excel_workbook"),
@@ -1062,11 +1182,33 @@ def create_upload(
             payload={"statement_month": statement_month, "growth_factor": growth_factor},
         )
         session.commit()
+        # If the extractor took a degraded path (e.g. scanned-PDF vision-only
+        # fallback), surface a one-shot quality warning so the frontend can
+        # show a dismissible dialog. The text is written for non-technical
+        # users and explains why they should double-check the numbers.
+        quality_warning: Optional[ExtractionQualityWarning] = None
+        if route.path == "pdf_vlm" and isinstance(pdf_result, ExtractedFinancialStatement):
+            metadata = pdf_result.extraction_metadata or {}
+            if metadata.get("used_vision_only_fallback"):
+                quality_warning = ExtractionQualityWarning(
+                    code="scanned_pdf_vision_only",
+                    title="Please double-check the numbers below",
+                    body=(
+                        "This file was a scanned image, so we had to read every "
+                        "number from the page picture instead of the file's text. "
+                        "That's usually accurate, but not always — please review "
+                        "every line item carefully (especially actuals and budgets) "
+                        "before saving. If you find mistakes, try re-uploading the "
+                        "original Excel file instead."
+                    ),
+                    severity="warning",
+                )
         return BudgetUploadResponse(
             upload_id=upload.id,
             draft=_serialize_draft(draft, upload),
             timeline_event=_serialize_timeline_event(upload_received_event),
             warnings=parse_warnings,
+            extraction_quality_warning=quality_warning,
         )
     except Exception as exc:
         upload.enrichment_status = "failed"

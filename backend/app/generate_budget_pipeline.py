@@ -146,6 +146,7 @@ class IncomeStatementEnricher:
         growth_factor_note: Optional[str] = None,
         am_seed_workbook: Optional[str] = None,
         sheet_name: str = "Income Statement",
+        known_columns: Optional[Dict[str, int]] = None,
     ):
         self.input_path = input_path
         self.output_path = output_path
@@ -159,11 +160,44 @@ class IncomeStatementEnricher:
         self.sheet_name = sheet_name
         self.am_seed_by_row: Dict[int, float] = {}
         self.an_seed_by_row: Dict[int, float] = {}
-        self._detect_input_columns()
+        if known_columns:
+            # PDF extraction path: column positions are known, skip detection
+            self.COL_T = known_columns["ytd_actual"] + 1   # 0-based → 1-based
+            self.COL_AG = known_columns["annual_budget"] + 1
+            max_data_col = max(self.COL_T, self.COL_AG)
+            self.COL_AK = max_data_col + 4
+            self.COL_AL = max_data_col + 5
+            self.COL_AM = max_data_col + 6
+            self.COL_AN = max_data_col + 7
+            self.COL_AO = max_data_col + 8
+            self._detect_data_start_row()
+        else:
+            self._detect_input_columns()
 
     # Row where enrichment headers are written and data starts on the next row
     HEADER_ROW = 5
     DATA_START_ROW = 6
+
+    def _detect_data_start_row(self):
+        """Detect only the data start row (used when columns are already known)."""
+        try:
+            wb = load_workbook(self.input_path, data_only=True)
+            ws = wb[self.sheet_name] if self.sheet_name in wb.sheetnames else wb.active
+            from .services.income_statement_parser import _match_section_header, _extract_account_code
+            for r in range(1, min(20, ws.max_row + 1)):
+                a = str(ws.cell(row=r, column=self.COL_A).value or "").strip()
+                b = str(ws.cell(row=r, column=self.COL_B).value or "").strip()
+                if _match_section_header(a) is not None:
+                    self.DATA_START_ROW = r
+                    self.HEADER_ROW = r - 1
+                    break
+                if b and _extract_account_code(b) is not None:
+                    self.DATA_START_ROW = r
+                    self.HEADER_ROW = r - 1
+                    break
+            wb.close()
+        except Exception:
+            pass
 
     def _detect_input_columns(self):
         """Detect column positions and data start row from the input file."""
@@ -754,7 +788,8 @@ class BudgetPipeline:
                  am_seed_workbook: Optional[str] = None,
                  aliases_path: Optional[str] = None,
                  enrich_only: bool = False,
-                 hoa_name: str = ''):
+                 hoa_name: str = '',
+                 known_columns: Optional[Dict[str, int]] = None):
         self.input_path = input_path
         self.intermediate_path = intermediate_path
         self.output_path = output_path
@@ -766,6 +801,7 @@ class BudgetPipeline:
         self.aliases_path = aliases_path
         self.enrich_only = enrich_only
         self.hoa_name = hoa_name
+        self.known_columns = known_columns
 
     def run(self):
         """Execute the full pipeline."""
@@ -793,6 +829,7 @@ class BudgetPipeline:
             growth_factor=self.growth_factor,
             growth_factor_note=self.growth_factor_note,
             am_seed_workbook=self.am_seed_workbook,
+            known_columns=self.known_columns,
         )
         enricher.enrich()
         # Propagate detected positions for downstream BudgetGenerator

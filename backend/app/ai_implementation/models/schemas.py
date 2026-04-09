@@ -1,5 +1,5 @@
 """Pydantic schemas for the AI Budget Pipeline API and internal pipeline."""
-from typing import Optional
+from typing import Any, Optional
 from pydantic import BaseModel, Field
 
 
@@ -120,9 +120,14 @@ class EnrichedLineItem(BaseModel):
 
 class LLMPass1Result(BaseModel):
     account_code: int
-    suggested_pct_change: float = Field(..., ge=-0.30, le=0.30)
+    suggested_pct_change: float
     reason: str
-    confidence: float = Field(..., ge=0.0, le=1.0)
+    confidence: float
+
+    def model_post_init(self, __context: Any) -> None:
+        # Clamp values that Gemini may return outside business range
+        self.suggested_pct_change = max(-0.30, min(0.30, self.suggested_pct_change))
+        self.confidence = max(0.0, min(1.0, self.confidence))
 
 
 class LLMPass2FlaggedItem(BaseModel):

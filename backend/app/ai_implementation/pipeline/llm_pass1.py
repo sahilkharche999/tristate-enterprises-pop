@@ -119,7 +119,7 @@ async def process_batch(
         {"role": "user", "content": user_msg},
     ]
 
-    result = await call_llm(messages, Pass1BatchResult)
+    result = await call_llm(messages, Pass1BatchResult, timeout=30.0)
 
     if result is None:
         logger.warning(f"LLM Pass 1 failed for batch of {len(batch)} items, using fallback")

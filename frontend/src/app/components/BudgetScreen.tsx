@@ -1,9 +1,18 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router';
-import { ArrowLeft, Download, FileText, Settings, Trash2, Upload } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, Download, FileText, Settings, Trash2, Upload } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { Button } from './ui/button';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from './ui/alert-dialog';
 import { AISuggestionMode } from './AISuggestionMode';
 import { BudgetView } from './BudgetView';
 import { DraftBaselineComparePanel } from './DraftBaselineComparePanel';
@@ -16,6 +25,7 @@ import {
   saveBudgetDraft,
   uploadBudgetSource,
   type BudgetDraftPayload,
+  type ExtractionQualityWarning,
 } from '../api/budgetHistory';
 import { type AISuggestion, type AISuggestionResponse, type FeedbackDecision, type LineItem } from '../data/mockData';
 import type { HOARecord } from '../api/hoa';
@@ -114,6 +124,10 @@ export function BudgetScreen({
   >(null);
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
+  // One-shot dismissible quality warning shown when the backend used a
+  // degraded extraction path (e.g. scanned-PDF vision-only fallback). State
+  // lives only in this component, so reload clears it — by design.
+  const [qualityWarning, setQualityWarning] = useState<ExtractionQualityWarning | null>(null);
   const activeReserveInflationRate =
     typeof hoa.reserve_inflation_rate === 'number' && Number.isFinite(hoa.reserve_inflation_rate)
       ? hoa.reserve_inflation_rate
@@ -174,6 +188,24 @@ export function BudgetScreen({
     setUploadState('uploading');
     try {
       const response = await uploadBudgetSource(hoaId, file);
+
+      // Review-required path: the backend accepted the upload (HTTP 200) but
+      // refused to build a draft because extraction failed or validation
+      // flagged blocking issues. response.draft is null in this case.
+      // Surface the review_reason + warnings and stay on the upload screen —
+      // the user's next step is to upload a different file or report the issue.
+      if (!response.draft) {
+        const reason =
+          response.review_reason ||
+          'We could not build a draft from this file. Please verify the statement and try again.';
+        toast.error(reason, { duration: 12000 });
+        for (const w of response.warnings ?? []) {
+          toast.warning(w, { duration: 10000 });
+        }
+        setUploadState('initial');
+        return;
+      }
+
       const mappedLineItems = mapBudgetHistoryLineItems(response.draft.line_items);
       onLineItemsUpdate(mappedLineItems);
       setDraftId(response.draft.id);
@@ -186,11 +218,14 @@ export function BudgetScreen({
       setUploadState('complete');
       toast.success('Income statement uploaded and draft created.');
       // Show parser warnings (e.g. Tier 3 fallback)
-      const warnings = (response as Record<string, unknown>).warnings as string[] | undefined;
-      if (warnings?.length) {
-        for (const w of warnings) {
-          toast.warning(w, { duration: 10000 });
-        }
+      for (const w of response.warnings ?? []) {
+        toast.warning(w, { duration: 10000 });
+      }
+      // If the backend took a degraded extraction path (e.g. scanned-PDF
+      // vision-only fallback), pop a one-shot dismissible dialog so the
+      // user knows to double-check the numbers before saving.
+      if (response.extraction_quality_warning) {
+        setQualityWarning(response.extraction_quality_warning);
       }
     } catch (error) {
       toast.error(getErrorMessage(error, 'Upload failed. Please try again.'));
@@ -527,6 +562,31 @@ export function BudgetScreen({
 
   return (
     <div className="min-h-screen bg-[#fafafa]">
+      {qualityWarning ? (
+        <AlertDialog
+          open={true}
+          onOpenChange={(open) => {
+            if (!open) setQualityWarning(null);
+          }}
+        >
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle className="flex items-center gap-2 text-[#92400e]">
+                <AlertTriangle className="h-5 w-5" aria-hidden="true" />
+                {qualityWarning.title}
+              </AlertDialogTitle>
+              <AlertDialogDescription className="whitespace-pre-line text-[#525252]">
+                {qualityWarning.body}
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogAction onClick={() => setQualityWarning(null)}>
+                Got it
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      ) : null}
       <header className="sticky top-0 z-10 border-b border-[#e5e5e5] bg-white shadow-sm">
         <div className="px-8 py-6">
           <div className="mb-4 flex items-center justify-between">

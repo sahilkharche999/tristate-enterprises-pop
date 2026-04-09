@@ -166,11 +166,12 @@ def enrich_all_items(
         )
 
         if is_read_only:
+            item_data = item.model_dump()
+            item_data["read_only"] = True
             enriched.append(EnrichedLineItem(
-                **item.model_dump(),
+                **item_data,
                 **hierarchy,
                 seasonality_index=seasonality_index,
-                read_only=True,
             ))
             continue
 

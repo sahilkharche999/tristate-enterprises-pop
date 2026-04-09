@@ -52,8 +52,12 @@ class Settings(BaseSettings):
     COOKIE_SECURE: bool = True
 
     # AI Pipeline (Gemini)
+    # Both must be provided via environment (.env or shell). No hardcoded defaults:
+    # GEMINI_API_KEY is a secret, and GEMINI_MODEL is deployment policy. The app
+    # fails fast at call time (see llm_client.py) when either is empty, rather
+    # than silently shipping a baked-in value that can go stale.
     GEMINI_API_KEY: str = ""
-    GEMINI_MODEL: str = "gemini-3.1-flash-lite-preview"
+    GEMINI_MODEL: str = ""
     DB_PATH: str = str(Path(__file__).parent / "ai_implementation" / "data" / "budget_ai.db")
     DOCUMENT_VLM_ENABLED: bool = False
     DOCUMENT_VLM_MAX_PAGES: int = 6

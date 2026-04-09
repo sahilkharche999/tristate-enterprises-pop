@@ -104,10 +104,27 @@ export interface BudgetHistoryResponse {
   notes: BudgetNoteRecord[];
 }
 
+export interface ExtractionQualityWarning {
+  code: string;
+  title: string;
+  body: string;
+  severity: 'warning' | 'info';
+}
+
 export interface BudgetUploadResponse {
   upload_id: number;
-  draft: BudgetDraftPayload;
+  // Null when the backend decides the extraction needs manual review (PDF
+  // extraction failed, or the parsed statement failed confidence checks).
+  // Callers MUST check for null and fall back to review_reason / warnings.
+  draft: BudgetDraftPayload | null;
   timeline_event: BudgetTimelineEvent;
+  warnings?: string[];
+  review_required?: boolean;
+  review_reason?: string | null;
+  // Set when the extractor took a degraded path (e.g. scanned-PDF
+  // vision-only fallback). The frontend should render this as a one-shot
+  // dismissible dialog so the user knows to double-check the numbers.
+  extraction_quality_warning?: ExtractionQualityWarning | null;
 }
 
 export interface SaveBudgetDraftPayload {
@@ -291,9 +308,22 @@ function readRecord(value: JsonValue | undefined): JsonObject {
 
 function inferCategory(record: JsonObject, label: string, accountCode?: number): LineItem['category'] {
   const explicit = pickString(record.category, record.category_name, readRecord(record.raw).Category);
-  if (explicit === 'income' || explicit === 'operating' || explicit === 'reserve' || explicit === 'reserve_income' || explicit === 'reserve_expense') {
+  // Accept the canonical 4-value taxonomy directly.
+  if (
+    explicit === 'income' ||
+    explicit === 'operating' ||
+    explicit === 'reserve_income' ||
+    explicit === 'reserve_expense'
+  ) {
     return explicit;
   }
+  // Legacy: coerce deprecated 3-value "reserve" → "reserve_expense".
+  // Retained for one release cycle while drafts migrate to the 4-value taxonomy.
+  if (explicit === 'reserve') {
+    return 'reserve_expense';
+  }
+
+  const normalizedLabel = (label || '').toLowerCase();
   if (
     normalizedLabel.includes('income') ||
     normalizedLabel.includes('revenue') ||
@@ -303,7 +333,11 @@ function inferCategory(record: JsonObject, label: string, accountCode?: number):
   ) {
     return 'income';
   }
-  if (accountCode != null && accountCode < 5000) {
+  // Account-code ranges aligned with backend _classify_by_account_code.
+  if (accountCode != null && accountCode >= 90000) {
+    return 'reserve_expense';
+  }
+  if (accountCode != null && accountCode < 50000) {
     return 'income';
   }
   return 'operating';
@@ -312,7 +346,20 @@ function inferCategory(record: JsonObject, label: string, accountCode?: number):
 export function budgetHistoryLineItemToEditorItem(record: JsonObject, index: number): LineItem {
   const raw = readRecord(record.raw);
   const accountCodeValue = record.account_code ?? raw['Account Code'] ?? raw.Account;
-  const accountCode = accountCodeValue == null ? undefined : Number(accountCodeValue) || undefined;
+  // Handle hyphenated PDF account codes (e.g. "41-4110" → 414110)
+  const accountCodeStr = accountCodeValue == null ? null : String(accountCodeValue).replace(/[-.\s]/g, '');
+  let accountCode = accountCodeStr ? (Number(accountCodeStr) || undefined) : undefined;
+  // Generate synthetic account code from label hash for PDFs without account codes
+  if (accountCode == null) {
+    const labelForHash = pickString(record.label, record.name, raw.Label, raw['Account Name'], raw.Description) ?? '';
+    if (labelForHash) {
+      let hash = 0;
+      for (let i = 0; i < labelForHash.length; i++) {
+        hash = ((hash << 5) - hash + labelForHash.charCodeAt(i)) | 0;
+      }
+      accountCode = 90000 + (Math.abs(hash) % 9999);
+    }
+  }
   const label =
     pickString(record.label, record.name, raw.Label, raw['Account Name'], raw.Description) ??
     `Line Item ${index + 1}`;

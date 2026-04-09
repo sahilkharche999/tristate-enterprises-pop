@@ -8,7 +8,11 @@ services:
       - budget-storage:/app/data/budget-storage
     environment:
       - ALLOW_ORIGINS=http://localhost,http://localhost:80,http://localhost:5173,http://0.0.0.0,http://0.0.0.0:80
+      # GEMINI_API_KEY and GEMINI_MODEL must be set in .env (no fallbacks here —
+      # backend fails fast at call time via llm_client._require_gemini_config).
+      # Example values: GEMINI_MODEL=gemini-2.5-flash, gemini-2.5-flash-lite.
       - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GEMINI_MODEL=${GEMINI_MODEL}
       - JWT_SECRET_KEY=${JWT_SECRET_KEY}
       - COOKIE_SECURE=false
     restart: unless-stopped

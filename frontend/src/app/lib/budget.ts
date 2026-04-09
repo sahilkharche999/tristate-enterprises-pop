@@ -118,14 +118,31 @@ export const calcCategoryTotal = (items: LineItem[], field: TotalField): number 
     return sum + item.ytdActual;
   }, 0);
 
+// MARKER_FRONTEND_BUILD_PROOF_20260407_2014_INCLUDEREADONLY_FIX_LIVE
 export const calcDisplayCategoryTotal = (
   items: LineItem[],
   field: TotalField,
   reserveInflationRate?: number | null,
-): number =>
-  items.reduce((sum, item) => {
+  includeReadOnly: boolean = false,
+): number => {
+  if (typeof window !== 'undefined') {
+    (window as unknown as { __CALC_DISPLAY_CATEGORY_TOTAL_MARKER__?: string }).__CALC_DISPLAY_CATEGORY_TOTAL_MARKER__ = 'INCLUDEREADONLY_FIX_LIVE_20260407';
+  }
+  return items.reduce((sum, item) => {
+    // Two modes:
+    //   includeReadOnly=false (default): used for cross-category grand totals.
+    //     Reserve items are excluded so they don't double-count with the
+    //     operating "Allocation to Reserves" line that funds them.
+    //   includeReadOnly=true: used for per-category subtotal rows. The subtotal
+    //     for a read-only category (reserve_income, reserve_expense) must sum
+    //     the real values — otherwise it displays $0 even though the rows show
+    //     real numbers, which misleads the user.
+    // Note: calcDisplayProposed/calcDisplayMonthly still return 0 for read-only
+    // items, so per-category subtotals for 'proposedChange' and 'monthly' will
+    // correctly show $0 (read-only items have no proposed adjustments).
+    if (item.readOnly && !includeReadOnly) return sum;
     if (field === 'projection') {
-      return sum + (item.readOnly ? 0 : (item.projection ?? 0));
+      return sum + (item.projection ?? 0);
     }
     if (field === 'proposedChange') {
       return sum + calcDisplayProposed(item, reserveInflationRate);
@@ -138,3 +155,4 @@ export const calcDisplayCategoryTotal = (
     }
     return sum + item.ytdActual;
   }, 0);
+};
