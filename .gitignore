@@ -3,6 +3,7 @@ frontend/node_modules/
 backend/.venv/
 .pnp
 .pnp.js
+node_modules/
 
 # Environment variables
 .env
@@ -41,3 +42,101 @@ Thumbs.db
 # Cache
 .eslintcache
 .cache/
+.pytest_cache/
+
+# Project tooling
+.claude/
+openspec/
+docs/
+.agents/
+
+# Planning artifacts (generated, not source code)
+.planning/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+*.egg-info/
+
+# Data / runtime artifacts
+mockdata/
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+
+# Client documents (sensitive financial data, not source code)
+Example Income Statements/
+Example Reserve Studies/
+Tri State Documents/
+
+# Client data files in project root (not source code)
+/Tri-State Budget.xlsx
+/Tri-State Product Delivery Draft 6.xlsx
+/*.xlsx
+/*.pdf
+
+# Root data/ folder (copies of seed files, not needed in repo)
+/data/
+
+# Backend runtime storage (uploads, generated budgets, temp files)
+backend/tmp/
+backend/data/
+backend/app/ai_implementation/data/budget_ai.db*
+
+# Unused seed data files (not needed for seeding or app)
+backend/app/ai_implementation/seed/data/401 Income Statement Dec 2024.xlsx
+backend/app/ai_implementation/seed/data/Budget_Template.xlsx
+backend/app/ai_implementation/seed/data/Income Statement Esprit Park Aug 2025.xlsx
+
+# Manual diagnostic / one-off scripts at backend root.
+# Real tests live in backend/tests/ — anything matching backend/test_*.py at the
+# top of backend/ is by convention an ad-hoc debug script (e.g. test_gemini_pdfs.py)
+# that should not be committed.
+backend/test_*.py
+
+# Next.js build cache. The frontend is a Vite app, but a .next/ directory exists
+# from earlier scaffolding and gets recreated by some tooling. Always ignore.
+frontend/.next/
+frontend/out/
+
+# Python tooling caches and coverage artifacts
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+*.cover
+
+# Backup, swap, and merge-conflict artifacts
+*.bak
+*.orig
+*.tmp
+*.rej
+
+# Local Docker Compose overrides (per-developer customizations, not shared config)
+docker-compose.override.yml
+docker-compose.local.yml
+docker-compose.*.local.yml
+
+# Secrets, certificates, and credentials — defensive ignore so these can never
+# accidentally land in a commit. Real secrets belong in .env (already ignored)
+# or in a secrets manager.
+*.pem
+*.crt
+*.cert
+*.p12
+*.pfx
+id_rsa
+id_rsa.pub
+id_dsa
+id_ecdsa
+id_ed25519
+service-account*.json
+gcp-credentials*.json
+google-credentials*.json
+credentials.json
+secrets.json

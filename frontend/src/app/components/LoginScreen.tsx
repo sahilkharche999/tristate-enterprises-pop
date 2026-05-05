@@ -1,36 +1,45 @@
-import { useState } from 'react';
-import { useNavigate } from 'react-router';
+import { useState, useEffect } from 'react';
+import { useNavigate, useLocation, Link } from 'react-router';
 import { Input } from './ui/input';
 import { Button } from './ui/button';
 import { Eye, EyeOff } from 'lucide-react';
+import { useAuth } from '../context/AuthContext';
+import { login as loginApi } from '../api/auth';
 
 export function LoginScreen() {
   const navigate = useNavigate();
+  const location = useLocation();
+  const auth = useAuth();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const signupSuccess = (location.state as any)?.signupSuccess;
 
-  const handleLogin = (e: React.FormEvent) => {
+  useEffect(() => {
+    if (auth.isAuthenticated) navigate('/workspace');
+  }, [auth.isAuthenticated, navigate]);
+
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
-    setIsLoading(true);
 
-    // Simple validation
     if (!email || !password) {
       setError('Please enter both email and password');
-      setIsLoading(false);
       return;
     }
 
-    // Simulate login delay
-    setTimeout(() => {
-      // For demo purposes, accept any credentials
-      // In production, this would validate against a real authentication service
+    setIsLoading(true);
+    try {
+      const response = await loginApi(email, password);
+      auth.login(response);
       navigate('/workspace');
+    } catch (err: any) {
+      setError(err?.message || 'Login failed. Please check your credentials.');
+    } finally {
       setIsLoading(false);
-    }, 800);
+    }
   };
 
   return (
@@ -102,6 +111,13 @@ export function LoginScreen() {
               </div>
             </div>
 
+            {/* Success Message (after signup) */}
+            {signupSuccess && !error && (
+              <div className="bg-[#d1fae5] border border-[#a7f3d0] text-[#065f46] px-4 py-3 rounded-lg text-sm">
+                Account created successfully. Please sign in.
+              </div>
+            )}
+
             {/* Error Message */}
             {error && (
               <div className="bg-[#fee] border border-[#fcc] text-[#c33] px-4 py-3 rounded-lg text-sm">
@@ -119,10 +135,13 @@ export function LoginScreen() {
             </Button>
           </form>
 
-          {/* Additional Info */}
+          {/* Sign Up Link */}
           <div className="mt-6 pt-6 border-t border-[#e5e5e5]">
-            <p className="text-xs text-center text-[#737373]">
-              Authorized personnel only. All access is logged and monitored.
+            <p className="text-sm text-center text-[#737373]">
+              Don't have an account?{' '}
+              <Link to="/signup" className="text-[#111111] hover:underline font-medium">
+                Sign Up
+              </Link>
             </p>
           </div>
         </div>

@@ -4,15 +4,24 @@ This app exposes endpoints that accept an uploaded Excel file and parameters, ru
 pipeline-style computations and return JSON results. Configuration values are
 externalized via `app.config.settings` (pydantic.BaseSettings).
 """
-from .config import settings
-from .routers import macros
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+import asyncio
 import logging
 import sys
+from contextlib import asynccontextmanager
 
-# Basic logging configuration for the application. Containers and prod deployments
-# can override this via environment or a more advanced logging setup.
+from fastapi import Depends, FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from .config import settings
+from .routers import macros
+from .auth.router import router as auth_router
+from .auth.dependencies import get_current_user
+from .ai_implementation.database import init_db
+from .ai_implementation.seed.seed_database import run_seed
+from .ai_implementation.router import router as ai_router
+from .routers.budget_history import router as budget_history_router
+from .routers.hoa import router as hoa_router
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
@@ -22,7 +31,18 @@ logger = logging.getLogger(__name__)
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="VBA -> Python Macro Pipeline")
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        try:
+            init_db()
+            logger.info("AI pipeline database initialized")
+            await asyncio.to_thread(run_seed)
+        except Exception as e:
+            logger.warning(f"AI pipeline startup failed: {e}")
+        yield
+
+    app = FastAPI(title="VBA -> Python Macro Pipeline", lifespan=lifespan)
 
     allow_origins = [o.strip() for o in settings.ALLOW_ORIGINS.split(',')] if settings.ALLOW_ORIGINS else ["*"]
 
@@ -34,7 +54,22 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    app.include_router(macros.router, prefix="")
+    # Auth routes (unprotected)
+    app.include_router(auth_router)
+
+    # Protected macro routes
+    app.include_router(macros.router, prefix="", dependencies=[Depends(get_current_user)])
+
+    # Protected HOA routes
+    app.include_router(hoa_router, prefix="", dependencies=[Depends(get_current_user)])
+    app.include_router(budget_history_router, prefix="", dependencies=[Depends(get_current_user)])
+
+    # Protected AI routes
+    app.include_router(
+        ai_router, prefix="/ai", tags=["AI Pipeline"],
+        dependencies=[Depends(get_current_user)],
+    )
+    logger.info("AI Budget Pipeline router mounted at /ai")
 
     return app
 

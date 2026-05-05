@@ -1,0 +1,4 @@
+{
+  "default": [0.25, 0.25, 0.25, 0.25],
+  "_comment": "All accounts use flat monthly budgeting (annual/12) per Esprit Park income statements. Seasonal weights may be derived empirically from multi-year monthly actuals in the future."
+}

@@ -1,64 +1,59 @@
 import { useState } from 'react';
-import { MessageSquare, ChevronDown, ChevronUp, Percent, DollarSign } from 'lucide-react';
+import { MessageSquare, ChevronDown, Percent, DollarSign } from 'lucide-react';
+import { toast } from 'sonner';
 import { Input } from './ui/input';
 import { Button } from './ui/button';
+import { saveBudgetNote } from '../api/budgetHistory';
 import { type LineItem } from '../data/mockData';
+import {
+  formatCurrency,
+  getCategoryLabel,
+  calcProposed,
+  calcMonthly,
+  calcPercentDiff,
+  calcDisplayCategoryTotal,
+  calcDisplayMonthly,
+  calcDisplayProposed,
+  calcSettingsDerivedReservePercent,
+  isReserveComponent,
+} from '../lib/budget';
+import { getErrorMessage } from '../lib/errors';
 
 interface EnrichedViewProps {
+  hoaId: string;
+  draftId: number | null;
   lineItems: LineItem[];
   onPercentChange: (itemId: string, newPercent: number) => void;
-  onNoteUpdate: (itemId: string, title: string, body: string) => void;
+  onNoteSaved: (itemId: string, title: string, body: string) => void;
   units: number;
+  reserveInflationRate: number;
 }
 
-export function EnrichedView({ lineItems, onPercentChange, onNoteUpdate, units }: EnrichedViewProps) {
+export function EnrichedView({
+  hoaId,
+  draftId,
+  lineItems,
+  onPercentChange,
+  onNoteSaved,
+  units,
+  reserveInflationRate,
+}: EnrichedViewProps) {
   const [expandedNote, setExpandedNote] = useState<string | null>(null);
   const [noteEdits, setNoteEdits] = useState<Record<string, { title: string; body: string }>>({});
-  const [calculating, setCalculating] = useState(false);
-  const [operatingIncomePercent, setOperatingIncomePercent] = useState(0);
-  const [incomeHeaderPercent, setIncomeHeaderPercent] = useState(0);
   const [inputMode, setInputMode] = useState<Record<string, 'percent' | 'dollar'>>({});
+  const [savingNoteId, setSavingNoteId] = useState<string | null>(null);
 
-  const formatCurrency = (value: number) => {
-    return new Intl.NumberFormat('en-US', {
-      style: 'currency',
-      currency: 'USD',
-      minimumFractionDigits: 0,
-      maximumFractionDigits: 0,
-    }).format(value);
-  };
-
-  const calculatePercentDifference = (ytd: number, budget: number) => {
-    if (ytd === 0) return 0;
-    return ((budget - ytd) / ytd) * 100;
-  };
-
-  const calculateProjection = (ytd: number) => {
-    // Extrapolate YTD to full year (assuming 8 months of data)
-    return (ytd / 8) * 12;
-  };
-
-  const calculateProposedChange = (projection: number, percentChange: number) => {
-    return projection * (1 + percentChange / 100);
-  };
-
-  const calculateMonthly = (proposedChange: number) => {
-    return proposedChange / 12;
-  };
 
   const handlePercentChangeInput = (itemId: string, value: string) => {
     const numValue = parseFloat(value) || 0;
-    setCalculating(true);
     onPercentChange(itemId, numValue);
-    setTimeout(() => setCalculating(false), 300);
   };
 
-  const handleDollarChangeInput = (itemId: string, dollarValue: string, projection: number) => {
+  const handleDollarChangeInput = (itemId: string, dollarValue: string, annualBudget: number) => {
     const numValue = parseFloat(dollarValue) || 0;
-    const percentChange = projection > 0 ? ((numValue - projection) / projection) * 100 : 0;
-    setCalculating(true);
+    // Invert backend formula: proposed = annualBudget × (1 + % change)
+    const percentChange = annualBudget > 0 ? ((numValue / annualBudget) - 1) * 100 : 0;
     onPercentChange(itemId, percentChange);
-    setTimeout(() => setCalculating(false), 300);
   };
 
   const toggleInputMode = (itemId: string) => {
@@ -66,20 +61,6 @@ export function EnrichedView({ lineItems, onPercentChange, onNoteUpdate, units }
       ...prev,
       [itemId]: prev[itemId] === 'dollar' ? 'percent' : 'dollar'
     }));
-  };
-
-  const handleOperatingIncomeChange = (value: string) => {
-    const numValue = parseFloat(value) || 0;
-    setCalculating(true);
-    setOperatingIncomePercent(numValue);
-    setTimeout(() => setCalculating(false), 300);
-  };
-
-  const handleIncomeHeaderChange = (value: string) => {
-    const numValue = parseFloat(value) || 0;
-    setCalculating(true);
-    setIncomeHeaderPercent(numValue);
-    setTimeout(() => setCalculating(false), 300);
   };
 
   const toggleNote = (itemId: string) => {
@@ -97,23 +78,32 @@ export function EnrichedView({ lineItems, onPercentChange, onNoteUpdate, units }
     }
   };
 
-  const saveNote = (itemId: string) => {
-    const edit = noteEdits[itemId];
-    if (edit) {
-      onNoteUpdate(itemId, edit.title, edit.body);
+  const saveNote = async (itemId: string) => {
+    if (!draftId) {
+      toast.error('Upload an income statement before saving notes.');
+      return;
     }
-  };
 
-  const getCategoryLabel = (category: string) => {
-    switch (category) {
-      case 'income':
-        return 'INCOME';
-      case 'operating':
-        return 'OPERATING EXPENSES';
-      case 'reserve':
-        return 'RESERVE CONTRIBUTIONS';
-      default:
-        return category.toUpperCase();
+    const edit = noteEdits[itemId];
+    const item = lineItems.find((entry) => entry.id === itemId);
+    if (edit && item) {
+      setSavingNoteId(itemId);
+      try {
+        await saveBudgetNote(hoaId, {
+          draft_id: draftId,
+          note_scope: 'line_item',
+          line_item_key: String(item.accountCode ?? item.label ?? item.name),
+          title: edit.title,
+          body: edit.body,
+        });
+        onNoteSaved(itemId, edit.title, edit.body);
+        toast.success('Note saved to sync history.');
+        setExpandedNote(null);
+      } catch (error) {
+        toast.error(getErrorMessage(error, 'Failed to save note.'));
+      } finally {
+        setSavingNoteId(null);
+      }
     }
   };
 
@@ -125,40 +115,16 @@ export function EnrichedView({ lineItems, onPercentChange, onNoteUpdate, units }
     return acc;
   }, {} as Record<string, LineItem[]>);
 
-  // Calculate totals
-  const calculateCategoryTotal = (items: LineItem[], field: 'ytdActual' | 'annualBudget' | 'projection' | 'proposedChange' | 'monthly') => {
-    return items.reduce((sum, item) => {
-      if (field === 'projection') {
-        return sum + calculateProjection(item.ytdActual);
-      } else if (field === 'proposedChange') {
-        const projection = calculateProjection(item.ytdActual);
-        return sum + calculateProposedChange(projection, item.percentChange);
-      } else if (field === 'monthly') {
-        const projection = calculateProjection(item.ytdActual);
-        const proposedChange = calculateProposedChange(projection, item.percentChange);
-        return sum + calculateMonthly(proposedChange);
-      }
-      return sum + item[field];
-    }, 0);
-  };
+  // Total Annual Budget = expenses only (operating + reserve expenses), not reserve income
+  const totalAnnualBudget =
+    calcDisplayCategoryTotal(groupedItems['operating'] || [], 'proposedChange', reserveInflationRate) +
+    calcDisplayCategoryTotal(groupedItems['reserve'] || [], 'proposedChange', reserveInflationRate) +
+    calcDisplayCategoryTotal(groupedItems['reserve_expense'] || [], 'proposedChange', reserveInflationRate);
 
-  // Total Annual Budget
-  const totalAnnualBudget = lineItems.reduce((sum, item) => {
-    const projection = calculateProjection(item.ytdActual);
-    return sum + calculateProposedChange(projection, item.percentChange);
-  }, 0);
-
-  const perUnitMonthly = totalAnnualBudget / 12 / units;
+  const perUnitMonthly = units > 0 ? totalAnnualBudget / 12 / units : null;
 
   return (
     <div className="space-y-8">
-      {/* Calculation Status */}
-      {calculating && (
-        <div className="fixed top-20 right-8 bg-[#111111] text-white px-4 py-2.5 rounded-lg text-sm shadow-lg z-50">
-          Recalculating...
-        </div>
-      )}
-
       {/* Table */}
       <div className="bg-white border border-[#e5e5e5] rounded-lg overflow-hidden shadow-sm">
         <div className="overflow-x-auto">
@@ -178,96 +144,69 @@ export function EnrichedView({ lineItems, onPercentChange, onNoteUpdate, units }
             </thead>
             <tbody>
               {Object.entries(groupedItems).flatMap(([category, items]) => [
-                // Operating Income Row (only for income category, before header)
-                ...(category === 'income' ? [
-                  <tr key="operating-income" className="border-b border-[#e5e5e5] hover:bg-[#fafafa] transition-colors">
-                    <td className="px-6 py-4 text-sm text-[#111111] font-medium">Operating Income</td>
-                    <td className="px-6 py-4 text-sm text-[#525252] text-right font-mono">
-                      0.00
-                    </td>
-                    <td className="px-6 py-4 text-sm text-[#525252] text-right font-mono">
-                      0.00
-                    </td>
-                    <td className="px-6 py-4 text-sm text-[#737373] text-right font-mono">
-                      0.0
-                    </td>
-                    <td className="px-6 py-4 text-sm text-[#525252] text-right font-mono">
-                      0.00
-                    </td>
-                    <td className="px-6 py-4 text-right">
-                      <Input
-                        type="number"
-                        step="0.1"
-                        value={operatingIncomePercent}
-                        onChange={(e) => handleOperatingIncomeChange(e.target.value)}
-                        className="w-24 text-right text-sm h-9 bg-white border-[#d4d4d4] focus:border-[#737373] focus:ring-1 focus:ring-[#737373] font-mono [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
-                      />
-                    </td>
-                    <td className="px-6 py-4 text-sm font-semibold text-[#111111] text-right font-mono">
-                      0.00
-                    </td>
-                    <td className="px-6 py-4 text-sm text-[#737373] text-right font-mono">
-                      0.00
-                    </td>
-                    <td className="px-6 py-4 text-center">
-                      <button
-                        disabled
-                        className="p-2 rounded transition-colors text-[#d4d4d4] cursor-not-allowed"
-                      >
-                        <MessageSquare className="w-4 h-4" />
-                      </button>
-                    </td>
-                  </tr>
-                ] : []),
                 // Category Header
-                ...(category === 'income' ? [
-                  <tr key={`${category}-header`} className="bg-[#f5f5f5] border-b border-[#e5e5e5]">
-                    <td className="px-6 py-3.5 text-xs font-bold text-[#111111] uppercase tracking-wide">
-                      {getCategoryLabel(category)}
-                    </td>
-                    <td className="px-6 py-3.5 text-xs font-bold text-[#111111] text-right font-mono">
-                      0.00
-                    </td>
-                    <td className="px-6 py-3.5 text-xs font-bold text-[#111111] text-right font-mono">
-                      0.00
-                    </td>
-                    <td className="px-6 py-3.5 text-xs font-bold text-[#111111] text-right font-mono">
-                      0.0
-                    </td>
-                    <td className="px-6 py-3.5 text-xs font-bold text-[#111111] text-right font-mono">
-                      0.00
-                    </td>
-                    <td className="px-6 py-3.5 text-right">
-                      <Input
-                        type="number"
-                        step="0.1"
-                        value={incomeHeaderPercent}
-                        onChange={(e) => handleIncomeHeaderChange(e.target.value)}
-                        className="w-24 text-right text-xs h-8 bg-white border-[#d4d4d4] focus:border-[#737373] focus:ring-1 focus:ring-[#737373] font-mono font-bold [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
-                      />
-                    </td>
-                    <td className="px-6 py-3.5 text-xs font-bold text-[#111111] text-right font-mono">
-                      0.00
-                    </td>
-                    <td className="px-6 py-3.5 text-xs font-bold text-[#111111] text-right font-mono">
-                      0.00
-                    </td>
-                    <td className="px-6 py-3.5"></td>
-                  </tr>
-                ] : [
-                  <tr key={`${category}-header`} className="bg-[#f5f5f5] border-b border-[#e5e5e5]">
-                    <td colSpan={9} className="px-6 py-3.5 text-xs font-bold text-[#111111] uppercase tracking-wide">
-                      {getCategoryLabel(category)}
-                    </td>
-                  </tr>
-                ]),
+                <tr key={`${category}-header`} className="bg-[#f5f5f5] border-b border-[#e5e5e5]">
+                  <td colSpan={9} className="px-6 py-3.5 text-xs font-bold text-[#111111] uppercase tracking-wide">
+                    {getCategoryLabel(category)}
+                  </td>
+                </tr>,
                 // Line Items
                 ...items.flatMap((item) => {
-                  const percentDiff = calculatePercentDifference(item.ytdActual, item.annualBudget);
-                  const projection = calculateProjection(item.ytdActual);
-                  const proposedChange = calculateProposedChange(projection, item.percentChange);
-                  const monthly = calculateMonthly(proposedChange);
                   const isNoteExpanded = expandedNote === item.id;
+
+                  // ── Read-only row (reserve-study / reserve-labeled, excluded from budget flow) ──
+                  if (item.readOnly) {
+                    if (isReserveComponent(item)) {
+                      const adjustedReserveAmount = calcDisplayProposed(item, reserveInflationRate);
+                      const adjustedMonthly = calcDisplayMonthly(item, reserveInflationRate);
+                      const settingsPercent = calcSettingsDerivedReservePercent(item, reserveInflationRate);
+                      return [
+                        <tr key={item.id} className="border-b border-[#e5e5e5] bg-[#fcfcfc]">
+                          <td className="px-6 py-4 text-sm text-[#525252] italic">{item.name}</td>
+                          <td className="px-6 py-4 text-sm text-[#737373] text-right font-mono">{formatCurrency(item.ytdActual)}</td>
+                          <td className="px-6 py-4 text-sm text-[#737373] text-right font-mono">{formatCurrency(item.annualBudget)}</td>
+                          <td className="px-6 py-4 text-sm text-[#a3a3a3] text-right">—</td>
+                          <td className="px-6 py-4 text-sm text-[#a3a3a3] text-right">—</td>
+                          <td className="px-6 py-4 text-right text-xs font-medium text-[#525252]">
+                            Settings {settingsPercent.toFixed(1)}%
+                          </td>
+                          <td className="px-6 py-4 text-sm font-semibold text-[#111111] text-right font-mono">
+                            {formatCurrency(adjustedReserveAmount)}
+                          </td>
+                          <td className="px-6 py-4 text-sm text-[#737373] text-right font-mono">
+                            {formatCurrency(adjustedMonthly)}
+                          </td>
+                          <td className="px-6 py-4 text-center">
+                            <button disabled className="p-2 rounded text-[#d4d4d4] cursor-not-allowed">
+                              <MessageSquare className="w-4 h-4" />
+                            </button>
+                          </td>
+                        </tr>,
+                      ];
+                    }
+                    return [
+                      <tr key={item.id} className="border-b border-[#e5e5e5] opacity-60">
+                        <td className="px-6 py-4 text-sm text-[#525252] italic">{item.name}</td>
+                        <td className="px-6 py-4 text-sm text-[#737373] text-right font-mono">{formatCurrency(item.ytdActual)}</td>
+                        <td className="px-6 py-4 text-sm text-[#737373] text-right font-mono">{formatCurrency(item.annualBudget)}</td>
+                        <td className="px-6 py-4 text-sm text-[#a3a3a3] text-right">—</td>
+                        <td className="px-6 py-4 text-sm text-[#a3a3a3] text-right">—</td>
+                        <td className="px-6 py-4 text-sm text-[#a3a3a3] text-right text-xs">Excluded</td>
+                        <td className="px-6 py-4 text-sm text-[#a3a3a3] text-right">—</td>
+                        <td className="px-6 py-4 text-sm text-[#a3a3a3] text-right">—</td>
+                        <td className="px-6 py-4 text-center">
+                          <button disabled className="p-2 rounded text-[#d4d4d4] cursor-not-allowed">
+                            <MessageSquare className="w-4 h-4" />
+                          </button>
+                        </td>
+                      </tr>,
+                    ];
+                  }
+
+                  const projection = item.projection ?? 0;
+                  const proposedChange = calcProposed(item.annualBudget, item.percentChange);
+                  const monthly = calcMonthly(proposedChange);
+                  const percentDiff = calcPercentDiff(projection, item.annualBudget);
 
                   return [
                     <tr key={item.id} className="border-b border-[#e5e5e5] hover:bg-[#fafafa] transition-colors">
@@ -286,52 +225,38 @@ export function EnrichedView({ lineItems, onPercentChange, onNoteUpdate, units }
                       </td>
                       <td className="px-6 py-4 text-right">
                         <div className="flex flex-col gap-1">
-                          <div className="relative flex items-center gap-1">
+                          <div className="flex items-center rounded-md border border-[#d4d4d4] bg-white overflow-hidden focus-within:border-[#737373] focus-within:ring-1 focus-within:ring-[#737373]">
                             {inputMode[item.id] === 'dollar' ? (
-                              <>
-                                <span className="absolute left-3 text-xs text-[#737373] pointer-events-none">$</span>
-                                <Input
-                                  type="number"
-                                  step="100"
-                                  value={Math.round(proposedChange)}
-                                  onChange={(e) => handleDollarChangeInput(item.id, e.target.value, projection)}
-                                  className="w-32 pl-6 text-right text-sm h-9 bg-white border-[#d4d4d4] focus:border-[#737373] focus:ring-1 focus:ring-[#737373] font-mono [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
-                                />
-                                <button
-                                  onClick={() => toggleInputMode(item.id)}
-                                  className="p-2 rounded bg-[#f5f5f5] text-[#737373] hover:bg-[#e5e5e5] hover:text-[#525252] transition-colors"
-                                  title="Switch to percentage"
-                                >
-                                  <DollarSign className="w-3.5 h-3.5" />
-                                </button>
-                              </>
+                              <input
+                                type="number"
+                                step="100"
+                                value={Math.round(proposedChange)}
+                                onChange={(e) => handleDollarChangeInput(item.id, e.target.value, item.annualBudget)}
+                                className="w-20 text-right text-sm h-8 px-2 bg-transparent border-0 outline-none font-mono [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                              />
                             ) : (
-                              <>
-                                <Input
-                                  type="number"
-                                  step="0.1"
-                                  value={item.percentChange}
-                                  onChange={(e) => handlePercentChangeInput(item.id, e.target.value)}
-                                  className="w-24 text-right text-sm h-9 bg-white border-[#d4d4d4] focus:border-[#737373] focus:ring-1 focus:ring-[#737373] font-mono [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
-                                />
-                                <span className="text-xs text-[#737373] ml-0.5">%</span>
-                                <button
-                                  onClick={() => toggleInputMode(item.id)}
-                                  className="p-2 rounded bg-[#f5f5f5] text-[#737373] hover:bg-[#e5e5e5] hover:text-[#525252] transition-colors"
-                                  title="Switch to dollar amount"
-                                >
-                                  <Percent className="w-3.5 h-3.5" />
-                                </button>
-                              </>
+                              <input
+                                type="number"
+                                step="0.1"
+                                value={item.percentChange}
+                                onChange={(e) => handlePercentChangeInput(item.id, e.target.value)}
+                                className="w-16 text-right text-sm h-8 px-2 bg-transparent border-0 outline-none font-mono [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                              />
                             )}
+                            <button
+                              onClick={() => toggleInputMode(item.id)}
+                              className="h-8 px-2.5 border-l border-[#d4d4d4] bg-[#f5f5f5] text-[#525252] hover:bg-[#e5e5e5] transition-colors flex items-center select-none shrink-0 text-xs font-medium"
+                              title={inputMode[item.id] === 'dollar' ? 'Switch to percentage' : 'Switch to dollar amount'}
+                            >
+                              {inputMode[item.id] === 'dollar' ? '$' : '%'}
+                            </button>
                           </div>
-                          {/* Display both values */}
                           {item.percentChange !== 0 && (
-                            <div className="text-[10px] text-[#737373] text-right font-mono">
+                            <div className="text-[10px] text-[#a3a3a3] text-right font-mono mt-0.5">
                               {inputMode[item.id] === 'dollar' ? (
                                 <span>{item.percentChange > 0 ? '+' : ''}{item.percentChange.toFixed(1)}%</span>
                               ) : (
-                                <span>{proposedChange > projection ? '+' : ''}{formatCurrency(proposedChange - projection)}</span>
+                                <span>{proposedChange >= item.annualBudget ? '+' : ''}{formatCurrency(proposedChange - item.annualBudget)}</span>
                               )}
                             </div>
                           )}
@@ -387,11 +312,12 @@ export function EnrichedView({ lineItems, onPercentChange, onNoteUpdate, units }
                             />
                             <div className="flex gap-2">
                               <Button
-                                onClick={() => saveNote(item.id)}
+                                onClick={() => void saveNote(item.id)}
+                                disabled={savingNoteId === item.id}
                                 className="bg-[#111111] text-white hover:bg-[#262626] shadow-sm"
                                 size="sm"
                               >
-                                Save Note
+                                {savingNoteId === item.id ? 'Saving...' : 'Save Note'}
                               </Button>
                               <Button
                                 onClick={() => setExpandedNote(null)}
@@ -408,25 +334,28 @@ export function EnrichedView({ lineItems, onPercentChange, onNoteUpdate, units }
                     ] : [])
                   ];
                 }),
-                // Category Total
+                // Category Total — per-category subtotal row. Passes includeReadOnly=true
+                // so read-only reserve categories sum their real values instead of
+                // collapsing to $0. proposedChange/monthly stay 0 for read-only items
+                // via calcDisplayProposed (read-only items have no proposed changes).
                 <tr key={`${category}-total`} className="bg-[#f5f5f5] font-semibold border-b-2 border-[#d4d4d4]">
                   <td className="px-6 py-4 text-sm text-[#111111]">{getCategoryLabel(category)} Total</td>
                   <td className="px-6 py-4 text-sm text-[#111111] text-right font-mono">
-                    {formatCurrency(calculateCategoryTotal(items, 'ytdActual'))}
+                    {formatCurrency(calcDisplayCategoryTotal(items, 'ytdActual', reserveInflationRate, true))}
                   </td>
                   <td className="px-6 py-4 text-sm text-[#111111] text-right font-mono">
-                    {formatCurrency(calculateCategoryTotal(items, 'annualBudget'))}
+                    {formatCurrency(calcDisplayCategoryTotal(items, 'annualBudget', reserveInflationRate, true))}
                   </td>
                   <td className="px-6 py-4 text-sm text-[#737373] text-right">—</td>
                   <td className="px-6 py-4 text-sm text-[#111111] text-right font-mono">
-                    {formatCurrency(calculateCategoryTotal(items, 'projection'))}
+                    {formatCurrency(calcDisplayCategoryTotal(items, 'projection', reserveInflationRate, true))}
                   </td>
                   <td className="px-6 py-4 text-sm text-[#737373] text-right">—</td>
                   <td className="px-6 py-4 text-sm font-bold text-[#111111] text-right font-mono">
-                    {formatCurrency(calculateCategoryTotal(items, 'proposedChange'))}
+                    {formatCurrency(calcDisplayCategoryTotal(items, 'proposedChange', reserveInflationRate, true))}
                   </td>
                   <td className="px-6 py-4 text-sm text-[#737373] text-right font-mono">
-                    {formatCurrency(calculateCategoryTotal(items, 'monthly'))}
+                    {formatCurrency(calcDisplayCategoryTotal(items, 'monthly', reserveInflationRate, true))}
                   </td>
                   <td className="px-6 py-4"></td>
                 </tr>
@@ -448,7 +377,9 @@ export function EnrichedView({ lineItems, onPercentChange, onNoteUpdate, units }
         </div>
         <div className="bg-white border border-[#e5e5e5] rounded-lg p-6 shadow-sm">
           <div className="text-xs font-medium text-[#737373] mb-2 uppercase tracking-wide">Per Unit Monthly</div>
-          <div className="text-3xl font-semibold text-[#111111]">{formatCurrency(perUnitMonthly)}</div>
+          <div className="text-3xl font-semibold text-[#111111]">
+            {perUnitMonthly == null ? '—' : formatCurrency(perUnitMonthly)}
+          </div>
         </div>
       </div>
     </div>

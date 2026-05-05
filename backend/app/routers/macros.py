@@ -1,13 +1,31 @@
 """HTTP router exposing macro-like endpoints."""
+from __future__ import annotations
+import json
+import logging
+import os
+import shutil
+import tempfile
+from typing import Optional
+
 from fastapi import APIRouter, File, UploadFile, Form, HTTPException, Response, BackgroundTasks
 from fastapi.concurrency import run_in_threadpool
-from ..services import macros_service
-from ..models.schemas import TableResponse, SumResponse, DupsResponse, SimpleResponse
-from ..config import settings
-import os
-import tempfile
-import shutil
 
+from ..config import settings
+from ..models.financial_document_extraction import DocumentExtractionFailure
+from ..models.schemas import TableResponse, SumResponse, DupsResponse, SimpleResponse
+from ..services import macros_service
+from ..services.financial_document_router import choose_financial_document_route
+from ..services.normalized_statement_workbook import build_normalized_statement_workbook
+from ..services.pdf_vlm_extractor import extract_pdf_statement
+from ..services.statement_period_inference import (
+    extract_pdf_statement_period_hint,
+    infer_growth_factor_from_statement_period,
+    select_statement_period_hint,
+)
+from ..generate_budget_pipeline import BudgetPipeline
+from ..generate_budget import infer_growth_factor_from_input
+
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
@@ -147,13 +165,14 @@ async def run_pipeline(file: UploadFile = File(...), sheet: str = Form('Income S
 @router.post("/macros/generate-budget")
 async def generate_budget(
     file: UploadFile = File(...),
-    growth_factor: float | None = Form(None),
+    growth_factor: Optional[float] = Form(None),
     fiscal_year_start_month: int = Form(1),
-    reserve_contribution: float | None = Form(None),
-    template_file: UploadFile | None = File(None),
-    am_seed_file: UploadFile | None = File(None),
-    aliases_csv: UploadFile | None = File(None),
+    reserve_contribution: Optional[float] = Form(None),
+    template_file: Optional[UploadFile] = File(None),
+    am_seed_file: Optional[UploadFile] = File(None),
+    aliases_csv: Optional[UploadFile] = File(None),
     enrich_only: bool = Form(False),
+    percent_changes_json: Optional[str] = Form(None),
     background: BackgroundTasks = None,
 ):
     """Run the full budget pipeline reusing existing Python code in the repo.
@@ -166,6 +185,28 @@ async def generate_budget(
     input_path = await save_upload_tmp(file)
     if background:
         background.add_task(lambda p=input_path: os.path.exists(p) and os.remove(p))
+
+    route = choose_financial_document_route(file.filename or "upload.xlsx", file.content_type)
+    statement_period_hint: str | None = None
+    if route.path == "pdf_vlm":
+        extraction = await extract_pdf_statement(input_path)
+        if isinstance(extraction, DocumentExtractionFailure):
+            raise HTTPException(status_code=422, detail=extraction.message)
+        statement_period_hint = extraction.statement_period or extract_pdf_statement_period_hint(input_path)
+        input_path = await run_in_threadpool(build_normalized_statement_workbook, extraction)
+        if background:
+            background.add_task(lambda p=input_path: os.path.exists(p) and os.remove(p))
+
+    # Apply percent changes from JSON before pipeline runs (writes to AM column by label)
+    if percent_changes_json:
+        try:
+            changes = json.loads(percent_changes_json)
+            await run_in_threadpool(
+                macros_service.write_percent_changes_by_label, input_path, "Income Statement", changes
+            )
+        except Exception as e:
+            logger.warning("write_percent_changes_by_label skipped: %s", e)
+
     tempdir = tempfile.mkdtemp(prefix="budget_pipeline_")
     try:
         intermediate_path = os.path.join(tempdir, "Income_Statement_Enriched.xlsx")
@@ -188,46 +229,24 @@ async def generate_budget(
             if background:
                 background.add_task(lambda p=aliases_path: os.path.exists(p) and os.remove(p))
 
-        # Ensure repo root is on sys.path so we can import pipeline modules
-        import sys
-        from pathlib import Path
-
-        # Allow overriding repo root via settings; otherwise walk upward to find modules
-        repo_root = settings.REPO_ROOT
-        if not repo_root:
-            curr = Path(__file__).resolve()
-            repo_root = None
-            for parent in curr.parents:
-                if (parent / "generate_budget_pipeline.py").exists() and (parent / "generate_budget.py").exists():
-                    repo_root = str(parent)
-                    break
-        if repo_root is None:
-            raise HTTPException(status_code=500, detail="Could not locate generate_budget modules in repository ancestors")
-        if repo_root not in sys.path:
-            sys.path.insert(0, repo_root)
-
-        # Import pipeline classes
-        try:
-            # import in threadpool to avoid blocking event loop with import system IO
-            def _import_pipeline():
-                import importlib
-                mod_pipeline = importlib.import_module('generate_budget_pipeline')
-                mod_gen = importlib.import_module('generate_budget')
-                return mod_pipeline.BudgetPipeline, mod_gen.infer_growth_factor_from_input
-
-            BudgetPipeline, infer_growth_factor_from_input = await run_in_threadpool(_import_pipeline)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail="Failed to import budget pipeline modules")
-
         # Determine growth factor if not provided
         resolved_growth_factor = growth_factor
         growth_factor_note = "configured value"
+        statement_month = None
         if resolved_growth_factor is None:
             try:
-                resolved_growth_factor, detected_months, source = await run_in_threadpool(
-                    infer_growth_factor_from_input, input_path, fiscal_year_start_month
+                inferred = infer_growth_factor_from_statement_period(
+                    statement_period_hint,
+                    fiscal_year_start_month,
                 )
+                if inferred is None:
+                    resolved_growth_factor, detected_months, source = await run_in_threadpool(
+                        lambda: infer_growth_factor_from_input(input_path, fiscal_year_start_month=fiscal_year_start_month)
+                    )
+                else:
+                    resolved_growth_factor, detected_months, source = inferred
                 growth_factor_note = f"auto annualization 12/{detected_months} from {source}"
+                statement_month = (fiscal_year_start_month + detected_months - 2) % 12 + 1
             except Exception as e:
                 raise HTTPException(status_code=400, detail="Could not infer growth factor from input")
 
@@ -250,29 +269,21 @@ async def generate_budget(
         except Exception:
             raise HTTPException(status_code=500, detail="Budget pipeline failed")
 
-        # Read enriched intermediate and budget preview
+        # Read enriched intermediate
         enriched = await run_in_threadpool(macros_service.read_sheet_as_table, intermediate_path, "Income Statement")
 
-        # Read budget preview from generated output: first worksheet
-        from openpyxl import load_workbook
-        wb = load_workbook(output_path, data_only=True)
-        try:
-            ws = wb[wb.sheetnames[0]]
-            max_col = ws.max_column
-            headers = [ws.cell(row=1, column=c).value for c in range(1, max_col + 1)]
-            rows = []
-            for r in range(2, min(ws.max_row, settings.MAX_PREVIEW_ROWS) + 1):
-                row = [ws.cell(row=r, column=c).value for c in range(1, max_col + 1)]
-                if any(v is not None for v in row):
-                    rows.append(row)
-            budget_preview = {"sheet": ws.title, "headers": headers, "rows": rows}
-        finally:
-            wb.close()
+        # Read budget preview only when the full pipeline ran (enrich_only=False produces the output file)
+        budget_preview = None
+        if not enrich_only:
+            budget_preview = await run_in_threadpool(
+                macros_service.read_first_sheet_preview, output_path, settings.MAX_PREVIEW_ROWS
+            )
 
         # Compose response
         resp = {
             "growth_factor": resolved_growth_factor,
             "growth_factor_note": growth_factor_note,
+            "statement_month": statement_month,
             "enriched": enriched,
             "budget_preview": budget_preview,
         }
@@ -281,5 +292,5 @@ async def generate_budget(
         # Cleanup temporary files and dirs; background tasks handle file deletes
         try:
             shutil.rmtree(tempdir, ignore_errors=True)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Temp dir cleanup failed: %s", e)
