@@ -248,10 +248,10 @@ Plans:
   - May 4, 2026 client meeting transcript (`HOA Budget Analysis Transcript.txt` — Otter ID `7vKtgw8oLjV0uiWmPkZvTIkkc64`) — Bob's walkthrough of the disclosure package and clarification answers (assessment categories fixed at HOA setup, ownership % kept as-is, monthly assessments keep cents, special assessments deferred, override annotation not required for phase one).
   - `backend/app/services/budget_history_service.py` — existing budget draft + reserve study persistence; Phase 11 inputs flow from here.
   - `backend/app/services/reserve_study_extractor.py` — existing reserve study extraction (Phase 10 in progress); feeds the reserve-summary calculations.
-**Plans:** 9 plans
+**Plans:** 1/9 plans executed
 
 Plans:
-- [ ] 11-01-PLAN.md — Wave 0: dependencies (WeasyPrint, pypdf, Jinja2, qpdf, fonts), schema.sql + DisclosurePackageJob ORM, Old Mill seed verification, conftest fixtures
+- [x] 11-01-PLAN.md — Wave 0: dependencies (WeasyPrint, pypdf, Jinja2, qpdf, fonts), schema.sql + DisclosurePackageJob ORM, Old Mill seed verification, conftest fixtures
 - [ ] 11-02-PLAN.md — Calculation engine (TDD): Pydantic schemas, audit decorator, Tier 0-5 formula registry, OLD_MILL_2026 PackageSpec
 - [ ] 11-03-PLAN.md — Input adapters (BudgetHistoryRecord/ExtractedReserveStudyDocument/Property to typed schemas) + preflight gate
 - [ ] 11-04-PLAN.md — WeasyPrint renderer with deny-all url_fetcher (T-11-03) + 17 templates for the 18 generated pages + render snapshot tests
