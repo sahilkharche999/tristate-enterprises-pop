@@ -117,6 +117,8 @@ def _build_thirty_year_plan(
     total_year_replacement_provision: Decimal,
     cash_eoy_prior: Decimal,
     fiscal_year_start: int,
+    inflation_rate: Optional[Decimal] = None,
+    interest_rate: Optional[Decimal] = None,
 ) -> list[dict[str, Any]]:
     """Project beginning balance, contribution, expenditures, interest, and
     ending balance for 30 years starting at ``fiscal_year_start``.
@@ -131,8 +133,8 @@ def _build_thirty_year_plan(
     """
     rows: list[dict[str, Any]] = []
     balance = cash_eoy_prior
-    inflation = spec.static_data.replacement_cost_increase_rate or Decimal("0.03")
-    interest_rate = spec.static_data.interest_rate_after_tax or Decimal("0.018")
+    inflation = inflation_rate or spec.static_data.replacement_cost_increase_rate or Decimal("0.03")
+    rate = interest_rate or spec.static_data.interest_rate_after_tax or Decimal("0.018")
     base_provision = total_year_replacement_provision or Decimal("0")
     base_liability = total_estimated_liability or Decimal("0")
 
@@ -144,7 +146,7 @@ def _build_thirty_year_plan(
         annual_contribution = (base_provision * factor).quantize(Decimal("1"))
         annual_expenditure = annual_contribution
         avg_balance = balance + (annual_contribution - annual_expenditure) / Decimal("2")
-        interest = (avg_balance * interest_rate).quantize(Decimal("1"))
+        interest = (avg_balance * rate).quantize(Decimal("1"))
         ending = (balance + annual_contribution - annual_expenditure + interest).quantize(
             Decimal("1")
         )
@@ -173,13 +175,29 @@ def _compute_all(
     budget_draft: BudgetDraft,
     reserve_snapshot: ReserveStudySnapshot,
     hoa_metadata: HOAMetadata,
+    effective_hoa_settings: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Materialize every value the templates reference.
 
     All formula calls happen inside the active audit_context so each one
     is recorded exactly once in the audit log (re-entrancy guard in
     audit.py keeps nested decorated calls from double-recording).
+
+    The ``effective_hoa_settings`` dict (built once in compile_package
+    by overlaying per-HOA overrides on spec.static_data) is consulted for
+    every config-style numeric input — reserve cash balance, fund
+    balance BOY, prior-year monthly assessment, after-tax interest rate,
+    replacement-cost inflation. This keeps the audit log, the formula
+    inputs, and the rendered template all reading the same value.
     """
+    settings = effective_hoa_settings or {}
+
+    def _setting_decimal(name: str) -> Decimal:
+        """Pull a numeric setting as Decimal, falling back to spec.static_data."""
+        raw = settings.get(name)
+        if raw is None:
+            raw = getattr(spec.static_data, name)
+        return Decimal(str(raw))
     operating_lis = [li for li in budget_draft.line_items if not li.is_reserve]
     reserve_lis = [li for li in budget_draft.line_items if li.is_reserve]
 
@@ -202,7 +220,8 @@ def _compute_all(
 
     total_liab = total_estimated_liability(components=reserve_snapshot.components)
     total_prov = total_year_replacement_provision(components=reserve_snapshot.components)
-    cash = spec.static_data.reserve_cash_balance_eoy_prior
+    cash = _setting_decimal("reserve_cash_balance_eoy_prior")
+    fund_balance_boy_op = _setting_decimal("fund_balance_boy_operations")
     pct = percent_funded(cash_reserves=cash, estimated_liability=total_liab)
     under_total = under_funded_balance_total(
         estimated_liability=total_liab, cash_reserves=cash
@@ -295,7 +314,7 @@ def _compute_all(
             "excess_revenues_over_expenses_operations": excess_op,
             "excess_revenues_over_expenses_replacement": excess_rep,
             "fund_balance_eoy_operations": fund_balance_eoy_operations(
-                beginning_balance=spec.static_data.fund_balance_boy_operations,
+                beginning_balance=fund_balance_boy_op,
                 excess=excess_op,
             ),
             "fund_balance_eoy_replacement": fund_balance_eoy_replacement(
@@ -347,6 +366,8 @@ def _compute_all(
                 total_year_replacement_provision=total_prov,
                 cash_eoy_prior=cash,
                 fiscal_year_start=spec.fiscal_year,
+                inflation_rate=_setting_decimal("replacement_cost_increase_rate"),
+                interest_rate=_setting_decimal("interest_rate_after_tax"),
             ),
             "assessment_change_disclosure": (
                 "0%"
@@ -473,7 +494,10 @@ def compile_package(
 
         # 3. Compute every formula value (each call is recorded once by
         #    the @audit_formula decorators).
-        computed = _compute_all(spec, budget_draft, reserve_snapshot, hoa_metadata)
+        computed = _compute_all(
+            spec, budget_draft, reserve_snapshot, hoa_metadata,
+            effective_hoa_settings=effective_hoa_settings,
+        )
         ctx_full: dict[str, Any] = {
             "spec": spec,
             "static_data": spec.static_data,

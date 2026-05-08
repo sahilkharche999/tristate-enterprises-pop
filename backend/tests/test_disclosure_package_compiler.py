@@ -441,6 +441,47 @@ def test_compile_package_uses_hoa_settings_for_reserve_cash_balance(
     assert audit["input_snapshot"]["hoa_settings"]["fund_balance_boy_operations"] == 12345
 
 
+def test_hoa_settings_overrides_drive_percent_funded(
+    monkeypatch, tmp_path: Path, qpdf_required
+) -> None:
+    """The override hits the formulas, not just the audit log: doubling the
+    cash-on-hand input doubles the rendered percent_funded ratio."""
+    appendices = tmp_path / "appendices"; appendices.mkdir()
+    _patch_render(monkeypatch)
+
+    base_run = compile_package(
+        spec=OLD_MILL_2026,
+        budget_draft=_budget_draft(),
+        reserve_snapshot=_reserve_snapshot(),
+        hoa_metadata=_hoa_metadata(),
+        output_dir=tmp_path / "base",
+        appendices_root=appendices,
+        hoa_settings_overrides={"reserve_cash_balance_eoy_prior": 1_000_000},
+    )
+    high_run = compile_package(
+        spec=OLD_MILL_2026,
+        budget_draft=_budget_draft(),
+        reserve_snapshot=_reserve_snapshot(),
+        hoa_metadata=_hoa_metadata(),
+        output_dir=tmp_path / "high",
+        appendices_root=appendices,
+        hoa_settings_overrides={"reserve_cash_balance_eoy_prior": 2_000_000},
+    )
+
+    base_audit = json.loads((tmp_path / "base" / "audit.json").read_text())
+    high_audit = json.loads((tmp_path / "high" / "audit.json").read_text())
+    base_pct = next(
+        c["output"] for c in base_audit["formula_calls"] if c["formula_id"] == "percent_funded"
+    )
+    high_pct = next(
+        c["output"] for c in high_audit["formula_calls"] if c["formula_id"] == "percent_funded"
+    )
+    # Doubling the cash input doubles the ratio (within rounding tolerance).
+    assert int(high_pct) == 2 * int(base_pct), (
+        f"percent_funded should track the override: base={base_pct} high={high_pct}"
+    )
+
+
 def test_compile_package_sha256_matches_output_bytes(monkeypatch, tmp_path: Path, qpdf_required) -> None:
     """The CompileResult.sha256 is the digest of the bytes actually on
     disk at output_path (sanity check — protects against the result
