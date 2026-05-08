@@ -27,20 +27,15 @@
     {% set op_rev_total = computed.total_revenues_operations %}
     {% set rep_rev_total = computed.total_revenues_replacement %}
 
-    <tr>
-      <td class="indent">Assessments</td>
-      <td>${{ '{:,.0f}'.format(op_rev_total) }}</td>
-      <td>${{ '{:,.0f}'.format(rep_rev_total) }}</td>
-      <td>${{ '{:,.0f}'.format(op_rev_total + rep_rev_total) }}</td>
-    </tr>
-
-    {% for li in computed.operating_revenues if li.label and 'assessment' not in li.label.lower() %}
+    {% for section_name, section in computed.revenues_by_section.items() %}
+      {% for item in section.items %}
       <tr>
-        <td class="indent">{{ li.label }}</td>
-        <td>${{ '{:,.0f}'.format(li.amount) }}</td>
-        <td>—</td>
-        <td>${{ '{:,.0f}'.format(li.amount) }}</td>
+        <td class="indent">{{ item.label }}</td>
+        <td>${{ '{:,.0f}'.format(item.amount) }}</td>
+        <td>{% if 'reserve' in section_name|lower %}${{ '{:,.0f}'.format(item.amount) }}{% else %}—{% endif %}</td>
+        <td>${{ '{:,.0f}'.format(item.amount) }}</td>
       </tr>
+      {% endfor %}
     {% endfor %}
 
     <tr class="subtotal">
@@ -55,92 +50,41 @@
     <tr><td class="section-label">EXPENSES</td><td></td><td></td><td></td></tr>
 
     <tr>
-      <td><span class="bold">Maintenance and operations</span></td>
-      <td></td><td></td><td></td>
-    </tr>
-    <tr>
       <td class="indent2">Major component replacement provision (Notes 3 and 5)</td>
       <td>—</td>
       <td>${{ '{:,.0f}'.format(computed.total_expenses_replacement) }}</td>
       <td>${{ '{:,.0f}'.format(computed.total_expenses_replacement) }}</td>
     </tr>
-    {% for li in computed.operating_expenses %}
-      {% set lower_label = li.label|lower if li.label else '' %}
-      {% if lower_label and (
-          'maint' in lower_label or 'plumb' in lower_label or 'landscape' in lower_label
-          or 'pool' in lower_label or 'janitor' in lower_label or 'pest' in lower_label
-          or 'fire' in lower_label or 'gutter' in lower_label
-          or 'elevator' in lower_label or 'garage' in lower_label
-      ) %}
-      <tr>
-        <td class="indent2">{{ li.label }}</td>
-        <td>${{ '{:,.0f}'.format(li.amount) }}</td>
-        <td>—</td>
-        <td>${{ '{:,.0f}'.format(li.amount) }}</td>
-      </tr>
-      {% endif %}
-    {% endfor %}
-    <tr class="subtotal">
-      <td></td>
-      <td>${{ '{:,.0f}'.format(computed.expenses_maintenance_operating) }}</td>
-      <td>${{ '{:,.0f}'.format(computed.total_expenses_replacement) }}</td>
-      <td>${{ '{:,.0f}'.format(computed.expenses_maintenance_operating + computed.total_expenses_replacement) }}</td>
-    </tr>
 
     <tr class="blank-row"><td colspan="4">&nbsp;</td></tr>
 
-    <tr>
-      <td><span class="bold">Utilities</span></td><td></td><td></td><td></td>
-    </tr>
-    {% for li in computed.operating_expenses %}
-      {% set lower_label = li.label|lower if li.label else '' %}
-      {% if 'water' in lower_label or 'trash' in lower_label or 'electric' in lower_label
-            or 'gas' in lower_label or 'phone' in lower_label or 'sewer' in lower_label
-            or 'utility' in lower_label or 'utilit' in lower_label %}
+    {% for section_name, section in computed.expenses_by_section.items() %}
       <tr>
-        <td class="indent2">{{ li.label }}</td>
-        <td>${{ '{:,.0f}'.format(li.amount) }}</td>
-        <td>—</td>
-        <td>${{ '{:,.0f}'.format(li.amount) }}</td>
+        <td><span class="bold">{{ section_name }}</span></td>
+        <td></td><td></td><td></td>
       </tr>
-      {% endif %}
-    {% endfor %}
-    <tr class="subtotal">
-      <td></td>
-      <td>${{ '{:,.0f}'.format(computed.expenses_utilities_operating) }}</td>
-      <td>—</td>
-      <td>${{ '{:,.0f}'.format(computed.expenses_utilities_operating) }}</td>
-    </tr>
-
-    <tr class="blank-row"><td colspan="4">&nbsp;</td></tr>
-
-    <tr>
-      <td><span class="bold">Administration</span></td><td></td><td></td><td></td>
-    </tr>
-    {% for li in computed.operating_expenses %}
-      {% set lower_label = li.label|lower if li.label else '' %}
-      {% if 'insurance' in lower_label or 'manag' in lower_label or 'office' in lower_label
-            or 'legal' in lower_label or 'license' in lower_label or 'audit' in lower_label
-            or 'admin' in lower_label or 'bank' in lower_label %}
+      {% for item in section.items %}
       <tr>
-        <td class="indent2">{{ li.label }}</td>
-        <td>${{ '{:,.0f}'.format(li.amount) }}</td>
+        <td class="indent2">{{ item.label }}</td>
+        <td>${{ '{:,.0f}'.format(item.amount) }}</td>
         <td>—</td>
-        <td>${{ '{:,.0f}'.format(li.amount) }}</td>
+        <td>${{ '{:,.0f}'.format(item.amount) }}</td>
       </tr>
-      {% endif %}
+      {% endfor %}
+      <tr class="subtotal">
+        <td></td>
+        <td>${{ '{:,.0f}'.format(section.total) }}</td>
+        <td>—</td>
+        <td>${{ '{:,.0f}'.format(section.total) }}</td>
+      </tr>
+      <tr class="blank-row"><td colspan="4">&nbsp;</td></tr>
     {% endfor %}
+
     <tr>
       <td class="indent2">Income tax provision</td>
       <td>—</td>
       <td>${{ '{:,.0f}'.format(computed.income_tax_provision) }}</td>
       <td>${{ '{:,.0f}'.format(computed.income_tax_provision) }}</td>
-    </tr>
-    <tr class="subtotal">
-      <td></td>
-      <td>${{ '{:,.0f}'.format(computed.expenses_administration_operating) }}</td>
-      <td>${{ '{:,.0f}'.format(computed.income_tax_provision) }}</td>
-      <td>${{ '{:,.0f}'.format(computed.expenses_administration_operating + computed.income_tax_provision) }}</td>
     </tr>
 
     <tr class="blank-row"><td colspan="4">&nbsp;</td></tr>

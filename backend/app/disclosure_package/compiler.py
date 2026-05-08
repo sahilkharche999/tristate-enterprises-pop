@@ -201,6 +201,32 @@ def _compute_all(
     operating_lis = [li for li in budget_draft.line_items if not li.is_reserve]
     reserve_lis = [li for li in budget_draft.line_items if li.is_reserve]
 
+    # Section-grouped expenses & revenues — keyed on the raw Excel header
+    # (LineItem.section) so the income-statement template can render
+    # whatever sections the data provides instead of keyword-matching
+    # labels against a hardcoded bucket list.
+    expenses_by_section: dict[str, dict[str, Any]] = {}
+    for li in operating_lis:
+        if li.is_revenue:
+            continue
+        section_name = (li.section or "Uncategorized").strip()
+        bucket = expenses_by_section.setdefault(
+            section_name, {"items": [], "total": Decimal(0)}
+        )
+        bucket["items"].append({"label": li.label, "amount": li.amount or Decimal(0)})
+        bucket["total"] = bucket["total"] + (li.amount or Decimal(0))
+
+    revenues_by_section: dict[str, dict[str, Any]] = {}
+    for li in operating_lis:
+        if not li.is_revenue:
+            continue
+        section_name = (li.section or "Operating Income").strip()
+        bucket = revenues_by_section.setdefault(
+            section_name, {"items": [], "total": Decimal(0)}
+        )
+        bucket["items"].append({"label": li.label, "amount": li.amount or Decimal(0)})
+        bucket["total"] = bucket["total"] + (li.amount or Decimal(0))
+
     total_rev_op = total_revenues_operations(operating_line_items=operating_lis)
     total_rev_rep = total_revenues_replacement(reserve_line_items=reserve_lis)
     exp_maint = expenses_maintenance_operating(operating_line_items=operating_lis)
@@ -375,6 +401,20 @@ def _compute_all(
                 == spec.static_data.monthly_assessment_per_unit_prior
                 else "increase"
             ),
+            "expenses_by_section": {k: {
+                "items": [
+                    {"label": it["label"], "amount": float(it["amount"] or 0)}
+                    for it in v["items"]
+                ],
+                "total": float(v["total"]),
+            } for k, v in expenses_by_section.items()},
+            "revenues_by_section": {k: {
+                "items": [
+                    {"label": it["label"], "amount": float(it["amount"] or 0)}
+                    for it in v["items"]
+                ],
+                "total": float(v["total"]),
+            } for k, v in revenues_by_section.items()},
         },
         "reserve_study_snapshot": reserve_snapshot,
         "budget_draft": budget_draft,
@@ -475,7 +515,36 @@ def compile_package(
             if value is not None:
                 effective_hoa_settings[key] = value
 
-    # 3. Capture the input snapshot for the audit log (CONTEXT D-15).
+    # 3. Pre-compute section-grouped expenses/revenues so we can capture
+    #    them in the audit input_snapshot (the snapshot is serialized at
+    #    audit_context open time, so they cannot be added retroactively
+    #    from inside _compute_all). _compute_all also surfaces them under
+    #    `computed` for the income-statement template to iterate over.
+    _operating_lis = [li for li in budget_draft.line_items if not li.is_reserve]
+    _expenses_by_section: dict[str, dict[str, Any]] = {}
+    for _li in _operating_lis:
+        if _li.is_revenue:
+            continue
+        _section = (_li.section or "Uncategorized").strip()
+        _bucket = _expenses_by_section.setdefault(
+            _section, {"items": [], "total": 0.0}
+        )
+        _amount = float(_li.amount or 0)
+        _bucket["items"].append({"label": _li.label, "amount": _amount})
+        _bucket["total"] = _bucket["total"] + _amount
+    _revenues_by_section: dict[str, dict[str, Any]] = {}
+    for _li in _operating_lis:
+        if not _li.is_revenue:
+            continue
+        _section = (_li.section or "Operating Income").strip()
+        _bucket = _revenues_by_section.setdefault(
+            _section, {"items": [], "total": 0.0}
+        )
+        _amount = float(_li.amount or 0)
+        _bucket["items"].append({"label": _li.label, "amount": _amount})
+        _bucket["total"] = _bucket["total"] + _amount
+
+    # 4. Capture the input snapshot for the audit log (CONTEXT D-15).
     input_snapshot: dict[str, Any] = {
         "spec_hoa_id": spec.hoa_id,
         "fiscal_year": spec.fiscal_year,
@@ -484,6 +553,8 @@ def compile_package(
         "hoa_metadata": hoa_metadata.model_dump(mode="json"),
         "static_data": spec.static_data.model_dump(mode="json"),
         "hoa_settings": effective_hoa_settings,
+        "expenses_by_section": _expenses_by_section,
+        "revenues_by_section": _revenues_by_section,
     }
 
     audit_log_ref = None

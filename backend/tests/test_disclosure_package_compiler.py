@@ -504,3 +504,44 @@ def test_compile_package_sha256_matches_output_bytes(monkeypatch, tmp_path: Path
 
     on_disk_sha = hashlib.sha256(result.output_path.read_bytes()).hexdigest()
     assert result.sha256 == on_disk_sha
+
+
+def test_compute_all_groups_operating_expenses_by_section_label(
+    monkeypatch, tmp_path: Path, qpdf_required
+) -> None:
+    """Operating expenses are grouped by raw `section` (Excel header), not
+    keyword-matched against the label."""
+    items = [
+        LineItem(label="40000 - Assessment Income", amount=Decimal("100000"),
+                 section="Operating Income > Income", category="operating_revenue",
+                 is_revenue=True),
+        LineItem(label="50050 - Management Service", amount=Decimal("5000"),
+                 section="Administration Expenses", category="administration"),
+        LineItem(label="55000 - General Insurance", amount=Decimal("14000"),
+                 section="Administration Expenses", category="administration"),
+        LineItem(label="62000 - Water & Sewer", amount=Decimal("10000"),
+                 section="Utilities", category="utilities"),
+        LineItem(label="74000 - General Maintenance", amount=Decimal("11000"),
+                 section="General Maintenance", category="maintenance"),
+    ]
+    draft = BudgetDraft(line_items=items)
+    appendices = tmp_path / "appendices"; appendices.mkdir()
+    _patch_render(monkeypatch)
+
+    compile_package(
+        spec=OLD_MILL_2026,
+        budget_draft=draft,
+        reserve_snapshot=_reserve_snapshot(),
+        hoa_metadata=_hoa_metadata(),
+        output_dir=tmp_path / "out",
+        appendices_root=appendices,
+    )
+    audit = json.loads((tmp_path / "out" / "audit.json").read_text())
+    sections = audit["input_snapshot"]["expenses_by_section"]
+    assert "Administration Expenses" in sections
+    assert sections["Administration Expenses"]["total"] == 19000
+    assert {it["label"] for it in sections["Administration Expenses"]["items"]} == {
+        "50050 - Management Service", "55000 - General Insurance"
+    }
+    assert "Utilities" in sections and sections["Utilities"]["total"] == 10000
+    assert "General Maintenance" in sections and sections["General Maintenance"]["total"] == 11000
