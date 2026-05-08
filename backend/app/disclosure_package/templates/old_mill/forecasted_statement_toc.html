@@ -1,0 +1,21 @@
+{% extends "_base.html" %}
+{% block title %}Forecasted Statement TOC — {{ fiscal_year }}{% endblock %}
+{% block content %}
+<h1>Table of Contents</h1>
+<p class="muted">Forecasted Statement of Revenues and Expenses —
+Year Ending December 31, {{ fiscal_year }}</p>
+
+<ul class="toc">
+  <li><a class="toc-entry" href="#compilation">Accountant's Compilation Report</a></li>
+  <li><a class="toc-entry" href="#income">Forecasted Statement of Revenues and Expenses</a></li>
+  <li><a class="toc-entry" href="#note-1">Note 1 — The Association</a></li>
+  <li><a class="toc-entry" href="#note-2">Note 2 — Forecast Period</a></li>
+  <li><a class="toc-entry" href="#note-3">Note 3 — Basis of Presentation</a></li>
+  <li><a class="toc-entry" href="#note-4">Note 4 — Revenues</a></li>
+  <li><a class="toc-entry" href="#note-5">Note 5 — Replacement Fund Balance</a></li>
+  <li><a class="toc-entry" href="#note-6">Note 6 — Funding Plan</a></li>
+  <li><a class="toc-entry" href="#note-7">Note 7 — Significant Assumptions</a></li>
+  <li><a class="toc-entry" href="#note-8">Note 8 — Outstanding Loans</a></li>
+  <li><a class="toc-entry" href="#schedule">Schedule of Major Component Replacement Provision</a></li>
+</ul>
+{% endblock %}

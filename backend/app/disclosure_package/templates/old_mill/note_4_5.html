@@ -1,0 +1,54 @@
+{% extends "_base.html" %}
+{% block title %}Notes 4-5 to Financial Statements{% endblock %}
+{% block content %}
+<h2 id="note-4">Note 4 — Revenues</h2>
+<p>Operating revenues consist principally of monthly regular assessments
+levied on each separate interest in the Association. The current monthly
+assessment per unit is
+${{ '{:,.2f}'.format(static_data.monthly_assessment_per_unit_current) }},
+unchanged from the prior year. A portion of each monthly assessment is
+allocated to the Replacement Fund in accordance with the funding plan
+adopted by the Board pursuant to California Civil Code § 5550;
+the {{ fiscal_year }} per-unit Replacement Fund contribution is
+${{ '{:,.2f}'.format(computed.monthly_replacement_contribution_per_unit_2026) }}
+per month.</p>
+
+<p>The Association also forecasts interest income on bank and
+certificate-of-deposit balances held within the Replacement Fund;
+interest income is recognized as earned and is reported net of any
+estimated income tax provision.</p>
+
+<h2 id="note-5">Note 5 — Replacement Fund Balance</h2>
+
+<table>
+  <tbody>
+    <tr>
+      <td>Estimated cash reserves (end of prior year)</td>
+      <td>${{ '{:,.0f}'.format(static_data.reserve_cash_balance_eoy_prior) }}</td>
+    </tr>
+    <tr>
+      <td>Estimated total liability for major component replacement</td>
+      <td>${{ '{:,.0f}'.format(computed.total_estimated_liability) }}</td>
+    </tr>
+    <tr class="totals-row">
+      <td>Under-funded balance</td>
+      <td>${{ '{:,.0f}'.format(computed.under_funded_balance_total) }}</td>
+    </tr>
+    <tr>
+      <td>Under-funded balance per unit</td>
+      <td>${{ '{:,.0f}'.format(computed.under_funded_balance_per_unit) }}</td>
+    </tr>
+    <tr class="totals-row">
+      <td>Percent funded</td>
+      <td>{{ computed.percent_funded }}%</td>
+    </tr>
+  </tbody>
+</table>
+
+<p class="muted">Reference: California Civil Code §§ 5565, 5570. The
+"estimated liability" figure above is the sum across all major reserve
+components of <em>replacement_cost &times; (useful_life &minus;
+remaining_life) / useful_life</em>, rounded to whole dollars
+half-even. The components and their inputs are listed in the Schedule
+of Major Component Replacement Provision.</p>
+{% endblock %}

@@ -1,0 +1,11 @@
+{% extends "_base.html" %}
+{% block title %}{{ static_data.hoa_legal_name }} — Annual Budget Report Cover{% endblock %}
+{% block content %}
+<div class="title-page">
+  <p class="muted">[California Civil Code Section 5300]</p>
+  <h1>{{ static_data.hoa_legal_name }}</h1>
+  <h2>Annual Budget Report</h2>
+  <p>Year Ending December 31, {{ fiscal_year }}</p>
+  <p class="muted">Prepared by {{ static_data.management_company }}</p>
+</div>
+{% endblock %}

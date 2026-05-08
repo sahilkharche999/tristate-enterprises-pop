@@ -1,0 +1,53 @@
+{% extends "_base.html" %}
+{% block title %}Note 6 — Funding Plan{% endblock %}
+{% block content %}
+<h2 id="note-6">Note 6 — Funding Plan</h2>
+
+<p>The Board has adopted a multi-decade funding plan pursuant to
+California Civil Code § 5550 designed to maintain the Association's
+Replacement Fund at a healthy percent-funded level relative to the
+estimated liability identified in the reserve study. The {{ fiscal_year }}
+base monthly Replacement Fund contribution is
+${{ '{:,.2f}'.format(computed.monthly_replacement_contribution_per_unit_2026) }}
+per unit per month, with subsequent annual adjustments scheduled per
+the table below.</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Forecast Horizon</th>
+      <th>Year</th>
+      <th>Percent Funded (forecast)</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Present</td>
+      <td>{{ fiscal_year }}</td>
+      <td>{{ computed.percent_funded }}%</td>
+    </tr>
+    {% if computed.percent_funded_at is defined %}
+      {% for horizon in [10, 20, 30] %}
+      <tr>
+        <td>+{{ horizon }} years</td>
+        <td>{{ fiscal_year + horizon }}</td>
+        <td>{{ computed.percent_funded_at[horizon] if horizon in computed.percent_funded_at else '—' }}%</td>
+      </tr>
+      {% endfor %}
+    {% endif %}
+  </tbody>
+</table>
+
+<p>The Association is currently considered to be in a healthy funding
+posture: the present percent-funded value of {{ computed.percent_funded }}%
+combined with the scheduled funding-plan adjustments is projected to
+maintain or improve the funded ratio over the 30-year forecast horizon.
+The Board reviews this trajectory annually in conjunction with the
+reserve study update prepared by
+{{ static_data.reserve_study_expert_name }}.</p>
+
+<p class="legal-block">In the event the Association's percent-funded
+ratio drops materially below the level projected herein, the Board will
+consider the available remedial measures provided by California Civil
+Code § 5560 (special assessments) and § 5550 (funding plan revision).</p>
+{% endblock %}
