@@ -388,6 +388,26 @@ def run_render_job(
 
         _set_status(session, job_id, stage=DISCLOSURE_STAGE_COMPUTING)
 
+        # Load operator-saved disclosure settings (Phase 11 plan 11-08
+        # Task 4). Fields left at the defaults / unset are skipped so
+        # spec.static_data continues to drive them in compile_package.
+        # Local import keeps the module-import graph cycle-free.
+        from ..services import hoa_settings_service as hoa_settings_module
+
+        settings_row = hoa_settings_module.get_or_create(session, hoa_id=hoa_id)
+        overrides: dict = {}
+        for field in (
+            "management_company", "management_company_address",
+            "management_company_phone", "management_company_fax", "management_company_web",
+            "cpa_firm_name", "cpa_firm_address", "reserve_study_expert_name",
+            "reserve_cash_balance_eoy_prior", "fund_balance_boy_operations",
+            "monthly_assessment_per_unit_prior", "interest_rate_after_tax",
+            "replacement_cost_increase_rate", "letter_signed_by",
+        ):
+            val = getattr(settings_row, field, None)
+            if val not in (None, "", 0, 0.0):
+                overrides[field] = val
+
         output_dir = _output_dir_for(hoa_id, fiscal_year, job_id)
         result = compile_package(
             spec=spec.model_copy(
@@ -398,6 +418,7 @@ def run_render_job(
             hoa_metadata=hoa_metadata,
             output_dir=output_dir,
             appendices_root=appendix_dir_for(hoa_id),
+            hoa_settings_overrides=overrides,
         )
 
         _set_status(

@@ -374,6 +374,7 @@ def compile_package(
     hoa_metadata: HOAMetadata,
     output_dir: Path,
     appendices_root: Optional[Path] = None,
+    hoa_settings_overrides: Optional[dict] = None,
 ) -> CompileResult:
     """Run the full disclosure-package compilation pipeline.
 
@@ -427,7 +428,33 @@ def compile_package(
             field_paths=[e.field_path for e in blocking],
         )
 
-    # 2. Capture the input snapshot for the audit log (CONTEXT D-15).
+    # 2. Build effective hoa_settings dict — spec.static_data defaults
+    #    overlaid with any operator-saved overrides from the hoa_settings
+    #    table (Phase 11 plan 11-08 Task 4). Templates and the audit log
+    #    consume this dict in preference to spec.static_data so a settings
+    #    edit changes the rendered package without a code change.
+    effective_hoa_settings: dict[str, Any] = {
+        "management_company": spec.static_data.management_company,
+        "management_company_address": spec.static_data.management_company_address,
+        "management_company_phone": "650.210.0085",
+        "management_company_fax": "650.210.0086",
+        "management_company_web": "www.3state.net",
+        "cpa_firm_name": spec.static_data.cpa_firm_name,
+        "cpa_firm_address": spec.static_data.cpa_firm_address,
+        "reserve_study_expert_name": spec.static_data.reserve_study_expert_name,
+        "reserve_cash_balance_eoy_prior": float(spec.static_data.reserve_cash_balance_eoy_prior),
+        "fund_balance_boy_operations": float(spec.static_data.fund_balance_boy_operations),
+        "monthly_assessment_per_unit_prior": float(spec.static_data.monthly_assessment_per_unit_prior),
+        "interest_rate_after_tax": float(spec.static_data.interest_rate_after_tax),
+        "replacement_cost_increase_rate": float(spec.static_data.replacement_cost_increase_rate),
+        "letter_signed_by": spec.static_data.letter_signed_by,
+    }
+    if hoa_settings_overrides:
+        for key, value in hoa_settings_overrides.items():
+            if value is not None:
+                effective_hoa_settings[key] = value
+
+    # 3. Capture the input snapshot for the audit log (CONTEXT D-15).
     input_snapshot: dict[str, Any] = {
         "spec_hoa_id": spec.hoa_id,
         "fiscal_year": spec.fiscal_year,
@@ -435,6 +462,7 @@ def compile_package(
         "reserve_snapshot": reserve_snapshot.model_dump(mode="json"),
         "hoa_metadata": hoa_metadata.model_dump(mode="json"),
         "static_data": spec.static_data.model_dump(mode="json"),
+        "hoa_settings": effective_hoa_settings,
     }
 
     audit_log_ref = None
@@ -455,6 +483,7 @@ def compile_package(
                                   # so the rendered name reflects the live DB row.
             "today": datetime.now(timezone.utc).strftime("%A %B %-d, %Y"),
             "today_iso": datetime.now(timezone.utc).date().isoformat(),
+            "hoa_settings": effective_hoa_settings,
             **computed,
         }
 

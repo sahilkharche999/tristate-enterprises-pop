@@ -415,6 +415,32 @@ def test_compile_package_output_layout(monkeypatch, tmp_path: Path, qpdf_require
     assert result.audit_path == output_dir / "audit.json"
 
 
+def test_compile_package_uses_hoa_settings_for_reserve_cash_balance(
+    monkeypatch, tmp_path: Path, qpdf_required
+) -> None:
+    """When hoa_settings_overrides is passed, those values supersede static_data."""
+    appendices = tmp_path / "appendices"
+    appendices.mkdir()
+    _patch_render(monkeypatch)
+
+    overrides = {
+        "reserve_cash_balance_eoy_prior": 9_999_999,
+        "fund_balance_boy_operations": 12345,
+    }
+    result = compile_package(
+        spec=OLD_MILL_2026,
+        budget_draft=_budget_draft(),
+        reserve_snapshot=_reserve_snapshot(),
+        hoa_metadata=_hoa_metadata(),
+        output_dir=tmp_path / "out",
+        appendices_root=appendices,
+        hoa_settings_overrides=overrides,
+    )
+    audit = json.loads((tmp_path / "out" / "audit.json").read_text())
+    assert audit["input_snapshot"]["hoa_settings"]["reserve_cash_balance_eoy_prior"] == 9_999_999
+    assert audit["input_snapshot"]["hoa_settings"]["fund_balance_boy_operations"] == 12345
+
+
 def test_compile_package_sha256_matches_output_bytes(monkeypatch, tmp_path: Path, qpdf_required) -> None:
     """The CompileResult.sha256 is the digest of the bytes actually on
     disk at output_path (sanity check — protects against the result
