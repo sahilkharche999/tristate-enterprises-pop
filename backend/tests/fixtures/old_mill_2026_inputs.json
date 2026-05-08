@@ -1,0 +1,31 @@
+{
+  "hoa_metadata": {
+    "hoa_id": 1,
+    "name": "Old Mill Homeowners Association",
+    "units": 279,
+    "fiscal_year_start_month": 1,
+    "fiscal_year_end_month": 12,
+    "tax_id": null
+  },
+  "budget_draft": {
+    "line_items": [
+      {"label": "Regular Assessment Income", "amount": "2025540.00", "section": "Income", "category": "income", "is_reserve": false, "is_revenue": true, "read_only": false},
+      {"label": "Interest Income (Operating)", "amount": "0.00", "section": "Income", "category": "income", "is_reserve": false, "is_revenue": true, "read_only": false},
+      {"label": "Reserve Assessment Income", "amount": "672886.00", "section": "Reserve Income", "category": "reserve_income", "is_reserve": true, "is_revenue": true, "read_only": false},
+      {"label": "Interest Income (Reserve)", "amount": "65000.00", "section": "Reserve Income", "category": "reserve_income", "is_reserve": true, "is_revenue": true, "read_only": false},
+      {"label": "General Maintenance", "amount": "100000.00", "section": "Maintenance and operations", "category": "operating", "is_reserve": false, "is_revenue": false, "read_only": false},
+      {"label": "Water/Sewer", "amount": "75000.00", "section": "Utilities", "category": "operating", "is_reserve": false, "is_revenue": false, "read_only": false},
+      {"label": "Management Fees", "amount": "120000.00", "section": "Administration", "category": "operating", "is_reserve": false, "is_revenue": false, "read_only": false},
+      {"label": "Replacement Reserve Expense", "amount": "672886.00", "section": "Reserve Expenses", "category": "reserve", "is_reserve": true, "is_revenue": false, "read_only": true},
+      {"label": "Income Tax Provision", "amount": "18200.00", "section": "Reserve Expenses", "category": "reserve", "is_reserve": true, "is_revenue": false, "read_only": false}
+    ]
+  },
+  "reserve_study_snapshot": {
+    "study_date": "September 2025",
+    "components": [
+      {"line_item": "Roof", "useful_life": 25, "remaining_life": 10, "replacement_cost": "500000.00", "year_new": 2010},
+      {"line_item": "Asphalt Resurfacing", "useful_life": 20, "remaining_life": 5, "replacement_cost": "300000.00", "year_new": 2010},
+      {"line_item": "Pool Resurfacing", "useful_life": 10, "remaining_life": 3, "replacement_cost": "75000.00", "year_new": 2018}
+    ]
+  }
+}
