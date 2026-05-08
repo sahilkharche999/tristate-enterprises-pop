@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>{% block title %}{{ static_data.hoa_legal_name }} {{ fiscal_year }}{% endblock %}</title>
+  <title>{% block title %}{{ hoa.name }} {{ fiscal_year }}{% endblock %}</title>
   <link rel="stylesheet" href="_shared.css">
 </head>
 <body>
@@ -30,7 +30,7 @@
 </div>
 
 <div class="letterhead-right">
-  <div class="letterhead-hoa-name">{{ static_data.hoa_legal_name | upper }}</div>
+  <div class="letterhead-hoa-name">{{ hoa.name | upper }}</div>
 </div>
 
 <div class="footer-block">

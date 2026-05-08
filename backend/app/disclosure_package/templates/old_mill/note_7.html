@@ -22,12 +22,12 @@ assumptions:</p>
     forecast at an after-tax annualized rate of
     {{ '{:.1%}'.format(static_data.interest_rate_after_tax) }}.</li>
   <li><span class="bold">Income tax provision:</span> a provision of
-    ${{ '{:,.0f}'.format(static_data.income_tax_provision_estimate) }}
+    ${{ '{:,.0f}'.format(computed.income_tax_provision) }}
     is reflected in the {{ fiscal_year }} forecast for federal and
     state income tax on Replacement Fund interest income.</li>
   <li><span class="bold">Assessment level:</span> regular monthly
     assessments are forecast at the current rate of
-    ${{ '{:,.2f}'.format(static_data.monthly_assessment_per_unit_current) }}
+    ${{ '{:,.2f}'.format(computed.monthly_assessment_per_unit_current) }}
     per unit per month.</li>
   <li><span class="bold">Funding plan schedule:</span> the funding plan
     adjusts the per-unit Replacement Fund contribution per the Board's
@@ -36,6 +36,6 @@ assumptions:</p>
 </ul>
 
 <p class="legal-block">All assumptions reflect management's good-faith
-estimates as of {{ static_data.letter_date }} and may be revised as
+estimates as of {{ today }} and may be revised as
 new information becomes available.</p>
 {% endblock %}

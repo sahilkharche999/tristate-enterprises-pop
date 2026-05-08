@@ -2,11 +2,11 @@
 {% block title %}Notes 1-3 to Financial Statements{% endblock %}
 {% block content %}
 <h1 id="notes">Notes to Financial Statements</h1>
-<p class="muted">{{ static_data.hoa_legal_name }} —
+<p class="muted">{{ hoa.name }} —
 For the Year Ending December 31, {{ fiscal_year }}</p>
 
 <h2 id="note-1">Note 1 — The Association</h2>
-<p>{{ static_data.hoa_legal_name }} (the "Association") is a common
+<p>{{ hoa.name }} (the "Association") is a common
 interest residential community located in {{ static_data.city }},
 {{ static_data.state }}. The Association is organized as a non-profit
 mutual benefit corporation under California law and is responsible for
@@ -25,7 +25,7 @@ covers the twelve-month period beginning January 1, {{ fiscal_year }}
 and ending December 31, {{ fiscal_year }}. The forecast is presented
 on the accrual basis of accounting and reflects management's good-faith
 estimate of expected operations during the forecast period, based on
-information available as of {{ static_data.letter_date }}.</p>
+information available as of {{ today }}.</p>
 
 <p>The forecast does not constitute audited or reviewed financial
 statements. Actual results during the forecast period may differ

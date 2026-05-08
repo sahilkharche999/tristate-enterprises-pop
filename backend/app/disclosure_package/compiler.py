@@ -231,6 +231,25 @@ def _compute_all(
     else:
         base_2026_monthly = Decimal("0.00")
 
+    # Monthly assessment per unit is whatever the draft says — sum the
+    # operating revenue lines whose label matches an "assessment" pattern,
+    # divided by units and 12 months. This replaces the previous hardcoded
+    # static_data value so that changing the draft changes the rendered
+    # cover letter / §5570 form / Note 4-5 / etc.
+    annual_assessment_revenue = sum(
+        (li.amount or Decimal(0))
+        for li in operating_lis
+        if li.is_revenue and li.label and "assessment" in li.label.lower()
+    )
+    if annual_assessment_revenue and hoa_metadata.units > 0:
+        monthly_assessment_per_unit_current = (
+            Decimal(annual_assessment_revenue) / Decimal(hoa_metadata.units) / Decimal(12)
+        ).quantize(Decimal("0.01"))
+    else:
+        monthly_assessment_per_unit_current = (
+            spec.static_data.monthly_assessment_per_unit_current
+        )
+
     # Pro-forma footnote counts — currently a strict subset of the reserve
     # study. Phase 12 adds a board-deferral / signed-contracts admin form;
     # for now we surface the one we can derive (useful_life missing) and
@@ -239,6 +258,24 @@ def _compute_all(
         1 for c in reserve_snapshot.components
         if not c.useful_life or int(c.useful_life) <= 0
     )
+
+    # Income tax provision — HOAs pay tax on non-exempt income, dominated by
+    # reserve interest revenue. Derive from the draft's actual interest line
+    # items where present (assumed 30% federal Form 1120-H rate, applied to
+    # non-membership income). Falls back to the spec default for backward
+    # compatibility on drafts that have not yet split out interest revenue.
+    interest_revenue_total = sum(
+        (li.amount or Decimal(0))
+        for li in (operating_lis + reserve_lis)
+        if li.is_revenue and li.label and "interest" in li.label.lower()
+    )
+    if interest_revenue_total:
+        income_tax_provision = (
+            (Decimal(interest_revenue_total) * Decimal("0.30"))
+            .quantize(Decimal("1"))
+        )
+    else:
+        income_tax_provision = spec.static_data.income_tax_provision_estimate
 
     return {
         "computed": {
@@ -272,6 +309,10 @@ def _compute_all(
             "monthly_replacement_contribution_per_unit_2026": base_2026_monthly,
             "monthly_replacement_revenue_total": total_rev_rep,
             "monthly_replacement_contribution_total": monthly_replacement_contribution_total,
+            "monthly_assessment_per_unit_current": monthly_assessment_per_unit_current,
+            "annual_assessment_revenue": Decimal(annual_assessment_revenue) if annual_assessment_revenue else Decimal(0),
+            "interest_revenue_total": Decimal(interest_revenue_total) if interest_revenue_total else Decimal(0),
+            "income_tax_provision": income_tax_provision,
             "useful_life_not_disclosed_count": useful_life_not_disclosed_count,
             "board_deferral_count": 0,
             "signed_contracts_count": 0,
@@ -409,6 +450,11 @@ def compile_package(
             "spec": spec,
             "static_data": spec.static_data,
             "fiscal_year": spec.fiscal_year,
+            "hoa": hoa_metadata,  # Property-record-derived; templates should
+                                  # prefer hoa.name over static_data.hoa_legal_name
+                                  # so the rendered name reflects the live DB row.
+            "today": datetime.now(timezone.utc).strftime("%A %B %-d, %Y"),
+            "today_iso": datetime.now(timezone.utc).date().isoformat(),
             **computed,
         }
 

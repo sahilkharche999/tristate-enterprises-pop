@@ -12,12 +12,12 @@
 
 <div class="letter-meta">
   <div>Board of Directors</div>
-  <div>{{ static_data.hoa_legal_name }}</div>
+  <div>{{ hoa.name }}</div>
   <div>{{ static_data.city }}, {{ static_data.state }}</div>
 </div>
 
 <p class="legal-block">Management is responsible for the accompanying forecast
-of {{ static_data.hoa_legal_name }} (the &ldquo;Association&rdquo;), which
+of {{ hoa.name }} (the &ldquo;Association&rdquo;), which
 comprises the forecasted statement of revenues, expenses and changes in
 fund balances for the year ending December 31, {{ fiscal_year }}, and the
 related summaries of significant assumptions and accounting policies in
@@ -45,10 +45,10 @@ the Association. Accordingly, this forecast may not be useful for any
 other purpose.</p>
 
 <p class="legal-block">We are not independent with respect to
-{{ static_data.hoa_legal_name }}.</p>
+{{ hoa.name }}.</p>
 
 <div class="letter-signature">
   <p class="bold" style="margin-bottom:4pt">{{ static_data.cpa_firm_name }}</p>
-  <p>{{ static_data.letter_date }}</p>
+  <p>{{ today }}</p>
 </div>
 {% endblock %}

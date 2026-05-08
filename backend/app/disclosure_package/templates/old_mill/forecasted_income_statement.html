@@ -3,7 +3,7 @@
 {% block content %}
 
 <p class="center bold" style="text-decoration: underline; font-size:11pt; margin-bottom:4pt">
-  {{ static_data.hoa_legal_name | upper }}
+  {{ hoa.name | upper }}
 </p>
 <p class="center bold" style="font-size:11pt; line-height:1.25; margin-bottom:14pt">
   FORECASTED STATEMENT OF REVENUES,<br>
@@ -133,14 +133,14 @@
     <tr>
       <td class="indent2">Income tax provision</td>
       <td>—</td>
-      <td>${{ '{:,.0f}'.format(static_data.income_tax_provision_estimate) }}</td>
-      <td>${{ '{:,.0f}'.format(static_data.income_tax_provision_estimate) }}</td>
+      <td>${{ '{:,.0f}'.format(computed.income_tax_provision) }}</td>
+      <td>${{ '{:,.0f}'.format(computed.income_tax_provision) }}</td>
     </tr>
     <tr class="subtotal">
       <td></td>
       <td>${{ '{:,.0f}'.format(computed.expenses_administration_operating) }}</td>
-      <td>${{ '{:,.0f}'.format(static_data.income_tax_provision_estimate) }}</td>
-      <td>${{ '{:,.0f}'.format(computed.expenses_administration_operating + static_data.income_tax_provision_estimate) }}</td>
+      <td>${{ '{:,.0f}'.format(computed.income_tax_provision) }}</td>
+      <td>${{ '{:,.0f}'.format(computed.expenses_administration_operating + computed.income_tax_provision) }}</td>
     </tr>
 
     <tr class="blank-row"><td colspan="4">&nbsp;</td></tr>

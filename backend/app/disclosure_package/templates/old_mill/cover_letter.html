@@ -1,10 +1,10 @@
 {% extends "_base.html" %}
-{% block title %}{{ static_data.hoa_legal_name }} — Cover Letter{% endblock %}
+{% block title %}{{ hoa.name }} — Cover Letter{% endblock %}
 {% block content %}
 
 <div class="letter-meta">
-  <div>{{ static_data.letter_date }}</div>
-  <div style="margin-top:6pt">To: Old Mill Homeowners</div>
+  <div>{{ today }}</div>
+  <div style="margin-top:6pt">To: {{ hoa.name }} Homeowners</div>
   <div>From: Board of Directors</div>
   <div>RE: {{ fiscal_year }} Operating Budget, Budget Report per Civil Code 5300, and Annual Policy Statement per Civil Code 5310</div>
 </div>
@@ -15,9 +15,9 @@
 
 <p>Thank you for the prompt payment of your assessments for the current year.
 The enclosed operating budget has been approved by your Board of Directors and
-will become effective on January 1, {{ fiscal_year }}.  The monthly
-assessment per unit for {{ fiscal_year }} will remain the same at
-${{ '{:,.2f}'.format(static_data.monthly_assessment_per_unit_current) }}.</p>
+will become effective on January 1, {{ fiscal_year }}. The monthly
+assessment per unit for {{ fiscal_year }} is
+${{ '{:,.2f}'.format(computed.monthly_assessment_per_unit_current) }}.</p>
 
 <ul class="letter-bullets">
   <li>Reserves are being funded in the amount of
@@ -91,7 +91,7 @@ ${{ '{:,.2f}'.format(static_data.monthly_assessment_per_unit_current) }}.</p>
   <li>4035: Please be advised that any official communications to the
     association should be put in writing and addressed to:
     <div class="address-block">
-      The {{ static_data.hoa_legal_name }}<br>
+      The {{ hoa.name }}<br>
       c/o {{ static_data.management_company }}<br>
       {{ static_data.management_company_address }}
     </div>
@@ -101,10 +101,9 @@ ${{ '{:,.2f}'.format(static_data.monthly_assessment_per_unit_current) }}.</p>
     notices by individual delivery.  A written request from the owner must
     be sent to:
     <div class="address-block">
-      The {{ static_data.hoa_legal_name }}<br>
+      The {{ hoa.name }}<br>
       c/o {{ static_data.management_company }}<br>
-      2133 Leghorn Street<br>
-      Mountain View, CA 94043
+      {{ static_data.management_company_address }}
     </div>
   </li>
 </ol>
@@ -115,11 +114,11 @@ request this, please complete an Opt Out Form and mail it back to the above
 address.</p>
 
 <p style="margin-top:14pt">On behalf of the Board of Directors of The
-{{ static_data.hoa_legal_name }},</p>
+{{ hoa.name }},</p>
 
 <div class="letter-signature">
   <p style="margin-bottom:24pt">&nbsp;</p>
-  <p>Jennifer Yeo<br>Vice President, {{ static_data.management_company }}</p>
+  <p>{{ static_data.letter_signed_by }}<br>{{ static_data.management_company }}</p>
 </div>
 
 </div>
