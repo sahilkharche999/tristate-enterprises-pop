@@ -23,6 +23,7 @@ from .routers.budget_history import router as budget_history_router
 from .routers.hoa import router as hoa_router
 from .routers.app_settings import router as app_settings_router
 from .disclosure_package.router import router as disclosure_package_router
+from .routers.hoa_settings import router as hoa_settings_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -72,6 +73,9 @@ def create_app() -> FastAPI:
     # add a router-level dependency here because the router's per-endpoint
     # auth + ownership check is the canonical site for T-11-01 / T-11-02.
     app.include_router(disclosure_package_router)
+    # hoa_settings router applies Depends(get_current_user) per-endpoint, so no
+    # router-level dependency needed (mirrors the disclosure_package pattern).
+    app.include_router(hoa_settings_router)
 
     # Protected AI routes
     app.include_router(
