@@ -9,6 +9,10 @@ in new HOAs without touching schemas or formulas.
 CONTEXT D-06 / threat T-11-04: every currency field is `Decimal`, NEVER float.
 Pydantic v2 coerces str/int/float inputs at the schema boundary, which is the
 single chokepoint for keeping float arithmetic out of the calc engine.
+
+Plan 11-06 added the API-facing DTOs at the bottom of the file:
+    * `DisclosurePackageJobResponse` — GET /status response shape.
+    * `GenerateDisclosurePackageRequest` — POST /generate request shape.
 """
 from __future__ import annotations
 
@@ -184,3 +188,41 @@ class AuditLog(BaseModel):
     formula_calls: List[FormulaCall]
     started_at: str
     completed_at: Optional[str] = None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# API-facing DTOs (Plan 11-06)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class DisclosurePackageJobResponse(BaseModel):
+    """Response shape for GET /api/disclosure-package/{job_id}/status.
+
+    The router constructs this from a `DisclosurePackageJob` ORM row via
+    `model_validate(job)` (CONfigDict.from_attributes). Internal-only fields
+    (`output_path`, `audit_path`) are surfaced because Plan 11-07's UI uses
+    their presence to decide whether to enable the Download button — they
+    are not URLs themselves.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    property_id: int
+    fiscal_year: int
+    status: Literal["pending", "running", "completed", "failed"]
+    stage: Optional[str] = None
+    error_message: Optional[str] = None
+    output_path: Optional[str] = None
+    audit_path: Optional[str] = None
+    created_at: Optional[str] = None
+    completed_at: Optional[str] = None
+
+
+class GenerateDisclosurePackageRequest(BaseModel):
+    """Request body for POST /api/disclosure-package/generate."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    hoa_id: int = Field(ge=1)
+    fiscal_year: int = Field(ge=1900, le=3000)
