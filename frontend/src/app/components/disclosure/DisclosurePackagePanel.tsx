@@ -15,6 +15,8 @@
 // Card chrome verbatim from ReserveStudyView.tsx:65-105 (PATTERNS analog).
 // Visible strings come from UI-SPEC §9 verbatim.
 
+import { useState } from 'react';
+
 import { useDisclosureJob } from './useDisclosureJob';
 import {
   DisclosurePreflightChecklist,
@@ -24,6 +26,7 @@ import {
 import { DisclosureProgressBlock } from './DisclosureProgressBlock';
 import { DisclosureResultBlock } from './DisclosureResultBlock';
 import { DisclosureFailureBlock } from './DisclosureFailureBlock';
+import { DisclosureAuditSheet } from './DisclosureAuditSheet';
 import { Button } from '../ui/button';
 
 export interface DisclosurePackagePanelProps {
@@ -47,6 +50,7 @@ export function DisclosurePackagePanel({
   isSupportedHoa,
 }: DisclosurePackagePanelProps) {
   const { state, job, stage, elapsedMs, error, generate, reset } = useDisclosureJob();
+  const [auditOpen, setAuditOpen] = useState(false);
 
   const handleGenerate = () => {
     if (!isSupportedHoa) return;
@@ -117,7 +121,11 @@ export function DisclosurePackagePanel({
             <DisclosureProgressBlock currentStage={stage} elapsedMs={elapsedMs} />
           ) : null}
           {state === 'completed' && job ? (
-            <DisclosureResultBlock job={job} onRegenerate={handleRegenerate} />
+            <DisclosureResultBlock
+              job={job}
+              onRegenerate={handleRegenerate}
+              onViewAudit={() => setAuditOpen(true)}
+            />
           ) : null}
           {state === 'failed' ? (
             <DisclosureFailureBlock
@@ -128,6 +136,11 @@ export function DisclosurePackagePanel({
           ) : null}
         </div>
       </div>
+      <DisclosureAuditSheet
+        jobId={job?.id ?? null}
+        open={auditOpen}
+        onClose={() => setAuditOpen(false)}
+      />
     </section>
   );
 }
