@@ -90,30 +90,35 @@ def appendix_dir_for(hoa_id: int) -> Path:
     return root / "disclosure-package-appendices" / safe_hoa
 
 
-# Filenames for uploaded appendices: keep operator-friendly characters
-# (letters, digits, underscore, hyphen, dot) and reject anything else.
-# Length cap of 128 chars matches BUDGET_STORAGE_ROOT operational limits.
-_APPENDIX_FILENAME_RE = re.compile(r"^[A-Za-z0-9._\-]{1,128}$")
+# Characters allowed in a sanitized appendix filename. Anything outside this
+# set is replaced with an underscore so realistic operator uploads
+# ("ADR Disclosure.pdf", "Pool Rules (2026).pdf") land safely. Path
+# separators, control bytes, and shell metacharacters are NOT in this set
+# (T-11-05 mitigation).
+_APPENDIX_SAFE_CHAR_RE = re.compile(r"[^A-Za-z0-9._\- ()]")
 
 
 def _sanitize_appendix_filename(filename: str) -> str:
-    """Reject path-traversal or non-PDF uploads (T-11-05 family).
+    """Coerce an uploaded filename into a path-safe basename.
 
-    Strips any directory component, requires .pdf suffix, and validates
-    the remaining basename against an allow-list regex.
+    Strips any directory component, replaces any character outside the
+    allow-list with an underscore, and requires a .pdf suffix. Returns
+    the sanitized basename.
     """
     if not isinstance(filename, str):
         raise ValueError("Filename is required")
-    base = Path(filename).name
+    base = Path(filename).name.strip()
     if not base or base in (".", ".."):
         raise ValueError(f"Invalid filename: {filename!r}")
     if not base.lower().endswith(".pdf"):
         raise ValueError("Only .pdf uploads are accepted")
-    if not _APPENDIX_FILENAME_RE.match(base):
-        raise ValueError(
-            f"Filename may only contain letters, digits, '.', '_' and '-': {base!r}"
-        )
-    return base
+    sanitized = _APPENDIX_SAFE_CHAR_RE.sub("_", base)
+    # Cap length to keep paths within filesystem limits. Truncate before
+    # the suffix so the .pdf extension is preserved.
+    if len(sanitized) > 128:
+        stem, _, ext = sanitized.rpartition(".")
+        sanitized = stem[: 128 - len(ext) - 1] + "." + ext
+    return sanitized
 
 
 def list_appendices(hoa_id: int) -> list[dict]:

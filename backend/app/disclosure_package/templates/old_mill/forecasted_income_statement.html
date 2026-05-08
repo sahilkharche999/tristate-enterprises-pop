@@ -107,18 +107,23 @@
 
     <tr class="blank-row"><td colspan="4">&nbsp;</td></tr>
 
+    {# hoa_settings.* values are floats (JSON-clean for the audit log) and
+       computed.* values are Decimals; cast the Decimals to float here so
+       Jinja arithmetic doesn't cross types. #}
+    {% set tel = computed.total_estimated_liability|float %}
+    {% set rep_boy = (hoa_settings.reserve_cash_balance_eoy_prior or 0) - tel %}
     <tr>
       <td class="bold">FUND BALANCE (DEFICIT),<br>BEGINNING OF YEAR (NOTE 5)</td>
-      <td>${{ '{:,.0f}'.format(hoa_settings.fund_balance_boy_operations) }}</td>
-      <td>${{ '{:,.0f}'.format(hoa_settings.reserve_cash_balance_eoy_prior - computed.total_estimated_liability) }}</td>
-      <td>${{ '{:,.0f}'.format(hoa_settings.fund_balance_boy_operations + (hoa_settings.reserve_cash_balance_eoy_prior - computed.total_estimated_liability)) }}</td>
+      <td>${{ '{:,.0f}'.format(hoa_settings.fund_balance_boy_operations or 0) }}</td>
+      <td>${{ '{:,.0f}'.format(rep_boy) }}</td>
+      <td>${{ '{:,.0f}'.format((hoa_settings.fund_balance_boy_operations or 0) + rep_boy) }}</td>
     </tr>
 
     <tr class="total-row">
       <td>FUND BALANCE (DEFICIT),<br>END OF YEAR</td>
-      <td>${{ '{:,.0f}'.format(computed.fund_balance_eoy_operations) }}</td>
-      <td>${{ '{:,.0f}'.format(computed.fund_balance_eoy_replacement - computed.total_estimated_liability) }}</td>
-      <td>${{ '{:,.0f}'.format(computed.fund_balance_eoy_operations + computed.fund_balance_eoy_replacement - computed.total_estimated_liability) }}</td>
+      <td>${{ '{:,.0f}'.format(computed.fund_balance_eoy_operations|float) }}</td>
+      <td>${{ '{:,.0f}'.format(computed.fund_balance_eoy_replacement|float - tel) }}</td>
+      <td>${{ '{:,.0f}'.format(computed.fund_balance_eoy_operations|float + computed.fund_balance_eoy_replacement|float - tel) }}</td>
     </tr>
 
   </tbody>
