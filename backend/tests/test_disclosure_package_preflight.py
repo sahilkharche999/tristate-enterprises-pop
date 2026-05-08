@@ -198,19 +198,18 @@ def test_validate_inputs_flags_zero_or_negative_reserve_cash_balance():
     assert "reserve_cash_balance.amount" in paths
 
 
-# ── Test 6: missing static appendix file on disk → blocking error ─────────────
+# ── Test 6: missing static appendix files do NOT block preflight ──────────────
 
 
-def test_validate_inputs_flags_missing_static_appendix_file(tmp_path: Path):
-    """When appendices_root is provided, every StaticAppendix `file` MUST
-    exist on disk under that root; otherwise emit a blocking error with
-    field_path='package_spec.appendices'.
+def test_validate_inputs_does_not_block_on_missing_static_appendices(tmp_path: Path):
+    """Missing appendix files are intentionally not preflight-blocking — the
+    compiler skips them and continues. This keeps generation working when
+    the operator hasn't extracted the full Old Mill manifest, and lets them
+    drop ad-hoc PDFs in without updating the spec.
     """
     from app.disclosure_package.preflight import validate_inputs
     from app.disclosure_package.package_specs import OLD_MILL_2026
 
-    # The Old Mill spec references many appendix files; tmp_path is empty,
-    # so every static appendix is missing → expect at least one error.
     errors = validate_inputs(
         spec=OLD_MILL_2026,
         budget_draft=_valid_budget(),
@@ -219,9 +218,7 @@ def test_validate_inputs_flags_missing_static_appendix_file(tmp_path: Path):
         appendices_root=tmp_path,
     )
     paths = [e.field_path for e in errors]
-    assert "package_spec.appendices" in paths
-    appendix_errors = [e for e in errors if e.field_path == "package_spec.appendices"]
-    assert all(e.severity == "blocking" for e in appendix_errors)
+    assert "package_spec.appendices" not in paths
 
 
 # ── Test 7: multiple gates fail → all errors returned in deterministic order ──

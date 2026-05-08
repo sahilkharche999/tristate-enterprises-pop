@@ -266,9 +266,13 @@ def compile_package(
     Raises:
         CompileError: preflight returned a blocking error. The
             ``field_paths`` attribute lists the offending fields.
-        FileNotFoundError: an appendix file was missing during merge
-            (escalated from ``merge_pdfs`` — REQ-D11-008).
         RuntimeError: ``qpdf --check`` rejected the merged output.
+
+    Static appendices are best-effort: missing files are skipped with a
+    log warning, and any extra PDFs in ``appendices_root`` (filenames not
+    in ``spec.entries``) are appended after the spec entries in sorted
+    order. This lets operators drop ad-hoc appendix PDFs in without
+    updating the PackageSpec.
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -338,21 +342,42 @@ def compile_package(
         generated_path = output_dir / "generated.pdf"
         merge_pdfs(intermediate_pdfs, generated_path)
 
-        # 5b. Build full merge order: walk spec.entries; for each
-        #     GeneratedPage append the matching intermediate; for each
-        #     StaticAppendix append the resolved appendix path.
+        # 5b. Build full merge order: walk spec.entries; GeneratedPage
+        #     entries always merge in; StaticAppendix entries merge in
+        #     when the file exists on disk and are silently skipped
+        #     otherwise (compile keeps working with 0-N appendix PDFs).
         full_paths: list[Path] = []
+        spec_appendix_files: set[str] = set()
         gen_index = 0
         for entry in spec.entries:
             if isinstance(entry, GeneratedPage):
                 full_paths.append(intermediate_pdfs[gen_index])
                 gen_index += 1
             elif isinstance(entry, StaticAppendix):
-                full_paths.append(appendices_root / entry.file)
+                spec_appendix_files.add(entry.file)
+                appendix_path = appendices_root / entry.file
+                if appendix_path.exists():
+                    full_paths.append(appendix_path)
+                else:
+                    logger.info(
+                        "compiler: skipping missing static appendix %s",
+                        entry.file,
+                    )
+
+        # 5c. Append any extra PDFs the operator dropped into the appendix
+        #     directory that aren't named in spec.entries — sorted so the
+        #     order is deterministic across runs. This is the "drop a
+        #     random appendix in and have it included" path.
+        if appendices_root.is_dir():
+            extras = sorted(
+                p for p in appendices_root.glob("*.pdf")
+                if p.name not in spec_appendix_files
+            )
+            for extra in extras:
+                logger.info("compiler: appending ad-hoc appendix %s", extra.name)
+                full_paths.append(extra)
 
         package_path = output_dir / "package.pdf"
-        # merge_pdfs raises FileNotFoundError naming any missing source
-        # path; the message bubbles up as part of REQ-D11-008.
         merge_pdfs(full_paths, package_path)
 
         # 6. Last-mile structural validator (REQ-D11-007).

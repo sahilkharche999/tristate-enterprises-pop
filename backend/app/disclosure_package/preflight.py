@@ -10,15 +10,15 @@ Field path contract (REQ-D11-004, REQ-D11-005):
   * reserve_study_snapshot.components
   * hoa_metadata.fiscal_year_end_month
   * reserve_cash_balance.amount
-  * package_spec.appendices
 
 Gate evaluation order is deterministic (above). When multiple gates fail,
 errors are returned in declaration order so the UI can render a stable list.
 
-Threat T-11-05 (path traversal): the appendices_root file-existence check
-joins trusted spec.entries[*].file (PackageSpec literal — not user input)
-under the caller-provided root via Path joining only. No user-controlled
-path component reaches the filesystem here.
+Static appendix files are intentionally NOT preflight-blocking. Whatever PDFs
+exist in the appendices directory at compile time are merged in; missing
+spec entries are skipped (compiler.py logs a warning). This keeps local-dev
+generation working without the full Old Mill legal-review extraction, and
+lets operators drop ad-hoc appendix PDFs in without updating the PackageSpec.
 """
 from __future__ import annotations
 
@@ -31,7 +31,6 @@ from .schemas import (
     PackageSpec,
     PreflightError,
     ReserveStudySnapshot,
-    StaticAppendix,
 )
 
 
@@ -50,11 +49,12 @@ def validate_inputs(
         budget_draft: BudgetDraft with operating + reserve line items.
         reserve_snapshot: ReserveStudySnapshot from Phase 10 extractor.
         hoa_metadata: HOAMetadata from properties table.
-        appendices_root: filesystem path to look up static appendix files.
-            When None, skips the file-existence check (unit-test mode +
-            keeps the function pure when callers want to defer the FS
-            check to a later stage).
+        appendices_root: accepted for backward compatibility; no longer used.
+            Static appendix existence is no longer a preflight concern —
+            see compiler.py for the merge-time skip-and-warn behaviour.
     """
+    del appendices_root  # appendix existence is checked at merge time, not here
+
     errors: list[PreflightError] = []
 
     # 1. Budget line items present (REQ-D11-005)
@@ -91,18 +91,5 @@ def validate_inputs(
             message="Reserve cash balance for end of prior year must be > 0",
             severity="blocking",
         ))
-
-    # 5. Static appendix files present on disk (only when appendices_root
-    #    is provided; unit tests pass None to keep the check pure).
-    if appendices_root is not None:
-        for entry in spec.entries:
-            if isinstance(entry, StaticAppendix):
-                appendix_path = appendices_root / entry.file
-                if not appendix_path.exists():
-                    errors.append(PreflightError(
-                        field_path="package_spec.appendices",
-                        message=f"Static appendix file not found: {entry.file}",
-                        severity="blocking",
-                    ))
 
     return errors

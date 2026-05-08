@@ -280,39 +280,72 @@ def test_compile_package_writes_audit_json(monkeypatch, tmp_path: Path, qpdf_req
     assert audit["started_at"] and audit["completed_at"]
 
 
-def test_compile_package_raises_on_preflight_error(monkeypatch, tmp_path: Path) -> None:
-    """Test 5: When preflight returns a blocking error, compile_package
-    raises CompileError carrying the offending field paths.
+def test_compile_package_skips_missing_appendices(monkeypatch, tmp_path: Path, qpdf_required) -> None:
+    """Test 5: Missing static appendix files are no longer a blocker —
+    compile_package skips them, merges the generated pages plus any
+    appendices that DO exist, and produces a valid package.pdf.
 
-    Trigger: appendices_root points to a non-existent dir → preflight
-    returns one PreflightError per StaticAppendix entry. The compiler
-    must NOT attempt to render or merge.
+    Trigger: appendices_root is empty. The compiler must still render,
+    merge, and emit package.pdf + audit.json.
     """
     output_dir = tmp_path / "out"
-    missing_appendices = tmp_path / "does_not_exist"
+    empty_appendices = tmp_path / "appendices_empty"
+    empty_appendices.mkdir()
 
-    # Render must NOT be called — set a sentinel that explodes if it is.
-    def render_must_not_be_called(*args, **kwargs):  # pragma: no cover
-        raise AssertionError("render_template called despite preflight failure")
+    _patch_render(monkeypatch)
 
-    monkeypatch.setattr(compiler_module, "render_template", render_must_not_be_called)
+    result = compile_package(
+        spec=OLD_MILL_2026,
+        budget_draft=_budget_draft(),
+        reserve_snapshot=_reserve_snapshot(),
+        hoa_metadata=_hoa_metadata(),
+        output_dir=output_dir,
+        appendices_root=empty_appendices,
+    )
 
-    with pytest.raises(CompileError) as excinfo:
-        compile_package(
-            spec=OLD_MILL_2026,
-            budget_draft=_budget_draft(),
-            reserve_snapshot=_reserve_snapshot(),
-            hoa_metadata=_hoa_metadata(),
-            output_dir=output_dir,
-            appendices_root=missing_appendices,
-        )
+    # Outputs were written and qpdf-checked.
+    assert result.output_path.exists()
+    assert (output_dir / "audit.json").exists()
+    # Page count reflects only the GeneratedPage entries (zero appendices).
+    generated_pages = sum(
+        e.page_count_hint for e in OLD_MILL_2026.entries
+        if isinstance(e, GeneratedPage)
+    )
+    assert result.page_count == generated_pages
 
-    err = excinfo.value
-    assert err.field_paths, "CompileError must carry the failing field_paths"
-    assert "package_spec.appendices" in err.field_paths
-    # No package.pdf or audit.json was written.
-    assert not (output_dir / "package.pdf").exists()
-    assert not (output_dir / "audit.json").exists()
+
+def test_compile_package_appends_extra_pdfs_in_appendix_dir(
+    monkeypatch, tmp_path: Path, qpdf_required
+) -> None:
+    """Operator-uploaded ad-hoc PDFs whose filenames are NOT in the
+    PackageSpec entries are appended at the end of the merge order in
+    sorted name order. This is the "drop a random PDF in" workflow.
+    """
+    appendices = tmp_path / "appendices"
+    appendices.mkdir()
+
+    # Drop two ad-hoc files that aren't in OLD_MILL_2026.entries.
+    extras = ["aaa_extra.pdf", "zzz_extra.pdf"]
+    for name in extras:
+        _make_pdf(appendices / name, page_count=1, label=name)
+
+    _patch_render(monkeypatch)
+
+    result = compile_package(
+        spec=OLD_MILL_2026,
+        budget_draft=_budget_draft(),
+        reserve_snapshot=_reserve_snapshot(),
+        hoa_metadata=_hoa_metadata(),
+        output_dir=tmp_path / "out",
+        appendices_root=appendices,
+    )
+
+    generated_pages = sum(
+        e.page_count_hint for e in OLD_MILL_2026.entries
+        if isinstance(e, GeneratedPage)
+    )
+    # Two extras of one page each are appended after the generated pages.
+    assert result.page_count == generated_pages + len(extras)
 
 
 def test_compile_package_two_runs_produce_byte_equivalent_pdf(monkeypatch, tmp_path: Path, qpdf_required) -> None:
