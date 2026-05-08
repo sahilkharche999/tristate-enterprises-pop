@@ -5,6 +5,10 @@ WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential gcc libpq-dev \
+    libpango-1.0-0 libharfbuzz0b libpangoft2-1.0-0 libharfbuzz-subset0 \
+    libffi-dev libjpeg-dev libopenjp2-7-dev \
+    qpdf \
+    fonts-liberation fonts-dejavu fonts-noto-core \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./

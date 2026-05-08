@@ -34,6 +34,20 @@ BUDGET_DRAFT_GENERATED = "generated"
 BUDGET_VERSION_STAGE_INTERIM = "Interim"
 BUDGET_VERSION_STAGE_FINAL = "Final"
 
+# Disclosure-package job lifecycle (Phase 11). The router exposes job_id as TEXT
+# (uuid4) so we never leak rate-of-creation via a sequential surrogate.
+DISCLOSURE_JOB_PENDING = "pending"
+DISCLOSURE_JOB_RUNNING = "running"
+DISCLOSURE_JOB_COMPLETED = "completed"
+DISCLOSURE_JOB_FAILED = "failed"
+
+# Per-render stage constants. Match the worker pipeline order in plan 11-06+.
+DISCLOSURE_STAGE_VALIDATING = "validating"
+DISCLOSURE_STAGE_COMPUTING = "computing"
+DISCLOSURE_STAGE_RENDERING = "rendering"
+DISCLOSURE_STAGE_MERGING = "merging"
+DISCLOSURE_STAGE_VERIFYING = "verifying"
+
 
 # ── Models ───────────────────────────────────────────────────────────────────
 
@@ -302,3 +316,39 @@ class BudgetAuditEvent(Base):
     version = relationship("BudgetVersion", lazy="raise")
     note = relationship("BudgetNote", lazy="raise")
     actor = relationship("User", lazy="raise")
+
+
+class DisclosurePackageJob(Base):
+    """Phase 11 disclosure-package render job.
+
+    The id is a TEXT uuid4 string, NOT an autoincrement integer, because the
+    router exposes job_id in URLs and we don't want sequential ids leaking
+    creation rate. Threat model T-11-01: the property_id FK + ON DELETE CASCADE
+    is the anchor for the ownership-check that plan 11-06's router will enforce
+    via Depends(get_current_user) before returning a job row.
+
+    Threat model T-11-06 (regenerate race): for MVP we accept the
+    `(property_id, fiscal_year, status='running')` race per Phase 11's
+    single-user assumption; plan 11-06's service does SELECT-then-INSERT in a
+    transaction. Full unique-constraint enforcement is deferred.
+    """
+
+    __tablename__ = "disclosure_package_jobs"
+
+    id = Column(Text, primary_key=True)
+    property_id = Column(
+        Integer,
+        ForeignKey("properties.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    fiscal_year = Column(Integer, nullable=False)
+    status = Column(Text, nullable=False, default=DISCLOSURE_JOB_PENDING)
+    stage = Column(Text, nullable=True)
+    error_message = Column(Text, nullable=True)
+    output_path = Column(Text, nullable=True)
+    audit_path = Column(Text, nullable=True)
+    created_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(Text, server_default=_CREATED_AT_DEFAULT)
+    completed_at = Column(Text, nullable=True)
+
+    property = relationship("Property", lazy="raise")

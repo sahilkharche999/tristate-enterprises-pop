@@ -133,6 +133,20 @@ PORTFOLIO_SEED: list[dict[str, Any]] = [
         "city": "Palo Alto",
         "workflow_status": "In Progress",
     },
+    # Old Mill seeded for Phase 11 disclosure-package generation. The smoking-gun
+    # raster-diff test in Phase 11 targets `2026/Old Mill 2026 budget disclosure.pdf`
+    # and the calc/render/api tests require a resolvable property_id for this HOA.
+    {
+        "hoa_code": "10",
+        "name": "Old Mill Homeowners Association",
+        "units": 279,
+        "tax_id": "00-0000000",
+        "fiscal_year_start_month": 1,
+        "fiscal_year_end_month": 12,
+        "portfolio_year": 2026,
+        "city": "Mountain View",
+        "workflow_status": "Not Started",
+    },
 ]
 
 
