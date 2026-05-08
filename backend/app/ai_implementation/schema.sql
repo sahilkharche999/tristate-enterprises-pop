@@ -222,6 +222,30 @@ CREATE TABLE IF NOT EXISTS disclosure_package_jobs (
 CREATE INDEX IF NOT EXISTS idx_disclosure_jobs_property
     ON disclosure_package_jobs(property_id, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS hoa_settings (
+    id                                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    property_id                         INTEGER NOT NULL UNIQUE
+                                        REFERENCES properties(id) ON DELETE CASCADE,
+    management_company                  TEXT,
+    management_company_address          TEXT,
+    management_company_phone            TEXT,
+    management_company_fax              TEXT,
+    management_company_web              TEXT,
+    cpa_firm_name                       TEXT,
+    cpa_firm_address                    TEXT,
+    reserve_study_expert_name           TEXT,
+    reserve_cash_balance_eoy_prior      REAL DEFAULT 0,
+    fund_balance_boy_operations         REAL DEFAULT 0,
+    monthly_assessment_per_unit_prior   REAL DEFAULT 0,
+    interest_rate_after_tax             REAL DEFAULT 0,
+    replacement_cost_increase_rate      REAL DEFAULT 0.03,
+    assessment_increase_schedule_json   TEXT,
+    letter_signed_by                    TEXT DEFAULT 'Board of Directors',
+    updated_at                          TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_hoa_settings_property ON hoa_settings(property_id);
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_properties_hoa_code ON properties(hoa_code);
 CREATE INDEX IF NOT EXISTS idx_feedback_account ON feedback_cases(account_code, property_id);

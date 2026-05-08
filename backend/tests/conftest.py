@@ -290,6 +290,43 @@ def db_session(client):
 
 
 @pytest.fixture
+def session() -> Iterator:
+    """Lightweight in-memory SQLite session loaded with schema.sql.
+
+    Used by ORM smoke tests that don't need the full FastAPI/TestClient stack.
+    Each test gets a fresh engine with foreign keys enabled.
+    """
+    schema_path = (
+        Path(__file__).resolve().parents[1]
+        / "app"
+        / "ai_implementation"
+        / "schema.sql"
+    )
+    schema_sql = schema_path.read_text()
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        echo=False,
+    )
+    event.listen(engine, "connect", session_module._set_sqlite_pragmas)
+
+    with engine.begin() as conn:
+        for statement in schema_sql.split(";"):
+            stmt = statement.strip()
+            if stmt:
+                conn.exec_driver_sql(stmt)
+
+    TestingSessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
+    test_session = TestingSessionLocal()
+    try:
+        yield test_session
+    finally:
+        test_session.close()
+        engine.dispose()
+
+
+@pytest.fixture
 def budget_compare_seed(db_session, budget_history_test_harness):
     hoa = db_session.get(Property, 9)
     assert hoa is not None

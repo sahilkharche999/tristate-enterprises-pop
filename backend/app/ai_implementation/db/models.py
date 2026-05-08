@@ -71,6 +71,34 @@ class Property(Base):
     cases = relationship("FeedbackCase", back_populates="property", lazy="raise")
 
 
+class HOASettings(Base):
+    __tablename__ = "hoa_settings"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    property_id = Column(
+        Integer,
+        ForeignKey("properties.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+    management_company = Column(Text)
+    management_company_address = Column(Text)
+    management_company_phone = Column(Text)
+    management_company_fax = Column(Text)
+    management_company_web = Column(Text)
+    cpa_firm_name = Column(Text)
+    cpa_firm_address = Column(Text)
+    reserve_study_expert_name = Column(Text)
+    reserve_cash_balance_eoy_prior = Column(Float, default=0.0)
+    fund_balance_boy_operations = Column(Float, default=0.0)
+    monthly_assessment_per_unit_prior = Column(Float, default=0.0)
+    interest_rate_after_tax = Column(Float, default=0.0)
+    replacement_cost_increase_rate = Column(Float, default=0.03)
+    assessment_increase_schedule_json = Column(Text)
+    letter_signed_by = Column(Text, default="Board of Directors")
+    updated_at = Column(Text, server_default=_CREATED_AT_DEFAULT)
+
+
 class SuggestionRun(Base):
     __tablename__ = "suggestion_runs"
 
