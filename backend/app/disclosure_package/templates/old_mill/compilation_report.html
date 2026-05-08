@@ -1,48 +1,54 @@
 {% extends "_base.html" %}
-{% block title %}Accountant's Compilation Report{% endblock %}
+{% block title %}Accountants&rsquo; Compilation Report{% endblock %}
 {% block content %}
-<h1 id="compilation">Accountant's Compilation Report</h1>
 
-<div class="letter-header">
-  <p>To the Board of Directors<br>
-  {{ static_data.hoa_legal_name }}<br>
-  {{ static_data.address_line_1 }}<br>
-  {{ static_data.address_line_2 }}<br>
-  {{ static_data.city }}, {{ static_data.state }} {{ static_data.zip }}</p>
+<p class="center bold" style="font-size:11pt; margin:0">
+  {{ static_data.cpa_firm_name | upper }}
+</p>
+<p class="center small" style="margin:0 0 16pt 0">
+  100 Montgomery Street, Suite 715<br>
+  San Francisco, California 94104
+</p>
+
+<div class="letter-meta">
+  <div>Board of Directors</div>
+  <div>{{ static_data.hoa_legal_name }}</div>
+  <div>{{ static_data.city }}, {{ static_data.state }}</div>
 </div>
 
-<p>Management is responsible for the accompanying forecasted statement of
-revenues and expenses of {{ static_data.hoa_legal_name }} (the
-"Association") for the year ending December 31, {{ fiscal_year }}, and
-the related summaries of significant assumptions and accounting policies
-in accordance with guidelines for the presentation of a forecast
-established by the American Institute of Certified Public Accountants
-(AICPA). We have performed a compilation engagement in accordance with
-Statements on Standards for Accounting and Review Services promulgated
-by the Accounting and Review Services Committee of the AICPA. We did
-not examine or review the forecasted financial statement, nor were we
-required to perform any procedures to verify the accuracy or
-completeness of the information provided by management. Accordingly,
-we do not express an opinion, a conclusion, nor provide any form of
-assurance on this forecasted financial statement or the assumptions.</p>
+<p class="legal-block">Management is responsible for the accompanying forecast
+of {{ static_data.hoa_legal_name }} (the &ldquo;Association&rdquo;), which
+comprises the forecasted statement of revenues, expenses and changes in
+fund balances for the year ending December 31, {{ fiscal_year }}, and the
+related summaries of significant assumptions and accounting policies in
+accordance with guidelines for the presentation of a forecast established
+by the American Institute of Certified Public Accountants (AICPA). We have
+performed a compilation engagement in accordance with Statements on
+Standards for Accounting and Review Services promulgated by the Accounting
+and Review Services Committee of the AICPA. We did not examine or review
+the forecast, nor were we required to perform any procedures to verify the
+accuracy or completeness of the information provided by management.
+Accordingly, we do not express an opinion, a conclusion, nor provide any
+form of assurance on this forecast or the assumptions.</p>
 
-<p>The forecasted results may not be achieved as there will usually be
-differences between the forecasted and actual results, because events
-and circumstances frequently do not occur as expected, and those
-differences may be material. We assume no responsibility to update this
-report for events and circumstances occurring after the date of this
+<p class="legal-block">The forecasted results may not be achieved as there
+will usually be differences between the forecast and actual results,
+because events and circumstances frequently do not occur as expected, and
+those differences may be material. We assume no responsibility to update
+this report for events and circumstances occurring after the date of this
 report.</p>
 
-<p>The accompanying forecasted statement of revenues and expenses, and
-the summaries of significant assumptions and accounting policies, are
-presented in accordance with the guidelines for the presentation of a
-forecast established by the AICPA.</p>
+<p class="legal-block">The accompanying forecast and summaries of
+significant assumptions and accounting policies were prepared to present
+the regular annual assessments based on the projected costs of operating
+the Association. Accordingly, this forecast may not be useful for any
+other purpose.</p>
 
-<p>We are not independent with respect to {{ static_data.hoa_legal_name }}.</p>
+<p class="legal-block">We are not independent with respect to
+{{ static_data.hoa_legal_name }}.</p>
 
 <div class="letter-signature">
-  <p class="bold">{{ static_data.cpa_firm_name }}</p>
-  <p class="muted">{{ static_data.cpa_firm_address }}</p>
+  <p class="bold" style="margin-bottom:4pt">{{ static_data.cpa_firm_name }}</p>
   <p>{{ static_data.letter_date }}</p>
 </div>
 {% endblock %}

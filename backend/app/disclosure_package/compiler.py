@@ -109,6 +109,65 @@ class CompileResult(BaseModel):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def _build_thirty_year_plan(
+    *,
+    spec: PackageSpec,
+    hoa_metadata: HOAMetadata,
+    total_estimated_liability: Decimal,
+    total_year_replacement_provision: Decimal,
+    cash_eoy_prior: Decimal,
+    fiscal_year_start: int,
+) -> list[dict[str, Any]]:
+    """Project beginning balance, contribution, expenditures, interest, and
+    ending balance for 30 years starting at ``fiscal_year_start``.
+
+    This is a deliberately simple roll-forward: each year contributes the
+    constant `total_year_replacement_provision` (with a 3% inflation factor
+    applied to the cost basis, mirroring `replacement_cost_increase_rate`),
+    earns interest on the average balance at the configured after-tax rate,
+    and is debited the same provision as a notional expenditure flat across
+    the horizon. Phase 12+ will replace this with per-component scheduled
+    expenditures from the reserve study.
+    """
+    rows: list[dict[str, Any]] = []
+    balance = cash_eoy_prior
+    inflation = spec.static_data.replacement_cost_increase_rate or Decimal("0.03")
+    interest_rate = spec.static_data.interest_rate_after_tax or Decimal("0.018")
+    base_provision = total_year_replacement_provision or Decimal("0")
+    base_liability = total_estimated_liability or Decimal("0")
+
+    for offset in range(30):
+        year = fiscal_year_start + offset
+        # Contribution grows with inflation; expenditure equals contribution
+        # for the simple roll-forward (net change ~ interest only).
+        factor = (Decimal("1") + inflation) ** offset
+        annual_contribution = (base_provision * factor).quantize(Decimal("1"))
+        annual_expenditure = annual_contribution
+        avg_balance = balance + (annual_contribution - annual_expenditure) / Decimal("2")
+        interest = (avg_balance * interest_rate).quantize(Decimal("1"))
+        ending = (balance + annual_contribution - annual_expenditure + interest).quantize(
+            Decimal("1")
+        )
+        liability = (base_liability * factor).quantize(Decimal("1"))
+        pct = (
+            (ending / liability * Decimal("100")).quantize(Decimal("1"))
+            if liability
+            else Decimal("0")
+        )
+        rows.append({
+            "year": year,
+            "beginning_balance": int(balance),
+            "annual_contribution": int(annual_contribution),
+            "annual_expenditure": int(annual_expenditure),
+            "interest": int(interest),
+            "ending_balance": int(ending),
+            "estimated_liability": int(liability),
+            "percent_funded": int(pct),
+        })
+        balance = ending
+    return rows
+
+
 def _compute_all(
     spec: PackageSpec,
     budget_draft: BudgetDraft,
@@ -154,12 +213,32 @@ def _compute_all(
         units=hoa_metadata.units,
     )
 
-    if hoa_metadata.units > 0 and total_rev_rep > 0:
+    # Cover-letter "Reserves are being funded in the amount of $X monthly" comes
+    # from the reserve-study annual provision divided by 12 (NOT the budget-side
+    # reserve revenue rows, which is what the original implementation used and
+    # which was zero whenever the operator did not flag any draft line items as
+    # is_reserve revenue). The provision is the source of truth per § 5550.
+    monthly_replacement_contribution_total = (
+        (total_prov / Decimal(12)).quantize(Decimal("0.01"))
+        if total_prov > 0
+        else Decimal("0.00")
+    )
+
+    if hoa_metadata.units > 0 and total_prov > 0:
         base_2026_monthly = (
-            total_rev_rep / Decimal(hoa_metadata.units) / Decimal(12)
+            total_prov / Decimal(hoa_metadata.units) / Decimal(12)
         ).quantize(Decimal("0.01"))
     else:
         base_2026_monthly = Decimal("0.00")
+
+    # Pro-forma footnote counts — currently a strict subset of the reserve
+    # study. Phase 12 adds a board-deferral / signed-contracts admin form;
+    # for now we surface the one we can derive (useful_life missing) and
+    # default the others to 0 so the rendered page reads cleanly.
+    useful_life_not_disclosed_count = sum(
+        1 for c in reserve_snapshot.components
+        if not c.useful_life or int(c.useful_life) <= 0
+    )
 
     return {
         "computed": {
@@ -192,6 +271,10 @@ def _compute_all(
             "under_funded_balance_per_unit": under_per_unit,
             "monthly_replacement_contribution_per_unit_2026": base_2026_monthly,
             "monthly_replacement_revenue_total": total_rev_rep,
+            "monthly_replacement_contribution_total": monthly_replacement_contribution_total,
+            "useful_life_not_disclosed_count": useful_life_not_disclosed_count,
+            "board_deferral_count": 0,
+            "signed_contracts_count": 0,
             "reserve_components": [
                 {
                     "line_item": c.line_item,
@@ -216,6 +299,14 @@ def _compute_all(
             # reference the field. StrictUndefined fails loudly if a
             # template references a missing key, so always emit the slot.
             "thirty_year_projections": [],
+            "thirty_year_funding_plan": _build_thirty_year_plan(
+                spec=spec,
+                hoa_metadata=hoa_metadata,
+                total_estimated_liability=total_liab,
+                total_year_replacement_provision=total_prov,
+                cash_eoy_prior=cash,
+                fiscal_year_start=spec.fiscal_year,
+            ),
             "assessment_change_disclosure": (
                 "0%"
                 if spec.static_data.monthly_assessment_per_unit_current

@@ -1,119 +1,187 @@
 {% extends "_base.html" %}
 {% block title %}Forecasted Statement of Revenues and Expenses — {{ fiscal_year }}{% endblock %}
 {% block content %}
-<h1 id="income">Forecasted Statement of Revenues and Expenses</h1>
-<p class="muted">{{ static_data.hoa_legal_name }} — Year Ending December 31, {{ fiscal_year }}</p>
 
-<table>
+<p class="center bold" style="text-decoration: underline; font-size:11pt; margin-bottom:4pt">
+  {{ static_data.hoa_legal_name | upper }}
+</p>
+<p class="center bold" style="font-size:11pt; line-height:1.25; margin-bottom:14pt">
+  FORECASTED STATEMENT OF REVENUES,<br>
+  EXPENSES AND CHANGES IN FUND BALANCES<br>
+  YEAR ENDING DECEMBER 31, {{ fiscal_year }}
+</p>
+
+<table class="statement">
   <thead>
     <tr>
-      <th>&nbsp;</th>
-      <th>Operations Fund</th>
-      <th>Replacement Fund</th>
-      <th>Total Funds</th>
+      <th></th>
+      <th>Operations<br>Fund</th>
+      <th>Replacement<br>Fund</th>
+      <th>Total<br>Funds</th>
     </tr>
   </thead>
   <tbody>
-    <tr class="section-header"><td colspan="4">Revenues</td></tr>
-    {% for li in computed.operating_revenues %}
+
+    <tr><td class="section-label">REVENUES</td><td></td><td></td><td></td></tr>
+
+    {% set op_rev_total = computed.total_revenues_operations %}
+    {% set rep_rev_total = computed.total_revenues_replacement %}
+
     <tr>
-      <td>{{ li.label }}</td>
-      <td>${{ '{:,.0f}'.format(li.amount) }}</td>
-      <td></td>
-      <td>${{ '{:,.0f}'.format(li.amount) }}</td>
+      <td class="indent">Assessments</td>
+      <td>${{ '{:,.0f}'.format(op_rev_total) }}</td>
+      <td>${{ '{:,.0f}'.format(rep_rev_total) }}</td>
+      <td>${{ '{:,.0f}'.format(op_rev_total + rep_rev_total) }}</td>
     </tr>
+
+    {% for li in computed.operating_revenues if li.label and 'assessment' not in li.label.lower() %}
+      <tr>
+        <td class="indent">{{ li.label }}</td>
+        <td>${{ '{:,.0f}'.format(li.amount) }}</td>
+        <td>—</td>
+        <td>${{ '{:,.0f}'.format(li.amount) }}</td>
+      </tr>
     {% endfor %}
-    {% for li in computed.replacement_revenues %}
-    <tr>
-      <td>{{ li.label }}</td>
-      <td></td>
-      <td>${{ '{:,.0f}'.format(li.amount) }}</td>
-      <td>${{ '{:,.0f}'.format(li.amount) }}</td>
-    </tr>
-    {% endfor %}
-    <tr class="totals-row">
+
+    <tr class="subtotal">
       <td>Total revenues</td>
-      <td>${{ '{:,.0f}'.format(computed.total_revenues_operations) }}</td>
-      <td>${{ '{:,.0f}'.format(computed.total_revenues_replacement) }}</td>
-      <td>${{ '{:,.0f}'.format(computed.total_revenues) }}</td>
+      <td>${{ '{:,.0f}'.format(op_rev_total) }}</td>
+      <td>${{ '{:,.0f}'.format(rep_rev_total) }}</td>
+      <td>${{ '{:,.0f}'.format(op_rev_total + rep_rev_total) }}</td>
     </tr>
 
-    <tr class="section-header"><td colspan="4">Expenses — Maintenance and Operations</td></tr>
-    {% for li in computed.operating_expenses %}
-      {% if li.section == "Maintenance and operations" %}
-      <tr>
-        <td>{{ li.label }}</td>
-        <td>${{ '{:,.0f}'.format(li.amount) }}</td>
-        <td></td>
-        <td>${{ '{:,.0f}'.format(li.amount) }}</td>
-      </tr>
-      {% endif %}
-    {% endfor %}
+    <tr class="blank-row"><td colspan="4">&nbsp;</td></tr>
 
-    <tr class="section-header"><td colspan="4">Expenses — Utilities</td></tr>
-    {% for li in computed.operating_expenses %}
-      {% if li.section == "Utilities" %}
-      <tr>
-        <td>{{ li.label }}</td>
-        <td>${{ '{:,.0f}'.format(li.amount) }}</td>
-        <td></td>
-        <td>${{ '{:,.0f}'.format(li.amount) }}</td>
-      </tr>
-      {% endif %}
-    {% endfor %}
+    <tr><td class="section-label">EXPENSES</td><td></td><td></td><td></td></tr>
 
-    <tr class="section-header"><td colspan="4">Expenses — Administration</td></tr>
-    {% for li in computed.operating_expenses %}
-      {% if li.section == "Administration" %}
-      <tr>
-        <td>{{ li.label }}</td>
-        <td>${{ '{:,.0f}'.format(li.amount) }}</td>
-        <td></td>
-        <td>${{ '{:,.0f}'.format(li.amount) }}</td>
-      </tr>
-      {% endif %}
-    {% endfor %}
-
-    <tr class="section-header"><td colspan="4">Expenses — Replacement Fund</td></tr>
-    {% for li in computed.replacement_expenses %}
     <tr>
-      <td>{{ li.label }}</td>
-      <td></td>
-      <td>${{ '{:,.0f}'.format(li.amount) }}</td>
-      <td>${{ '{:,.0f}'.format(li.amount) }}</td>
+      <td><span class="bold">Maintenance and operations</span></td>
+      <td></td><td></td><td></td>
     </tr>
+    <tr>
+      <td class="indent2">Major component replacement provision (Notes 3 and 5)</td>
+      <td>—</td>
+      <td>${{ '{:,.0f}'.format(computed.total_expenses_replacement) }}</td>
+      <td>${{ '{:,.0f}'.format(computed.total_expenses_replacement) }}</td>
+    </tr>
+    {% for li in computed.operating_expenses %}
+      {% set lower_label = li.label|lower if li.label else '' %}
+      {% if lower_label and (
+          'maint' in lower_label or 'plumb' in lower_label or 'landscape' in lower_label
+          or 'pool' in lower_label or 'janitor' in lower_label or 'pest' in lower_label
+          or 'fire' in lower_label or 'gutter' in lower_label
+          or 'elevator' in lower_label or 'garage' in lower_label
+      ) %}
+      <tr>
+        <td class="indent2">{{ li.label }}</td>
+        <td>${{ '{:,.0f}'.format(li.amount) }}</td>
+        <td>—</td>
+        <td>${{ '{:,.0f}'.format(li.amount) }}</td>
+      </tr>
+      {% endif %}
     {% endfor %}
+    <tr class="subtotal">
+      <td></td>
+      <td>${{ '{:,.0f}'.format(computed.expenses_maintenance_operating) }}</td>
+      <td>${{ '{:,.0f}'.format(computed.total_expenses_replacement) }}</td>
+      <td>${{ '{:,.0f}'.format(computed.expenses_maintenance_operating + computed.total_expenses_replacement) }}</td>
+    </tr>
 
-    <tr class="totals-row">
-      <td>Total expenses</td>
+    <tr class="blank-row"><td colspan="4">&nbsp;</td></tr>
+
+    <tr>
+      <td><span class="bold">Utilities</span></td><td></td><td></td><td></td>
+    </tr>
+    {% for li in computed.operating_expenses %}
+      {% set lower_label = li.label|lower if li.label else '' %}
+      {% if 'water' in lower_label or 'trash' in lower_label or 'electric' in lower_label
+            or 'gas' in lower_label or 'phone' in lower_label or 'sewer' in lower_label
+            or 'utility' in lower_label or 'utilit' in lower_label %}
+      <tr>
+        <td class="indent2">{{ li.label }}</td>
+        <td>${{ '{:,.0f}'.format(li.amount) }}</td>
+        <td>—</td>
+        <td>${{ '{:,.0f}'.format(li.amount) }}</td>
+      </tr>
+      {% endif %}
+    {% endfor %}
+    <tr class="subtotal">
+      <td></td>
+      <td>${{ '{:,.0f}'.format(computed.expenses_utilities_operating) }}</td>
+      <td>—</td>
+      <td>${{ '{:,.0f}'.format(computed.expenses_utilities_operating) }}</td>
+    </tr>
+
+    <tr class="blank-row"><td colspan="4">&nbsp;</td></tr>
+
+    <tr>
+      <td><span class="bold">Administration</span></td><td></td><td></td><td></td>
+    </tr>
+    {% for li in computed.operating_expenses %}
+      {% set lower_label = li.label|lower if li.label else '' %}
+      {% if 'insurance' in lower_label or 'manag' in lower_label or 'office' in lower_label
+            or 'legal' in lower_label or 'license' in lower_label or 'audit' in lower_label
+            or 'admin' in lower_label or 'bank' in lower_label %}
+      <tr>
+        <td class="indent2">{{ li.label }}</td>
+        <td>${{ '{:,.0f}'.format(li.amount) }}</td>
+        <td>—</td>
+        <td>${{ '{:,.0f}'.format(li.amount) }}</td>
+      </tr>
+      {% endif %}
+    {% endfor %}
+    <tr>
+      <td class="indent2">Income tax provision</td>
+      <td>—</td>
+      <td>${{ '{:,.0f}'.format(static_data.income_tax_provision_estimate) }}</td>
+      <td>${{ '{:,.0f}'.format(static_data.income_tax_provision_estimate) }}</td>
+    </tr>
+    <tr class="subtotal">
+      <td></td>
+      <td>${{ '{:,.0f}'.format(computed.expenses_administration_operating) }}</td>
+      <td>${{ '{:,.0f}'.format(static_data.income_tax_provision_estimate) }}</td>
+      <td>${{ '{:,.0f}'.format(computed.expenses_administration_operating + static_data.income_tax_provision_estimate) }}</td>
+    </tr>
+
+    <tr class="blank-row"><td colspan="4">&nbsp;</td></tr>
+
+    <tr class="subtotal">
+      <td><span class="bold">Total expenses</span></td>
       <td>${{ '{:,.0f}'.format(computed.total_expenses_operations) }}</td>
       <td>${{ '{:,.0f}'.format(computed.total_expenses_replacement) }}</td>
       <td>${{ '{:,.0f}'.format(computed.total_expenses) }}</td>
     </tr>
 
-    <tr class="totals-row">
-      <td>Excess (deficiency) of revenues over expenses</td>
-      <td>${{ '{:,.0f}'.format(computed.total_revenues_operations - computed.total_expenses_operations) }}</td>
-      <td>${{ '{:,.0f}'.format(computed.total_revenues_replacement - computed.total_expenses_replacement) }}</td>
-      <td>${{ '{:,.0f}'.format(computed.total_revenues - computed.total_expenses) }}</td>
-    </tr>
+    <tr class="blank-row"><td colspan="4">&nbsp;</td></tr>
 
     <tr>
-      <td>Beginning fund balance, January 1, {{ fiscal_year }}</td>
-      <td>${{ '{:,.0f}'.format(static_data.fund_balance_boy_operations) }}</td>
-      <td>${{ '{:,.0f}'.format(static_data.reserve_cash_balance_eoy_prior) }}</td>
-      <td>${{ '{:,.0f}'.format(static_data.fund_balance_boy_operations + static_data.reserve_cash_balance_eoy_prior) }}</td>
+      <td class="bold">EXCESS (DEFICIENCY) OF<br>REVENUES OVER EXPENSES</td>
+      <td>${{ '{:,.0f}'.format(computed.excess_revenues_over_expenses_operations) }}</td>
+      <td>${{ '{:,.0f}'.format(computed.excess_revenues_over_expenses_replacement) }}</td>
+      <td>${{ '{:,.0f}'.format(computed.excess_revenues_over_expenses_operations + computed.excess_revenues_over_expenses_replacement) }}</td>
     </tr>
 
-    <tr class="totals-row">
-      <td>Ending fund balance, December 31, {{ fiscal_year }}</td>
-      <td>${{ '{:,.0f}'.format(static_data.fund_balance_boy_operations + computed.total_revenues_operations - computed.total_expenses_operations) }}</td>
-      <td>${{ '{:,.0f}'.format(static_data.reserve_cash_balance_eoy_prior + computed.total_revenues_replacement - computed.total_expenses_replacement) }}</td>
-      <td>${{ '{:,.0f}'.format(static_data.fund_balance_boy_operations + static_data.reserve_cash_balance_eoy_prior + computed.total_revenues - computed.total_expenses) }}</td>
+    <tr class="blank-row"><td colspan="4">&nbsp;</td></tr>
+
+    <tr>
+      <td class="bold">FUND BALANCE (DEFICIT),<br>BEGINNING OF YEAR (NOTE 5)</td>
+      <td>${{ '{:,.0f}'.format(static_data.fund_balance_boy_operations) }}</td>
+      <td>${{ '{:,.0f}'.format(static_data.reserve_cash_balance_eoy_prior - computed.total_estimated_liability) }}</td>
+      <td>${{ '{:,.0f}'.format(static_data.fund_balance_boy_operations + (static_data.reserve_cash_balance_eoy_prior - computed.total_estimated_liability)) }}</td>
     </tr>
+
+    <tr class="total-row">
+      <td>FUND BALANCE (DEFICIT),<br>END OF YEAR</td>
+      <td>${{ '{:,.0f}'.format(computed.fund_balance_eoy_operations) }}</td>
+      <td>${{ '{:,.0f}'.format(computed.fund_balance_eoy_replacement - computed.total_estimated_liability) }}</td>
+      <td>${{ '{:,.0f}'.format(computed.fund_balance_eoy_operations + computed.fund_balance_eoy_replacement - computed.total_estimated_liability) }}</td>
+    </tr>
+
   </tbody>
 </table>
 
-<p class="muted">See accompanying Notes 1 through 8 and the Accountant's
-Compilation Report.</p>
+<p class="center small italic" style="margin-top:18pt">
+  See accountants&rsquo; compilation report and accompanying notes and significant assumptions.
+</p>
+
 {% endblock %}

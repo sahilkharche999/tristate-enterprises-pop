@@ -1,62 +1,203 @@
 {% extends "_base.html" %}
-{% block title %}Pro Forma Disclosure Summary — {{ fiscal_year }}{% endblock %}
+{% block title %}Assessment And Reserve Funding Disclosure Summary — {{ fiscal_year }}{% endblock %}
 {% block content %}
-<h1 id="pro-forma">Pro Forma Operating Budget &amp; Reserve Funding Disclosure Summary</h1>
-<p class="muted">For the Year Ending December 31, {{ fiscal_year }} —
-California Civil Code § 5570</p>
 
-<h2>Section 1: Operating Budget Summary</h2>
+{# Civil Code § 5570 Assessment and Reserve Funding Disclosure Summary form.
+   Layout mirrors LEC's CPA-firm template: framed title block, numbered items
+   with hanging indents, right-margin "page reference" callouts, footer crediting
+   LEC. Statutory copy is verbatim; computed values come from formulas.py. #}
 
-<div class="form-row">
-  <span class="form-label">Will the regular assessment increase from the prior year?</span>
-  <span class="form-value">{{ computed.assessment_change_disclosure }}</span>
-</div>
+<table class="form-5570-frame">
+  <tr>
+    <td class="form-5570-title">
+      <div class="form-5570-title-text">
+        Assessment And Reserve Funding Disclosure Summary
+      </div>
+      <div class="form-5570-title-sub">For the Fiscal Year Ending December 31, {{ fiscal_year }}</div>
+    </td>
+    <td class="form-5570-pageref-head">
+      <div class="muted small right">---- Page Reference ----</div>
+      <table class="pageref-grid">
+        <tr><th>Pro Forma<br>Budget</th><th>Disclosure<br>Summary</th></tr>
+      </table>
+    </td>
+  </tr>
+</table>
 
-<div class="form-row">
-  <span class="form-label">Current monthly assessment per unit:</span>
-  <span class="form-value">${{ '{:,.2f}'.format(static_data.monthly_assessment_per_unit_current) }}</span>
-</div>
+<ol class="form-5570-list">
 
-<div class="form-row">
-  <span class="form-label">Prior year monthly assessment per unit:</span>
-  <span class="form-value">${{ '{:,.2f}'.format(static_data.monthly_assessment_per_unit_prior) }}</span>
-</div>
+  <li>
+    <div class="form-5570-item">
+      The regular assessment per ownership interest is
+      <span class="form-fill">${{ '{:,.2f}'.format(static_data.monthly_assessment_per_unit_current) }}</span>
+      per <span class="form-fill">month</span>.
+    </div>
+    <div class="muted small italic">
+      Note: If assessments vary by the size or type of ownership interest,
+      the assessment applicable to this ownership interest may be found on
+      page _____ of the attached summary.
+    </div>
+  </li>
 
-<div class="form-row">
-  <span class="form-label">Will any special assessment be levied during {{ fiscal_year }}?</span>
-  <span class="form-value">No</span>
-</div>
+  <li>
+    <div class="form-5570-item">
+      Additional regular or special assessments that have already been
+      scheduled to be imposed or charged, regardless of the purpose, if they
+      have been approved by the board or members:
+    </div>
+    <table class="form-5570-table">
+      <thead>
+        <tr>
+          <th class="left">Date assessment will be due</th>
+          <th class="right">Amount per ownership interest per month or year</th>
+          <th class="left">Purpose</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>None scheduled</td>
+          <td class="right">$0.00</td>
+          <td>—</td>
+        </tr>
+      </tbody>
+    </table>
+  </li>
 
-<h2>Section 2: Reserve Funding Disclosure Summary (§ 5565 / § 5570)</h2>
+  <li>
+    <div class="form-5570-item">
+      Based on the most recent reserve study and other information available
+      to the board of directors, will currently projected reserve account
+      balances be sufficient at the end of each year to meet the
+      association&rsquo;s obligation for repair and/or replacement of major
+      components during the next 30 years?
+      <span class="form-fill bold">
+        {%- if computed.percent_funded|float >= 70 -%}Yes{%- else -%}No{%- endif -%}
+      </span>
+    </div>
+  </li>
 
-<div class="form-row">
-  <span class="form-label">Estimated cash reserves (end of prior year):</span>
-  <span class="form-value">${{ '{:,.0f}'.format(static_data.reserve_cash_balance_eoy_prior) }}</span>
-</div>
+  <li>
+    <div class="form-5570-item">
+      If the answer to (3) is no, what additional assessments or other
+      contributions to reserves would be necessary to ensure that sufficient
+      reserve funds will be available each year during the next 30 years
+      that have not yet been approved by the board or the members?
+    </div>
+    <table class="form-5570-table">
+      <thead>
+        <tr>
+          <th class="left">Approximate date assessment will be due</th>
+          <th class="right">Amount per ownership interest per month or year</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>None at this time</td>
+          <td class="right">$0.00</td>
+        </tr>
+      </tbody>
+    </table>
+  </li>
 
-<div class="form-row">
-  <span class="form-label">Estimated total liability for major component replacement:</span>
-  <span class="form-value">${{ '{:,.0f}'.format(computed.total_estimated_liability) }}</span>
-</div>
+  <li>
+    <div class="form-5570-item">
+      All major components are included in the reserve study and are
+      included in its calculations.
+    </div>
+  </li>
 
-<div class="form-row">
-  <span class="form-label">Under-funded balance (estimated liability − cash reserves):</span>
-  <span class="form-value">${{ '{:,.0f}'.format(computed.under_funded_balance_total) }}</span>
-</div>
+  <li>
+    <div class="form-5570-item">
+      Based on the method of calculation in paragraph (4) of subdivision
+      (b) of Section 5570, the estimated amount required in the reserve
+      fund at the end of the current fiscal year is
+      <span class="form-fill">${{ '{:,.0f}'.format(computed.total_estimated_liability) }}</span>,
+      based in whole or in part on the last reserve study or update
+      prepared by <span class="form-fill">{{ static_data.reserve_study_expert_name }}</span>
+      as of <span class="form-fill">{{ fiscal_year - 1 }}</span>.
+      The projected reserve fund cash balance at the end of the current
+      fiscal year is
+      <span class="form-fill">${{ '{:,.0f}'.format(static_data.reserve_cash_balance_eoy_prior) }}</span>,
+      resulting in reserves being
+      <span class="form-fill">{{ computed.percent_funded }}</span> percent
+      funded at this date.
+    </div>
+  </li>
 
-<div class="form-row">
-  <span class="form-label">Under-funded balance per unit:</span>
-  <span class="form-value">${{ '{:,.0f}'.format(computed.under_funded_balance_per_unit) }}</span>
-</div>
+  <li>
+    <div class="form-5570-item">
+      Based on the method of calculation in paragraph (4) of subdivision
+      (b) of Section 5570 of the Civil Code, the estimated amount required
+      in the reserve fund at the end of each of the next five budget years,
+      and the projected reserve fund cash balance in each of those years,
+      taking into account only assessments already approved and other known
+      revenues, is as follows:
+    </div>
+    <table class="form-5570-table">
+      <thead>
+        <tr>
+          <th class="left">Year</th>
+          <th class="right">Reserves</th>
+          <th class="right">Projected Reserves</th>
+          <th class="right">Percent Funded</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% set thirty_year = computed.thirty_year_funding_plan %}
+        {% if thirty_year %}
+          {% for row in thirty_year[:5] %}
+            <tr>
+              <td class="left">{{ row.year }}</td>
+              <td class="right">${{ '{:,.0f}'.format(row.estimated_liability) }}</td>
+              <td class="right">${{ '{:,.0f}'.format(row.ending_balance) }}</td>
+              <td class="right">{{ row.percent_funded }}%</td>
+            </tr>
+          {% endfor %}
+        {% else %}
+          <tr><td colspan="4" class="muted italic">Five-year projection not available.</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </li>
 
-<div class="form-row">
-  <span class="form-label">Percent funded:</span>
-  <span class="form-value">{{ computed.percent_funded }}%</span>
-</div>
+</ol>
+
+<p class="muted small italic" style="margin-top:18pt">
+  All major components are included in the reserve study and are
+  considered in its calculations. Plans exist to fund reserves at a level
+  that will prevent special assessments.
+</p>
+
+<p class="muted small italic">
+  (1) Funding plan elections, alternate calculation methods, and any
+  alternative reserve funding scenarios are described in the accompanying
+  notes and significant assumptions.
+</p>
 
 <div class="page-break"></div>
 
-<h2>Section 3: Footnotes</h2>
+<h2>Definitions and Calculation Basis</h2>
+
+<p class="legal-block"><span class="bold">&ldquo;Major component&rdquo;</span>
+has the meaning used in Section 5550. Components with an estimated
+remaining life of more than 30 years may be included in a study or be
+disregarded from the reserve calculation, so long as the decision is
+revealed in the Reserve Funding Disclosure Summary.</p>
+
+<p class="legal-block">The form set out in subdivision (a) [items #1 — #7]
+shall accompany each annual budget report or summary thereof that is
+delivered pursuant to Section 5300. The form may be supplemented or
+modified to clarify the information delivered, so long as the minimum
+information set out in subdivision (a) [items #1 — #7] is provided.</p>
+
+<p class="legal-block">For the purpose of the report and summary, the
+amount of reserves needed to be accumulated for a component at a given
+time shall be computed as the current cost of replacement or repair
+multiplied by the number of years the component has been in service
+divided by the useful life of the component. This shall not be construed
+to require the Board to fund reserves in accordance with this calculation.</p>
+
+<h3>Footnotes</h3>
 
 <p class="legal-block"><span class="bold">Useful life not disclosed:</span>
 {{ computed.useful_life_not_disclosed_count if computed.useful_life_not_disclosed_count is defined else 0 }}
@@ -72,57 +213,14 @@ component replacement:</span>
 {{ computed.signed_contracts_count if computed.signed_contracts_count is defined else 0 }}
 component(s).</p>
 
-<div class="page-break"></div>
+<p class="legal-block muted small">
+  The above information is the representation of management and/or the
+  board of directors of the association.
+</p>
 
-<h2>Section 4: Definitions and Calculation Basis</h2>
+<p class="center small bold" style="margin-top:18pt">
+  {{ static_data.cpa_firm_name }}<br>
+  San Francisco, California
+</p>
 
-<p class="legal-block"><span class="bold">"Major component"</span> as used
-herein means a major component identified by the reserve study expert
-under California Civil Code § 5550, having a remaining useful life of 30
-years or less and an estimated repair, restoration, or replacement cost
-that materially affects the Reserve Fund.</p>
-
-<p class="legal-block"><span class="bold">"Estimated cash reserves"</span>
-means the cash and cash-equivalent balance held by the association in
-its Replacement Fund accounts as of the last day of the prior fiscal
-year, as reflected in the books and records of the association.</p>
-
-<p class="legal-block"><span class="bold">"Estimated liability"</span> for
-major component replacement is calculated for each component as
-<em>replacement_cost &times; (useful_life &minus; remaining_life) /
-useful_life</em>, summed across all major components identified in the
-reserve study (§ 5565). Whole-dollar half-even rounding is applied to
-each component before summation; the policy mirrors the reserve-study
-extractor used in member-facing budget tools.</p>
-
-<p class="legal-block"><span class="bold">"Percent funded"</span> is the
-ratio of estimated cash reserves to estimated liability, expressed as a
-whole percent. Per the California Department of Real Estate guidance, a
-percent-funded value of 70% or greater is considered "well funded";
-values below 30% are considered "under funded."</p>
-
-<p class="legal-block"><span class="bold">"Under-funded balance"</span>
-is the arithmetic difference between estimated liability and estimated
-cash reserves. The per-unit under-funded balance divides this difference
-by the number of separate interests in the association.</p>
-
-<div class="page-break"></div>
-
-<h2>Section 5: Method of Calculating Funds for Replacement</h2>
-
-<p class="legal-block">The association funds its Replacement Fund through
-monthly assessments, projected interest income on bank and certificate-of-deposit
-balances, and the funding plan adopted by the board pursuant to
-Civil Code § 5550. The funding plan in effect for fiscal year
-{{ fiscal_year }} contemplates a piecewise schedule of contribution
-adjustments documented in Note 6 ("Funding Plan").</p>
-
-<p class="legal-block">The board has reviewed the funding plan in
-relation to the reserve study by
-{{ static_data.reserve_study_expert_name }} and finds the plan
-adequate to meet the association's reserve obligations consistent with
-California Civil Code §§ 5550, 5560, and 5570.</p>
-
-<p class="muted">Signed: {{ static_data.letter_signed_by }} —
-{{ static_data.letter_date }}</p>
 {% endblock %}

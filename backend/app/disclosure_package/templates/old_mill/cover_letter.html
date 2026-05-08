@@ -1,55 +1,126 @@
 {% extends "_base.html" %}
 {% block title %}{{ static_data.hoa_legal_name }} — Cover Letter{% endblock %}
 {% block content %}
-<div class="letter-header">
-  <p class="muted">{{ static_data.management_company }}<br>
-    {{ static_data.management_company_address }}</p>
-  <p>{{ static_data.letter_date }}</p>
-  <p>To: Members of {{ static_data.hoa_legal_name }}</p>
+
+<div class="letter-meta">
+  <div>{{ static_data.letter_date }}</div>
+  <div style="margin-top:6pt">To: Old Mill Homeowners</div>
+  <div>From: Board of Directors</div>
+  <div>RE: {{ fiscal_year }} Operating Budget, Budget Report per Civil Code 5300, and Annual Policy Statement per Civil Code 5310</div>
 </div>
 
-<h1>{{ static_data.hoa_legal_name }} — {{ fiscal_year }} Annual Disclosures</h1>
+<p class="letter-greeting">Dear Homeowner:</p>
 
-<p>We are pleased to enclose your association's annual disclosures for the
-fiscal year ending December 31, {{ fiscal_year }}. The board has approved
-the {{ fiscal_year }} budget effective January 1, {{ fiscal_year }}. The
-monthly assessment per unit will remain at
-${{ '{:,.2f}'.format(static_data.monthly_assessment_per_unit_current) }}
-per unit, the same level as fiscal year {{ fiscal_year - 1 }}.</p>
+<div class="letter-body">
 
-<p>Of the monthly assessment, the portion allocated to the Replacement Fund
-totals approximately
-${{ '{:,.2f}'.format(computed.monthly_replacement_revenue_total / 12) }}
-per month for the association as a whole, equivalent to
-${{ '{:,.2f}'.format(computed.monthly_replacement_contribution_per_unit_2026) }}
-per unit per month.</p>
+<p>Thank you for the prompt payment of your assessments for the current year.
+The enclosed operating budget has been approved by your Board of Directors and
+will become effective on January 1, {{ fiscal_year }}.  The monthly
+assessment per unit for {{ fiscal_year }} will remain the same at
+${{ '{:,.2f}'.format(static_data.monthly_assessment_per_unit_current) }}.</p>
 
-<h2>California Civil Code Disclosures</h2>
+<ul class="letter-bullets">
+  <li>Reserves are being funded in the amount of
+    ${{ '{:,.2f}'.format(computed.monthly_replacement_contribution_total) }} monthly.</li>
+</ul>
 
-<p>This packet is delivered pursuant to California Civil Code §§ 5300
-through 5320 and 5550 through 5580. The pro forma operating budget,
-reserve study summary, insurance disclosures, and other documents
-required by Civil Code § 5300 are included in the order specified by
-§ 5310.</p>
+<p>Please find the following documents enclosed:</p>
 
-<p class="legal-block">Civil Code § 4045(b) opt-out: Members may request
-that disclosures listed under § 5300 be sent by United States mail by
-delivering a written request to the association at the management
-company address shown above. In the absence of such a request,
-disclosures may be delivered by individual electronic delivery as
-permitted by Civil Code § 4040(b).</p>
+<ol class="enclosed-list">
+  <li>{{ fiscal_year }} Pro Forma Operating Budget ({{ static_data.cpa_firm_name | replace(' LLP','') }})</li>
+  <li>30 Year Pro Forma Funding Study ({{ static_data.cpa_firm_name | replace(' LLP','') }})</li>
+  <li>Annual Insurance Disclosure</li>
+  <li>Alternative Dispute Resolution and Meet &amp; Confer Program</li>
+  <li>Assessment Collection, Delinquency &amp; Foreclosure Policies</li>
+  <li>Enforcement &amp; Fine Policy</li>
+  <li>Architectural Guidelines &amp; Application</li>
+  <li>Voting &amp; Election Rules</li>
+  <li>Rules, Regulations &amp; Miscellaneous Policies</li>
+</ol>
 
-<p>Please review the entire package carefully. If you have any
-questions regarding the budget, reserve study, or any required
-disclosure, please contact the management office at the address shown
-above.</p>
+<p>As per civil code, the following disclosures are made:</p>
+
+<ol class="disclosure-list">
+  <li>5300: The Board does not anticipate that there is a possibility of a
+    special assessment that will be required during the {{ fiscal_year }}
+    calendar year to repair, replace, or restore any major component or to
+    provide adequate reserves therefore. (See Above)</li>
+
+  <li>4950(b): The Board of Directors will make a draft or summary of the
+    minutes of the Board meetings available to members within 30 days of
+    the meeting at the expense of the requestor. The request must be made
+    to {{ static_data.management_company }}.</li>
+
+  <li>4045(a)3: General notices can be posted by either: 1st class mail; or
+    electronic notice (with consent); or included in billing statements or
+    newsletters; or television broadcast.  The association&rsquo;s designated
+    place for posting notices is posted at the mailbox/directory or via USPS
+    mail.</li>
+
+  <li>5565: Commencing January 1, 2009, a summary of the reserve funding
+    plan shall be adopted by the board of directors of the association.
+    The summary shall include notice to members that the full reserve study
+    plan is available upon request, and the association shall provide the
+    full reserve plan to any member upon request.</li>
+
+  <li>5300(b)(3): A review of the financial statement of the association
+    shall be prepared in accordance with generally accepted accounting
+    principles by a licensee of the California Board of Accountancy for any
+    fiscal year in which the gross income to the association exceeds
+    seventy-five thousand dollars ($75,000). A copy of the review of the
+    financial statement shall be distributed within 120 days after the
+    close of each fiscal year.</li>
+
+  <li>5310(a)(10); 4765: An association shall annually provide its members
+    with notice of any requirements for association approval of physical
+    changes to property. The notice shall describe the types of changes
+    that require association approval and shall include a copy of the
+    procedure used to review and approve or disapprove a proposed change.</li>
+
+  <li>4040(b): A member of an association may provide written notice by
+    facsimile transmission or United States mail to the association of a
+    secondary address. If a secondary address is provided, the association
+    shall send any and all correspondence and legal notices required
+    pursuant to this article to both the primary and the secondary address.</li>
+
+  <li>5310 and 5850: If the board adopts a fine policy for rules
+    violations, the board must give notice of the policy to all members by
+    personal delivery or first-class mail. Thereafter, no further notice is
+    required unless there are changes in the policy.</li>
+
+  <li>4035: Please be advised that any official communications to the
+    association should be put in writing and addressed to:
+    <div class="address-block">
+      The {{ static_data.hoa_legal_name }}<br>
+      c/o {{ static_data.management_company }}<br>
+      {{ static_data.management_company_address }}
+    </div>
+  </li>
+
+  <li>5310(a)(4); 4045(b). A member may have the option to receive general
+    notices by individual delivery.  A written request from the owner must
+    be sent to:
+    <div class="address-block">
+      The {{ static_data.hoa_legal_name }}<br>
+      c/o {{ static_data.management_company }}<br>
+      2133 Leghorn Street<br>
+      Mountain View, CA 94043
+    </div>
+  </li>
+</ol>
+
+<p>Opt Out Option: Please be advised, if you want to opt out of having your
+name, mailing address and/or email address provided to other members who
+request this, please complete an Opt Out Form and mail it back to the above
+address.</p>
+
+<p style="margin-top:14pt">On behalf of the Board of Directors of The
+{{ static_data.hoa_legal_name }},</p>
 
 <div class="letter-signature">
-  <p>Sincerely,</p>
-  <p class="bold">{{ static_data.letter_signed_by }}<br>
-  {{ static_data.hoa_legal_name }}</p>
+  <p style="margin-bottom:24pt">&nbsp;</p>
+  <p>Jennifer Yeo<br>Vice President, {{ static_data.management_company }}</p>
 </div>
 
-<p class="muted">References: California Civil Code §§ 5300, 5310, 5320,
-4040(b), 4045(b).</p>
+</div>
 {% endblock %}

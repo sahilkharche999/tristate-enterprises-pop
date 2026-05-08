@@ -1,10 +1,14 @@
 {% extends "_base.html" %}
-{% block title %}Forecasted Statement Title — {{ fiscal_year }}{% endblock %}
+{% block title %}Forecasted Statement Title &mdash; {{ fiscal_year }}{% endblock %}
 {% block content %}
 <div class="title-page">
-  <p class="muted">[California Civil Code Section 5300 — {{ fiscal_year }} Pro Forma Operating Budget]</p>
-  <h1 id="forecasted">{{ static_data.hoa_legal_name }}</h1>
-  <h2>Forecasted Statement of Revenues and Expenses</h2>
-  <p>For the Year Ending December 31, {{ fiscal_year }}</p>
+  <p class="bold" style="text-decoration: underline; font-size:14pt">{{ static_data.hoa_legal_name | upper }}</p>
+  <p class="bold" style="font-size:13pt; line-height:1.3; margin-top:18pt">
+    FORECASTED STATEMENT OF REVENUES,<br>
+    EXPENSES AND CHANGES IN FUND BALANCES<br>
+    AND ACCOUNTANTS&rsquo; COMPILATION REPORT
+  </p>
+  <p class="bold" style="font-size:12pt; margin-top:18pt">YEAR ENDING DECEMBER 31, {{ fiscal_year }}</p>
+  <p class="bold" style="margin-top:30pt">[California Civil Code Section 5300<br>{{ fiscal_year }} Pro Forma Operating Budget]</p>
 </div>
 {% endblock %}

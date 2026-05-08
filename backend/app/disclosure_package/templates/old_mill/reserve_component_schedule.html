@@ -1,47 +1,56 @@
 {% extends "_base.html" %}
-{% block title %}Schedule of Major Component Replacement Provision{% endblock %}
+{% block title %}Schedule of Major Component Replacement Provision — {{ fiscal_year }}{% endblock %}
 {% block content %}
-<h1>Schedule of Major Component Replacement Provision</h1>
-<p class="muted">{{ static_data.hoa_legal_name }} —
-For the Year Ending December 31, {{ fiscal_year }} —
-Estimated Liability at December 31, {{ fiscal_year - 1 }}</p>
+
+<p class="center bold" style="text-decoration: underline; font-size:11pt; margin-bottom:4pt">
+  {{ static_data.hoa_legal_name | upper }}
+</p>
+<p class="center bold" style="font-size:11pt; line-height:1.25; margin-bottom:14pt">
+  FORECASTED SCHEDULE OF MAJOR COMPONENT REPLACEMENT PROVISION<br>
+  YEAR ENDING DECEMBER 31, {{ fiscal_year }}
+</p>
+
+<p class="legal-block" style="margin-bottom:10pt">
+  Major components identified in the reserve study by
+  {{ static_data.reserve_study_expert_name }}. The annual replacement
+  provision is computed as current replacement cost &divide; useful life
+  (whole-dollar half-even rounding). Estimated liability is current
+  replacement cost &times; (useful life &minus; remaining life) &divide; useful life.
+</p>
 
 <table class="wide-table">
   <thead>
     <tr>
-      <th>Description</th>
-      <th>Useful Life (yr)</th>
-      <th>Remaining Life (yr)</th>
-      <th>Year New</th>
-      <th>Annual Replacement Provision</th>
-      <th>Estimated Liability</th>
+      <th>Component</th>
+      <th>Useful<br>Life</th>
+      <th>Remaining<br>Life</th>
+      <th>Year<br>New</th>
+      <th>Replacement<br>Cost</th>
+      <th>Annual<br>Provision</th>
+      <th>Estimated<br>Liability</th>
     </tr>
   </thead>
   <tbody>
     {% for c in computed.reserve_components %}
     <tr>
       <td>{{ c.line_item }}</td>
-      <td class="right">{{ c.useful_life }}</td>
-      <td class="right">{{ c.remaining_life }}</td>
-      <td class="right">{{ c.year_new if c.year_new else '' }}</td>
-      <td class="right">${{ '{:,.0f}'.format(c.year_replacement_provision) }}</td>
-      <td class="right">${{ '{:,.0f}'.format(c.estimated_liability) }}</td>
+      <td>{{ c.useful_life or '—' }}</td>
+      <td>{{ c.remaining_life if c.remaining_life is not none else '—' }}</td>
+      <td>{{ c.year_new or '—' }}</td>
+      <td>${{ '{:,.0f}'.format(c.replacement_cost) if c.replacement_cost else '—' }}</td>
+      <td>${{ '{:,.0f}'.format(c.year_replacement_provision) if c.year_replacement_provision else '—' }}</td>
+      <td>${{ '{:,.0f}'.format(c.estimated_liability) if c.estimated_liability else '—' }}</td>
     </tr>
     {% endfor %}
     <tr class="totals-row">
-      <td>Total</td>
-      <td></td>
-      <td></td>
-      <td></td>
-      <td class="right">${{ '{:,.0f}'.format(computed.total_year_replacement_provision) }}</td>
-      <td class="right">${{ '{:,.0f}'.format(computed.total_estimated_liability) }}</td>
+      <td colspan="5" class="bold">TOTAL</td>
+      <td class="bold">${{ '{:,.0f}'.format(computed.total_year_replacement_provision) }}</td>
+      <td class="bold">${{ '{:,.0f}'.format(computed.total_estimated_liability) }}</td>
     </tr>
   </tbody>
 </table>
 
-<p class="muted">Per-component figures are computed under the
-straight-line accumulated-liability method
-(<em>cost &times; (useful_life &minus; remaining_life) /
-useful_life</em>) and rounded to whole dollars half-even, mirroring the
-member-facing reserve-study display policy.</p>
+<p class="center small italic" style="margin-top:18pt">
+  See accountants&rsquo; compilation report and accompanying notes and significant assumptions.
+</p>
 {% endblock %}
