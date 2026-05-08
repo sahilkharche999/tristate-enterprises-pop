@@ -13,6 +13,16 @@ component-replacement schedule), and the projected ending cash balance
 and percent-funded ratio. The forecast applies the assumptions described
 in Note 7 and the funding-plan schedule described in Note 6.</p>
 
+{# Render the 30-year cash flow split into three decade-block tables.
+   This matches the canonical 10-year columnar bands used in the golden
+   PDF and keeps each band on its own page for readability. #}
+
+{% for band_idx in range(3) %}
+{% set band_start = fiscal_year + band_idx * 10 %}
+{% set band_end = band_start + 9 %}
+
+<h2>Per-Year Cash Flow Forecast — Years {{ band_start }} – {{ band_end }}</h2>
+
 <table class="wide-table">
   <thead>
     <tr>
@@ -26,7 +36,7 @@ in Note 7 and the funding-plan schedule described in Note 6.</p>
     </tr>
   </thead>
   <tbody>
-    {% for row in computed.thirty_year_projections %}
+    {% for row in computed.thirty_year_projections if row.year >= band_start and row.year <= band_end %}
     <tr>
       <td>{{ row.year }}</td>
       <td class="right">${{ '{:,.0f}'.format(row.cash_balance) }}</td>
@@ -39,6 +49,78 @@ in Note 7 and the funding-plan schedule described in Note 6.</p>
     {% endfor %}
   </tbody>
 </table>
+
+<div class="page-break"></div>
+{% endfor %}
+
+<h2>Decade-Band Summary</h2>
+
+<p class="legal-block">The following decade-band summary aggregates the
+per-year forecast above into 10-year windows. Each window reports the
+total scheduled replacement revenue, total forecast expenditures, and
+the projected end-of-decade percent-funded ratio. The decade-band view
+is informational; the per-year table above governs the funding-plan
+adjustments adopted by the Board.</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Decade</th>
+      <th>Years</th>
+      <th>Total Replacement Revenue</th>
+      <th>Total Replacement Expenditures</th>
+      <th>End-of-Decade % Funded</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for band_start in [fiscal_year, fiscal_year + 10, fiscal_year + 20] %}
+    <tr>
+      <td>Years {{ loop.index }}-10</td>
+      <td>{{ band_start }} - {{ band_start + 9 }}</td>
+      <td class="right">—</td>
+      <td class="right">—</td>
+      <td class="right">{{ computed.percent_funded_at[(loop.index)*10] if computed.percent_funded_at is defined and (loop.index)*10 in computed.percent_funded_at else '—' }}%</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h2>Funding Plan Methodology</h2>
+
+<p class="legal-block">The 30-year forecast applies the following
+methodology, consistent with California Civil Code §§ 5550 and 5570:</p>
+
+<ul>
+  <li>Each year's beginning cash balance is the prior year's ending cash
+    balance.</li>
+  <li>Replacement revenue for each year combines (a) the per-unit
+    monthly Replacement Fund contribution multiplied by the unit count
+    and 12, and (b) projected interest income on the prior-year-end cash
+    balance at the after-tax interest rate documented in Note 7.</li>
+  <li>The per-unit monthly contribution is adjusted annually per the
+    funding-plan schedule documented in Note 6.</li>
+  <li>Replacement expenditures are drawn from the reserve study
+    component-replacement schedule prepared by
+    {{ static_data.reserve_study_expert_name }}, with replacement costs
+    inflated at the rate documented in Note 7.</li>
+  <li>The percent-funded ratio for each year is computed as the
+    end-of-year cash balance divided by the cumulative estimated
+    liability, rounded to whole percent half-even.</li>
+</ul>
+
+<h2>Material Risks and Sensitivities</h2>
+
+<p class="legal-block">The forecast is sensitive to material variation
+in the assumptions documented in Note 7. A 1-percentage-point change in
+the after-tax interest rate would change the projected ending cash
+balance by approximately
+${{ '{:,.0f}'.format(static_data.bank_cd_balance_for_interest / 100) }}
+per year of forecast horizon. A 1-percentage-point change in the
+replacement-cost inflation rate would change the projected total
+replacement expenditures over the 30-year horizon
+materially. The Board reviews these sensitivities annually and may
+recommend updates to the funding plan in light of updated reserve-study
+findings.</p>
 
 <p class="muted">Reference: California Civil Code §§ 5550, 5570. The
 Board reviews this trajectory annually and may revise the funding plan
