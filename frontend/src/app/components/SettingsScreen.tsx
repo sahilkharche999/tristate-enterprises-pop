@@ -12,6 +12,7 @@ import { exportData } from '../api/macros';
 import { getHOA, updateHOA, type HOARecord } from '../api/hoa';
 import { getErrorMessage } from '../lib/errors';
 import { MONTH_NAMES, monthNameToNumber, monthNumberToName } from '../lib/hoa';
+import { HOADisclosureSettingsForm } from './HOADisclosureSettingsForm';
 
 interface SettingsFormState {
   name: string;
@@ -210,6 +211,9 @@ export function SettingsScreen() {
             <TabsTrigger value="data" className="data-[state=active]:bg-white">
               Data Export
             </TabsTrigger>
+            <TabsTrigger value="disclosure" className="data-[state=active]:bg-white">
+              Disclosure Package
+            </TabsTrigger>
           </TabsList>
 
           <TabsContent value="database" className="space-y-6">
@@ -371,6 +375,12 @@ export function SettingsScreen() {
                   Export All Data
                 </Button>
               </div>
+            </div>
+          </TabsContent>
+
+          <TabsContent value="disclosure" className="space-y-6">
+            <div className="bg-[#F7F7F7] border border-[#E5E5E5] rounded-lg p-8">
+              <HOADisclosureSettingsForm hoaId={hoa.id} />
             </div>
           </TabsContent>
 
