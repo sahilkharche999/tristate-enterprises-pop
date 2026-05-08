@@ -28,7 +28,7 @@
     {% set rep_rev_total = computed.total_revenues_replacement %}
 
     {% for section_name, section in computed.revenues_by_section.items() %}
-      {% for item in section.items %}
+      {% for item in section.rows %}
       <tr>
         <td class="indent">{{ item.label }}</td>
         <td>${{ '{:,.0f}'.format(item.amount) }}</td>
@@ -63,7 +63,7 @@
         <td><span class="bold">{{ section_name }}</span></td>
         <td></td><td></td><td></td>
       </tr>
-      {% for item in section.items %}
+      {% for item in section.rows %}
       <tr>
         <td class="indent2">{{ item.label }}</td>
         <td>${{ '{:,.0f}'.format(item.amount) }}</td>

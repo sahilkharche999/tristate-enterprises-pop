@@ -540,7 +540,7 @@ def test_compute_all_groups_operating_expenses_by_section_label(
     sections = audit["input_snapshot"]["expenses_by_section"]
     assert "Administration Expenses" in sections
     assert sections["Administration Expenses"]["total"] == 19000
-    assert {it["label"] for it in sections["Administration Expenses"]["items"]} == {
+    assert {it["label"] for it in sections["Administration Expenses"]["rows"]} == {
         "50050 - Management Service", "55000 - General Insurance"
     }
     assert "Utilities" in sections and sections["Utilities"]["total"] == 10000

@@ -211,9 +211,9 @@ def _compute_all(
             continue
         section_name = (li.section or "Uncategorized").strip()
         bucket = expenses_by_section.setdefault(
-            section_name, {"items": [], "total": Decimal(0)}
+            section_name, {"rows": [], "total": Decimal(0)}
         )
-        bucket["items"].append({"label": li.label, "amount": li.amount or Decimal(0)})
+        bucket["rows"].append({"label": li.label, "amount": li.amount or Decimal(0)})
         bucket["total"] = bucket["total"] + (li.amount or Decimal(0))
 
     revenues_by_section: dict[str, dict[str, Any]] = {}
@@ -222,9 +222,9 @@ def _compute_all(
             continue
         section_name = (li.section or "Operating Income").strip()
         bucket = revenues_by_section.setdefault(
-            section_name, {"items": [], "total": Decimal(0)}
+            section_name, {"rows": [], "total": Decimal(0)}
         )
-        bucket["items"].append({"label": li.label, "amount": li.amount or Decimal(0)})
+        bucket["rows"].append({"label": li.label, "amount": li.amount or Decimal(0)})
         bucket["total"] = bucket["total"] + (li.amount or Decimal(0))
 
     total_rev_op = total_revenues_operations(operating_line_items=operating_lis)
@@ -402,16 +402,16 @@ def _compute_all(
                 else "increase"
             ),
             "expenses_by_section": {k: {
-                "items": [
+                "rows": [
                     {"label": it["label"], "amount": float(it["amount"] or 0)}
-                    for it in v["items"]
+                    for it in v["rows"]
                 ],
                 "total": float(v["total"]),
             } for k, v in expenses_by_section.items()},
             "revenues_by_section": {k: {
-                "items": [
+                "rows": [
                     {"label": it["label"], "amount": float(it["amount"] or 0)}
-                    for it in v["items"]
+                    for it in v["rows"]
                 ],
                 "total": float(v["total"]),
             } for k, v in revenues_by_section.items()},
@@ -527,10 +527,10 @@ def compile_package(
             continue
         _section = (_li.section or "Uncategorized").strip()
         _bucket = _expenses_by_section.setdefault(
-            _section, {"items": [], "total": 0.0}
+            _section, {"rows": [], "total": 0.0}
         )
         _amount = float(_li.amount or 0)
-        _bucket["items"].append({"label": _li.label, "amount": _amount})
+        _bucket["rows"].append({"label": _li.label, "amount": _amount})
         _bucket["total"] = _bucket["total"] + _amount
     _revenues_by_section: dict[str, dict[str, Any]] = {}
     for _li in _operating_lis:
@@ -538,10 +538,10 @@ def compile_package(
             continue
         _section = (_li.section or "Operating Income").strip()
         _bucket = _revenues_by_section.setdefault(
-            _section, {"items": [], "total": 0.0}
+            _section, {"rows": [], "total": 0.0}
         )
         _amount = float(_li.amount or 0)
-        _bucket["items"].append({"label": _li.label, "amount": _amount})
+        _bucket["rows"].append({"label": _li.label, "amount": _amount})
         _bucket["total"] = _bucket["total"] + _amount
 
     # 4. Capture the input snapshot for the audit log (CONTEXT D-15).

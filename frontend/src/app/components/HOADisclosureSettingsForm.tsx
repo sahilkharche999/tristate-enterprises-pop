@@ -29,7 +29,9 @@ export function HOADisclosureSettingsForm({ hoaId }: { hoaId: number }) {
     setSaving(true);
     setError(null);
     try {
-      const next = await putHOADisclosureSettings(hoaId, settings);
+      // Strip read-only fields the backend allow-list rejects.
+      const { property_id: _propertyId, ...writable } = settings;
+      const next = await putHOADisclosureSettings(hoaId, writable);
       setSettings(next);
       setSavedAt(new Date().toLocaleTimeString());
     } catch (e) {
