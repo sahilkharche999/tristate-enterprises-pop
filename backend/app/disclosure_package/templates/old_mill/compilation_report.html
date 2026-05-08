@@ -1,0 +1,48 @@
+{% extends "_base.html" %}
+{% block title %}Accountant's Compilation Report{% endblock %}
+{% block content %}
+<h1 id="compilation">Accountant's Compilation Report</h1>
+
+<div class="letter-header">
+  <p>To the Board of Directors<br>
+  {{ static_data.hoa_legal_name }}<br>
+  {{ static_data.address_line_1 }}<br>
+  {{ static_data.address_line_2 }}<br>
+  {{ static_data.city }}, {{ static_data.state }} {{ static_data.zip }}</p>
+</div>
+
+<p>Management is responsible for the accompanying forecasted statement of
+revenues and expenses of {{ static_data.hoa_legal_name }} (the
+"Association") for the year ending December 31, {{ fiscal_year }}, and
+the related summaries of significant assumptions and accounting policies
+in accordance with guidelines for the presentation of a forecast
+established by the American Institute of Certified Public Accountants
+(AICPA). We have performed a compilation engagement in accordance with
+Statements on Standards for Accounting and Review Services promulgated
+by the Accounting and Review Services Committee of the AICPA. We did
+not examine or review the forecasted financial statement, nor were we
+required to perform any procedures to verify the accuracy or
+completeness of the information provided by management. Accordingly,
+we do not express an opinion, a conclusion, nor provide any form of
+assurance on this forecasted financial statement or the assumptions.</p>
+
+<p>The forecasted results may not be achieved as there will usually be
+differences between the forecasted and actual results, because events
+and circumstances frequently do not occur as expected, and those
+differences may be material. We assume no responsibility to update this
+report for events and circumstances occurring after the date of this
+report.</p>
+
+<p>The accompanying forecasted statement of revenues and expenses, and
+the summaries of significant assumptions and accounting policies, are
+presented in accordance with the guidelines for the presentation of a
+forecast established by the AICPA.</p>
+
+<p>We are not independent with respect to {{ static_data.hoa_legal_name }}.</p>
+
+<div class="letter-signature">
+  <p class="bold">{{ static_data.cpa_firm_name }}</p>
+  <p class="muted">{{ static_data.cpa_firm_address }}</p>
+  <p>{{ static_data.letter_date }}</p>
+</div>
+{% endblock %}

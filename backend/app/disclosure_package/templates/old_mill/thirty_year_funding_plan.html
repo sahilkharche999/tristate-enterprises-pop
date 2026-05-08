@@ -1,0 +1,48 @@
+{% extends "_base.html" %}
+{% block title %}30-Year Reserve Funding Plan{% endblock %}
+{% block content %}
+<h1 id="thirty-year">30-Year Reserve Funding Plan</h1>
+<p class="muted">{{ static_data.hoa_legal_name }} —
+Forecasted Cash Flow of the Replacement Fund — {{ fiscal_year }} through {{ fiscal_year + 29 }}</p>
+
+<p class="legal-block">The table below sets forth, by fiscal year, the
+projected beginning Replacement Fund cash balance, scheduled annual
+replacement-fund revenue (regular assessment + interest income), the
+forecasted replacement-fund disbursements (drawn from the reserve study
+component-replacement schedule), and the projected ending cash balance
+and percent-funded ratio. The forecast applies the assumptions described
+in Note 7 and the funding-plan schedule described in Note 6.</p>
+
+<table class="wide-table">
+  <thead>
+    <tr>
+      <th>Year</th>
+      <th>Beginning Cash</th>
+      <th>Replacement Revenue</th>
+      <th>Forecast Liability</th>
+      <th>Replacement Expenditures</th>
+      <th>Ending Cash</th>
+      <th>% Funded</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in computed.thirty_year_projections %}
+    <tr>
+      <td>{{ row.year }}</td>
+      <td class="right">${{ '{:,.0f}'.format(row.cash_balance) }}</td>
+      <td class="right">${{ '{:,.0f}'.format(row.revenue) }}</td>
+      <td class="right">${{ '{:,.0f}'.format(row.liability) }}</td>
+      <td class="right">${{ '{:,.0f}'.format(row.expenditure) }}</td>
+      <td class="right">${{ '{:,.0f}'.format(row.cash_balance + row.revenue - row.expenditure) }}</td>
+      <td class="right">{{ row.percent_funded }}%</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<p class="muted">Reference: California Civil Code §§ 5550, 5570. The
+Board reviews this trajectory annually and may revise the funding plan
+in response to updated reserve-study findings or material changes in
+operating costs, replacement-cost inflation, or interest-rate
+assumptions.</p>
+{% endblock %}
