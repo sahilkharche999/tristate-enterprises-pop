@@ -4,6 +4,7 @@ import { toast } from 'sonner';
 
 import { BudgetScreen } from './BudgetScreen';
 import { GeneratedBudgetScreen } from './GeneratedBudgetScreen';
+import { DisclosurePackagePanel } from './disclosure/DisclosurePackagePanel';
 import {
   reopenBudgetVersion,
   generateBudgetVersion,
@@ -19,6 +20,13 @@ import { getHOA, type HOARecord } from '../api/hoa';
 import type { SheetTable } from '../api/macros';
 import { initialLineItems, type AISuggestionResponse, type LineItem } from '../data/mockData';
 import { getErrorMessage } from '../lib/errors';
+
+// UI-SPEC §5.2 visibility rule: the panel renders for every HOA workspace,
+// but is enabled only for Old Mill in Phase 11. Other HOAs see the locked
+// "not yet available" state. The match is exact (case-sensitive) against
+// the canonical HOA name; a backend-driven `disclosure_supported` field
+// would supersede this when Phase 12+ widens support (UI-SPEC OQ-3).
+const OLD_MILL_HOA_NAME = 'Old Mill Homeowners Association';
 
 export function BudgetScreenWrapper() {
   const { id } = useParams<{ id: string }>();
@@ -269,22 +277,41 @@ export function BudgetScreenWrapper() {
     );
   }
 
+  // UI-SPEC §5.1: the disclosure-package panel lives inside the BudgetScreenWrapper
+  // shell as a new sibling section below the budget workspace. Old Mill (the
+  // only HOA with full Phase 11 support) gets the enabled CTA; other HOAs see
+  // the locked "not yet available" state.
+  // UI-SPEC OQ-7 / BudgetScreen.tsx:810 precedent: fiscal year is sourced from
+  // hoa.portfolio_year, falling back to the current calendar year.
+  const disclosureFiscalYear = hoa.portfolio_year ?? new Date().getFullYear();
+  const isSupportedHoa = hoa.name === OLD_MILL_HOA_NAME;
+
   return (
-    <BudgetScreen
-      hoa={hoa}
-      hoaId={id}
-      lineItems={lineItems}
-      onLineItemsUpdate={setLineItems}
-      onGenerateBudget={handleGenerateBudget}
-      onDraftChange={handleDraftChange}
-      onDraftDeleted={handleDraftDeleted}
-      budgetGenerated={Boolean(generatedVersion)}
-      isGenerating={isGenerating}
-      initialView={initialView}
-      savedAiResponse={aiResponse}
-      onAiResponseChange={setAiResponse}
-      activeDraft={activeDraft}
-      key={reopenedFromVersionId ? `reopened-${reopenedFromVersionId}-${activeDraft?.id ?? 'none'}` : 'active-draft'}
-    />
+    <>
+      <BudgetScreen
+        hoa={hoa}
+        hoaId={id}
+        lineItems={lineItems}
+        onLineItemsUpdate={setLineItems}
+        onGenerateBudget={handleGenerateBudget}
+        onDraftChange={handleDraftChange}
+        onDraftDeleted={handleDraftDeleted}
+        budgetGenerated={Boolean(generatedVersion)}
+        isGenerating={isGenerating}
+        initialView={initialView}
+        savedAiResponse={aiResponse}
+        onAiResponseChange={setAiResponse}
+        activeDraft={activeDraft}
+        key={reopenedFromVersionId ? `reopened-${reopenedFromVersionId}-${activeDraft?.id ?? 'none'}` : 'active-draft'}
+      />
+      <div className="mx-auto max-w-7xl px-8 pb-12">
+        <DisclosurePackagePanel
+          hoaId={hoa.id}
+          fiscalYear={disclosureFiscalYear}
+          hoaName={hoa.name}
+          isSupportedHoa={isSupportedHoa}
+        />
+      </div>
+    </>
   );
 }
