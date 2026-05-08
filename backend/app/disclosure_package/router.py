@@ -18,14 +18,18 @@ import json
 import logging
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy.orm import Session
 from starlette.status import (
+    HTTP_201_CREATED,
     HTTP_202_ACCEPTED,
+    HTTP_204_NO_CONTENT,
+    HTTP_400_BAD_REQUEST,
     HTTP_404_NOT_FOUND,
     HTTP_409_CONFLICT,
     HTTP_410_GONE,
+    HTTP_413_CONTENT_TOO_LARGE,
     HTTP_500_INTERNAL_SERVER_ERROR,
     HTTP_501_NOT_IMPLEMENTED,
 )
@@ -181,6 +185,100 @@ async def download_job_pdf(
         filename=filename,
         media_type="application/pdf",
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Per-HOA static-appendix uploads
+#
+# These endpoints let an authenticated user manage the PDFs that get appended
+# after the generated pages of a disclosure package. Files live under
+# BUDGET_STORAGE_ROOT/disclosure-package-appendices/{hoa_id}/ and survive across
+# generation jobs. The compiler appends every PDF it finds in this directory at
+# generate time (sorted by filename). T-11-05 path-traversal mitigations live in
+# service._sanitize_appendix_filename.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Appendix uploads cap. Cohesive with WeasyPrint render budget (CONTEXT D-09);
+# anything bigger than 25 MB is almost certainly a non-PDF mistake.
+_APPENDIX_MAX_BYTES = 25 * 1024 * 1024
+
+
+def _ensure_hoa_supported(session: Session, hoa_id: int) -> Property:
+    property_row = (
+        session.query(Property)
+        .filter(Property.id == hoa_id)
+        .one_or_none()
+    )
+    if property_row is None:
+        raise HTTPException(
+            status_code=HTTP_404_NOT_FOUND, detail=f"HOA not found: {hoa_id}"
+        )
+    if not dp_service.is_supported_hoa(property_row.name):
+        raise HTTPException(
+            status_code=HTTP_501_NOT_IMPLEMENTED,
+            detail=(
+                "Disclosure-package appendices are not yet available for "
+                f"{property_row.name}"
+            ),
+        )
+    return property_row
+
+
+@router.get("/hoa/{hoa_id}/appendices")
+async def list_hoa_appendices(
+    hoa_id: int,
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user),  # noqa: ARG001 — auth gate
+) -> JSONResponse:
+    """List uploaded static appendices for an HOA, sorted by filename."""
+    _ensure_hoa_supported(session, hoa_id)
+    return JSONResponse(content={"items": dp_service.list_appendices(hoa_id)})
+
+
+@router.post("/hoa/{hoa_id}/appendices", status_code=HTTP_201_CREATED)
+async def upload_hoa_appendix(
+    hoa_id: int,
+    file: UploadFile = File(...),
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user),  # noqa: ARG001 — auth gate
+) -> JSONResponse:
+    """Upload a single PDF appendix for an HOA. Replaces by filename."""
+    _ensure_hoa_supported(session, hoa_id)
+    content = await file.read()
+    if len(content) > _APPENDIX_MAX_BYTES:
+        raise HTTPException(
+            status_code=HTTP_413_CONTENT_TOO_LARGE,
+            detail=f"Appendix exceeds {_APPENDIX_MAX_BYTES} bytes",
+        )
+    try:
+        entry = dp_service.save_appendix(
+            hoa_id, filename=file.filename or "", content=content
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=str(exc))
+    return JSONResponse(status_code=HTTP_201_CREATED, content=entry)
+
+
+@router.delete(
+    "/hoa/{hoa_id}/appendices/{filename}", status_code=HTTP_204_NO_CONTENT
+)
+async def delete_hoa_appendix(
+    hoa_id: int,
+    filename: str,
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user),  # noqa: ARG001 — auth gate
+):
+    """Delete a previously uploaded appendix. 404 if it doesn't exist."""
+    _ensure_hoa_supported(session, hoa_id)
+    try:
+        deleted = dp_service.delete_appendix(hoa_id, filename)
+    except ValueError as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=str(exc))
+    if not deleted:
+        raise HTTPException(
+            status_code=HTTP_404_NOT_FOUND, detail=f"Appendix not found: {filename}"
+        )
+    return JSONResponse(status_code=HTTP_204_NO_CONTENT, content=None)
 
 
 @router.get("/{job_id}/audit")

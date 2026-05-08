@@ -99,3 +99,52 @@ export async function downloadDisclosurePackagePdf(jobId: string): Promise<Blob>
   });
   return handleBlobResponse(res);
 }
+
+// ── Per-HOA static-appendix uploads ──────────────────────────────────────────
+
+export interface DisclosureAppendixEntry {
+  filename: string;
+  size_bytes: number;
+  uploaded_at: string;
+}
+
+export async function listDisclosureAppendices(
+  hoaId: number,
+): Promise<DisclosureAppendixEntry[]> {
+  const res = await fetch(
+    `${BASE_URL}/api/disclosure-package/hoa/${hoaId}/appendices`,
+    { headers: authHeaders() },
+  );
+  const body = await handleResponse<{ items: DisclosureAppendixEntry[] }>(res);
+  return body.items;
+}
+
+export async function uploadDisclosureAppendix(
+  hoaId: number,
+  file: File,
+): Promise<DisclosureAppendixEntry> {
+  const form = new FormData();
+  form.append('file', file, file.name);
+  const res = await fetch(
+    `${BASE_URL}/api/disclosure-package/hoa/${hoaId}/appendices`,
+    {
+      method: 'POST',
+      headers: authHeaders(),
+      body: form,
+    },
+  );
+  return handleResponse<DisclosureAppendixEntry>(res);
+}
+
+export async function deleteDisclosureAppendix(
+  hoaId: number,
+  filename: string,
+): Promise<void> {
+  const res = await fetch(
+    `${BASE_URL}/api/disclosure-package/hoa/${hoaId}/appendices/${encodeURIComponent(filename)}`,
+    { method: 'DELETE', headers: authHeaders() },
+  );
+  if (!res.ok) {
+    throw new Error(`Failed to delete appendix (${res.status})`);
+  }
+}

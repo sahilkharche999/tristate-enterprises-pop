@@ -78,6 +78,104 @@ def _output_dir_for(hoa_id: int, fiscal_year: int, job_id: str) -> Path:
     return root / "disclosure-packages" / safe_hoa / safe_fy / safe_job
 
 
+def appendix_dir_for(hoa_id: int) -> Path:
+    """Per-HOA static-appendix upload dir.
+
+    User-uploaded PDFs land here and the compiler picks them up at
+    generate time (sorted by filename). Files survive across jobs and
+    fiscal years — they are configuration, not job output.
+    """
+    root = Path(settings.BUDGET_STORAGE_ROOT)
+    safe_hoa = _sanitize_segment(str(hoa_id))
+    return root / "disclosure-package-appendices" / safe_hoa
+
+
+# Filenames for uploaded appendices: keep operator-friendly characters
+# (letters, digits, underscore, hyphen, dot) and reject anything else.
+# Length cap of 128 chars matches BUDGET_STORAGE_ROOT operational limits.
+_APPENDIX_FILENAME_RE = re.compile(r"^[A-Za-z0-9._\-]{1,128}$")
+
+
+def _sanitize_appendix_filename(filename: str) -> str:
+    """Reject path-traversal or non-PDF uploads (T-11-05 family).
+
+    Strips any directory component, requires .pdf suffix, and validates
+    the remaining basename against an allow-list regex.
+    """
+    if not isinstance(filename, str):
+        raise ValueError("Filename is required")
+    base = Path(filename).name
+    if not base or base in (".", ".."):
+        raise ValueError(f"Invalid filename: {filename!r}")
+    if not base.lower().endswith(".pdf"):
+        raise ValueError("Only .pdf uploads are accepted")
+    if not _APPENDIX_FILENAME_RE.match(base):
+        raise ValueError(
+            f"Filename may only contain letters, digits, '.', '_' and '-': {base!r}"
+        )
+    return base
+
+
+def list_appendices(hoa_id: int) -> list[dict]:
+    """Return uploaded appendices for an HOA, sorted by filename.
+
+    Each entry: {filename, size_bytes, uploaded_at} (ISO8601 mtime).
+    """
+    directory = appendix_dir_for(hoa_id)
+    if not directory.is_dir():
+        return []
+    entries: list[dict] = []
+    for path in sorted(directory.glob("*.pdf")):
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        entries.append({
+            "filename": path.name,
+            "size_bytes": stat.st_size,
+            "uploaded_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+            .replace(microsecond=0)
+            .isoformat(),
+        })
+    return entries
+
+
+def save_appendix(hoa_id: int, *, filename: str, content: bytes) -> dict:
+    """Persist an uploaded appendix PDF under the per-HOA dir.
+
+    Overwrites if a file of the same sanitized name already exists.
+    Returns the same shape as list_appendices() entries.
+    """
+    base = _sanitize_appendix_filename(filename)
+    if not content:
+        raise ValueError("Empty file rejected")
+    # Lightweight sniff: PDF files start with %PDF-.
+    if not content.startswith(b"%PDF-"):
+        raise ValueError("File does not appear to be a PDF (missing %PDF- header)")
+    directory = appendix_dir_for(hoa_id)
+    directory.mkdir(parents=True, exist_ok=True)
+    target = directory / base
+    target.write_bytes(content)
+    stat = target.stat()
+    return {
+        "filename": base,
+        "size_bytes": stat.st_size,
+        "uploaded_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+        .replace(microsecond=0)
+        .isoformat(),
+    }
+
+
+def delete_appendix(hoa_id: int, filename: str) -> bool:
+    """Delete a previously uploaded appendix. Returns True if removed."""
+    base = _sanitize_appendix_filename(filename)
+    target = appendix_dir_for(hoa_id) / base
+    if not target.exists():
+        return False
+    target.unlink()
+    return True
+
+
 def _resolve_spec_for_hoa(hoa_name: str):
     """Match the HOA name to a known PackageSpec (REQ-D11-016).
 
@@ -299,6 +397,7 @@ def run_render_job(
             reserve_snapshot=reserve_snapshot,
             hoa_metadata=hoa_metadata,
             output_dir=output_dir,
+            appendices_root=appendix_dir_for(hoa_id),
         )
 
         _set_status(
@@ -342,10 +441,14 @@ def run_render_job(
 __all__ = [
     "OLD_MILL_LEGAL_NAME",
     "SUPPORTED_HOA_NAMES",
+    "appendix_dir_for",
     "assert_ownership",
     "create_job",
+    "delete_appendix",
     "is_supported_hoa",
+    "list_appendices",
     "run_render_job",
+    "save_appendix",
     "_output_dir_for",
     "_sanitize_segment",
 ]

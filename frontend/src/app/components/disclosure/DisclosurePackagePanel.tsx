@@ -27,6 +27,7 @@ import { DisclosureProgressBlock } from './DisclosureProgressBlock';
 import { DisclosureResultBlock } from './DisclosureResultBlock';
 import { DisclosureFailureBlock } from './DisclosureFailureBlock';
 import { DisclosureAuditSheet } from './DisclosureAuditSheet';
+import { DisclosureAppendixManager } from './DisclosureAppendixManager';
 import { Button } from '../ui/button';
 
 export interface DisclosurePackagePanelProps {
@@ -135,6 +136,15 @@ export function DisclosurePackagePanel({
             />
           ) : null}
         </div>
+
+        {isSupportedHoa ? (
+          <div className="mt-6 border-t border-[#e5e5e5] pt-6">
+            <DisclosureAppendixManager
+              hoaId={hoaId}
+              disabled={state === 'starting' || state === 'running'}
+            />
+          </div>
+        ) : null}
       </div>
       <DisclosureAuditSheet
         jobId={job?.id ?? null}
