@@ -1,0 +1,166 @@
+/* Old Mill 2026 disclosure package — shared CSS.
+ *
+ * Fonts are pinned to bundled families (CONTEXT D-10). The Dockerfile
+ * installs `fonts-liberation`, `fonts-dejavu`, `fonts-noto-core`. There are
+ * NO @font-face URL fetches here — _deny_url_fetcher in render.py would
+ * reject them anyway (T-11-03).
+ */
+
+@page {
+    size: Letter;
+    margin: 1in 0.75in 1in 0.75in;
+    @bottom-center {
+        content: counter(page);
+        font-family: "Liberation Serif", Times, serif;
+        font-size: 10pt;
+        color: #555;
+    }
+}
+
+html, body {
+    font-family: "Liberation Serif", Times, serif;
+    font-size: 11pt;
+    line-height: 1.4;
+    color: #000;
+    margin: 0;
+    padding: 0;
+}
+
+h1, h2, h3 {
+    font-family: "Liberation Sans", Helvetica, Arial, sans-serif;
+    font-weight: bold;
+    page-break-after: avoid;
+}
+
+h1 { font-size: 18pt; margin: 0 0 12pt 0; }
+h2 { font-size: 14pt; margin: 16pt 0 8pt 0; }
+h3 { font-size: 12pt; margin: 12pt 0 6pt 0; }
+
+p {
+    margin: 0 0 8pt 0;
+    text-align: justify;
+}
+
+.title-page {
+    text-align: center;
+    padding-top: 3in;
+}
+
+.title-page h1 { font-size: 22pt; }
+.title-page h2 { font-size: 16pt; }
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    page-break-inside: auto;
+    margin: 8pt 0;
+}
+
+table thead {
+    /* RESEARCH "Don't Hand-Roll": auto-repeat headers across page splits */
+    display: table-header-group;
+}
+
+table tr {
+    page-break-inside: avoid;
+}
+
+table th, table td {
+    padding: 4px 6px;
+    border-bottom: 1px solid #ddd;
+    font-size: 10pt;
+    text-align: right;
+    vertical-align: top;
+}
+
+table th:first-child, table td:first-child {
+    text-align: left;
+}
+
+table th {
+    border-bottom: 1.5px solid #000;
+    font-weight: bold;
+}
+
+.right { text-align: right; }
+.center { text-align: center; }
+.left { text-align: left; }
+.bold { font-weight: bold; }
+.muted { color: #555; }
+.no-break { page-break-inside: avoid; }
+.page-break { page-break-after: always; }
+
+.totals-row {
+    border-top: 1px solid #000;
+    font-weight: bold;
+}
+
+.section-header {
+    font-weight: bold;
+    padding-top: 8px;
+    padding-bottom: 4px;
+    background: #f0f0f0;
+}
+
+/* TOC entry style with leader dots and target-counter — "Don't Hand-Roll"
+ * (RESEARCH §"Layer 2"): WeasyPrint emits a cross-page page reference
+ * automatically; manual pagination would drift on font substitution.
+ */
+.toc {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+
+.toc li {
+    margin: 4pt 0;
+}
+
+.toc-entry {
+    display: block;
+    text-decoration: none;
+    color: #000;
+}
+
+.toc-entry::after {
+    content: leader('. ') target-counter(attr(href), page);
+}
+
+/* Disclosure summary (§5570) form fields */
+.form-row {
+    display: block;
+    border-bottom: 1px solid #999;
+    padding: 6pt 0;
+}
+
+.form-label {
+    font-weight: bold;
+    margin-right: 12pt;
+}
+
+.form-value {
+    display: inline-block;
+    min-width: 1in;
+}
+
+.legal-block {
+    font-size: 10pt;
+    line-height: 1.3;
+    color: #222;
+    margin: 8pt 0;
+}
+
+/* Letter formatting */
+.letter-header {
+    margin-bottom: 24pt;
+}
+
+.letter-signature {
+    margin-top: 36pt;
+}
+
+/* Wide tables (reserve component schedule, 30-year plan) */
+.wide-table th, .wide-table td {
+    font-size: 9pt;
+    padding: 3px 4px;
+}
