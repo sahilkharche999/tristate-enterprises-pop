@@ -21,7 +21,6 @@ export interface HOAUpdatePayload {
   hoa_code?: string;
   tax_id?: string;
   units?: number;
-  reserve_inflation_rate?: number;
   fiscal_year_start_month: number;
   city?: string;
 }

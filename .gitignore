@@ -78,6 +78,10 @@ Tri State Documents/
 /*.xlsx
 /*.pdf
 
+# Reference disclosure-package PDFs and ad-hoc transcripts (large, not source)
+2026/
+/HOA Budget Analysis Transcript.txt
+
 # Root data/ folder (copies of seed files, not needed in repo)
 /data/
 

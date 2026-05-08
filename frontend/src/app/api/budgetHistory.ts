@@ -69,8 +69,12 @@ export interface BudgetDraftPayload {
   id: number;
   status: string;
   source_upload_id?: number | null;
+  reserve_study_upload_id?: number | null;
   reopened_from_version_id?: number | null;
   line_items: JsonObject[];
+  reserve_study_status?: string;
+  reserve_study_rows: JsonObject[];
+  reserve_study_warnings: string[];
   global_note?: string | null;
   statement_month?: number | null;
   growth_factor?: number | null;
@@ -86,11 +90,13 @@ export interface BudgetDraftSummary {
   id: number;
   status: string;
   source_upload_id?: number | null;
+  reserve_study_upload_id?: number | null;
   source_upload_filename?: string | null;
   reopened_from_version_id?: number | null;
   reopened_from_version_code?: string | null;
   reserve_inflation_rate: number;
   reserve_inflation_note?: string | null;
+  reserve_study_status?: string;
   updated_at?: string | null;
   actor_name: string;
   enriched_file_available?: boolean | null;
@@ -125,6 +131,49 @@ export interface BudgetUploadResponse {
   // vision-only fallback). The frontend should render this as a one-shot
   // dismissible dialog so the user knows to double-check the numbers.
   extraction_quality_warning?: ExtractionQualityWarning | null;
+}
+
+export interface ReserveStudyRow {
+  row_id: string;
+  row_type?: 'item' | 'header';
+  line_item: string;
+  useful_life: number | null;
+  remaining_life: number | null;
+  quantity: string | null;
+  replacement_cost: number | null;
+  year_new?: number | null;
+  reference_year?: number | null;
+  year_replacement_provision?: number | null;
+  estimated_liability?: number | null;
+  source_page?: number | null;
+  flags?: string[];
+}
+
+export interface BundleFileStatus {
+  upload_id?: number | null;
+  filename?: string | null;
+  status: 'completed' | 'review_required' | 'failed' | 'pending';
+  warnings: string[];
+  review_reason?: string | null;
+}
+
+export interface BudgetBundleUploadResponse {
+  draft: BudgetDraftPayload | null;
+  budget_source: BundleFileStatus;
+  reserve_study: BundleFileStatus;
+  can_continue_with_budget_only: boolean;
+  can_continue_with_reserve_study_only: boolean;
+}
+
+export interface SaveReserveStudyPayload {
+  rows: JsonObject[];
+  warnings?: string[];
+}
+
+export interface ApplyReserveStudyResponse {
+  draft: BudgetDraftPayload;
+  applied_count: number;
+  message: string;
 }
 
 export interface SaveBudgetDraftPayload {
@@ -479,6 +528,22 @@ export async function uploadBudgetSource(hoaId: number | string, file: File): Pr
   return handleResponse<BudgetUploadResponse>(res);
 }
 
+export async function uploadBudgetBundle(
+  hoaId: number | string,
+  budgetFile: File,
+  reserveStudyFile: File,
+): Promise<BudgetBundleUploadResponse> {
+  const formData = new FormData();
+  formData.append('budget_file', budgetFile);
+  formData.append('reserve_study_file', reserveStudyFile);
+  const res = await fetch(`${BASE_URL}/hoa/${hoaId}/budget/upload-bundle`, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: formData,
+  });
+  return handleResponse<BudgetBundleUploadResponse>(res);
+}
+
 export async function saveBudgetDraft(
   hoaId: number | string,
   payload: SaveBudgetDraftPayload,
@@ -492,6 +557,33 @@ export async function saveBudgetDraft(
     body: JSON.stringify(payload),
   });
   return handleResponse<SaveBudgetDraftResponse>(res);
+}
+
+export async function saveReserveStudyRows(
+  hoaId: number | string,
+  draftId: number | string,
+  payload: SaveReserveStudyPayload,
+): Promise<BudgetDraftPayload> {
+  const res = await fetch(`${BASE_URL}/hoa/${hoaId}/budget/drafts/${draftId}/reserve-study`, {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+      ...authHeaders(),
+    },
+    body: JSON.stringify(payload),
+  });
+  return handleResponse<BudgetDraftPayload>(res);
+}
+
+export async function applyReserveStudyToBudget(
+  hoaId: number | string,
+  draftId: number | string,
+): Promise<ApplyReserveStudyResponse> {
+  const res = await fetch(`${BASE_URL}/hoa/${hoaId}/budget/drafts/${draftId}/reserve-study/apply`, {
+    method: 'POST',
+    headers: authHeaders(),
+  });
+  return handleResponse<ApplyReserveStudyResponse>(res);
 }
 
 export async function saveBudgetNote(

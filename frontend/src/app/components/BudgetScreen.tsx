@@ -4,6 +4,8 @@ import { AlertTriangle, ArrowLeft, Download, FileText, Settings, Trash2, Upload 
 import { toast } from 'sonner';
 
 import { Button } from './ui/button';
+import { Checkbox } from './ui/checkbox';
+import { Label } from './ui/label';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -17,22 +19,28 @@ import { AISuggestionMode } from './AISuggestionMode';
 import { BudgetView } from './BudgetView';
 import { DraftBaselineComparePanel } from './DraftBaselineComparePanel';
 import { EnrichedView } from './EnrichedView';
+import { ReserveStudyView } from './ReserveStudyView';
 import {
+  applyReserveStudyToBudget,
   deleteActiveDraft,
   downloadBudgetDraftEnriched,
   mapBudgetHistoryLineItems,
   mapEditorLineItemsToBudgetHistory,
   saveBudgetDraft,
+  saveReserveStudyRows,
+  uploadBudgetBundle,
   uploadBudgetSource,
+  type BudgetBundleUploadResponse,
   type BudgetDraftPayload,
   type ExtractionQualityWarning,
+  type ReserveStudyRow,
 } from '../api/budgetHistory';
 import { type AISuggestion, type AISuggestionResponse, type FeedbackDecision, type LineItem } from '../data/mockData';
 import type { HOARecord } from '../api/hoa';
 import { formatTimestamp } from '../lib/budget';
 import { getErrorMessage } from '../lib/errors';
 import { computeTimingInputs } from '../lib/fiscalYear';
-import { formatFiscalYearLabel } from '../lib/hoa';
+import { formatFiscalYearRangeLabel } from '../lib/hoa';
 
 interface GenerateBudgetRequest {
   draftId: number;
@@ -59,6 +67,8 @@ interface BudgetScreenProps {
   activeDraft?: BudgetDraftPayload | null;
 }
 
+const DRAFT_AUTO_SAVE_INTERVAL_MS = 30_000;
+
 function downloadBlob(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
@@ -84,6 +94,23 @@ function normalizedDraftSnapshot(
   });
 }
 
+function normalizedReserveStudySnapshot(
+  rows: ReserveStudyRow[],
+  warnings: string[],
+) {
+  return JSON.stringify({
+    rows,
+    warnings,
+  });
+}
+
+function reserveSnapshotFromDraft(draft: BudgetDraftPayload | null): string {
+  return normalizedReserveStudySnapshot(
+    ((draft?.reserve_study_rows ?? []) as ReserveStudyRow[]),
+    draft?.reserve_study_warnings ?? [],
+  );
+}
+
 export function BudgetScreen({
   hoa,
   hoaId,
@@ -102,7 +129,7 @@ export function BudgetScreen({
   const [uploadState, setUploadState] = useState<'initial' | 'uploading' | 'complete'>(
     activeDraft ? 'complete' : 'initial',
   );
-  const [currentView, setCurrentView] = useState<'enriched' | 'budget' | 'ai'>(initialView);
+  const [currentView, setCurrentView] = useState<'enriched' | 'budget' | 'ai' | 'reserve'>(initialView);
   const [draftId, setDraftId] = useState<number | null>(activeDraft?.id ?? null);
   const [globalNote, setGlobalNote] = useState(activeDraft?.global_note ?? '');
   const [lastSaved, setLastSaved] = useState<Date | null>(
@@ -117,7 +144,10 @@ export function BudgetScreen({
   const [isSavingDraft, setIsSavingDraft] = useState(false);
   const [isDeletingDraft, setIsDeletingDraft] = useState(false);
   const [isDownloadingEnriched, setIsDownloadingEnriched] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [autoSaveEnabled, setAutoSaveEnabled] = useState(false);
+  const [budgetSourceFile, setBudgetSourceFile] = useState<File | null>(null);
+  const [reserveStudyFile, setReserveStudyFile] = useState<File | null>(null);
+  const [bundleUploadResult, setBundleUploadResult] = useState<BudgetBundleUploadResponse | null>(null);
   const [aiResponse, internalSetAiResponse] = useState<AISuggestionResponse | null>(savedAiResponse);
   const [appliedSuggestionSnapshot, setAppliedSuggestionSnapshot] = useState<
     Map<string, { feedbackCaseId: number; appliedPercent: number }> | null
@@ -128,14 +158,30 @@ export function BudgetScreen({
   // degraded extraction path (e.g. scanned-PDF vision-only fallback). State
   // lives only in this component, so reload clears it — by design.
   const [qualityWarning, setQualityWarning] = useState<ExtractionQualityWarning | null>(null);
+  const [reserveStudyRows, setReserveStudyRows] = useState<ReserveStudyRow[]>([]);
+  const [reserveStudyWarnings, setReserveStudyWarnings] = useState<string[]>([]);
+  const [reserveStudyStatus, setReserveStudyStatus] = useState<string>('none');
+  const [reserveStudyApplyMessage, setReserveStudyApplyMessage] = useState<string | null>(null);
+  const [isSavingReserveStudy, setIsSavingReserveStudy] = useState(false);
+  const [isApplyingReserveStudy, setIsApplyingReserveStudy] = useState(false);
+  const reserveSavePromiseRef = useRef<Promise<BudgetDraftPayload> | null>(null);
+  const reserveRowsRef = useRef<ReserveStudyRow[]>([]);
+  const reserveWarningsRef = useRef<string[]>([]);
+  const autoSaveInFlightRef = useRef(false);
+  const lastAutoSaveAttemptSnapshotRef = useRef<string | null>(null);
+  const lastPersistedReserveSnapshotRef = useRef<string>(reserveSnapshotFromDraft(activeDraft));
+  const allowReserveHydrationRef = useRef(true);
   const activeReserveInflationRate =
     typeof hoa.reserve_inflation_rate === 'number' && Number.isFinite(hoa.reserve_inflation_rate)
       ? hoa.reserve_inflation_rate
-      : 0;
+      : typeof activeDraft?.reserve_inflation_rate === 'number' && Number.isFinite(activeDraft.reserve_inflation_rate)
+        ? activeDraft.reserve_inflation_rate
+        : 0;
 
-  const fiscalYearLabel = formatFiscalYearLabel(
+  const fiscalYearLabel = formatFiscalYearRangeLabel(
     hoa.fiscal_year_start_month,
     hoa.fiscal_year_end_month,
+    hoa.portfolio_year,
   );
 
   const setAiResponse = (response: AISuggestionResponse | null) => {
@@ -155,6 +201,18 @@ export function BudgetScreen({
   }, [savedAiResponse]);
 
   useEffect(() => {
+    reserveRowsRef.current = reserveStudyRows;
+    reserveWarningsRef.current = reserveStudyWarnings;
+  }, [reserveStudyRows, reserveStudyWarnings]);
+
+  const hydrateReserveState = (draft: BudgetDraftPayload) => {
+    setReserveStudyRows((draft.reserve_study_rows ?? []) as ReserveStudyRow[]);
+    setReserveStudyWarnings(draft.reserve_study_warnings ?? []);
+    setReserveStudyStatus(draft.reserve_study_status ?? 'none');
+    lastPersistedReserveSnapshotRef.current = reserveSnapshotFromDraft(draft);
+  };
+
+  useEffect(() => {
     if (!activeDraft) {
       setDraftId(null);
       setGlobalNote('');
@@ -163,9 +221,23 @@ export function BudgetScreen({
       setWorkingGrowthFactor(null);
       setGrowthFactorNote('');
       setIsComparePanelOpen(false);
+      setReserveStudyRows([]);
+      setReserveStudyWarnings([]);
+      setReserveStudyStatus('none');
+      lastPersistedReserveSnapshotRef.current = reserveSnapshotFromDraft(null);
+      allowReserveHydrationRef.current = true;
       setUploadState('initial');
       return;
     }
+
+    const nextDraftId = activeDraft.id;
+    const isDraftSwitch = draftId == null || nextDraftId !== draftId;
+    const currentReserveSnapshot = normalizedReserveStudySnapshot(
+      reserveRowsRef.current,
+      reserveWarningsRef.current,
+    );
+    const hasUnsavedLocalReserveEdits =
+      currentReserveSnapshot !== lastPersistedReserveSnapshotRef.current;
 
     setDraftId(activeDraft.id);
     setGlobalNote(activeDraft.global_note ?? '');
@@ -173,57 +245,100 @@ export function BudgetScreen({
     setStatementMonth(activeDraft.statement_month ?? null);
     setWorkingGrowthFactor(activeDraft.growth_factor ?? null);
     setGrowthFactorNote(activeDraft.growth_factor_note ?? '');
+    if (isDraftSwitch || allowReserveHydrationRef.current || !hasUnsavedLocalReserveEdits) {
+      hydrateReserveState(activeDraft);
+    }
+    allowReserveHydrationRef.current = false;
     setUploadState('complete');
   }, [activeDraft]);
 
-  const handleSelectFile = () => {
-    fileInputRef.current?.click();
+  const hydrateDraftState = (draft: BudgetDraftPayload, options?: { hydrateReserve?: boolean }) => {
+    const mappedLineItems = mapBudgetHistoryLineItems(draft.line_items);
+    onLineItemsUpdate(mappedLineItems);
+    setDraftId(draft.id);
+    setGlobalNote(draft.global_note ?? '');
+    setStatementMonth(draft.statement_month ?? null);
+    setWorkingGrowthFactor(draft.growth_factor ?? null);
+    setGrowthFactorNote(draft.growth_factor_note ?? '');
+    if (options?.hydrateReserve !== false) {
+      hydrateReserveState(draft);
+    }
+    setLastSaved(draft.updated_at ? new Date(draft.updated_at) : null);
+    allowReserveHydrationRef.current = options?.hydrateReserve !== false;
+    onDraftChange?.(draft);
+    setUploadState('complete');
   };
 
-  const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    event.target.value = '';
-
+  const handleBundleUpload = async () => {
+    if (!budgetSourceFile || !reserveStudyFile) {
+      toast.error('Select both the budget file and the reserve study PDF first.');
+      return;
+    }
     setUploadState('uploading');
     try {
-      const response = await uploadBudgetSource(hoaId, file);
+      const response = await uploadBudgetBundle(hoaId, budgetSourceFile, reserveStudyFile);
+      setBundleUploadResult(response);
 
-      // Review-required path: the backend accepted the upload (HTTP 200) but
-      // refused to build a draft because extraction failed or validation
-      // flagged blocking issues. response.draft is null in this case.
-      // Surface the review_reason + warnings and stay on the upload screen —
-      // the user's next step is to upload a different file or report the issue.
+      if (!response.draft) {
+        setUploadState('initial');
+        toast.error(response.budget_source.review_reason || 'We could not create a draft from the selected files.');
+        if (response.can_continue_with_reserve_study_only) {
+          toast.warning('Reserve study upload was preserved. Replace the budget file to continue.');
+        }
+        return;
+      }
+
+      if (response.can_continue_with_budget_only) {
+        setUploadState('initial');
+        toast.warning(
+          response.reserve_study.review_reason ||
+            'Budget draft is ready, but the reserve study needs attention before it can be attached.',
+          { duration: 10000 },
+        );
+        return;
+      }
+
+      hydrateDraftState(response.draft);
+      toast.success('Budget draft created from both uploaded files.');
+    } catch (error) {
+      toast.error(getErrorMessage(error, 'Upload failed. Please try again.'));
+      setUploadState('initial');
+    }
+  };
+
+  const handleContinueWithBudgetOnly = () => {
+    if (!bundleUploadResult?.draft) {
+      return;
+    }
+    hydrateDraftState(bundleUploadResult.draft);
+    toast.success('Continuing with the successful budget draft.');
+  };
+
+  const handleBudgetOnlyUpload = async () => {
+    if (!budgetSourceFile) {
+      toast.error('Select a budget file first.');
+      return;
+    }
+    setUploadState('uploading');
+    try {
+      const response = await uploadBudgetSource(hoaId, budgetSourceFile);
       if (!response.draft) {
         const reason =
           response.review_reason ||
           'We could not build a draft from this file. Please verify the statement and try again.';
         toast.error(reason, { duration: 12000 });
-        for (const w of response.warnings ?? []) {
-          toast.warning(w, { duration: 10000 });
+        for (const warning of response.warnings ?? []) {
+          toast.warning(warning, { duration: 10000 });
         }
         setUploadState('initial');
         return;
       }
 
-      const mappedLineItems = mapBudgetHistoryLineItems(response.draft.line_items);
-      onLineItemsUpdate(mappedLineItems);
-      setDraftId(response.draft.id);
-      setGlobalNote(response.draft.global_note ?? '');
-      setStatementMonth(response.draft.statement_month ?? null);
-      setWorkingGrowthFactor(response.draft.growth_factor ?? null);
-      setGrowthFactorNote(response.draft.growth_factor_note ?? '');
-      setLastSaved(response.draft.updated_at ? new Date(response.draft.updated_at) : null);
-      onDraftChange?.(response.draft);
-      setUploadState('complete');
+      hydrateDraftState(response.draft);
       toast.success('Income statement uploaded and draft created.');
-      // Show parser warnings (e.g. Tier 3 fallback)
-      for (const w of response.warnings ?? []) {
-        toast.warning(w, { duration: 10000 });
+      for (const warning of response.warnings ?? []) {
+        toast.warning(warning, { duration: 10000 });
       }
-      // If the backend took a degraded extraction path (e.g. scanned-PDF
-      // vision-only fallback), pop a one-shot dismissible dialog so the
-      // user knows to double-check the numbers before saving.
       if (response.extraction_quality_warning) {
         setQualityWarning(response.extraction_quality_warning);
       }
@@ -231,6 +346,14 @@ export function BudgetScreen({
       toast.error(getErrorMessage(error, 'Upload failed. Please try again.'));
       setUploadState('initial');
     }
+  };
+
+  const handleCreateDraftUpload = () => {
+    if (reserveStudyFile) {
+      void handleBundleUpload();
+      return;
+    }
+    void handleBudgetOnlyUpload();
   };
 
   const handlePercentChange = (itemId: string, newPercent: number) => {
@@ -244,38 +367,14 @@ export function BudgetScreen({
   const handleSaveDraft = async () => {
     try {
       await persistDraftSnapshot();
+      if (hasUnsavedReserveStudyChanges) {
+        await persistReserveStudySnapshot(reserveRowsRef.current, reserveWarningsRef.current);
+      }
       toast.success('Draft saved.');
     } catch (error) {
       toast.error(getErrorMessage(error, 'Failed to save draft.'));
     }
   };
-
-  // Auto-save: debounce 2s after line items, notes, or growth factor change
-  const autoSaveRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const isMountedRef = useRef(false);
-
-  useEffect(() => {
-    // Skip the initial mount — only auto-save on subsequent changes
-    if (!isMountedRef.current) {
-      isMountedRef.current = true;
-      return;
-    }
-    if (!draftId || isSavingDraft) return;
-
-    if (autoSaveRef.current) clearTimeout(autoSaveRef.current);
-    autoSaveRef.current = setTimeout(async () => {
-      try {
-        await persistDraftSnapshot();
-        setLastSaved(new Date());
-      } catch {
-        // Silent — manual save is still available as fallback
-      }
-    }, 2000);
-
-    return () => {
-      if (autoSaveRef.current) clearTimeout(autoSaveRef.current);
-    };
-  }, [lineItems, globalNote, workingGrowthFactor, growthFactorNote]);
 
   const handleDiscardDraft = async () => {
     if (!draftId) return;
@@ -317,27 +416,25 @@ export function BudgetScreen({
     }
   };
 
-  const hasUnsavedDraftChanges = (() => {
-    if (!activeDraft) {
-      return Boolean(draftId);
-    }
-
-    const persistedEditorSnapshot = normalizedDraftSnapshot(
-      mapBudgetHistoryLineItems(activeDraft.line_items),
-      activeDraft.global_note ?? '',
-      activeDraft.statement_month ?? null,
-      activeDraft.growth_factor ?? null,
-      activeDraft.growth_factor_note ?? '',
-    );
-    const workingSnapshot = normalizedDraftSnapshot(
-      lineItems,
-      globalNote,
-      statementMonth,
-      workingGrowthFactor,
-      growthFactorNote,
-    );
-    return persistedEditorSnapshot !== workingSnapshot;
-  })();
+  const persistedDraftSnapshot = activeDraft
+    ? normalizedDraftSnapshot(
+        mapBudgetHistoryLineItems(activeDraft.line_items),
+        activeDraft.global_note ?? '',
+        activeDraft.statement_month ?? null,
+        activeDraft.growth_factor ?? null,
+        activeDraft.growth_factor_note ?? '',
+      )
+    : null;
+  const workingDraftSnapshot = normalizedDraftSnapshot(
+    lineItems,
+    globalNote,
+    statementMonth,
+    workingGrowthFactor,
+    growthFactorNote,
+  );
+  const hasUnsavedDraftChanges = activeDraft
+    ? persistedDraftSnapshot !== workingDraftSnapshot
+    : Boolean(draftId);
 
   const ensurePersistedDraftSnapshot = async (): Promise<BudgetDraftPayload> => {
     let persistedDraft = activeDraft;
@@ -349,6 +446,120 @@ export function BudgetScreen({
     }
     return persistedDraft;
   };
+
+  const workingReserveStudySnapshot = normalizedReserveStudySnapshot(reserveStudyRows, reserveStudyWarnings);
+  const hasUnsavedReserveStudyChanges =
+    workingReserveStudySnapshot !== lastPersistedReserveSnapshotRef.current;
+
+  const persistReserveStudySnapshot = async (
+    rows: ReserveStudyRow[] = reserveRowsRef.current,
+    warnings: string[] = reserveWarningsRef.current,
+  ): Promise<BudgetDraftPayload> => {
+    if (!draftId) {
+      throw new Error('Create a draft first.');
+    }
+
+    const snapshotSent = normalizedReserveStudySnapshot(rows, warnings);
+    const savePromise = (async () => {
+      setIsSavingReserveStudy(true);
+      try {
+        const draft = await saveReserveStudyRows(hoaId, draftId, {
+          rows: rows as unknown as Record<string, unknown>[],
+          warnings,
+        });
+        const savedSnapshot = reserveSnapshotFromDraft(draft);
+        lastPersistedReserveSnapshotRef.current = savedSnapshot;
+        const localSnapshotNow = normalizedReserveStudySnapshot(
+          reserveRowsRef.current,
+          reserveWarningsRef.current,
+        );
+        if (localSnapshotNow === snapshotSent) {
+          hydrateReserveState(draft);
+        }
+        setLastSaved(draft.updated_at ? new Date(draft.updated_at) : new Date());
+        return draft;
+      } finally {
+        setIsSavingReserveStudy(false);
+        if (reserveSavePromiseRef.current === savePromise) {
+          reserveSavePromiseRef.current = null;
+        }
+      }
+    })();
+    reserveSavePromiseRef.current = savePromise;
+    return savePromise;
+  };
+
+  const ensurePersistedReserveStudySnapshot = async (
+    persistedDraft: BudgetDraftPayload | null,
+  ): Promise<BudgetDraftPayload> => {
+    let nextDraft = persistedDraft;
+    if (reserveSavePromiseRef.current) {
+      nextDraft = await reserveSavePromiseRef.current;
+    }
+    const latestReserveSnapshot = normalizedReserveStudySnapshot(
+      reserveRowsRef.current,
+      reserveWarningsRef.current,
+    );
+    if (!nextDraft || latestReserveSnapshot !== lastPersistedReserveSnapshotRef.current) {
+      nextDraft = await persistReserveStudySnapshot(
+        reserveRowsRef.current,
+        reserveWarningsRef.current,
+      );
+    }
+    return nextDraft;
+  };
+
+  useEffect(() => {
+    if (!autoSaveEnabled || !draftId || isSavingDraft || isSavingReserveStudy) {
+      return;
+    }
+    if (!hasUnsavedDraftChanges && !hasUnsavedReserveStudyChanges) {
+      return;
+    }
+
+    const autoSaveSnapshot = JSON.stringify({
+      draft: workingDraftSnapshot,
+      reserve: workingReserveStudySnapshot,
+    });
+    if (lastAutoSaveAttemptSnapshotRef.current === autoSaveSnapshot) {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      if (autoSaveInFlightRef.current) {
+        return;
+      }
+      autoSaveInFlightRef.current = true;
+      lastAutoSaveAttemptSnapshotRef.current = autoSaveSnapshot;
+
+      void (async () => {
+        try {
+          if (hasUnsavedDraftChanges) {
+            await persistDraftSnapshot();
+          }
+          if (hasUnsavedReserveStudyChanges) {
+            await persistReserveStudySnapshot(reserveRowsRef.current, reserveWarningsRef.current);
+          }
+        } catch (error) {
+          lastAutoSaveAttemptSnapshotRef.current = null;
+          toast.error(getErrorMessage(error, 'Auto-save failed.'));
+        } finally {
+          autoSaveInFlightRef.current = false;
+        }
+      })();
+    }, DRAFT_AUTO_SAVE_INTERVAL_MS);
+
+    return () => window.clearTimeout(timer);
+  }, [
+    autoSaveEnabled,
+    draftId,
+    isSavingDraft,
+    isSavingReserveStudy,
+    hasUnsavedDraftChanges,
+    hasUnsavedReserveStudyChanges,
+    workingDraftSnapshot,
+    workingReserveStudySnapshot,
+  ]);
 
   const handleDownloadEnriched = async () => {
     if (!draftId) {
@@ -389,7 +600,7 @@ export function BudgetScreen({
         onDraftChange?.(response.draft);
         setLastSaved(response.draft.updated_at ? new Date(response.draft.updated_at) : new Date());
       } catch {
-        // Auto-save will catch it on the next cycle
+        // The note editor already confirmed locally; the draft save button can retry persistence.
       }
     }
   };
@@ -438,8 +649,9 @@ export function BudgetScreen({
 
     try {
       const persistedDraft = await ensurePersistedDraftSnapshot();
+      const persistedReserveDraft = await ensurePersistedReserveStudySnapshot(persistedDraft);
       await onGenerateBudget({
-        draftId: persistedDraft.id,
+        draftId: persistedReserveDraft.id,
         lineItems,
         globalNote,
         statementMonth,
@@ -448,6 +660,134 @@ export function BudgetScreen({
       });
     } catch (error) {
       toast.error(getErrorMessage(error, 'Failed to generate budget. Please try again.'));
+    }
+  };
+
+  const handleReserveStudyRowChange = (index: number, field: keyof ReserveStudyRow, value: string) => {
+    setReserveStudyRows((current) =>
+      current.map((row, rowIndex) => {
+        if (rowIndex !== index) return row;
+        if (field === 'line_item') {
+          return { ...row, line_item: value };
+        }
+        if (row.row_type === 'header') {
+          return row;
+        }
+        if (field === 'quantity') {
+          return { ...row, quantity: value.trim() === '' ? null : value };
+        }
+        const nextValue = value === '' ? null : Number(value);
+        const updates: Partial<ReserveStudyRow> = {
+          [field]: Number.isFinite(nextValue as number) ? nextValue : null,
+        };
+        if (field === 'useful_life' || field === 'replacement_cost') {
+          updates.year_replacement_provision = null;
+          updates.estimated_liability = null;
+        } else if (field === 'remaining_life' || field === 'year_new' || field === 'reference_year') {
+          updates.estimated_liability = null;
+        }
+        return {
+          ...row,
+          ...updates,
+        };
+      }),
+    );
+    setReserveStudyApplyMessage(null);
+  };
+
+  const handleAddReserveStudyRow = () => {
+    setReserveStudyRows((current) => [
+      ...current,
+      {
+        row_id: `manual-${Date.now()}-${current.length}`,
+        row_type: 'item',
+        line_item: '',
+        useful_life: null,
+        remaining_life: null,
+        quantity: null,
+        replacement_cost: null,
+        year_new: null,
+        reference_year: null,
+        year_replacement_provision: null,
+        estimated_liability: null,
+        source_page: null,
+        flags: [],
+      },
+    ]);
+    setReserveStudyApplyMessage(null);
+  };
+
+  const handleAddReserveStudyHeader = () => {
+    setReserveStudyRows((current) => [
+      ...current,
+      {
+        row_id: `manual-header-${Date.now()}-${current.length}`,
+        row_type: 'header',
+        line_item: 'New Header',
+        useful_life: null,
+        remaining_life: null,
+        quantity: null,
+        replacement_cost: null,
+        year_new: null,
+        reference_year: null,
+        year_replacement_provision: null,
+        estimated_liability: null,
+        source_page: null,
+        flags: [],
+      },
+    ]);
+    setReserveStudyApplyMessage(null);
+  };
+
+  const handleMoveReserveStudyRow = (index: number, direction: 'up' | 'down') => {
+    setReserveStudyRows((current) => {
+      const targetIndex = direction === 'up' ? index - 1 : index + 1;
+      if (targetIndex < 0 || targetIndex >= current.length) {
+        return current;
+      }
+      const next = [...current];
+      [next[index], next[targetIndex]] = [next[targetIndex], next[index]];
+      return next;
+    });
+    setReserveStudyApplyMessage(null);
+  };
+
+  const handleDeleteReserveStudyRow = (index: number) => {
+    setReserveStudyRows((current) => current.filter((_, rowIndex) => rowIndex !== index));
+    setReserveStudyApplyMessage(null);
+  };
+
+  const handleSaveReserveStudy = async () => {
+    try {
+      await ensurePersistedReserveStudySnapshot(activeDraft);
+      toast.success('Reserve study saved.');
+    } catch (error) {
+      toast.error(getErrorMessage(error, 'Failed to save reserve study rows.'));
+    }
+  };
+
+  const handleApplyReserveStudy = async () => {
+    if (!draftId) {
+      toast.error('Create a draft first.');
+      return;
+    }
+    setIsApplyingReserveStudy(true);
+    try {
+      const persistedDraft = await ensurePersistedDraftSnapshot();
+      const persistedReserveDraft = await ensurePersistedReserveStudySnapshot(persistedDraft);
+      const response = await applyReserveStudyToBudget(hoaId, persistedReserveDraft.id);
+      hydrateDraftState(response.draft);
+      onLineItemsUpdate(mapBudgetHistoryLineItems(response.draft.line_items));
+      setReserveStudyApplyMessage(response.message);
+      if (response.applied_count > 0) {
+        toast.success(response.message);
+      } else {
+        toast.message(response.message);
+      }
+    } catch (error) {
+      toast.error(getErrorMessage(error, 'Failed to apply reserve study rows to the budget.'));
+    } finally {
+      setIsApplyingReserveStudy(false);
     }
   };
 
@@ -476,6 +816,30 @@ export function BudgetScreen({
     } finally {
       setAiLoading(false);
     }
+  };
+
+  const budgetFileRequiresAttention =
+    bundleUploadResult?.budget_source.status === 'failed' ||
+    bundleUploadResult?.budget_source.status === 'review_required';
+  const reserveFileRequiresAttention =
+    bundleUploadResult?.reserve_study.status === 'failed' ||
+    bundleUploadResult?.reserve_study.status === 'review_required';
+
+  const uploadTileClassName = (options: {
+    hasFile: boolean;
+    requiresAttention: boolean;
+    isMissingWhileOtherSelected: boolean;
+  }) => {
+    if (options.requiresAttention) {
+      return 'rounded-2xl border-2 border-[#f59e0b] bg-[#fff7ed] p-5 text-left shadow-sm transition-colors';
+    }
+    if (options.hasFile) {
+      return 'rounded-2xl border-2 border-[#111111] bg-white p-5 text-left shadow-sm transition-colors';
+    }
+    if (options.isMissingWhileOtherSelected) {
+      return 'rounded-2xl border-2 border-dashed border-[#f59e0b] bg-[#fff7ed] p-5 text-left shadow-sm transition-colors';
+    }
+    return 'rounded-2xl border-2 border-dashed border-[#d4d4d4] bg-[#fafafa] p-5 text-left shadow-sm transition-colors hover:border-[#a3a3a3] hover:bg-white';
   };
 
   const handleApplyAISuggestions = (selectedSuggestions: AISuggestion[]) => {
@@ -532,27 +896,163 @@ export function BudgetScreen({
                 <Upload className="h-8 w-8 text-[#525252]" />
               </div>
               <div>
-                <h2 className="mb-2 text-xl font-semibold text-[#111111]">Upload Income Statement</h2>
+                <h2 className="mb-2 text-xl font-semibold text-[#111111]">Create Budget Draft</h2>
                 <p className="text-sm text-[#737373]">
                   {uploadState === 'uploading'
-                    ? 'Parsing document and creating a persisted draft...'
-                    : 'Upload your Excel or PDF income statement to begin'}
+                    ? 'Processing the selected file...'
+                    : 'Select a budget source. Add a reserve study PDF if available.'}
                 </p>
               </div>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".xlsx,.xls,.pdf"
-                className="hidden"
-                onChange={handleFileChange}
-              />
+              <div className="grid w-full gap-4 md:grid-cols-2">
+                <label
+                  className={uploadTileClassName({
+                    hasFile: Boolean(budgetSourceFile),
+                    requiresAttention: Boolean(budgetFileRequiresAttention),
+                    isMissingWhileOtherSelected: Boolean(!budgetSourceFile && reserveStudyFile),
+                  })}
+                >
+                  <input
+                    type="file"
+                    accept=".xlsx,.xls,.pdf"
+                    onChange={(event) => setBudgetSourceFile(event.target.files?.[0] ?? null)}
+                    className="sr-only"
+                  />
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <span className="mb-2 block text-xs font-medium uppercase tracking-[0.18em] text-[#737373]">
+                        Budget File
+                      </span>
+                      <p className="text-sm font-medium text-[#111111]">
+                        {budgetSourceFile?.name ?? 'Excel workbook or PDF income statement'}
+                      </p>
+                      <p className="mt-2 text-xs text-[#737373]">
+                        {budgetSourceFile
+                          ? 'Selected and ready to upload.'
+                          : 'Required. Choose the operating budget source first.'}
+                      </p>
+                    </div>
+                    <span className="rounded-lg border border-[#d4d4d4] bg-white px-3 py-2 text-xs font-medium text-[#111111] shadow-sm">
+                      {budgetSourceFile ? 'Change File' : 'Select File'}
+                    </span>
+                  </div>
+                </label>
+                <label
+                  className={uploadTileClassName({
+                    hasFile: Boolean(reserveStudyFile),
+                    requiresAttention: Boolean(reserveFileRequiresAttention),
+                    isMissingWhileOtherSelected: Boolean(!reserveStudyFile && budgetSourceFile),
+                  })}
+                >
+                  <input
+                    type="file"
+                    accept=".pdf"
+                    onChange={(event) => setReserveStudyFile(event.target.files?.[0] ?? null)}
+                    className="sr-only"
+                  />
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <span className="mb-2 block text-xs font-medium uppercase tracking-[0.18em] text-[#737373]">
+                        Reserve Study PDF
+                      </span>
+                      <p className="text-sm font-medium text-[#111111]">
+                        {reserveStudyFile?.name ?? 'Separate reserve study PDF'}
+                      </p>
+                      <p className="mt-2 text-xs text-[#737373]">
+                        {reserveStudyFile
+                          ? 'Selected and ready to upload.'
+                          : 'Optional. Attach a reserve study PDF to review reserve components with this draft.'}
+                      </p>
+                    </div>
+                    <span className="rounded-lg border border-[#d4d4d4] bg-white px-3 py-2 text-xs font-medium text-[#111111] shadow-sm">
+                      {reserveStudyFile ? 'Change File' : 'Select File'}
+                    </span>
+                  </div>
+                </label>
+              </div>
               <Button
-                onClick={handleSelectFile}
-                disabled={uploadState === 'uploading'}
-                className="bg-[#111111] px-6 py-2.5 text-white shadow-sm hover:bg-[#262626]"
+                onClick={handleCreateDraftUpload}
+                disabled={uploadState === 'uploading' || !budgetSourceFile}
+                className="min-w-[240px] bg-[#111111] px-8 py-3 text-base font-medium text-white shadow-sm hover:bg-[#262626]"
               >
-                {uploadState === 'uploading' ? 'Processing...' : 'Select File'}
+                {uploadState === 'uploading'
+                  ? 'Processing...'
+                  : reserveStudyFile
+                    ? 'Create Draft from Files'
+                    : 'Create Budget Draft'}
               </Button>
+              {bundleUploadResult ? (
+                <div className="w-full rounded-xl border border-[#e5e5e5] bg-[#fafafa] p-5 text-left">
+                  <h3 className="mb-4 text-sm font-semibold uppercase tracking-[0.18em] text-[#737373]">
+                    File Results
+                  </h3>
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <div className="rounded-xl border border-[#e5e5e5] bg-white p-4">
+                      <p className="text-sm font-medium text-[#111111]">Budget File</p>
+                      <p className="mt-1 text-xs text-[#737373]">{bundleUploadResult.budget_source.filename}</p>
+                      <p className="mt-3 text-sm text-[#525252]">
+                        Status: {bundleUploadResult.budget_source.status}
+                      </p>
+                      {bundleUploadResult.budget_source.review_reason ? (
+                        <p className="mt-2 text-sm text-[#b45309]">
+                          {bundleUploadResult.budget_source.review_reason}
+                        </p>
+                      ) : null}
+                      {bundleUploadResult.budget_source.warnings.length > 0 ? (
+                        <ul className="mt-3 space-y-2 text-xs leading-5 text-[#525252]">
+                          {bundleUploadResult.budget_source.warnings.map((warning, index) => (
+                            <li key={`${warning}-${index}`} className="rounded-lg bg-[#fff7ed] px-3 py-2">
+                              {warning}
+                            </li>
+                          ))}
+                        </ul>
+                      ) : null}
+                    </div>
+                    <div className="rounded-xl border border-[#e5e5e5] bg-white p-4">
+                      <p className="text-sm font-medium text-[#111111]">Reserve Study</p>
+                      <p className="mt-1 text-xs text-[#737373]">{bundleUploadResult.reserve_study.filename}</p>
+                      <p className="mt-3 text-sm text-[#525252]">
+                        Status: {bundleUploadResult.reserve_study.status}
+                      </p>
+                      {bundleUploadResult.reserve_study.review_reason ? (
+                        <p className="mt-2 text-sm text-[#b45309]">
+                          {bundleUploadResult.reserve_study.review_reason}
+                        </p>
+                      ) : null}
+                      {bundleUploadResult.reserve_study.warnings.length > 0 ? (
+                        <ul className="mt-3 space-y-2 text-xs leading-5 text-[#525252]">
+                          {bundleUploadResult.reserve_study.warnings.map((warning, index) => (
+                            <li key={`${warning}-${index}`} className="rounded-lg bg-[#fff7ed] px-3 py-2">
+                              {warning}
+                            </li>
+                          ))}
+                        </ul>
+                      ) : null}
+                    </div>
+                  </div>
+                  {bundleUploadResult.can_continue_with_budget_only && bundleUploadResult.draft ? (
+                    <div className="mt-4 flex flex-wrap gap-3">
+                      <Button
+                        onClick={handleContinueWithBudgetOnly}
+                        className="bg-[#111111] text-white hover:bg-[#262626]"
+                      >
+                        Continue with Budget Only
+                      </Button>
+                      <Button
+                        variant="outline"
+                        onClick={() => setBundleUploadResult(null)}
+                        className="border-[#d4d4d4] text-[#111111] hover:border-[#a3a3a3] hover:bg-[#f5f5f5]"
+                      >
+                        Choose Another Reserve Study PDF
+                      </Button>
+                    </div>
+                  ) : null}
+                  {bundleUploadResult.can_continue_with_reserve_study_only ? (
+                    <p className="mt-4 text-sm text-[#525252]">
+                      Reserve study upload succeeded, but a budget draft cannot be created until a valid budget file is uploaded.
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
             </div>
           </div>
         </main>
@@ -614,11 +1114,20 @@ export function BudgetScreen({
                 variant="outline"
                 size="sm"
                 onClick={handleSaveDraft}
-                disabled={isSavingDraft || isGenerating || !draftId}
+                disabled={isSavingDraft || isSavingReserveStudy || isGenerating || !draftId}
                 className="border-[#d4d4d4] text-[#111111] hover:border-[#a3a3a3] hover:bg-[#f5f5f5]"
               >
-                {isSavingDraft ? 'Saving...' : 'Save Draft'}
+                {isSavingDraft || isSavingReserveStudy ? 'Saving...' : 'Save Draft'}
               </Button>
+              <Label className="cursor-pointer whitespace-nowrap text-xs font-normal text-[#737373]">
+                <Checkbox
+                  checked={autoSaveEnabled}
+                  onCheckedChange={(checked) => setAutoSaveEnabled(checked === true)}
+                  disabled={!draftId || isGenerating}
+                  className="border-[#a3a3a3] data-[state=checked]:border-[#111111] data-[state=checked]:bg-[#111111]"
+                />
+                Auto-save every 30 seconds
+              </Label>
               {draftId && !budgetGenerated && (
                 <Button
                   variant="outline"
@@ -715,6 +1224,17 @@ export function BudgetScreen({
               AI Suggested % Change
             </Button>
             <Button
+              variant={currentView === 'reserve' ? 'default' : 'outline'}
+              onClick={() => setCurrentView('reserve')}
+              className={
+                currentView === 'reserve'
+                  ? 'bg-[#111111] text-white shadow-sm hover:bg-[#262626]'
+                  : 'border-[#e5e5e5] text-[#525252] hover:border-[#737373] hover:bg-[#f5f5f5]'
+              }
+            >
+              Reserve Study
+            </Button>
+            <Button
               variant="outline"
               className="border-[#e5e5e5] text-[#525252] hover:border-[#737373] hover:bg-[#f5f5f5]"
               onClick={() => void handleDownloadEnriched()}
@@ -789,6 +1309,24 @@ export function BudgetScreen({
             error={aiError}
             onApply={handleApplyAISuggestions}
             onRefetch={handleFetchAISuggestions}
+          />
+        )}
+        {currentView === 'reserve' && (
+          <ReserveStudyView
+            rows={reserveStudyRows}
+            warnings={reserveStudyWarnings}
+            status={reserveStudyStatus}
+            onRowChange={handleReserveStudyRowChange}
+            onAddRow={handleAddReserveStudyRow}
+            onAddHeader={handleAddReserveStudyHeader}
+            onMoveRow={handleMoveReserveStudyRow}
+            onDeleteRow={handleDeleteReserveStudyRow}
+            onSave={handleSaveReserveStudy}
+            onApply={handleApplyReserveStudy}
+            hasUnsavedChanges={hasUnsavedReserveStudyChanges}
+            isSaving={isSavingReserveStudy}
+            isApplying={isApplyingReserveStudy}
+            applyMessage={reserveStudyApplyMessage}
           />
         )}
       </main>

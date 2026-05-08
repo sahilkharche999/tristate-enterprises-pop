@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from ..ai_implementation.db import get_session
 from ..auth.dependencies import get_current_user
 from ..models.budget_history import (
+    BudgetBundleUploadResponse,
     BudgetDraftCompareOptionsResponse,
     BudgetDraftCompareRequest,
     BudgetDraftCompareResponse,
@@ -14,6 +15,8 @@ from ..models.budget_history import (
     BudgetDraftPayload,
     BudgetDraftSaveRequest,
     BudgetDraftSaveResponse,
+    BudgetReserveStudyApplyResponse,
+    BudgetReserveStudySaveRequest,
     BudgetGenerateRequest,
     BudgetGenerateResponse,
     BudgetHistoryResponse,
@@ -46,6 +49,32 @@ async def upload_budget(
             original_filename=file.filename or "upload.xlsx",
             content_type=file.content_type,
             file_bytes=await file.read(),
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/hoa/{hoa_id}/budget/upload-bundle", response_model=BudgetBundleUploadResponse)
+async def upload_budget_bundle(
+    hoa_id: int,
+    budget_file: UploadFile = File(...),
+    reserve_study_file: UploadFile = File(...),
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user),
+) -> BudgetBundleUploadResponse:
+    try:
+        return budget_history_service.create_upload_bundle(
+            session,
+            hoa_id=hoa_id,
+            actor=current_user,
+            budget_filename=budget_file.filename or "budget-upload.xlsx",
+            budget_content_type=budget_file.content_type,
+            budget_file_bytes=await budget_file.read(),
+            reserve_filename=reserve_study_file.filename or "reserve-study.pdf",
+            reserve_content_type=reserve_study_file.content_type,
+            reserve_file_bytes=await reserve_study_file.read(),
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
@@ -137,6 +166,51 @@ async def save_budget_draft(
             payload=payload,
         )
         return BudgetDraftSaveResponse(draft=draft, timeline_event=timeline_event)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@router.patch("/hoa/{hoa_id}/budget/drafts/{draft_id}/reserve-study", response_model=BudgetDraftPayload)
+async def save_budget_reserve_study(
+    hoa_id: int,
+    draft_id: int,
+    payload: BudgetReserveStudySaveRequest,
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user),
+) -> BudgetDraftPayload:
+    try:
+        return budget_history_service.save_reserve_study_rows(
+            session,
+            hoa_id=hoa_id,
+            draft_id=draft_id,
+            actor=current_user,
+            payload=payload,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@router.post(
+    "/hoa/{hoa_id}/budget/drafts/{draft_id}/reserve-study/apply",
+    response_model=BudgetReserveStudyApplyResponse,
+)
+async def apply_budget_reserve_study(
+    hoa_id: int,
+    draft_id: int,
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user),
+) -> BudgetReserveStudyApplyResponse:
+    try:
+        return budget_history_service.apply_reserve_study_to_budget(
+            session,
+            hoa_id=hoa_id,
+            draft_id=draft_id,
+            actor=current_user,
+        )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:

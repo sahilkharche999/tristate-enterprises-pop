@@ -217,3 +217,46 @@ Plans:
 - [x] 09-01-PLAN.md — Config, requirements, and Gemini llm_client.py wrapper
 - [ ] 09-02-PLAN.md — Update consumer files and rewrite PDF extraction for single-call hybrid ingestion
 - [ ] 09-03-PLAN.md — Rewrite tests for Gemini mocks and verify full suite
+
+### Phase 10: Reserve Study PDF Upload, Parsing, and Review Workflow
+
+**Goal:** Add a paired upload flow where each HOA provides a budget source file plus a separate reserve-study PDF, run reserve-study parsing through the same Gemini-based PDF ingestion family already used for PDF income statements, add a dedicated reserve-study review/apply workflow, and move reserve inflation to one global Tri-State setting.
+**Requirements**: [D-01, D-02, D-03, D-04, D-05, D-06, D-07, D-08, D-09, D-10, D-11, D-12, D-13, D-14, D-15, D-16, D-17, D-18, D-19, D-20, D-21, D-22, D-23, D-24]
+**Depends on:** Phase 9
+**Success Criteria** (what must be TRUE):
+  1. Users can attach a budget file and reserve-study PDF on one screen and start processing with one explicit action
+  2. Budget and reserve-study processing outcomes are tracked separately, and when only one succeeds the user can continue without re-uploading the successful file
+  3. Reserve-study parsing adds a page-discovery layer before reusing the existing PDF VLM extraction stack, including low-confidence review behavior and scanned-PDF fallback
+  4. The reserve-study tab supports row-level edit/add/delete and `Apply to Budget` replaces only due-this-budget-year reserve-study-derived lines
+  5. Reserve inflation is sourced from one global Tri-State setting and is no longer locally editable per HOA
+**Plans:** 3 plans
+
+Plans:
+- [ ] 10-01-PLAN.md — Paired upload backend contract, reserve-study persistence, and global reserve setting foundation
+- [ ] 10-02-PLAN.md — Reserve-study page discovery, extraction schema, and parser integration using reused PDF VLM components
+- [ ] 10-03-PLAN.md — Two-file upload UI, reserve-study review/apply workflow, and end-to-end verification
+
+### Phase 11: Old Mill End-to-End Disclosure Package (MVP)
+
+**Goal:** As a Tri-State property manager, I want to generate Old Mill's complete 2026 budget disclosure PDF from the webapp, so that I can replace the manual assembly process for at least one HOA before the 2027 budget season.
+**Mode:** mvp
+**Requirements**: [REQ-D11-001, REQ-D11-002, REQ-D11-003, REQ-D11-004, REQ-D11-005, REQ-D11-006, REQ-D11-007, REQ-D11-008, REQ-D11-009, REQ-D11-010, REQ-D11-011, REQ-D11-012, REQ-D11-013, REQ-D11-014, REQ-D11-015, REQ-D11-016, REQ-D11-017, REQ-D11-018]
+**Depends on:** Phase 10
+**Canonical refs**:
+  - `.planning/phases/11-old-mill-end-to-end-disclosure-package-mvp/11-RESEARCH-EXTERNAL.md` — external architecture research (schema-first package compiler, calc DAG + provenance, WeasyPrint + qpdf rendering stack, layered testing). MUST read before planning.
+  - `2026/Old Mill 2026 budget disclosure.pdf` — golden reference PDF; Phase 11's smoking-gun success criterion is page-for-page parity on the 18 generated pages.
+  - May 4, 2026 client meeting transcript (`HOA Budget Analysis Transcript.txt` — Otter ID `7vKtgw8oLjV0uiWmPkZvTIkkc64`) — Bob's walkthrough of the disclosure package and clarification answers (assessment categories fixed at HOA setup, ownership % kept as-is, monthly assessments keep cents, special assessments deferred, override annotation not required for phase one).
+  - `backend/app/services/budget_history_service.py` — existing budget draft + reserve study persistence; Phase 11 inputs flow from here.
+  - `backend/app/services/reserve_study_extractor.py` — existing reserve study extraction (Phase 10 in progress); feeds the reserve-summary calculations.
+**Plans:** 9 plans
+
+Plans:
+- [ ] 11-01-PLAN.md — Wave 0: dependencies (WeasyPrint, pypdf, Jinja2, qpdf, fonts), schema.sql + DisclosurePackageJob ORM, Old Mill seed verification, conftest fixtures
+- [ ] 11-02-PLAN.md — Calculation engine (TDD): Pydantic schemas, audit decorator, Tier 0-5 formula registry, OLD_MILL_2026 PackageSpec
+- [ ] 11-03-PLAN.md — Input adapters (BudgetHistoryRecord/ExtractedReserveStudyDocument/Property to typed schemas) + preflight gate
+- [ ] 11-04-PLAN.md — WeasyPrint renderer with deny-all url_fetcher (T-11-03) + 17 templates for the 18 generated pages + render snapshot tests
+- [ ] 11-05-PLAN.md — pypdf merge + qpdf check + atomic writes + 23 static appendices extraction + compile_package orchestrator
+- [ ] 11-06-PLAN.md — service.py (ownership / IDOR / path sanitization / dedup) + 4-endpoint router + main.py wiring + API tests
+- [ ] 11-07-PLAN.md — Frontend API client + useDisclosureJob polling hook + 5 components + BudgetScreenWrapper mount
+- [ ] 11-08-PLAN.md — verify.py raster diff + smoking-gun parity test + frontend smoke test + manual visual walkthrough
+- [ ] 11-09-PLAN.md — DisclosureAuditSheet UI + 11-VALIDATION.md per-task map fill-in (nyquist_compliant: true)

@@ -5,6 +5,7 @@ import { toast } from 'sonner';
 import { BudgetScreen } from './BudgetScreen';
 import { GeneratedBudgetScreen } from './GeneratedBudgetScreen';
 import {
+  reopenBudgetVersion,
   generateBudgetVersion,
   getBudgetDraft,
   getActiveBudgetDraft,

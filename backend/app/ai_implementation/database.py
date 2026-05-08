@@ -26,8 +26,16 @@ _PROPERTY_COLUMN_DEFINITIONS: dict[str, str] = {
     "workflow_status": "TEXT DEFAULT 'Not Started'",
 }
 
+_BUDGET_UPLOAD_COLUMN_DEFINITIONS: dict[str, str] = {
+    "document_role": "TEXT NOT NULL DEFAULT 'budget_source'",
+}
+
 _BUDGET_DRAFT_COLUMN_DEFINITIONS: dict[str, str] = {
     "enriched_storage_key": "TEXT",
+    "reserve_study_upload_id": "INTEGER",
+    "reserve_study_rows_json": "TEXT",
+    "reserve_study_warnings_json": "TEXT",
+    "reserve_study_status": "TEXT DEFAULT 'none'",
     "reserve_inflation_rate": "REAL DEFAULT 0",
     "reserve_inflation_note": "TEXT",
 }
@@ -84,6 +92,29 @@ def _iter_missing_budget_draft_columns(raw_conn: sqlite3.Connection) -> Iterable
             yield column_name, column_sql
 
 
+def _iter_missing_budget_upload_columns(raw_conn: sqlite3.Connection) -> Iterable[tuple[str, str]]:
+    existing_columns = {
+        row[1]
+        for row in raw_conn.execute("PRAGMA table_info(budget_uploads)").fetchall()
+    }
+    for column_name, column_sql in _BUDGET_UPLOAD_COLUMN_DEFINITIONS.items():
+        if column_name not in existing_columns:
+            yield column_name, column_sql
+
+
+def ensure_budget_upload_columns() -> None:
+    """Brownfield migration path for upload metadata added after initial launch."""
+    raw_conn = engine.raw_connection()
+    try:
+        missing_columns = list(_iter_missing_budget_upload_columns(raw_conn))
+        for column_name, column_sql in missing_columns:
+            logger.info("Adding missing budget_uploads.%s column", column_name)
+            raw_conn.execute(f"ALTER TABLE budget_uploads ADD COLUMN {column_name} {column_sql}")
+        raw_conn.commit()
+    finally:
+        raw_conn.close()
+
+
 def ensure_budget_draft_columns() -> None:
     """Brownfield migration path for draft artifact persistence columns."""
     raw_conn = engine.raw_connection()
@@ -131,6 +162,7 @@ def init_db() -> None:
     finally:
         raw_conn.close()
     ensure_property_columns()
+    ensure_budget_upload_columns()
     ensure_budget_draft_columns()
     ensure_budget_version_columns()
 

@@ -79,8 +79,12 @@ class BudgetDraftPayload(BaseModel):
     id: int
     status: str
     source_upload_id: Optional[int] = None
+    reserve_study_upload_id: Optional[int] = None
     reopened_from_version_id: Optional[int] = None
     line_items: list[JsonObject] = Field(default_factory=list)
+    reserve_study_status: str = "none"
+    reserve_study_rows: list[JsonObject] = Field(default_factory=list)
+    reserve_study_warnings: list[str] = Field(default_factory=list)
     global_note: Optional[str] = None
     statement_month: Optional[int] = None
     growth_factor: Optional[float] = None
@@ -98,11 +102,13 @@ class BudgetDraftSummary(BaseModel):
     id: int
     status: str
     source_upload_id: Optional[int] = None
+    reserve_study_upload_id: Optional[int] = None
     source_upload_filename: Optional[str] = None
     reopened_from_version_id: Optional[int] = None
     reopened_from_version_code: Optional[str] = None
     reserve_inflation_rate: float = 0.0
     reserve_inflation_note: Optional[str] = None
+    reserve_study_status: str = "none"
     updated_at: Optional[str] = None
     actor_name: str
     enriched_file_available: bool = False
@@ -139,6 +145,33 @@ class BudgetUploadResponse(BaseModel):
     # None means the upload used the normal high-confidence path; no
     # quality warning is needed.
     extraction_quality_warning: Optional[ExtractionQualityWarning] = None
+
+
+class BundleFileStatus(BaseModel):
+    upload_id: Optional[int] = None
+    filename: Optional[str] = None
+    status: Literal["completed", "review_required", "failed", "pending"] = "pending"
+    warnings: list[str] = Field(default_factory=list)
+    review_reason: Optional[str] = None
+
+
+class BudgetBundleUploadResponse(BaseModel):
+    draft: Optional[BudgetDraftPayload] = None
+    budget_source: BundleFileStatus
+    reserve_study: BundleFileStatus
+    can_continue_with_budget_only: bool = False
+    can_continue_with_reserve_study_only: bool = False
+
+
+class BudgetReserveStudySaveRequest(BaseModel):
+    rows: list[JsonObject] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class BudgetReserveStudyApplyResponse(BaseModel):
+    draft: BudgetDraftPayload
+    applied_count: int = 0
+    message: str
 
 
 class BudgetDraftSaveRequest(BaseModel):

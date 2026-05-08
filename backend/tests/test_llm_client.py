@@ -195,9 +195,24 @@ def test_call_llm_vision_returns_parsed_model(monkeypatch):
     assert result.value == 7
 
 
-def test_get_llm_client_creates_singleton(monkeypatch):
-    """get_llm_client should create client on first call and reuse on second."""
-    monkeypatch.setattr("app.ai_implementation.pipeline.llm_client._gemini_client", None)
+def test_get_llm_client_caches_within_same_loop(monkeypatch):
+    """get_llm_client should reuse a cached client for the same event loop.
+
+    This is the happy path: a FastAPI request handler that makes multiple
+    Gemini calls on the same loop should share one client, not allocate
+    a new one each time.
+    """
+    monkeypatch.setattr("app.ai_implementation.pipeline.llm_client._gemini_clients", {})
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-2.5-flash")
+
+    # Re-read settings so _require_gemini_config passes
+    import importlib
+    from app import config as config_module
+    importlib.reload(config_module)
+    from app.ai_implementation.pipeline import llm_client as llm_client_module
+    importlib.reload(llm_client_module)
+    monkeypatch.setattr("app.ai_implementation.pipeline.llm_client._gemini_clients", {})
 
     call_count = 0
 
@@ -209,11 +224,65 @@ def test_get_llm_client_creates_singleton(monkeypatch):
         call_count += 1
         return FakeClient()
 
-    import google.genai
     monkeypatch.setattr("app.ai_implementation.pipeline.llm_client.genai.Client", fake_genai_client)
 
-    client1 = get_llm_client()
-    client2 = get_llm_client()
+    async def _reuse_twice():
+        c1 = llm_client_module.get_llm_client()
+        c2 = llm_client_module.get_llm_client()
+        return c1, c2
 
+    client1, client2 = asyncio.run(_reuse_twice())
     assert client1 is client2
     assert call_count == 1
+
+
+def test_get_llm_client_does_not_share_across_event_loops(monkeypatch):
+    """get_llm_client must NOT share a cached client across different event loops.
+
+    Regression guard for the 'Event loop is closed' bug: when
+    ThreadPoolExecutor-based column detection ran on its own short-lived loop
+    and populated the module singleton, the FastAPI main loop later reused
+    the same client — whose internal aiohttp session was bound to the now-
+    dead thread loop — and the first parallel page extraction failed with
+    'Event loop is closed'. The fix is to cache per event loop (keyed on
+    id(loop)) so each loop sees its own fresh client.
+    """
+    monkeypatch.setattr("app.ai_implementation.pipeline.llm_client._gemini_clients", {})
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-2.5-flash")
+
+    import importlib
+    from app import config as config_module
+    importlib.reload(config_module)
+    from app.ai_implementation.pipeline import llm_client as llm_client_module
+    importlib.reload(llm_client_module)
+    monkeypatch.setattr("app.ai_implementation.pipeline.llm_client._gemini_clients", {})
+
+    call_count = 0
+
+    class FakeClient:
+        pass
+
+    def fake_genai_client(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        return FakeClient()
+
+    monkeypatch.setattr("app.ai_implementation.pipeline.llm_client.genai.Client", fake_genai_client)
+
+    async def _get_on_this_loop():
+        return llm_client_module.get_llm_client()
+
+    # Loop A (simulates column detection's thread-pool loop)
+    client_loop_a = asyncio.run(_get_on_this_loop())
+    # Loop B (simulates FastAPI request handler's main loop)
+    client_loop_b = asyncio.run(_get_on_this_loop())
+
+    # Each asyncio.run() creates a fresh loop. The fix guarantees each loop
+    # gets its own client — otherwise reusing client_loop_a on loop B would
+    # reproduce the 'Event loop is closed' error.
+    assert client_loop_a is not client_loop_b, (
+        "Clients were shared across event loops — would cause 'Event loop is closed' "
+        "on the second loop if the first loop closed between calls."
+    )
+    assert call_count == 2

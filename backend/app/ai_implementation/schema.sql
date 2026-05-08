@@ -87,9 +87,17 @@ CREATE TABLE IF NOT EXISTS users (
     created_at      TEXT DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS app_settings (
+    key        TEXT PRIMARY KEY,
+    value_text TEXT,
+    updated_at TEXT DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS budget_uploads (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     property_id         INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+    document_role       TEXT NOT NULL DEFAULT 'budget_source'
+                        CHECK(document_role IN ('budget_source', 'reserve_study')),
     original_filename   TEXT NOT NULL,
     storage_key         TEXT NOT NULL UNIQUE,
     content_type        TEXT,
@@ -110,9 +118,14 @@ CREATE TABLE IF NOT EXISTS budget_drafts (
     id                       INTEGER PRIMARY KEY AUTOINCREMENT,
     property_id              INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
     source_upload_id         INTEGER REFERENCES budget_uploads(id) ON DELETE SET NULL,
+    reserve_study_upload_id  INTEGER REFERENCES budget_uploads(id) ON DELETE SET NULL,
     reopened_from_version_id INTEGER REFERENCES budget_versions(id) ON DELETE SET NULL,
     status                   TEXT NOT NULL CHECK(status IN ('active', 'superseded', 'generated')),
     line_items_json          TEXT NOT NULL,
+    reserve_study_rows_json  TEXT,
+    reserve_study_warnings_json TEXT,
+    reserve_study_status     TEXT DEFAULT 'none'
+                             CHECK(reserve_study_status IN ('none', 'pending', 'completed', 'review_required', 'failed')),
     global_note              TEXT,
     statement_month          INTEGER,
     growth_factor            REAL,

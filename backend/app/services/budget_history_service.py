@@ -25,6 +25,7 @@ from ..models.financial_document_extraction import (
     ExtractedFinancialStatement,
     ExtractedStatementLineItem,
 )
+from ..models.reserve_study_extraction import ExtractedReserveStudyDocument
 from ..services.income_statement_parser import (
     parse_rows_with_sections,
     detect_columns,
@@ -41,16 +42,19 @@ from ..services.financial_statement_validation import (
 )
 from ..services.normalized_statement_workbook import build_normalized_statement_workbook
 from ..services.pdf_vlm_extractor import extract_pdf_statement
+from ..services.reserve_study_extractor import canonicalize_reserve_study_row_dicts, extract_reserve_study
 from ..services.statement_period_inference import (
     extract_pdf_statement_period_hint,
     infer_growth_factor_from_statement_period,
 )
 from ..models.budget_history import (
+    BundleFileStatus,
     BudgetDraftCompareBaselineOption,
     BudgetDraftCompareOptionsResponse,
     BudgetDraftCompareResponse,
     BudgetDraftReserveReviewRequest,
     BudgetDraftReserveReviewResponse,
+    BudgetBundleUploadResponse,
     BudgetDraftChangeSummary,
     BudgetDraftCompareRow,
     BudgetReserveComponentRow,
@@ -61,6 +65,8 @@ from ..models.budget_history import (
     BudgetGenerateRequest,
     BudgetGenerateResponse,
     BudgetHistoryResponse,
+    BudgetReserveStudyApplyResponse,
+    BudgetReserveStudySaveRequest,
     BudgetNoteRecord,
     BudgetNoteSaveRequest,
     BudgetNoteSaveResponse,
@@ -75,7 +81,7 @@ from ..models.budget_history import (
     BudgetVersionReopenResponse,
     BudgetVersionSummary,
 )
-from ..services import macros_service
+from ..services import app_settings_service, macros_service
 from ..ai_implementation.db.models import (
     BUDGET_DRAFT_ACTIVE,
     BUDGET_DRAFT_GENERATED,
@@ -94,6 +100,22 @@ from ..ai_implementation.db.models import (
 # These are NOT input indices — they reference AK/AL columns written by IncomeStatementEnricher.
 _COL_PROJECTION_INDEX = 37
 _COL_PERCENT_CHANGE_INDEX = 38
+
+_EXPECTED_INCOME_STATEMENT_GUIDANCE = [
+    (
+        "Expected budget source format: upload an income statement / statement of revenues "
+        "and expenses, not a monthly operating budget or cash-flow budget workbook."
+    ),
+    (
+        "The workbook should have a line-item/account column plus financial comparison columns "
+        "such as Current Period, Year To Date, and Annual Budget."
+    ),
+    (
+        "A good example is 'Income Statement Esprit Park Aug 2025.xlsx': sheet 'Income Statement', "
+        "section rows like Operating Income/Operating Expense, and an Annual Budget column with "
+        "usable values for the line items."
+    ),
+]
 
 
 def _now_text() -> str:
@@ -259,6 +281,48 @@ def _build_review_required_response(
     )
 
 
+def _build_income_statement_validation_feedback(
+    *,
+    original_filename: str,
+    issues: list[dict[str, Any]],
+) -> tuple[str, list[str]]:
+    blocking_issues = [issue for issue in issues if issue.get("severity") == "error"]
+    primary_issue = blocking_issues[0] if blocking_issues else (issues[0] if issues else {})
+    primary_message = str(primary_issue.get("message") or "The statement did not match the expected layout.")
+    issue_codes = {str(issue.get("code") or "") for issue in issues}
+    likely_wrong_report = bool(
+        issue_codes
+        & {
+            "missing_annual_budget_coverage",
+            "missing_numeric_coverage",
+            "suspicious_zero_heavy_output",
+        }
+    )
+
+    reason = f"{original_filename} was not accepted as an income statement. {primary_message}"
+    if likely_wrong_report:
+        reason += (
+            " This commonly happens when the uploaded workbook is an annual/monthly budget "
+            "or cash-flow report instead of the income statement used for budget drafting."
+        )
+
+    warnings: list[str] = []
+    for issue in blocking_issues or issues:
+        message = str(issue.get("message") or "").strip()
+        if not message:
+            continue
+        details = issue.get("details")
+        if isinstance(details, dict) and issue.get("code") == "missing_annual_budget_coverage":
+            rows = details.get("annual_budget_populated_rows")
+            total = details.get("line_item_count")
+            if rows is not None and total is not None:
+                message = f"{message} Detected annual-budget coverage: {rows}/{total} parsed rows."
+        warnings.append(message)
+
+    warnings.extend(_EXPECTED_INCOME_STATEMENT_GUIDANCE)
+    return reason, warnings
+
+
 def _extract_pdf_statement_sync(path: str) -> ExtractedFinancialStatement | DocumentExtractionFailure:
     try:
         loop = asyncio.get_running_loop()
@@ -272,6 +336,21 @@ def _extract_pdf_statement_sync(path: str) -> ExtractedFinancialStatement | Docu
             return pool.submit(asyncio.run, extract_pdf_statement(path)).result()
 
     return asyncio.run(extract_pdf_statement(path))
+
+
+def _extract_reserve_study_sync(path: str) -> ExtractedReserveStudyDocument | DocumentExtractionFailure:
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        import concurrent.futures
+
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            return pool.submit(asyncio.run, extract_reserve_study(path)).result()
+
+    return asyncio.run(extract_reserve_study(path))
 
 
 def _parse_float(value: Any) -> float:
@@ -663,12 +742,17 @@ def _serialize_timeline_event(event: BudgetAuditEvent) -> BudgetTimelineEvent:
 
 
 def _serialize_draft(draft: BudgetDraft, upload: Optional[BudgetUpload] = None) -> BudgetDraftPayload:
+    reserve_study_rows, _ = canonicalize_reserve_study_row_dicts(_json_loads(draft.reserve_study_rows_json, []))
     return BudgetDraftPayload(
         id=draft.id,
         status=draft.status,
         source_upload_id=draft.source_upload_id,
+        reserve_study_upload_id=draft.reserve_study_upload_id,
         reopened_from_version_id=draft.reopened_from_version_id,
         line_items=_json_loads(draft.line_items_json, []),
+        reserve_study_status=draft.reserve_study_status or "none",
+        reserve_study_rows=reserve_study_rows,
+        reserve_study_warnings=_json_loads(draft.reserve_study_warnings_json, []),
         global_note=draft.global_note,
         statement_month=draft.statement_month,
         growth_factor=draft.growth_factor,
@@ -691,11 +775,13 @@ def _serialize_draft_summary(
         id=draft.id,
         status=draft.status,
         source_upload_id=draft.source_upload_id,
+        reserve_study_upload_id=draft.reserve_study_upload_id,
         source_upload_filename=upload.original_filename if upload else None,
         reopened_from_version_id=draft.reopened_from_version_id,
         reopened_from_version_code=reopened_from_version.version_code if reopened_from_version else None,
         reserve_inflation_rate=draft.reserve_inflation_rate,
         reserve_inflation_note=draft.reserve_inflation_note,
+        reserve_study_status=draft.reserve_study_status or "none",
         updated_at=draft.updated_at,
         actor_name=draft.actor_name,
         enriched_file_available=_storage_file_available(draft.enriched_storage_key),
@@ -860,6 +946,110 @@ def _create_audit_event(
     return event
 
 
+def _create_upload_record(
+    session: Session,
+    *,
+    hoa_id: int,
+    actor: dict[str, Any],
+    original_filename: str,
+    content_type: Optional[str],
+    file_bytes: bytes,
+    timestamp: str,
+    document_role: str,
+    enrichment_status: str,
+) -> BudgetUpload:
+    sha256 = hashlib.sha256(file_bytes).hexdigest()
+    upload = BudgetUpload(
+        property_id=hoa_id,
+        document_role=document_role,
+        original_filename=original_filename,
+        storage_key="pending",
+        content_type=content_type,
+        byte_size=len(file_bytes),
+        sha256=sha256,
+        enrichment_status=enrichment_status,
+        uploaded_by_user_id=actor["id"],
+        uploaded_by_name=_actor_name(actor),
+        created_at=timestamp,
+    )
+    session.add(upload)
+    session.flush()
+
+    file_ext = Path(original_filename).suffix.lower() or ".bin"
+    filename = "source" if document_role == "budget_source" else "reserve-study"
+    upload.storage_key = _relative_storage_path("hoa", hoa_id, "uploads", upload.id, f"{filename}{file_ext}")
+    _write_atomic_bytes(_budget_storage_path(upload.storage_key), file_bytes)
+    return upload
+
+
+def _bundle_status_from_budget_response(
+    response: BudgetUploadResponse,
+    *,
+    filename: str,
+) -> BundleFileStatus:
+    status = "review_required" if response.review_required else "completed"
+    return BundleFileStatus(
+        upload_id=response.upload_id,
+        filename=filename,
+        status=status,
+        warnings=response.warnings,
+        review_reason=response.review_reason,
+    )
+
+
+def _is_applied_reserve_study_line_item(item: dict[str, Any]) -> bool:
+    raw = item.get("raw")
+    raw_record = raw if isinstance(raw, dict) else {}
+    line_item_key = str(item.get("line_item_key") or item.get("id") or "")
+    return raw_record.get("source") == "reserve_study" or line_item_key.startswith("reserve-study::")
+
+
+def _reserve_study_row_due_this_budget_year(row: dict[str, Any]) -> bool:
+    if row.get("row_type") == "header":
+        return False
+    remaining_life = row.get("remaining_life")
+    if remaining_life is None:
+        return False
+    try:
+        return float(remaining_life) <= 1.0
+    except (TypeError, ValueError):
+        return False
+
+
+def _reserve_study_row_to_budget_line_item(row: dict[str, Any]) -> dict[str, Any]:
+    row_id = str(row.get("row_id") or row.get("line_item") or "reserve-study-row")
+    label = str(row.get("line_item") or "Reserve Study Component")
+    replacement_cost = row.get("replacement_cost")
+    amount = _parse_float(replacement_cost)
+    source_page = row.get("source_page")
+    return {
+        "id": f"reserve-study::{row_id}",
+        "category": "reserve_expense",
+        "name": label,
+        "label": label,
+        "line_item_key": f"reserve-study::{row_id}",
+        "account_code": None,
+        "ytdActual": 0.0,
+        "ytd_actual": 0.0,
+        "annualBudget": amount,
+        "annual_budget": amount,
+        "percentChange": 0.0,
+        "percent_change": 0.0,
+        "projection": amount,
+        "readOnly": True,
+        "read_only": True,
+        "reserve_group": "component",
+        "section": "Reserve Expenses (Reserve Study)",
+        "raw": {
+            "section": "Reserve Expenses (Reserve Study)",
+            "source": "reserve_study",
+            "row_id": row_id,
+            "source_page": source_page,
+            "flags": row.get("flags") or [],
+        },
+    }
+
+
 def _render_draft_snapshot_from_upload(
     upload: BudgetUpload,
     *,
@@ -968,25 +1158,17 @@ def create_upload(
     hoa = _get_property(session, hoa_id)
     timestamp = _now_text()
     sha256 = hashlib.sha256(file_bytes).hexdigest()
-
-    upload = BudgetUpload(
-        property_id=hoa_id,
+    upload = _create_upload_record(
+        session,
+        hoa_id=hoa_id,
+        actor=actor,
         original_filename=original_filename,
-        storage_key="pending",
         content_type=content_type,
-        byte_size=len(file_bytes),
-        sha256=sha256,
+        file_bytes=file_bytes,
+        timestamp=timestamp,
+        document_role="budget_source",
         enrichment_status="failed",
-        uploaded_by_user_id=actor["id"],
-        uploaded_by_name=_actor_name(actor),
-        created_at=timestamp,
     )
-    session.add(upload)
-    session.flush()
-
-    _ext = Path(original_filename).suffix.lower() or ".xlsx"
-    upload.storage_key = _relative_storage_path("hoa", hoa_id, "uploads", upload.id, f"source{_ext}")
-    _write_atomic_bytes(_budget_storage_path(upload.storage_key), file_bytes)
 
     upload_received_event = _create_audit_event(
         session,
@@ -1124,8 +1306,10 @@ def create_upload(
         )
         canonical_issues = validate_extracted_statement(canonical_statement)
         if has_blocking_validation_issues(canonical_issues):
-            review_reason = "Extraction requires review because the parsed statement failed confidence checks."
-            warnings = [issue["message"] for issue in canonical_issues]
+            review_reason, validation_warnings = _build_income_statement_validation_feedback(
+                original_filename=original_filename,
+                issues=canonical_issues,
+            )
             return _build_review_required_response(
                 session,
                 hoa_id=hoa_id,
@@ -1134,21 +1318,25 @@ def create_upload(
                 original_filename=original_filename,
                 reason=review_reason,
                 code="validation_failed",
-                warnings=parse_warnings + warnings,
+                warnings=parse_warnings + validation_warnings,
             )
 
         _replace_active_draft(session, hoa_id, timestamp)
         draft = BudgetDraft(
             property_id=hoa_id,
             source_upload_id=upload.id,
+            reserve_study_upload_id=None,
             reopened_from_version_id=None,
             status=BUDGET_DRAFT_ACTIVE,
             line_items_json=_json_dumps(line_items),
+            reserve_study_rows_json=_json_dumps([]),
+            reserve_study_warnings_json=_json_dumps([]),
+            reserve_study_status="none",
             global_note=None,
             statement_month=statement_month,
             growth_factor=growth_factor,
             growth_factor_note=growth_factor_note,
-            reserve_inflation_rate=hoa.reserve_inflation_rate or 0.0,
+            reserve_inflation_rate=app_settings_service.get_global_reserve_inflation_rate(session),
             reserve_inflation_note=None,
             budget_preview_json=_json_dumps(preview),
             created_by_user_id=actor["id"],
@@ -1230,6 +1418,143 @@ def create_upload(
         shutil.rmtree(temp_output_dir, ignore_errors=True)
 
 
+def create_upload_bundle(
+    session: Session,
+    *,
+    hoa_id: int,
+    actor: dict[str, Any],
+    budget_filename: str,
+    budget_content_type: Optional[str],
+    budget_file_bytes: bytes,
+    reserve_filename: str,
+    reserve_content_type: Optional[str],
+    reserve_file_bytes: bytes,
+) -> BudgetBundleUploadResponse:
+    _get_property(session, hoa_id)
+
+    budget_route = choose_financial_document_route(budget_filename, budget_content_type)
+    if budget_route.is_supported:
+        budget_response = create_upload(
+            session,
+            hoa_id=hoa_id,
+            actor=actor,
+            original_filename=budget_filename,
+            content_type=budget_content_type,
+            file_bytes=budget_file_bytes,
+        )
+        draft = budget_response.draft
+        budget_status = _bundle_status_from_budget_response(budget_response, filename=budget_filename)
+    else:
+        draft = None
+        budget_status = BundleFileStatus(
+            filename=budget_filename,
+            status="failed",
+            review_reason="Unsupported budget file type. Upload an Excel workbook or PDF income statement.",
+        )
+
+    reserve_route = choose_financial_document_route(reserve_filename, reserve_content_type)
+    reserve_is_pdf = Path(reserve_filename).suffix.lower() == ".pdf" or "pdf" in (reserve_content_type or "").lower()
+    reserve_upload: Optional[BudgetUpload] = None
+    if reserve_route.is_supported and reserve_is_pdf:
+        timestamp = _now_text()
+        reserve_upload = _create_upload_record(
+            session,
+            hoa_id=hoa_id,
+            actor=actor,
+            original_filename=reserve_filename,
+            content_type=reserve_content_type,
+            file_bytes=reserve_file_bytes,
+            timestamp=timestamp,
+            document_role="reserve_study",
+            enrichment_status="completed",
+        )
+        reserve_status = BundleFileStatus(
+            upload_id=reserve_upload.id,
+            filename=reserve_filename,
+            status="pending",
+        )
+        try:
+            reserve_result = _extract_reserve_study_sync(
+                _budget_storage_path(reserve_upload.storage_key).as_posix()
+            )
+        except Exception as exc:
+            reserve_result = DocumentExtractionFailure(
+                code="reserve_provider_error",
+                message=f"Reserve study extraction could not complete automatically: {exc}",
+                details={"error": str(exc)},
+            )
+        if isinstance(reserve_result, DocumentExtractionFailure):
+            reserve_status = BundleFileStatus(
+                upload_id=reserve_upload.id,
+                filename=reserve_filename,
+                status="review_required",
+                warnings=[reserve_result.message],
+                review_reason=reserve_result.message,
+            )
+            if draft is not None:
+                draft_row = _get_editable_draft(session, hoa_id, draft.id)
+                draft_row.reserve_study_upload_id = reserve_upload.id
+                draft_row.reserve_study_status = "review_required"
+                draft_row.reserve_study_rows_json = _json_dumps([])
+                draft_row.reserve_study_warnings_json = _json_dumps([reserve_result.message])
+                draft_row.updated_by_user_id = actor["id"]
+                draft_row.actor_name = _actor_name(actor)
+                draft_row.updated_at = _now_text()
+                session.commit()
+                draft = _serialize_draft(draft_row, _get_upload(session, draft_row.source_upload_id))
+        else:
+            has_review_flags = bool(reserve_result.warnings) or any(row.flags for row in reserve_result.rows)
+            persisted_status = "review_required" if has_review_flags else "completed"
+            reserve_status = BundleFileStatus(
+                upload_id=reserve_upload.id,
+                filename=reserve_filename,
+                status=persisted_status,
+                warnings=reserve_result.warnings,
+                review_reason="Reserve study rows need review before applying to the budget." if has_review_flags else None,
+            )
+            if draft is not None:
+                draft_row = _get_editable_draft(session, hoa_id, draft.id)
+                draft_row.reserve_study_upload_id = reserve_upload.id
+                draft_row.reserve_study_status = persisted_status
+                draft_row.reserve_study_rows_json = _json_dumps(
+                    [row.model_dump() for row in reserve_result.rows]
+                )
+                draft_row.reserve_study_warnings_json = _json_dumps(reserve_result.warnings)
+                draft_row.updated_by_user_id = actor["id"]
+                draft_row.actor_name = _actor_name(actor)
+                draft_row.updated_at = _now_text()
+                session.commit()
+                draft = _serialize_draft(draft_row, _get_upload(session, draft_row.source_upload_id))
+    else:
+        reserve_status = BundleFileStatus(
+            filename=reserve_filename,
+            status="failed",
+            review_reason="Unsupported reserve study file type. Upload a reserve study PDF.",
+        )
+
+    if draft is not None and reserve_upload is not None and reserve_status.status == "pending":
+        draft_row = _get_editable_draft(session, hoa_id, draft.id)
+        draft_row.reserve_study_upload_id = reserve_upload.id
+        draft_row.reserve_study_status = "pending"
+        draft_row.reserve_study_rows_json = _json_dumps([])
+        draft_row.reserve_study_warnings_json = _json_dumps([])
+        draft_row.updated_by_user_id = actor["id"]
+        draft_row.actor_name = _actor_name(actor)
+        draft_row.updated_at = _now_text()
+        session.commit()
+        draft = _serialize_draft(draft_row, _get_upload(session, draft_row.source_upload_id))
+    elif reserve_upload is not None:
+        session.commit()
+
+    return BudgetBundleUploadResponse(
+        draft=draft,
+        budget_source=budget_status,
+        reserve_study=reserve_status,
+        can_continue_with_budget_only=draft is not None and reserve_status.status == "failed",
+        can_continue_with_reserve_study_only=draft is None and reserve_upload is not None and budget_status.status == "failed",
+    )
+
+
 def get_active_draft(session: Session, hoa_id: int) -> BudgetDraftPayload:
     draft = session.scalars(
         select(BudgetDraft).where(
@@ -1252,7 +1577,7 @@ def get_draft_compare_options(
     *,
     hoa_id: int,
 ) -> BudgetDraftCompareOptionsResponse:
-    hoa = _get_property(session, hoa_id)
+    _get_property(session, hoa_id)
     draft = _get_editable_draft(
         session,
         hoa_id,
@@ -1295,7 +1620,7 @@ def get_draft_compare_options(
             )
             for version in versions
         ],
-        reserve_inflation_rate=hoa.reserve_inflation_rate or 0.0,
+        reserve_inflation_rate=app_settings_service.get_global_reserve_inflation_rate(session),
         reserve_inflation_note=None,
     )
 
@@ -1307,7 +1632,7 @@ def save_draft(
     actor: dict[str, Any],
     payload: BudgetDraftSaveRequest,
 ) -> tuple[BudgetDraftPayload, Optional[BudgetTimelineEvent]]:
-    hoa = _get_property(session, hoa_id)
+    _get_property(session, hoa_id)
     draft = _get_editable_draft(session, hoa_id, payload.draft_id)
     upload = _get_upload(session, draft.source_upload_id)
     if upload is None:
@@ -1332,11 +1657,11 @@ def save_draft(
     draft.statement_month = payload.statement_month
     draft.growth_factor = payload.growth_factor
     draft.growth_factor_note = payload.growth_factor_note
-    # Use explicitly provided inflation rate, or fall back to HOA setting
+    # Use explicitly provided inflation rate, or fall back to the app-level setting.
     draft.reserve_inflation_rate = (
         payload.reserve_inflation_rate
         if payload.reserve_inflation_rate is not None
-        else (hoa.reserve_inflation_rate or 0.0)
+        else app_settings_service.get_global_reserve_inflation_rate(session)
     )
     draft.reserve_inflation_note = payload.reserve_inflation_note
     draft.updated_by_user_id = actor["id"]
@@ -1360,6 +1685,74 @@ def save_draft(
         timeline_event = _serialize_timeline_event(event)
     session.commit()
     return _serialize_draft(draft, upload), timeline_event
+
+
+def save_reserve_study_rows(
+    session: Session,
+    *,
+    hoa_id: int,
+    draft_id: int,
+    actor: dict[str, Any],
+    payload: BudgetReserveStudySaveRequest,
+) -> BudgetDraftPayload:
+    draft = _get_editable_draft(session, hoa_id, draft_id)
+    upload = _get_upload(session, draft.source_upload_id)
+    normalized_rows, _ = canonicalize_reserve_study_row_dicts(payload.rows)
+    has_review_flags = bool(payload.warnings) or any(
+        isinstance(row.get("flags"), list) and len(row.get("flags") or []) > 0
+        for row in normalized_rows
+    )
+    draft.reserve_study_rows_json = _json_dumps(normalized_rows)
+    draft.reserve_study_warnings_json = _json_dumps(payload.warnings)
+    draft.reserve_study_status = "review_required" if has_review_flags else "completed"
+    draft.updated_by_user_id = actor["id"]
+    draft.actor_name = _actor_name(actor)
+    draft.updated_at = _now_text()
+    session.commit()
+    return _serialize_draft(draft, upload)
+
+
+def apply_reserve_study_to_budget(
+    session: Session,
+    *,
+    hoa_id: int,
+    draft_id: int,
+    actor: dict[str, Any],
+) -> BudgetReserveStudyApplyResponse:
+    draft = _get_editable_draft(session, hoa_id, draft_id)
+    upload = _get_upload(session, draft.source_upload_id)
+    reserve_rows, _ = canonicalize_reserve_study_row_dicts(_json_loads(draft.reserve_study_rows_json, []))
+    due_rows = [
+        row for row in reserve_rows
+        if isinstance(row, dict) and _reserve_study_row_due_this_budget_year(row)
+    ]
+    if not due_rows:
+        return BudgetReserveStudyApplyResponse(
+            draft=_serialize_draft(draft, upload),
+            applied_count=0,
+            message="No reserve study components are due this budget year.",
+        )
+
+    current_line_items = _json_loads(draft.line_items_json, [])
+    preserved_line_items = [
+        item for item in current_line_items
+        if isinstance(item, dict) and not _is_applied_reserve_study_line_item(item)
+    ]
+    applied_line_items = [_reserve_study_row_to_budget_line_item(row) for row in due_rows]
+    draft.line_items_json = _json_dumps([*preserved_line_items, *applied_line_items])
+    draft.updated_by_user_id = actor["id"]
+    draft.actor_name = _actor_name(actor)
+    draft.updated_at = _now_text()
+    session.commit()
+    return BudgetReserveStudyApplyResponse(
+        draft=_serialize_draft(draft, upload),
+        applied_count=len(applied_line_items),
+        message=(
+            "Applied reserve study rows to the budget."
+            if applied_line_items
+            else "No reserve study components are due this budget year."
+        ),
+    )
 
 
 def _latest_line_item_notes(
@@ -1831,13 +2224,18 @@ def reopen_version_as_draft(
     ).first()
     previous_active_draft_id = previous_active_draft.id if previous_active_draft else None
     _replace_active_draft(session, hoa_id, timestamp)
+    source_draft = session.get(BudgetDraft, version.source_draft_id) if version.source_draft_id else None
 
     draft = BudgetDraft(
         property_id=hoa_id,
         source_upload_id=version.source_upload_id,
+        reserve_study_upload_id=source_draft.reserve_study_upload_id if source_draft else None,
         reopened_from_version_id=version.id,
         status=BUDGET_DRAFT_ACTIVE,
         line_items_json=version.line_items_json,
+        reserve_study_rows_json=source_draft.reserve_study_rows_json if source_draft else _json_dumps([]),
+        reserve_study_warnings_json=source_draft.reserve_study_warnings_json if source_draft else _json_dumps([]),
+        reserve_study_status=(source_draft.reserve_study_status if source_draft else None) or "none",
         global_note=version.summary_note,
         statement_month=version.statement_month,
         growth_factor=version.growth_factor,

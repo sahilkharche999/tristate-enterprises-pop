@@ -10,7 +10,7 @@ import { toNum, type SheetTable } from '../api/macros';
 import type { LineItem } from '../data/mockData';
 import { calcProposed, formatCurrency, formatTimestamp } from '../lib/budget';
 import { getErrorMessage } from '../lib/errors';
-import { formatFiscalYearLabel } from '../lib/hoa';
+import { formatFiscalYearRangeLabel } from '../lib/hoa';
 
 interface BudgetTotals {
   totalIncome: number;
@@ -101,9 +101,10 @@ export function GeneratedBudgetScreen({
 }: GeneratedBudgetScreenProps) {
   const navigate = useNavigate();
   const [isDownloading, setIsDownloading] = useState(false);
-  const fiscalYearLabel = formatFiscalYearLabel(
+  const fiscalYearLabel = formatFiscalYearRangeLabel(
     hoa.fiscal_year_start_month,
     hoa.fiscal_year_end_month,
+    hoa.portfolio_year,
   );
   const isFinalVersion = stage === 'Final';
 

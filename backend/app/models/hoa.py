@@ -37,7 +37,6 @@ class HOAUpdateRequest(BaseModel):
     hoa_code: Optional[str] = Field(default=None, max_length=64)
     tax_id: Optional[str] = Field(default=None, max_length=64)
     units: Optional[int] = Field(default=None, ge=1, le=100000)
-    reserve_inflation_rate: Optional[float] = Field(default=None, ge=0)
     fiscal_year_start_month: int = Field(ge=1, le=12)
     fiscal_year_end_month: Optional[int] = Field(default=None, ge=1, le=12)
     city: Optional[str] = Field(default=None, max_length=255)

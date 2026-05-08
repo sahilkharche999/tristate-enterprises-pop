@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from ..ai_implementation.db import Property
 from ..models.hoa import HOACreateRequest, HOADetail, HOAListItem, HOAUpdateRequest
+from . import app_settings_service
 
 
 def _derive_fiscal_year_end(start_month: int) -> int:
@@ -14,14 +15,14 @@ def _derive_fiscal_year_end(start_month: int) -> int:
     return ((start_month + 10) % 12) + 1
 
 
-def _hoa_payload(property_row: Property) -> dict[str, object]:
+def _hoa_payload(property_row: Property, *, reserve_inflation_rate: float) -> dict[str, object]:
     return {
         "id": property_row.id,
         "hoa_code": property_row.hoa_code or "",
         "name": property_row.name,
         "tax_id": property_row.tax_id or "",
         "units": property_row.units or 0,
-        "reserve_inflation_rate": property_row.reserve_inflation_rate or 0.0,
+        "reserve_inflation_rate": reserve_inflation_rate,
         "fiscal_year_start_month": property_row.fiscal_year_start_month or 1,
         "fiscal_year_end_month": property_row.fiscal_year_end_month or 12,
         "city": property_row.city or "",
@@ -30,23 +31,28 @@ def _hoa_payload(property_row: Property) -> dict[str, object]:
     }
 
 
-def _serialize_hoa(property_row: Property) -> HOADetail:
+def _serialize_hoa(property_row: Property, *, reserve_inflation_rate: float) -> HOADetail:
     return HOADetail(
-        **_hoa_payload(property_row),
+        **_hoa_payload(property_row, reserve_inflation_rate=reserve_inflation_rate),
         created_at=property_row.created_at,
     )
 
 
 def list_hoas(session: Session) -> List[HOAListItem]:
+    reserve_inflation_rate = app_settings_service.get_global_reserve_inflation_rate(session)
     rows = session.scalars(select(Property).order_by(Property.id)).all()
-    return [HOAListItem(**_hoa_payload(row)) for row in rows]
+    return [
+        HOAListItem(**_hoa_payload(row, reserve_inflation_rate=reserve_inflation_rate))
+        for row in rows
+    ]
 
 
 def get_hoa(session: Session, hoa_id: int) -> Optional[HOADetail]:
     row = session.get(Property, hoa_id)
     if row is None:
         return None
-    return _serialize_hoa(row)
+    reserve_inflation_rate = app_settings_service.get_global_reserve_inflation_rate(session)
+    return _serialize_hoa(row, reserve_inflation_rate=reserve_inflation_rate)
 
 
 def create_hoa(session: Session, payload: HOACreateRequest) -> HOADetail:
@@ -68,7 +74,8 @@ def create_hoa(session: Session, payload: HOACreateRequest) -> HOADetail:
     session.add(row)
     session.commit()
     session.refresh(row)
-    return _serialize_hoa(row)
+    reserve_inflation_rate = app_settings_service.get_global_reserve_inflation_rate(session)
+    return _serialize_hoa(row, reserve_inflation_rate=reserve_inflation_rate)
 
 
 def update_hoa(session: Session, hoa_id: int, payload: HOAUpdateRequest) -> Optional[HOADetail]:
@@ -83,12 +90,11 @@ def update_hoa(session: Session, hoa_id: int, payload: HOAUpdateRequest) -> Opti
         row.tax_id = payload.tax_id.strip()
     if payload.units is not None:
         row.units = payload.units
-    if payload.reserve_inflation_rate is not None:
-        row.reserve_inflation_rate = payload.reserve_inflation_rate
     row.fiscal_year_start_month = payload.fiscal_year_start_month
     row.fiscal_year_end_month = _derive_fiscal_year_end(payload.fiscal_year_start_month)
     if payload.city is not None:
         row.city = payload.city.strip()
     session.commit()
     session.refresh(row)
-    return _serialize_hoa(row)
+    reserve_inflation_rate = app_settings_service.get_global_reserve_inflation_rate(session)
+    return _serialize_hoa(row, reserve_inflation_rate=reserve_inflation_rate)

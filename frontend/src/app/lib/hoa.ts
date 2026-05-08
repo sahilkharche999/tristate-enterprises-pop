@@ -42,6 +42,20 @@ export function formatFiscalYearLabel(startMonth: number, endMonth: number): str
   return `${monthNumberToName(startMonth)}-${monthNumberToName(endMonth)}`;
 }
 
+function formatTwoDigitYear(year: number): string {
+  return String(year).slice(-2);
+}
+
+export function formatFiscalYearRangeLabel(
+  startMonth: number,
+  endMonth: number,
+  startYear?: number | null,
+): string {
+  const resolvedStartYear = startYear ?? new Date().getFullYear();
+  const resolvedEndYear = endMonth < startMonth ? resolvedStartYear + 1 : resolvedStartYear;
+  return `${monthNumberToName(startMonth)}/${formatTwoDigitYear(resolvedStartYear)} - ${monthNumberToName(endMonth)}/${formatTwoDigitYear(resolvedEndYear)}`;
+}
+
 export function toHOAViewModel(hoa: HOARecord): HOAViewModel {
   return {
     id: String(hoa.id),

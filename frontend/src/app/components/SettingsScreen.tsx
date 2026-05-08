@@ -20,12 +20,11 @@ interface SettingsFormState {
   taxId: string;
   units: string;
   city: string;
-  reserveInflationRate: string;
   allocationType: string;
   driveFolderPath: string;
 }
 
-type ValidationField = 'name' | 'units' | 'fiscalYearStart' | 'reserveInflationRate';
+type ValidationField = 'name' | 'units' | 'fiscalYearStart';
 type ValidationErrors = Partial<Record<ValidationField, string>>;
 
 const DEFAULT_FORM: SettingsFormState = {
@@ -35,25 +34,14 @@ const DEFAULT_FORM: SettingsFormState = {
   taxId: '',
   units: '',
   city: '',
-  reserveInflationRate: '0.0',
   allocationType: 'Flat',
   driveFolderPath: '/Tri-State/HOAs/401-HOA',
 };
 
-function formatReserveInflationRate(rate: number): string {
-  const normalizedRate = Number.isFinite(rate) ? rate : 0;
-  return (normalizedRate * 100).toFixed(1);
-}
-
-function parseReserveInflationRate(value: string): number {
-  const normalizedValue = Number(value);
-  if (!Number.isFinite(normalizedValue) || normalizedValue < 0) {
-    return 0;
-  }
-  return normalizedValue / 100;
-}
-
-function buildFormState(hoa: HOARecord, previous?: SettingsFormState): SettingsFormState {
+function buildFormState(
+  hoa: HOARecord,
+  previous?: SettingsFormState,
+): SettingsFormState {
   return {
     ...DEFAULT_FORM,
     allocationType: previous?.allocationType ?? DEFAULT_FORM.allocationType,
@@ -64,7 +52,6 @@ function buildFormState(hoa: HOARecord, previous?: SettingsFormState): SettingsF
     taxId: hoa.tax_id,
     units: String(hoa.units),
     city: hoa.city || '',
-    reserveInflationRate: formatReserveInflationRate(hoa.reserve_inflation_rate),
   };
 }
 
@@ -79,13 +66,6 @@ function validateForm(form: SettingsFormState): ValidationErrors {
   }
 
   if (!form.fiscalYearStart) errors.fiscalYearStart = 'Fiscal year start month is required.';
-  if (form.reserveInflationRate.trim()) {
-    const reserveInflationRate = Number(form.reserveInflationRate);
-    if (!Number.isFinite(reserveInflationRate) || reserveInflationRate < 0) {
-      errors.reserveInflationRate = 'Reserve inflation must be a non-negative number.';
-    }
-  }
-
   return errors;
 }
 
@@ -162,7 +142,6 @@ export function SettingsScreen() {
       const payload = {
         name: hoaConfig.name.trim(),
         fiscal_year_start_month: monthNameToNumber(hoaConfig.fiscalYearStart),
-        reserve_inflation_rate: parseReserveInflationRate(hoaConfig.reserveInflationRate),
         ...(hoaConfig.hoaId.trim() ? { hoa_code: hoaConfig.hoaId.trim() } : {}),
         ...(hoaConfig.taxId.trim() ? { tax_id: hoaConfig.taxId.trim() } : {}),
         ...(hoaConfig.units.trim() ? { units: Number(hoaConfig.units) } : {}),
@@ -172,7 +151,7 @@ export function SettingsScreen() {
       setHoa(savedHoa);
       setHoaConfig((current) => buildFormState(savedHoa, current));
       setValidationErrors({});
-      toast.success('HOA database settings saved.');
+      toast.success('Settings saved.');
     } catch (error) {
       toast.error(getErrorMessage(error, 'Failed to save settings. Please try again.'));
     } finally {
@@ -343,25 +322,6 @@ export function SettingsScreen() {
                     className="bg-white border-[#E5E5E5]"
                     placeholder="San Francisco"
                   />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="reserveInflationRate">Reserve Inflation Rate (%)</Label>
-                  <div className="flex items-center gap-3">
-                    <Input
-                      id="reserveInflationRate"
-                      type="number"
-                      step="0.1"
-                      min="0"
-                      value={hoaConfig.reserveInflationRate}
-                      onChange={(e) => handleFieldChange('reserveInflationRate', e.target.value)}
-                      className="bg-white border-[#E5E5E5]"
-                    />
-                    <span className="text-sm text-[#666666]">%</span>
-                  </div>
-                  {validationErrors.reserveInflationRate && (
-                    <p className="text-xs text-[#b91c1c]">{validationErrors.reserveInflationRate}</p>
-                  )}
-                  <p className="text-xs text-[#666666]">Applied to reserve study components in draft screens. Reserve rows stay read-only.</p>
                 </div>
               </div>
             </div>

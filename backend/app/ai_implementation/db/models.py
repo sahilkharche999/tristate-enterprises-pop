@@ -140,11 +140,20 @@ class User(Base):
     created_at = Column(Text, server_default=_CREATED_AT_DEFAULT)
 
 
+class AppSetting(Base):
+    __tablename__ = "app_settings"
+
+    key = Column(Text, primary_key=True)
+    value_text = Column(Text)
+    updated_at = Column(Text, server_default=_CREATED_AT_DEFAULT)
+
+
 class BudgetUpload(Base):
     __tablename__ = "budget_uploads"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     property_id = Column(Integer, ForeignKey("properties.id"), nullable=False)
+    document_role = Column(Text, nullable=False, default="budget_source")
     original_filename = Column(Text, nullable=False)
     storage_key = Column(Text, nullable=False, unique=True)
     content_type = Column(Text)
@@ -170,9 +179,13 @@ class BudgetDraft(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     property_id = Column(Integer, ForeignKey("properties.id"), nullable=False)
     source_upload_id = Column(Integer, ForeignKey("budget_uploads.id"))
+    reserve_study_upload_id = Column(Integer, ForeignKey("budget_uploads.id"))
     reopened_from_version_id = Column(Integer, ForeignKey("budget_versions.id"))
     status = Column(Text, nullable=False, default=BUDGET_DRAFT_ACTIVE)
     line_items_json = Column(Text, nullable=False)
+    reserve_study_rows_json = Column(Text)
+    reserve_study_warnings_json = Column(Text)
+    reserve_study_status = Column(Text, nullable=False, default="none")
     global_note = Column(Text)
     statement_month = Column(Integer)
     growth_factor = Column(Float)
@@ -189,6 +202,7 @@ class BudgetDraft(Base):
 
     property = relationship("Property", lazy="raise")
     source_upload = relationship("BudgetUpload", foreign_keys=[source_upload_id], lazy="raise")
+    reserve_study_upload = relationship("BudgetUpload", foreign_keys=[reserve_study_upload_id], lazy="raise")
     reopened_from_version = relationship(
         "BudgetVersion",
         foreign_keys=[reopened_from_version_id],

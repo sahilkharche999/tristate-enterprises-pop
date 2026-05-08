@@ -2,17 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_plan: 3
-status: verifying
-stopped_at: Completed 09-03-PLAN.md
-last_updated: "2026-04-06T12:33:32.580Z"
-last_activity: 2026-04-06
+status: Executing Phase 10
+stopped_at: Phase 11 context gathered
+last_updated: "2026-05-08T11:42:14.404Z"
+last_activity: "2026-04-30 - Completed quick task 260430-k59: Clarify rejected budget-source uploads with income-statement format guidance"
 progress:
-  total_phases: 10
-  completed_phases: 0
-  total_plans: 0
-  completed_plans: 3
-  percent: 67
+  total_phases: 12
+  completed_phases: 3
+  total_plans: 21
+  completed_plans: 11
+  percent: 52
 ---
 
 # Project State
@@ -22,18 +21,12 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-18)
 
 **Core value:** A property manager can take a real HOA income statement and move from upload to budget review in one system without losing operational context.
-**Current focus:** Phase 09 — groq-to-gemini-migration
+**Current focus:** Phase 10 — reserve-study-pdf-upload-parsing-and-review-workflow
 
 ## Current Position
 
-Phase: 09 (groq-to-gemini-migration) — EXECUTING
-Plan: 3 of 3
-Current Plan: 3
-Total Plans in Phase: 3
-Status: Phase complete — ready for verification
-Last activity: 2026-04-06
-
-Progress: [███████░░░] 67%
+Phase: 10 (reserve-study-pdf-upload-parsing-and-review-workflow) — EXECUTING
+Plan: 1 of 3
 
 ## Performance Metrics
 
@@ -97,19 +90,31 @@ Recent decisions affecting current work:
 - Phase 7 added: Section-Based Line Item Classification & Dynamic Parsing — replace keyword-based classification with section-aware parsing, add header-scanning for flexible column detection, add PDF parsing support
 - Phase 8 added: VLM-First PDF Financial Extraction and Validation Pipeline — keep known clean Excel on the deterministic parser path, add shared schema/confidence hardening for Excel variants, and route PDFs, unknown layouts, and scanned statements through schema-enforced VLM extraction with math validation and fail-closed review states
 - Phase 9 added: Groq to Gemini Migration — replace all Groq LLM calls (budget suggestions + PDF extraction) with Google Gemini API, use native structured output for schema enforcement, single-call document processing
+- Phase 10 added: Reserve Study PDF Upload, Parsing, and Review Workflow — HOA users upload a separate reserve-study PDF alongside the budget file, and reserve-study PDFs reuse the existing VLM PDF ingestion family with reserve-study-specific extraction and manual review
+- Phase 11 added: Old Mill End-to-End Disclosure Package (MVP) — vertical-slice walking skeleton that generates the full annual budget disclosure PDF (18 generated pages + appended boilerplate appendices) for one fixed flat-per-unit HOA (Old Mill), proving the generator end-to-end before later phases expand to other assessment models, special assessments, and a per-HOA appendix library
 
 ### Pending Todos
 
 - Plan Phase 04.1: Define draft-vs-last-final compare behavior and reserve inflation treatment
 - Plan Phase 5: Define the Knowledge Base persistence and file-access approach
+- Plan Phase 10: Define separate reserve-study upload, extraction, edit/review, and budget integration behavior
 
 ### Blockers/Concerns
 
 - Export/admin actions need authorization hardening before production use
 - Git commits for this execution were deferred because the user instructed the agent not to perform git actions until asked
 
+### Quick Tasks Completed
+
+| # | Description | Date | Commit | Directory |
+|---|-------------|------|--------|-----------|
+| 260430-jk8 | Reserve study table headers, row reordering, recalculation, and manual save controls | 2026-04-30 | not committed | [260430-jk8-reserve-study-table-headers-row-reorderi](./quick/260430-jk8-reserve-study-table-headers-row-reorderi/) |
+| 260430-k59 | Clarify rejected budget-source uploads with income-statement format guidance | 2026-04-30 | not committed | [260430-k59-clarify-rejected-budget-source-uploads-w](./quick/260430-k59-clarify-rejected-budget-source-uploads-w/) |
+
 ## Session Continuity
 
-Last session: 2026-04-06T12:33:32.577Z
-Stopped at: Completed 09-03-PLAN.md
-Resume file: None
+Last activity: 2026-04-30 - Completed quick task 260430-k59: Clarify rejected budget-source uploads with income-statement format guidance
+
+Last session: 2026-05-08T11:42:14.393Z
+Stopped at: Phase 11 context gathered
+Resume file: .planning/phases/11-old-mill-end-to-end-disclosure-package-mvp/11-CONTEXT.md

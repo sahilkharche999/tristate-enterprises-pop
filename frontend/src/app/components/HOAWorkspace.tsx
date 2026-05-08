@@ -1,10 +1,20 @@
 import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router';
 import { Search, Settings, LayoutList, LayoutGrid, Filter, X, LogOut, Plus } from 'lucide-react';
+import { toast } from 'sonner';
+import {
+  AlertDialog,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from './ui/alert-dialog';
 import { Input } from './ui/input';
 import { Button } from './ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 import { Label } from './ui/label';
+import { getAppSettings, updateAppSettings } from '../api/appSettings';
 import { createHOA, listHOAs } from '../api/hoa';
 import { useAuth } from '../context/AuthContext';
 import { getErrorMessage } from '../lib/errors';
@@ -25,6 +35,19 @@ const DEFAULT_CREATE_FORM: CreateHoaFormState = {
   city: '',
 };
 
+function formatReserveInflationRate(rate: number): string {
+  const normalizedRate = Number.isFinite(rate) ? rate : 0;
+  return (normalizedRate * 100).toFixed(1);
+}
+
+function parseReserveInflationRate(value: string): number | null {
+  const normalizedValue = Number(value);
+  if (!Number.isFinite(normalizedValue) || normalizedValue < 0) {
+    return null;
+  }
+  return normalizedValue / 100;
+}
+
 export function HOAWorkspace() {
   const navigate = useNavigate();
   const auth = useAuth();
@@ -41,6 +64,10 @@ export function HOAWorkspace() {
   const [createForm, setCreateForm] = useState<CreateHoaFormState>(DEFAULT_CREATE_FORM);
   const [createError, setCreateError] = useState<string | null>(null);
   const [isCreating, setIsCreating] = useState(false);
+  const [globalReserveInflationRate, setGlobalReserveInflationRate] = useState('0.0');
+  const [globalReserveInflationError, setGlobalReserveInflationError] = useState<string | null>(null);
+  const [isSavingGlobalReserveInflation, setIsSavingGlobalReserveInflation] = useState(false);
+  const [isGlobalReserveInflationOpen, setIsGlobalReserveInflationOpen] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -49,9 +76,12 @@ export function HOAWorkspace() {
       setIsLoading(true);
       setLoadError(null);
       try {
-        const response = await listHOAs();
+        const [response, appSettings] = await Promise.all([listHOAs(), getAppSettings()]);
         if (!cancelled) {
           setHoas(response.map(toHOAViewModel));
+          setGlobalReserveInflationRate(
+            formatReserveInflationRate(appSettings.global_reserve_inflation_rate),
+          );
         }
       } catch (error) {
         if (!cancelled) {
@@ -113,6 +143,32 @@ export function HOAWorkspace() {
     setCreateError(null);
   };
 
+  const handleGlobalReserveInflationSave = async (): Promise<boolean> => {
+    const parsedRate = parseReserveInflationRate(globalReserveInflationRate);
+    if (parsedRate == null) {
+      setGlobalReserveInflationError('Reserve inflation must be a non-negative number.');
+      return false;
+    }
+
+    setIsSavingGlobalReserveInflation(true);
+    setGlobalReserveInflationError(null);
+    try {
+      const response = await updateAppSettings({
+        global_reserve_inflation_rate: parsedRate,
+      });
+      setGlobalReserveInflationRate(
+        formatReserveInflationRate(response.global_reserve_inflation_rate),
+      );
+      toast.success('Global reserve inflation updated.');
+      return true;
+    } catch (error) {
+      setGlobalReserveInflationError(getErrorMessage(error, 'Failed to save global reserve inflation.'));
+      return false;
+    } finally {
+      setIsSavingGlobalReserveInflation(false);
+    }
+  };
+
   const closeCreateModal = () => {
     if (isCreating) {
       return;
@@ -167,6 +223,16 @@ export function HOAWorkspace() {
             {auth.user && (
               <span className="text-sm text-[#737373]">{auth.user.name}</span>
             )}
+            <Button
+              variant="outline"
+              className="border-[#e5e5e5] text-[#525252] hover:bg-[#f5f5f5] hover:text-[#111111]"
+              onClick={() => {
+                setGlobalReserveInflationError(null);
+                setIsGlobalReserveInflationOpen(true);
+              }}
+            >
+              Reserve {globalReserveInflationRate}%
+            </Button>
             <Link to="/settings">
               <Button variant="ghost" size="icon" className="hover:bg-[#f5f5f5]">
                 <Settings className="w-5 h-5 text-[#525252]" />
@@ -185,7 +251,7 @@ export function HOAWorkspace() {
       </header>
 
       <main className="max-w-7xl mx-auto px-8 py-12">
-        <div className="mb-6 flex items-center gap-4">
+        <div className="mb-6 flex flex-wrap items-end gap-4">
           <div className="relative flex-1">
             <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-[#a3a3a3]" />
             <Input
@@ -381,6 +447,60 @@ export function HOAWorkspace() {
           </div>
         )}
       </main>
+
+      <AlertDialog open={isGlobalReserveInflationOpen} onOpenChange={setIsGlobalReserveInflationOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Global Reserve Inflation Rate</AlertDialogTitle>
+            <AlertDialogDescription>
+              This percentage applies across all HOAs in the workspace.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor="workspaceReserveInflation">Reserve Inflation (%)</Label>
+            <Input
+              id="workspaceReserveInflation"
+              type="number"
+              step="0.1"
+              min="0"
+              value={globalReserveInflationRate}
+              onChange={(e) => {
+                setGlobalReserveInflationRate(e.target.value);
+                setGlobalReserveInflationError(null);
+              }}
+              className="bg-white border-[#E5E5E5]"
+            />
+            {globalReserveInflationError ? (
+              <p className="text-sm text-[#b91c1c]">{globalReserveInflationError}</p>
+            ) : null}
+          </div>
+          <AlertDialogFooter>
+            <Button
+              variant="outline"
+              className="border-[#e5e5e5]"
+              onClick={() => {
+                setGlobalReserveInflationError(null);
+                setIsGlobalReserveInflationOpen(false);
+              }}
+              disabled={isSavingGlobalReserveInflation}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={async () => {
+                const saved = await handleGlobalReserveInflationSave();
+                if (saved) {
+                  setIsGlobalReserveInflationOpen(false);
+                }
+              }}
+              disabled={isSavingGlobalReserveInflation}
+              className="bg-[#111111] text-white hover:bg-[#262626]"
+            >
+              {isSavingGlobalReserveInflation ? 'Saving...' : 'Save'}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {isCreateOpen ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-6">

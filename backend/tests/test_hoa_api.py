@@ -29,7 +29,6 @@ def test_update_hoa(client):
         "name": "401 HOA Updated",
         "tax_id": "11-1111111",
         "units": 52,
-        "reserve_inflation_rate": 0.04,
         "fiscal_year_start_month": 2,
     }
 
@@ -44,7 +43,7 @@ def test_update_hoa(client):
     assert payload["name"] == "401 HOA Updated"
     assert payload["tax_id"] == "11-1111111"
     assert payload["units"] == 52
-    assert payload["reserve_inflation_rate"] == 0.04
+    assert payload["reserve_inflation_rate"] == 0.0
     assert payload["fiscal_year_start_month"] == 2
     # Auto-derived: start=2 (Feb) → end=1 (Jan)
     assert payload["fiscal_year_end_month"] == 1
