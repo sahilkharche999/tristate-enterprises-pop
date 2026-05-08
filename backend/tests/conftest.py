@@ -463,3 +463,52 @@ def budget_compare_seed(db_session, budget_history_test_harness):
         "final_version_id": versions[1].id,
         "latest_generated_version_id": versions[2].id,
     }
+
+
+# ── Phase 11 disclosure-package fixtures ─────────────────────────────────────
+
+
+@pytest.fixture
+def disclosure_storage_root(tmp_path, monkeypatch) -> Path:
+    """Per-test isolated disclosure-packages root.
+
+    RESEARCH Pitfall 7: production volume path does not exist locally.
+    Tests use tmp_path; production reads from settings.BUDGET_STORAGE_ROOT.
+    Plan 11-06's filename builder will sanitize hoa_id and fiscal_year before
+    joining to BUDGET_STORAGE_ROOT to mitigate T-11-05 (path traversal).
+    """
+    root = tmp_path / "disclosure-packages"
+    root.mkdir()
+    monkeypatch.setenv("BUDGET_STORAGE_ROOT", str(tmp_path))
+    return root
+
+
+@pytest.fixture
+def golden_old_mill_pdf() -> Path:
+    """Path to the golden 2026 Old Mill disclosure PDF for raster-diff tests.
+
+    The smoking-gun success criterion (CONTEXT D-13) is page-for-page parity on
+    the 18 generated pages between the system output and this PDF. Skip if the
+    file is not present in the working tree (e.g., open-source clone without
+    the client's reference document).
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    path = repo_root / "2026" / "Old Mill 2026 budget disclosure.pdf"
+    if not path.exists():
+        pytest.skip(f"Golden PDF not present at {path}; cannot run parity test.")
+    return path
+
+
+@pytest.fixture
+def qpdf_required():
+    """Skip marker for tests that need the qpdf system binary.
+
+    RESEARCH Pitfall 4: qpdf is a system binary, not a pip package. The Docker
+    image installs it (Dockerfile apt-get layer); developer machines may or may
+    not have it. Tests that exercise the `qpdf --check` finalization step in
+    `merge.py` should depend on this fixture so they skip cleanly when qpdf is
+    absent rather than failing with FileNotFoundError.
+    """
+    import shutil
+    if shutil.which("qpdf") is None:
+        pytest.skip("qpdf binary not installed in test environment")
