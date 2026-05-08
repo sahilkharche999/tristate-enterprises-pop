@@ -11,10 +11,11 @@
 // UI rows are intentionally omitted rather than rendered with placeholder
 // values per project no-stub discipline.
 
+import { useState } from 'react';
 import { Download } from 'lucide-react';
 
 import type { DisclosurePackageJob } from '../../api/disclosurePackage';
-import { disclosurePackageDownloadUrl } from '../../api/disclosurePackage';
+import { downloadDisclosurePackagePdf } from '../../api/disclosurePackage';
 import { Button } from '../ui/button';
 
 export interface DisclosureResultBlockProps {
@@ -37,6 +38,25 @@ export function DisclosureResultBlock({
 }: DisclosureResultBlockProps) {
   const generated = formatTimestamp(job.completed_at);
   const filename = `old-mill-${job.fiscal_year}-disclosure-package.pdf`;
+  const [downloading, setDownloading] = useState(false);
+
+  async function handleDownload() {
+    if (downloading) return;
+    setDownloading(true);
+    try {
+      const blob = await downloadDisclosurePackagePdf(job.id);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } finally {
+      setDownloading(false);
+    }
+  }
 
   return (
     <div className="space-y-4 transition-opacity duration-200">
@@ -70,17 +90,12 @@ export function DisclosureResultBlock({
           </Button>
         ) : null}
         <Button
-          asChild
+          onClick={handleDownload}
+          disabled={downloading}
           className="bg-[#111111] text-white shadow-sm hover:bg-[#262626]"
         >
-          <a
-            href={disclosurePackageDownloadUrl(job.id)}
-            download={filename}
-            rel="noopener"
-          >
-            <Download className="mr-2 h-4 w-4" />
-            Download PDF
-          </a>
+          <Download className="mr-2 h-4 w-4" />
+          {downloading ? 'Downloading…' : 'Download PDF'}
         </Button>
       </div>
     </div>
