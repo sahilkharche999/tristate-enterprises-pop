@@ -15,6 +15,10 @@ services:
       - GEMINI_MODEL=${GEMINI_MODEL}
       - JWT_SECRET_KEY=${JWT_SECRET_KEY}
       - COOKIE_SECURE=false
+      # Phase 11 disclosure-package output. Default in config.py resolves to
+      # /app/app/data/budget-storage; pin it here so it lines up with the
+      # `budget-storage` volume mount above (and survives container restarts).
+      - BUDGET_STORAGE_ROOT=/app/data/budget-storage
     restart: unless-stopped
 
   frontend:
