@@ -113,11 +113,11 @@
       fund at the end of the current fiscal year is
       <span class="form-fill">${{ '{:,.0f}'.format(computed.total_estimated_liability) }}</span>,
       based in whole or in part on the last reserve study or update
-      prepared by <span class="form-fill">{{ static_data.reserve_study_expert_name }}</span>
+      prepared by <span class="form-fill">{{ hoa_settings.reserve_study_expert_name }}</span>
       as of <span class="form-fill">{{ fiscal_year - 1 }}</span>.
       The projected reserve fund cash balance at the end of the current
       fiscal year is
-      <span class="form-fill">${{ '{:,.0f}'.format(static_data.reserve_cash_balance_eoy_prior) }}</span>,
+      <span class="form-fill">${{ '{:,.0f}'.format(hoa_settings.reserve_cash_balance_eoy_prior) }}</span>,
       resulting in reserves being
       <span class="form-fill">{{ computed.percent_funded }}</span> percent
       funded at this date.
@@ -219,7 +219,7 @@ component(s).</p>
 </p>
 
 <p class="center small bold" style="margin-top:18pt">
-  {{ static_data.cpa_firm_name }}<br>
+  {{ hoa_settings.cpa_firm_name }}<br>
   San Francisco, California
 </p>
 

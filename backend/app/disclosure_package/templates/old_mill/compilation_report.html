@@ -3,7 +3,7 @@
 {% block content %}
 
 <p class="center bold" style="font-size:11pt; margin:0">
-  {{ static_data.cpa_firm_name | upper }}
+  {{ hoa_settings.cpa_firm_name | upper }}
 </p>
 <p class="center small" style="margin:0 0 16pt 0">
   100 Montgomery Street, Suite 715<br>
@@ -48,7 +48,7 @@ other purpose.</p>
 {{ hoa.name }}.</p>
 
 <div class="letter-signature">
-  <p class="bold" style="margin-bottom:4pt">{{ static_data.cpa_firm_name }}</p>
+  <p class="bold" style="margin-bottom:4pt">{{ hoa_settings.cpa_firm_name }}</p>
   <p>{{ today }}</p>
 </div>
 {% endblock %}

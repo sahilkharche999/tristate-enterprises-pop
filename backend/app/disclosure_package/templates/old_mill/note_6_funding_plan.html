@@ -6,7 +6,7 @@
 
 <p class="legal-block">In accordance with California Civil Code &sect; 5550,
 the Board has reviewed the reserve study prepared by
-{{ static_data.reserve_study_expert_name }} and adopted a funding plan
+{{ hoa_settings.reserve_study_expert_name }} and adopted a funding plan
 intended to keep the Association&rsquo;s Replacement Fund at a level
 sufficient to meet projected major-component replacement obligations
 over the 30-year forecast horizon.</p>
@@ -20,7 +20,7 @@ per ownership interest per month. Total estimated liability for major
 component replacement (Civil Code &sect; 5565) is
 <span class="bold">${{ '{:,.0f}'.format(computed.total_estimated_liability) }}</span>;
 projected reserve cash at end of prior fiscal year is
-<span class="bold">${{ '{:,.0f}'.format(static_data.reserve_cash_balance_eoy_prior) }}</span>;
+<span class="bold">${{ '{:,.0f}'.format(hoa_settings.reserve_cash_balance_eoy_prior) }}</span>;
 percent funded is <span class="bold">{{ computed.percent_funded }}%</span>.</p>
 
 <p class="legal-block">The funding plan applies a piecewise schedule of
@@ -48,7 +48,7 @@ relation to the reserve study and finds the plan adequate to meet the
 Association&rsquo;s reserve obligations consistent with California Civil
 Code &sect;&sect; 5550, 5560, and 5570. Members may obtain a copy of the
 full reserve study and funding plan at no charge upon written request to
-{{ static_data.management_company }}, {{ static_data.management_company_address }}.</p>
+{{ hoa_settings.management_company }}, {{ hoa_settings.management_company_address }}.</p>
 
 <p class="legal-block">A summary of the projected fiscal-year cash
 balances and percent-funded ratios for the next 30 years is included in

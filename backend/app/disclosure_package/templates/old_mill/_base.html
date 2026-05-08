@@ -34,8 +34,8 @@
 </div>
 
 <div class="footer-block">
-  <div>{{ static_data.management_company_address }}</div>
-  <div>phone.650.210.0085  |  fax.650.210.0086  |  www.3state.net</div>
+  <div>{{ hoa_settings.management_company_address or static_data.management_company_address }}</div>
+  <div>phone.{{ hoa_settings.management_company_phone }}  |  fax.{{ hoa_settings.management_company_fax }}  |  {{ hoa_settings.management_company_web }}</div>
 </div>
 
 {% block content %}{% endblock %}

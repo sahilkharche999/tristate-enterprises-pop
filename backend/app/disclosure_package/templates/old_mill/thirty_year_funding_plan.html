@@ -47,13 +47,13 @@ plan in effect for fiscal year {{ fiscal_year }}.</p>
 </table>
 
 <p class="muted small italic" style="margin-top:14pt">
-  Projection assumes a {{ '{:.1%}'.format(static_data.replacement_cost_increase_rate) }}
+  Projection assumes a {{ '{:.1%}'.format(hoa_settings.replacement_cost_increase_rate) }}
   annual replacement-cost inflation factor and an after-tax
-  {{ '{:.2%}'.format(static_data.interest_rate_after_tax) }} reserve
+  {{ '{:.2%}'.format(hoa_settings.interest_rate_after_tax) }} reserve
   earnings rate. Each fiscal year&rsquo;s expenditure is computed against
   the inflation-adjusted reserve provision; the actual schedule of
   expenditures will follow the per-component remaining-life timing in
-  the reserve study by {{ static_data.reserve_study_expert_name }}.
+  the reserve study by {{ hoa_settings.reserve_study_expert_name }}.
 </p>
 
 <p class="center small italic" style="margin-top:14pt">

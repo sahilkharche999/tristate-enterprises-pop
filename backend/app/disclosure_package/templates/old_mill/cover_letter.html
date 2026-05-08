@@ -27,8 +27,8 @@ ${{ '{:,.2f}'.format(computed.monthly_assessment_per_unit_current) }}.</p>
 <p>Please find the following documents enclosed:</p>
 
 <ol class="enclosed-list">
-  <li>{{ fiscal_year }} Pro Forma Operating Budget ({{ static_data.cpa_firm_name | replace(' LLP','') }})</li>
-  <li>30 Year Pro Forma Funding Study ({{ static_data.cpa_firm_name | replace(' LLP','') }})</li>
+  <li>{{ fiscal_year }} Pro Forma Operating Budget ({{ hoa_settings.cpa_firm_name | replace(' LLP','') }})</li>
+  <li>30 Year Pro Forma Funding Study ({{ hoa_settings.cpa_firm_name | replace(' LLP','') }})</li>
   <li>Annual Insurance Disclosure</li>
   <li>Alternative Dispute Resolution and Meet &amp; Confer Program</li>
   <li>Assessment Collection, Delinquency &amp; Foreclosure Policies</li>
@@ -49,7 +49,7 @@ ${{ '{:,.2f}'.format(computed.monthly_assessment_per_unit_current) }}.</p>
   <li>4950(b): The Board of Directors will make a draft or summary of the
     minutes of the Board meetings available to members within 30 days of
     the meeting at the expense of the requestor. The request must be made
-    to {{ static_data.management_company }}.</li>
+    to {{ hoa_settings.management_company }}.</li>
 
   <li>4045(a)3: General notices can be posted by either: 1st class mail; or
     electronic notice (with consent); or included in billing statements or
@@ -92,8 +92,8 @@ ${{ '{:,.2f}'.format(computed.monthly_assessment_per_unit_current) }}.</p>
     association should be put in writing and addressed to:
     <div class="address-block">
       The {{ hoa.name }}<br>
-      c/o {{ static_data.management_company }}<br>
-      {{ static_data.management_company_address }}
+      c/o {{ hoa_settings.management_company }}<br>
+      {{ hoa_settings.management_company_address }}
     </div>
   </li>
 
@@ -102,8 +102,8 @@ ${{ '{:,.2f}'.format(computed.monthly_assessment_per_unit_current) }}.</p>
     be sent to:
     <div class="address-block">
       The {{ hoa.name }}<br>
-      c/o {{ static_data.management_company }}<br>
-      {{ static_data.management_company_address }}
+      c/o {{ hoa_settings.management_company }}<br>
+      {{ hoa_settings.management_company_address }}
     </div>
   </li>
 </ol>
@@ -118,7 +118,7 @@ address.</p>
 
 <div class="letter-signature">
   <p style="margin-bottom:24pt">&nbsp;</p>
-  <p>{{ static_data.letter_signed_by }}<br>{{ static_data.management_company }}</p>
+  <p>{{ hoa_settings.letter_signed_by }}<br>{{ hoa_settings.management_company }}</p>
 </div>
 
 </div>

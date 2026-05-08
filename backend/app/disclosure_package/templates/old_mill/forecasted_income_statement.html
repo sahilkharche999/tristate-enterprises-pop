@@ -109,9 +109,9 @@
 
     <tr>
       <td class="bold">FUND BALANCE (DEFICIT),<br>BEGINNING OF YEAR (NOTE 5)</td>
-      <td>${{ '{:,.0f}'.format(static_data.fund_balance_boy_operations) }}</td>
-      <td>${{ '{:,.0f}'.format(static_data.reserve_cash_balance_eoy_prior - computed.total_estimated_liability) }}</td>
-      <td>${{ '{:,.0f}'.format(static_data.fund_balance_boy_operations + (static_data.reserve_cash_balance_eoy_prior - computed.total_estimated_liability)) }}</td>
+      <td>${{ '{:,.0f}'.format(hoa_settings.fund_balance_boy_operations) }}</td>
+      <td>${{ '{:,.0f}'.format(hoa_settings.reserve_cash_balance_eoy_prior - computed.total_estimated_liability) }}</td>
+      <td>${{ '{:,.0f}'.format(hoa_settings.fund_balance_boy_operations + (hoa_settings.reserve_cash_balance_eoy_prior - computed.total_estimated_liability)) }}</td>
     </tr>
 
     <tr class="total-row">

@@ -9,18 +9,18 @@ assumptions:</p>
 <ul>
   <li><span class="bold">Reserve study basis:</span> the Replacement
     Fund forecast is grounded in the reserve study prepared by
-    {{ static_data.reserve_study_expert_name }} dated
+    {{ hoa_settings.reserve_study_expert_name }} dated
     {{ reserve_study_snapshot.study_date }}. Major components, their
     useful lives, and their remaining lives are taken from that study
     without adjustment.</li>
   <li><span class="bold">Replacement-cost inflation:</span> projected
     component replacement costs are increased at an annual rate of
-    {{ '{:.0%}'.format(static_data.replacement_cost_increase_rate) }}
+    {{ '{:.0%}'.format(hoa_settings.replacement_cost_increase_rate) }}
     over the prior-year cost.</li>
   <li><span class="bold">Interest income:</span> interest income on
     Replacement Fund cash and certificate-of-deposit balances is
     forecast at an after-tax annualized rate of
-    {{ '{:.1%}'.format(static_data.interest_rate_after_tax) }}.</li>
+    {{ '{:.1%}'.format(hoa_settings.interest_rate_after_tax) }}.</li>
   <li><span class="bold">Income tax provision:</span> a provision of
     ${{ '{:,.0f}'.format(computed.income_tax_provision) }}
     is reflected in the {{ fiscal_year }} forecast for federal and
