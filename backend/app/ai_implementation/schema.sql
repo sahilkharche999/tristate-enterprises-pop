@@ -205,6 +205,23 @@ CREATE TABLE IF NOT EXISTS budget_audit_events (
     created_at         TEXT DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS disclosure_package_jobs (
+    id              TEXT PRIMARY KEY,
+    property_id     INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+    fiscal_year     INTEGER NOT NULL,
+    status          TEXT NOT NULL CHECK(status IN ('pending','running','completed','failed')),
+    stage           TEXT,
+    error_message   TEXT,
+    output_path     TEXT,
+    audit_path      TEXT,
+    created_by_user_id INTEGER REFERENCES users(id),
+    created_at      TEXT DEFAULT (datetime('now')),
+    completed_at    TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_disclosure_jobs_property
+    ON disclosure_package_jobs(property_id, created_at DESC);
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_properties_hoa_code ON properties(hoa_code);
 CREATE INDEX IF NOT EXISTS idx_feedback_account ON feedback_cases(account_code, property_id);
