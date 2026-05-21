@@ -679,6 +679,13 @@ def _table_to_line_items(table: dict[str, Any]) -> tuple[list[dict[str, Any]], l
             # and the taxonomy definition. Adding a new read-only section means
             # changing ONE constant (READ_ONLY_SECTIONS), not this check.
             "read_only": category in READ_ONLY_SECTIONS,
+            # Per the DRE-driven assessment engine invariant
+            # (BudgetDraft.line_items.amount = annual), audit which source
+            # column the annual value came from. "annual_budget" here means
+            # the value was promoted from the Annual Budget column of the
+            # enriched/extracted table; the engine consumes ONLY this field.
+            "source_column": "annual_budget",
+            "source_page_or_cell": item.get("Source Page") or item.get("Source Cell"),
             "raw": item,
         }
         line_items.append(normalized)
@@ -1523,6 +1530,17 @@ def create_upload_bundle(
                 draft_row.updated_by_user_id = actor["id"]
                 draft_row.actor_name = _actor_name(actor)
                 draft_row.updated_at = _now_text()
+                # Cache the extracted study_date on hoa_settings so the
+                # disclosure compiler can render it in the Notes section
+                # without re-parsing the reserve study PDF. The operator can
+                # override via the Disclosure Settings form.
+                extracted_date = getattr(reserve_result, "study_date", None)
+                if extracted_date:
+                    from ..services import hoa_settings_service as _hoa_settings_service
+                    settings_row = _hoa_settings_service.get_or_create(
+                        session, hoa_id=hoa_id
+                    )
+                    settings_row.reserve_study_date = str(extracted_date)
                 session.commit()
                 draft = _serialize_draft(draft_row, _get_upload(session, draft_row.source_upload_id))
     else:
@@ -1657,12 +1675,21 @@ def save_draft(
     draft.statement_month = payload.statement_month
     draft.growth_factor = payload.growth_factor
     draft.growth_factor_note = payload.growth_factor_note
-    # Use explicitly provided inflation rate, or fall back to the app-level setting.
-    draft.reserve_inflation_rate = (
-        payload.reserve_inflation_rate
-        if payload.reserve_inflation_rate is not None
-        else app_settings_service.get_global_reserve_inflation_rate(session)
-    )
+    # Resolve the reserve inflation rate in priority order:
+    #   1. operator-supplied payload value (explicit override on save)
+    #   2. HOA-level ``properties.reserve_inflation_rate`` when non-zero
+    #   3. app-level global default
+    # Keeps the HOA-level rate as the implicit save-time choice without
+    # forcing the operator to re-type it on every PATCH.
+    _hoa_rate = getattr(_get_property(session, hoa_id), "reserve_inflation_rate", None)
+    if payload.reserve_inflation_rate is not None:
+        draft.reserve_inflation_rate = payload.reserve_inflation_rate
+    elif _hoa_rate is not None and _hoa_rate > 0.0:
+        draft.reserve_inflation_rate = _hoa_rate
+    else:
+        draft.reserve_inflation_rate = (
+            app_settings_service.get_global_reserve_inflation_rate(session)
+        )
     draft.reserve_inflation_note = payload.reserve_inflation_note
     draft.updated_by_user_id = actor["id"]
     draft.actor_name = _actor_name(actor)

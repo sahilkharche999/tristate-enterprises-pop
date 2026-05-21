@@ -75,6 +75,10 @@ class HOAMetadata(BaseModel):
     fiscal_year_start_month: int = Field(ge=1, le=12)
     fiscal_year_end_month: int = Field(ge=1, le=12)
     tax_id: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    entity_type: Optional[str] = None
+    incorporation_year: Optional[int] = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────

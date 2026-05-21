@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_HALF_EVEN
 from math import isclose
@@ -61,7 +62,9 @@ _DISCOVERY_SYSTEM_PROMPT = (
     "and reserve fund income statements are NOT reserve_table pages.\n"
     "Use vendor-agnostic judgment. Do not rely on exact report titles.\n"
     "For each page, also return:\n"
-    "- ui_fields_present: which of these UI fields are visibly present on the page: line_item, quantity, useful_life, remaining_life, replacement_cost. Quantity is helpful but optional.\n"
+    "- ui_fields_present: which of these UI fields are visibly present on the page: line_item, quantity, useful_life, remaining_life, replacement_cost. "
+    "Only mark useful_life or remaining_life as present when their NUMERIC VALUES are visible on this page — not when only the column header appears, "
+    "and not when only the component name is shown without an aligned numeric column for that field. Quantity is helpful but optional.\n"
     "- is_primary_ui_table: true only if this page belongs to the main editable component schedule that best fits the reserve-study UI\n"
     "- same_table_as_previous: true if this page is a continuation of the same table as the previous page\n"
     "- same_table_as_next: true if this page continues onto the next page as the same table\n"
@@ -78,6 +81,22 @@ _DISCOVERY_SYSTEM_PROMPT = (
     "Do not mark narrative/detail appendix pages as the primary UI table when a compact tabular schedule exists.\n"
     "A schedule centered on annual replacement provision or estimated liability should lose to a reserve-study plan schedule when both describe the same components.\n"
     "When a compact anchor page already contains the editable component columns, pages that repeat the same components only to show different year bands or derived columns should be marked as duplicate component repeat pages.\n"
+    "Year-organized cash-flow or expenditure schedules are NOT the primary reserve-table target, "
+    "regardless of the vendor's wording. These pages share the same structure across vendors:\n"
+    "  - the page is fundamentally organized by year (rows or banded sections keyed to a year, not to a component);\n"
+    "  - it has only one or two numeric columns (typically a single expenditure or cash-flow value per row);\n"
+    "  - the same component appears multiple times across different years, or year labels appear as section headers;\n"
+    "  - useful life and remaining life columns are absent, or the columns exist but the numeric cells are empty for these rows.\n"
+    "Examples of titles vendors use for this kind of page include (non-exhaustive, vendor-agnostic — match on structure, not exact text): "
+    "Annual Expenditure Detail, Cash Flow Detail, Cash Flow Summary, Cash Flow Funding Plan, Yearly Cash Flow, Year-by-Year Expenditures, "
+    "Funding Analysis, Reserve Cash Flow, 30-Year Cash Flow, Annual Funding Plan. Section headers within these pages often read like "
+    "'Replacement Year YYYY', 'Total for YYYY', 'No Replacement in YYYY', 'YYYY Expenditures', or just a bare year. "
+    "When a page matches this structure, mark it is_year_provision_or_liability_schedule=true AND is_primary_ui_table=false, "
+    "even when component names are visible.\n"
+    "The primary reserve-table is the one where each component appears EXACTLY ONCE with its lifecycle columns "
+    "(useful life, remaining life, replacement cost), regardless of the vendor's label for that table — "
+    "common labels include Component Funding Summary, Component Inventory, Component Inventory Detail Report, "
+    "Component Details, Component Inventory and Analysis, or simply Reserve Component Schedule.\n"
     "Use the rendered page images as the source of truth for this classification.\n"
     "Return one classification entry per page number in the input, preserving page numbers exactly.\n"
     "Return only the structured classification."
@@ -475,7 +494,7 @@ def _sequence_field_coverage(
     return primary_fields, optional_fields
 
 
-def _sequence_score(sequence: _ReserveStudySequence) -> tuple[int, int, int, int, int, int, float, int]:
+def _sequence_score(sequence: _ReserveStudySequence) -> tuple[int, int, int, int, int, int, int, float, int]:
     tabular_pages = sum(1 for item in sequence.table_pages if item.is_tabular_schedule)
     primary_fields, optional_fields = _sequence_field_coverage(sequence.table_pages)
     primary_pages = sum(1 for item in sequence.table_pages if item.is_primary_ui_table)
@@ -484,13 +503,19 @@ def _sequence_score(sequence: _ReserveStudySequence) -> tuple[int, int, int, int
         1 for item in sequence.relevant_pages if item.is_year_provision_or_liability_schedule
     )
     avg_confidence = sum(item.confidence for item in sequence.items) / len(sequence.items)
+    # Highest priority: NO year-provision / annual-schedule / liability pages
+    # in the span. A clean component-summary span (3 pages) must outrank a
+    # longer annual-expenditure span (8 pages), regardless of column coverage
+    # or page count. Without this gate, the longer schedule wins on len(items).
+    provision_clean = 1 if provision_liability_pages == 0 else 0
     return (
+        provision_clean,
         tabular_pages,
         len(primary_fields),
         len(optional_fields),
         primary_pages,
         -appendix_pages,
-        -provision_liability_pages,
+        -provision_liability_pages,  # tiebreaker between "dirty" sequences
         avg_confidence,
         len(sequence.items),
     )
@@ -855,6 +880,79 @@ def _merge_reserve_rows(existing: ExtractedReserveStudyRow, candidate: Extracted
     )
 
 
+# Deterministic noise patterns from year-organized cash-flow / expenditure
+# schedules. These are vendor-agnostic patterns observed across multiple
+# reserve-study vendors (CIRMS, Association Reserves, SMA, Siena/Pinnacle,
+# etc.). When the LLM mis-picks one of those sections, these rows leak in
+# as fake components. We drop them by line_item before dedupe.
+#
+# This regex is a belt-and-suspenders fallback for known vendor fingerprints;
+# the vendor-agnostic check is the "no lifecycle data" rule in
+# _drop_annual_schedule_noise (no useful_life + no remaining_life + no
+# replacement_cost = not a real component, regardless of label text).
+_ANNUAL_SCHEDULE_NOISE_RE = re.compile(
+    r"^\s*("
+    # Year-banded section headers (any vendor).
+    r"replacement\s+year\b"
+    r"|total\s+for\b"
+    r"|no\s+replacement\b"
+    r"|expenditures?\s+(for|in)\s+\d{4}\b"
+    r"|\d{4}\s+expenditures?\b"
+    r"|year\s*[-:]?\s*\d{4}\b"
+    # Column-header rows that landed in the item stream.
+    r"|description\s+expenditures?\b"
+    r"|grand\s+total\b"
+    # Cash-flow / funding-plan section labels.
+    r"|annual\s+expenditure"
+    r"|cash\s+flow\s+(detail|summary|funding)"
+    r"|(yearly|annual)\s+cash\s+flow"
+    r"|year\s*-?\s*by\s*-?\s*year"
+    r"|funding\s+(analysis|plan|summary)\s*$"
+    # Misc. trailing markers.
+    r"|continued\.{0,3}\s*$"
+    r"|subtotal\b"
+    r"|page\s+\d"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _drop_annual_schedule_noise(
+    rows: list[ExtractedReserveStudyRow],
+) -> tuple[list[ExtractedReserveStudyRow], int]:
+    """Drop rows that cannot be real reserve components.
+
+    Two filters are applied to rows where ``row_type == 'item'``:
+      1. line_item matches a known annual-schedule header pattern
+         ("Replacement Year YYYY", "Total for YYYY", etc.).
+      2. row has no useful_life AND no remaining_life AND no replacement_cost —
+         the three primary lifecycle fields. A row with none of these is not a
+         component the UI can render, regardless of the line_item text.
+
+    Header rows (``row_type == 'header'``) are preserved — they're rendered as
+    visual breaks and don't claim to be components.
+    """
+    kept: list[ExtractedReserveStudyRow] = []
+    dropped = 0
+    for row in rows:
+        if row.row_type == "header":
+            kept.append(row)
+            continue
+        label = (row.line_item or "").strip()
+        if label and _ANNUAL_SCHEDULE_NOISE_RE.match(label):
+            dropped += 1
+            continue
+        if (
+            row.useful_life is None
+            and row.remaining_life is None
+            and row.replacement_cost is None
+        ):
+            dropped += 1
+            continue
+        kept.append(row)
+    return kept, dropped
+
+
 def _dedupe_reserve_rows(rows: list[ExtractedReserveStudyRow]) -> tuple[list[ExtractedReserveStudyRow], int]:
     deduped: list[ExtractedReserveStudyRow] = []
     duplicates_merged = 0
@@ -1192,6 +1290,7 @@ async def extract_reserve_study(
             details={"page_spans": [item.model_dump() for item in discovery.page_spans]},
         )
 
+    rows, noise_dropped = _drop_annual_schedule_noise(rows)
     rows, duplicates_merged = _dedupe_reserve_rows(rows)
     rows, reference_year = canonicalize_reserve_study_rows(
         rows,
@@ -1201,6 +1300,11 @@ async def extract_reserve_study(
         study_year=study_year,
     )
     unique_warnings = list(dict.fromkeys(warnings))
+    if noise_dropped:
+        unique_warnings.append(
+            f"Dropped {noise_dropped} non-component row(s) (annual-schedule headers, year totals, "
+            f"or rows with no usable lifecycle data)."
+        )
     if duplicates_merged:
         unique_warnings.append(
             f"Merged {duplicates_merged} duplicate reserve-study row(s) detected across extracted pages."

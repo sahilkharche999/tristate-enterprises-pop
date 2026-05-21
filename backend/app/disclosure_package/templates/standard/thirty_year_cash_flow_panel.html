@@ -1,0 +1,150 @@
+{% extends "_base.html" %}
+{% block title %}Cash Flow Forecast{% endblock %}
+{% block content %}
+
+{# Three horizontal panels: years 1-10, 11-20, 21-30. The cash-flow matrix is
+   pivoted: rows are line items, cols are years. Computed in compiler._cash_flow_rows. #}
+
+{% set cf = computed.thirty_year_cash_flow %}
+{% set slices = [(0, 10), (10, 20), (20, 30)] %}
+
+{% macro panel(slice_start, slice_end) %}
+  {% set ncols = slice_end - slice_start %}
+  {% set colspan_full = ncols + 1 %}
+  <p class="center bold" style="text-decoration: underline; font-size:10pt; margin:0">
+    {{ hoa.name | upper }}
+  </p>
+  <p class="center bold" style="font-size:9pt; line-height:1.3; margin:0 0 4pt 0">
+    FORECASTED STATEMENTS OF REPLACEMENT FUND<br>
+    CASH RECEIPTS, DISBURSEMENTS AND BALANCES<br>
+    YEARS ENDING DECEMBER 31, {{ fiscal_year }} TO {{ fiscal_year + 29 }}
+    {% if slice_start > 0 %}<br>(CONTINUED){% endif %}
+  </p>
+  <table class="matrix-table">
+    <thead>
+      <tr>
+        <th></th>
+        {% for i in range(ncols) %}<th>{{ slice_start + i + 1 }}</th>{% endfor %}
+      </tr>
+      <tr>
+        <th></th>
+        {% for offset in range(slice_start, slice_end) %}<th>{{ cf.years[offset] }}</th>{% endfor %}
+      </tr>
+    </thead>
+    <tbody>
+      <tr class="section"><td colspan="{{ colspan_full }}">COMPUTATION PARAMETERS</td></tr>
+      <tr>
+        <td>Number of units</td>
+        {% for offset in range(slice_start, slice_end) %}
+          <td>{{ cf.number_of_units[offset] }}</td>
+        {% endfor %}
+      </tr>
+      <tr>
+        <td>Replace fund regular assmnt per unit per mo</td>
+        {% for offset in range(slice_start, slice_end) %}
+          <td>{{ '%.2f'|format(cf.replace_fund_assmnt_per_unit_per_mo[offset]) }}</td>
+        {% endfor %}
+      </tr>
+      <tr>
+        <td>Replace fund special assmnt per unit for yr</td>
+        {% for offset in range(slice_start, slice_end) %}
+          <td>{{ '%.0f'|format(cf.replace_fund_special_assmnt_per_unit_per_yr[offset]) }}</td>
+        {% endfor %}
+      </tr>
+      {% for bracket in cf.increase_brackets %}
+      <tr>
+        <td>Annual assmnt increase rate at</td>
+        <td class="bracket-label" colspan="{{ ncols }}">
+          {{ '%.1f'|format(bracket.rate * 100) }} % thru {{ bracket.end_year }}
+        </td>
+      </tr>
+      {% endfor %}
+      <tr>
+        <td>After-tax interest on cash balances</td>
+        {% for offset in range(slice_start, slice_end) %}
+          <td>{{ '%.3f'|format(cf.after_tax_interest_decimal[offset]) }}</td>
+        {% endfor %}
+      </tr>
+      <tr>
+        <td>Replacement cost increase rate</td>
+        <td class="bracket-label" colspan="{{ ncols }}">
+          {{ '%.1f'|format(cf.replacement_cost_increase_rate * 100) }} % p.a.
+        </td>
+      </tr>
+
+      <tr class="section"><td colspan="{{ colspan_full }}">CASH FLOW FORECASTS</td></tr>
+      <tr class="section"><td colspan="{{ colspan_full }}">CASH RECEIPTS</td></tr>
+      <tr>
+        <td>Regular assessments</td>
+        {% for offset in range(slice_start, slice_end) %}
+          <td>{{ '{:,}'.format(cf.regular_assessments[offset]|int) }}</td>
+        {% endfor %}
+      </tr>
+      <tr>
+        <td>Special assessments</td>
+        {% for offset in range(slice_start, slice_end) %}
+          <td>{{ '{:,}'.format(cf.special_assessments_row[offset]|int) }}</td>
+        {% endfor %}
+      </tr>
+      <tr>
+        <td>Interest income</td>
+        {% for offset in range(slice_start, slice_end) %}
+          <td>{{ '{:,}'.format(cf.interest_income[offset]|int) }}</td>
+        {% endfor %}
+      </tr>
+      <tr class="subtotal">
+        <td>Total cash receipts</td>
+        {% for offset in range(slice_start, slice_end) %}
+          <td>{{ '{:,}'.format(cf.total_cash_receipts[offset]|int) }}</td>
+        {% endfor %}
+      </tr>
+
+      <tr class="section"><td colspan="{{ colspan_full }}">CASH DISBURSEMENTS</td></tr>
+      <tr>
+        <td>Repair and replacement costs</td>
+        {% for offset in range(slice_start, slice_end) %}
+          <td>{{ '{:,}'.format(cf.repair_replacement_costs[offset]|int) }}</td>
+        {% endfor %}
+      </tr>
+      <tr>
+        <td>Board approved deferral of expenditures</td>
+        {% for offset in range(slice_start, slice_end) %}
+          <td>{{ '{:,}'.format(cf.board_approved_deferral[offset]|int) }}</td>
+        {% endfor %}
+      </tr>
+      <tr class="subtotal">
+        <td>Total cash disbursements</td>
+        {% for offset in range(slice_start, slice_end) %}
+          <td>{{ '{:,}'.format(cf.total_cash_disbursements[offset]|int) }}</td>
+        {% endfor %}
+      </tr>
+
+      <tr class="subtotal">
+        <td>CASH FLOW (DEFICIENCY)</td>
+        {% for offset in range(slice_start, slice_end) %}
+          {% set v = cf.cash_flow_deficiency[offset]|int %}
+          <td>{% if v < 0 %}({{ '{:,}'.format(-v) }}){% else %}{{ '{:,}'.format(v) }}{% endif %}</td>
+        {% endfor %}
+      </tr>
+      <tr class="subtotal">
+        <td>CASH BALANCE, BEGINNING OF YEAR</td>
+        {% for offset in range(slice_start, slice_end) %}
+          <td>{{ '{:,}'.format(cf.cash_balance_beginning[offset]|int) }}</td>
+        {% endfor %}
+      </tr>
+      <tr class="total-row">
+        <td>CASH BALANCE, END OF YEAR</td>
+        {% for offset in range(slice_start, slice_end) %}
+          <td>{{ '{:,}'.format(cf.cash_balance_end[offset]|int) }}</td>
+        {% endfor %}
+      </tr>
+    </tbody>
+  </table>
+{% endmacro %}
+
+{% for slice in slices %}
+  {{ panel(slice[0], slice[1]) }}
+  {% if not loop.last %}<div class="page-break"></div>{% endif %}
+{% endfor %}
+
+{% endblock %}

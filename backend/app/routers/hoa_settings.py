@@ -23,6 +23,7 @@ def _row_to_dict(row) -> Dict[str, Any]:
         "cpa_firm_name": row.cpa_firm_name,
         "cpa_firm_address": row.cpa_firm_address,
         "reserve_study_expert_name": row.reserve_study_expert_name,
+        "reserve_study_date": row.reserve_study_date,
         "reserve_cash_balance_eoy_prior": row.reserve_cash_balance_eoy_prior,
         "fund_balance_boy_operations": row.fund_balance_boy_operations,
         "monthly_assessment_per_unit_prior": row.monthly_assessment_per_unit_prior,
@@ -30,6 +31,25 @@ def _row_to_dict(row) -> Dict[str, Any]:
         "replacement_cost_increase_rate": row.replacement_cost_increase_rate,
         "assessment_increase_schedule_json": row.assessment_increase_schedule_json,
         "letter_signed_by": row.letter_signed_by,
+        # Priority-A disclosure inputs (drifting-puzzling-grove)
+        "approved_monthly_assessment_per_unit": row.approved_monthly_assessment_per_unit,
+        "income_tax_provision_override": row.income_tax_provision_override,
+        "reserve_funding_source": row.reserve_funding_source or "reserve_study_provision",
+        "reserve_funding_manual_amount": row.reserve_funding_manual_amount,
+        "special_assessments_json": row.special_assessments_json or "[]",
+        "additional_assessments_needed_json": row.additional_assessments_needed_json or "[]",
+        "outstanding_loan_json": row.outstanding_loan_json,
+        # Phase 1 boilerplate-gap fields (drifting-puzzling-grove)
+        "letter_date": row.letter_date,
+        "letter_signed_by_title": row.letter_signed_by_title,
+        "accountant_report_date": row.accountant_report_date,
+        "reserve_funding_plan_date": row.reserve_funding_plan_date,
+        "hoa_state": row.hoa_state or "CA",
+        "hoa_entity_type": row.hoa_entity_type,
+        "hoa_incorporation_year": row.hoa_incorporation_year,
+        # 30-year reserve funding study (drifting-puzzling-grove rebuild)
+        "replacement_fund_monthly_assessment_per_unit": row.replacement_fund_monthly_assessment_per_unit,
+        "board_deferrals_json": row.board_deferrals_json or "[]",
     }
 
 

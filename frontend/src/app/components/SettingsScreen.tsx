@@ -13,6 +13,9 @@ import { getHOA, updateHOA, type HOARecord } from '../api/hoa';
 import { getErrorMessage } from '../lib/errors';
 import { MONTH_NAMES, monthNameToNumber, monthNumberToName } from '../lib/hoa';
 import { HOADisclosureSettingsForm } from './HOADisclosureSettingsForm';
+import { AppendixManifestEditor } from './AppendixManifestEditor';
+import { AnnualPackagesPanel } from './AnnualPackagesPanel';
+import { DREPanel } from './DREPanel';
 
 interface SettingsFormState {
   name: string;
@@ -214,6 +217,15 @@ export function SettingsScreen() {
             <TabsTrigger value="disclosure" className="data-[state=active]:bg-white">
               Disclosure Package
             </TabsTrigger>
+            <TabsTrigger value="appendices" className="data-[state=active]:bg-white">
+              Appendices
+            </TabsTrigger>
+            <TabsTrigger value="packages" className="data-[state=active]:bg-white">
+              Annual Packages
+            </TabsTrigger>
+            <TabsTrigger value="dre" className="data-[state=active]:bg-white">
+              DRE & Review
+            </TabsTrigger>
           </TabsList>
 
           <TabsContent value="database" className="space-y-6">
@@ -381,6 +393,24 @@ export function SettingsScreen() {
           <TabsContent value="disclosure" className="space-y-6">
             <div className="bg-[#F7F7F7] border border-[#E5E5E5] rounded-lg p-8">
               <HOADisclosureSettingsForm hoaId={hoa.id} />
+            </div>
+          </TabsContent>
+
+          <TabsContent value="appendices" className="space-y-6">
+            <div className="bg-[#F7F7F7] border border-[#E5E5E5] rounded-lg">
+              <AppendixManifestEditor hoaId={hoa.id} />
+            </div>
+          </TabsContent>
+
+          <TabsContent value="packages" className="space-y-6">
+            <div className="bg-[#F7F7F7] border border-[#E5E5E5] rounded-lg">
+              <AnnualPackagesPanel hoaId={hoa.id} />
+            </div>
+          </TabsContent>
+
+          <TabsContent value="dre" className="space-y-6">
+            <div className="bg-[#F7F7F7] border border-[#E5E5E5] rounded-lg">
+              <DREPanel hoaId={hoa.id} />
             </div>
           </TabsContent>
 

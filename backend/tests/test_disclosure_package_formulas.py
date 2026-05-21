@@ -331,24 +331,34 @@ def test_no_float_in_signatures():
             )
 
 
-def test_old_mill_2026_spec_loads():
-    """Smoke test that OLD_MILL_2026 is a valid PackageSpec."""
-    from app.disclosure_package.package_specs import SPECS
+def test_standard_spec_loads():
+    """Smoke test that STANDARD_PACKAGE_SPEC is a valid PackageSpec.
 
-    spec = SPECS["old_mill"]
-    assert spec.fiscal_year == 2026
-    assert spec.static_data.assessment_model == "flat"
-    assert spec.static_data.monthly_assessment_per_unit_current == Decimal("605.00")
-
-
-def test_old_mill_2026_entries_total_109_pages():
-    """Smoking-gun: golden PDF is 109 pages (CONTEXT, RESEARCH § 'Top-level structure').
-
-    DEVIATION-NOTE: the RESEARCH-listed entries sum to 96 pages, not 109.
-    The deficit is reconciled in old_mill.py per CONTEXT and SUMMARY.
+    DRE-driven architecture: the spec ships with sentinel hoa_id/fiscal_year
+    and empty static_data defaults; per-HOA values flow from DB rows at
+    compile time.
     """
-    from app.disclosure_package.package_specs import SPECS
+    from app.disclosure_package.package_specs import SPECS, STANDARD_PACKAGE_SPEC
 
-    spec = SPECS["old_mill"]
-    total = sum(entry.page_count_hint for entry in spec.entries)
-    assert total == 109, f"expected 109, got {total}"
+    assert SPECS["standard"] is STANDARD_PACKAGE_SPEC
+    assert STANDARD_PACKAGE_SPEC.hoa_id == 0
+    assert STANDARD_PACKAGE_SPEC.fiscal_year == 0
+    assert STANDARD_PACKAGE_SPEC.static_data.assessment_model in {"flat", "grouped", "per_unit"}
+
+
+def test_standard_entries_has_template_chain():
+    """The universal template chain must include the expected generated pages."""
+    from app.disclosure_package.package_specs import STANDARD_PACKAGE_SPEC
+    from app.disclosure_package.schemas import GeneratedPage
+
+    generated = [e for e in STANDARD_PACKAGE_SPEC.entries if isinstance(e, GeneratedPage)]
+    templates = {entry.template for entry in generated}
+
+    # Core templates the compile/render pipeline expects.
+    assert "cover_letter.html" in templates
+    assert "annual_budget_report_cover.html" in templates
+    assert "pro_forma_disclosure_summary.html" in templates
+    assert "forecasted_income_statement.html" in templates
+    assert "reserve_component_schedule.html" in templates
+    assert "thirty_year_cash_flow_panel.html" in templates
+    assert "major_component_schedule.html" in templates

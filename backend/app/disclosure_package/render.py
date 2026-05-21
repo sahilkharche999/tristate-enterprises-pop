@@ -6,10 +6,10 @@ remote URL fetches), the url_fetcher is locked to a deny-all that
 allows ONLY local file:// references inside the templates directory.
 
 Public surface:
-    render_template(*, template_name, context, templates_subdir="old_mill") -> bytes
+    render_template(*, template_name, context, templates_subdir="standard") -> bytes
         Render a single Jinja template to PDF bytes.
 
-    render_package(*, spec, computed, templates_subdir="old_mill") -> dict[str, bytes]
+    render_package(*, spec, computed, templates_subdir="standard") -> dict[str, bytes]
         Render every GeneratedPage in spec.entries.
 
     RemoteFetchDenied (RuntimeError subclass)
@@ -60,7 +60,7 @@ def _deny_url_fetcher(url: str, timeout: int = 10, ssl_context=None) -> dict:
     )
 
 
-def _build_env(templates_subdir: str = "old_mill") -> Environment:
+def _build_env(templates_subdir: str = "standard") -> Environment:
     """Construct the Jinja2 Environment used for template rendering.
 
     Hardening policies:
@@ -87,7 +87,7 @@ def render_template(
     *,
     template_name: str,
     context: dict[str, Any],
-    templates_subdir: str = "old_mill",
+    templates_subdir: str = "standard",
 ) -> bytes:
     """Render a single template to PDF bytes via WeasyPrint.
 
@@ -126,7 +126,7 @@ def render_package(
     *,
     spec,  # PackageSpec
     computed: dict[str, Any],
-    templates_subdir: str = "old_mill",
+    templates_subdir: str = "standard",
 ) -> dict[str, bytes]:
     """Render every GeneratedPage entry in ``spec.entries``.
 

@@ -1,0 +1,58 @@
+You are mapping a current annual HOA budget to a previously approved DRE
+assessment setup for THIS specific association. You do not know which
+association this is, and you must rely only on the inputs provided —
+not on any HOA name, region, or formatting convention you may have seen.
+
+Inputs:
+1. Saved DRE setup JSON (defines pool_keys, allocation methods, recipient scopes)
+2. Current annual budget line items (label, section, category, fund_type, annual_amount)
+3. Prior-year mapping, if available (normalized_label → pool_key, with confidence)
+
+Task:
+Map current budget lines into the existing DRE allocation pools using the
+saved setup's pool_keys. Do not change the saved DRE allocation rules.
+
+Rules:
+- Do not create a new pool unless the line cannot be mapped to any existing pool.
+- Preserve the saved DRE allocation rules verbatim.
+- Match by pool_key (stable across setup versions), NOT by pool_id.
+- Use section + category + fund_type to disambiguate same-label lines that belong in different pools (e.g. "Insurance — operating" vs "Insurance — reserve").
+- If a new or renamed budget line appears, suggest the closest pool and mark for human review (confidence < 0.8).
+- If a line affects reserve funding, identify whether it belongs to reserve contribution, reserve expenditure, or operating expense.
+- Return both mapped lines and unmapped/review lines.
+- Never invent pools or line items not present in the inputs.
+
+Output JSON:
+{
+  "mapped_budget_lines": [
+    {
+      "budget_line_id": "",
+      "description": "",
+      "amount_annual": null,
+      "suggested_pool_key": "",
+      "mapping_confidence": 0.0,
+      "reason": ""
+    }
+  ],
+  "unmapped_lines": [
+    {
+      "budget_line_id": "",
+      "description": "",
+      "amount_annual": null,
+      "reason": "",
+      "suggested_question": ""
+    }
+  ],
+  "pool_totals": [
+    {
+      "pool_key": "",
+      "annual_total": null,
+      "monthly_total": null
+    }
+  ],
+  "warnings": []
+}
+
+(pool_id is intentionally NOT in this output. The mapping layer resolves
+pool_key → pool_id when persisting; the AI works in stable pool_key namespace
+so the same mapping survives AssessmentSetup supersessions.)

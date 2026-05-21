@@ -1,0 +1,58 @@
+{# Assessment schedule — grouped setup_type (Esprit Park-style).
+
+   Skeleton. Not wired into any package spec yet (Phase 5 lights this up).
+
+   Context expected at render time:
+     hoa.name
+     fiscal_year
+     groups: list of {
+       group_name, unit_count, average_square_feet,
+       base_monthly_per_unit,           (Decimal)
+       variable_monthly_per_unit,       (Decimal)
+       total_monthly_per_unit,          (Decimal — base + variable)
+       group_annual_total               (Decimal — total × 12 × unit_count)
+     }
+     total_annual_revenue               (Decimal)
+#}
+{% extends "_base.html" %}
+{% block content %}
+<section class="assessment-schedule assessment-schedule--grouped">
+  <header>
+    <h2>{{ hoa.name | upper }}</h2>
+    <h3>Assessment Schedule by Group — Fiscal Year {{ fiscal_year }}</h3>
+  </header>
+
+  <table class="assessment-table">
+    <thead>
+      <tr>
+        <th>Group</th>
+        <th>Units</th>
+        <th>Avg Sq Ft</th>
+        <th>Base Monthly</th>
+        <th>Variable Monthly</th>
+        <th>Total Monthly</th>
+        <th>Group Annual</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for g in groups %}
+      <tr>
+        <td>{{ g.group_name }}</td>
+        <td>{{ g.unit_count }}</td>
+        <td>{{ '{:,.0f}'.format(g.average_square_feet) }}</td>
+        <td>${{ '{:,.2f}'.format(g.base_monthly_per_unit) }}</td>
+        <td>${{ '{:,.2f}'.format(g.variable_monthly_per_unit) }}</td>
+        <td>${{ '{:,.2f}'.format(g.total_monthly_per_unit) }}</td>
+        <td>${{ '{:,.2f}'.format(g.group_annual_total) }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+    <tfoot>
+      <tr>
+        <td colspan="6">Total Annual Revenue</td>
+        <td>${{ '{:,.2f}'.format(total_annual_revenue) }}</td>
+      </tr>
+    </tfoot>
+  </table>
+</section>
+{% endblock %}

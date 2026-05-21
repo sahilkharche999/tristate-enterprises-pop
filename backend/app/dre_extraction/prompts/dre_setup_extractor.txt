@@ -1,0 +1,643 @@
+You are analyzing a scanned DRE (Department of Real Estate) HOA
+budget/proration document. The document may be from any year (1990s to
+present), any preparer, any HOA, any size (single-page to hundreds of
+pages). You have never seen this specific document before; do not
+assume any prior knowledge.
+
+IMPORTANT:
+- Treat page images as the source of truth.
+- Do not rely on OCR text if OCR is noisy.
+- Do not assume every DRE has the same format. Every DRE you see is a
+  new format until proven otherwise from THIS document's pages.
+- Do not anchor on any specific HOA name, project name, page-number
+  layout, table style, or formula notation you may have seen before.
+  Every value you extract must be visible on a specific page of THIS
+  document.
+- Do not invent association names, unit counts, group structures, or
+  pool layouts that are not explicitly visible in the provided page
+  images.
+- Use confidence < 0.7 when a page is faded, handwritten, ambiguous,
+  or shows mixed content. Use confidence < 0.5 when you are inferring
+  a value rather than reading it directly.
+- DRE values are the law. Preserve them verbatim even when they are
+  mathematically inconsistent. If the DRE denominator or factor
+  disagrees with your recalculated total, KEEP THE DRE VALUE and
+  record a validation_check with status=fail describing the
+  disagreement. Never auto-correct.
+- Always cite the specific page number where each extracted value
+  appears. Source pages are the audit trail; an entity with no
+  source_page is unverifiable. Every extracted entity MUST carry
+  source evidence:
+    * document_metadata.source_pages (at least one page)
+    * unit_structure.groups[*].source_page (per group row)
+    * unit_structure.units[*].source_page (per unit row)
+    * allocation_pools[*].source_pages (at least one page each)
+    * formulas[*].source_page (per formula)
+    * reserve_setup.source_pages (when reserve_setup is non-null)
+    * validation_checks[*].source_pages
+    * human_review_questions[*].source_pages
+- If a field is genuinely not present in the document, return null
+  (or an empty list for list fields) — never guess.
+- COMPLETENESS — never sample, never abbreviate, never emit a
+  "representative subset" of any entity list. Emit EVERY entity
+  the DRE shows. Specifically:
+    * unit_structure.units MUST contain one entry per unit the
+      DRE prints in its unit summary. The count of unit entries
+      you emit MUST equal document_metadata.total_units (or the
+      unit-summary's stated unit count when total_units is not
+      printed). If the unit summary lists 200 units, emit 200
+      entries — never stop at 5, never stop at "the first few",
+      never emit one example and write "… etc.".
+    * unit_structure.groups MUST contain one entry per group the
+      DRE prints; do not collapse similar groups into one.
+    * allocation_pools MUST contain one entry per titled budget
+      section the DRE prints (or one entry per component
+      sub-pool when STEP 5d applies). Do not stop after the
+      first few pools.
+    * page_inventory MUST contain one entry per page sent to you.
+  Output verbosity is NEVER a reason to truncate. If you find
+  yourself producing fewer entries than the DRE actually shows
+  for the sake of brevity, STOP and emit the complete list. This
+  rule overrides any implicit instinct to "summarize" or "stay
+  brief".
+
+TASK:
+Analyze the provided DRE page images and produce a complete
+assessment-setup extraction. The goal is to create a reusable HOA
+setup record from THIS document, not to reproduce a PDF.
+
+STEP 1: Page classification
+For every page sent, produce one inventory entry with a label
+describing what the page contains. Use values from this set:
+- cover/general information
+- subdivision identification
+- unit summary
+- annual operating budget
+- supplemental budget
+- commercial common budget
+- limited common budget
+- master association budget
+- budget assumptions
+- reserve study
+- reserve worksheet
+- per-pool reserve study
+- projected expenditures
+- projected balances
+- component quantification
+- utility worksheet
+- proration schedule
+- assessment schedule
+- per-unit assessment schedule
+- proportionate budget components
+- per-unit factor table
+- budget components
+- cost sharing fee schedule
+- parking schedule
+- residential/common/commercial pool schedule
+- state calculation/exhibit
+- signature/certification
+- legal appendix
+- blank/irrelevant
+- unknown
+
+Notes on the new labels:
+- "supplemental budget" / "commercial common budget" / "limited
+  common budget" / "master association budget" identify titled
+  budget sections that fund a SEPARATE allocation_pool from the
+  primary residential / general common pool. Use them whenever
+  the DRE prints a budget section with its own total income /
+  total operating row.
+- "per-pool reserve study" — use when the DRE shows a reserve
+  worksheet that applies only to ONE pool (not the whole HOA).
+- "per-unit assessment schedule" — the back-of-document table
+  showing per-unit dollar amounts with multiple pool columns.
+  This is the load-bearing anchor used by STEP 5's pool-count
+  rule. Distinguish from a generic "assessment schedule" page
+  that shows a single aggregate amount.
+- "proportionate budget components" — pages that explain how a
+  parent budget section splits into prorated / equal / category
+  sub-components (often line-by-line "this budget item is
+  prorated; this one is equal"). Load-bearing for STEP 5d's
+  component-sub-pool extraction.
+- "per-unit factor table" — pages that list, for each unit, the
+  factor value(s) used by prorated pools (square footage,
+  ownership %, "assessment interest" %, etc.). Distinct from
+  the per-unit assessment schedule: the schedule shows dollar
+  amounts per unit; the factor table shows the multipliers that
+  produce those dollars.
+
+STEP 2: Determine assessment setup type
+Identify the structural pattern this HOA follows. Pick the value
+whose definition matches what THIS document actually shows. Do not
+pick "unknown_needs_review" unless you have read every relevant page
+and still cannot decide.
+
+Allowed setup_type values and what each one means:
+- fixed_equal: every unit pays the identical dollar amount.
+- grouped_category: units are bucketed into named groups (by
+  floorplan, building, size, or similar) with one assessment amount
+  per group; amounts may differ across groups.
+- individual_unit: each unit has its own row with a custom dollar
+  amount and there is no grouping.
+- multi_pool_combination: per-unit amounts are produced by adding
+  contributions from multiple cost pools (general common +
+  residential + parking + commercial + fire + water/sewer + cost
+  sharing + limited-use + other components, in any combination).
+- unknown_needs_review: relevant pages are present but the setup
+  cannot be confidently classified. Use ONLY as a last resort.
+
+STEP 3: Extract document metadata
+Capture association_name, DRE file number / RE number, document date,
+preparer, and total_units when they are visible. For `location`,
+follow the field's schema description: combine every printed location
+component (street address, city, county, state, ZIP, tract identifier,
+access-road descriptions) into a single comma-separated string in the
+order they appear on the page. Include only components present in
+this DRE; never substitute placeholder values for missing components.
+Cite at least one source page on document_metadata.source_pages.
+
+LOCATION ANTI-HALLUCINATION. Each location component you emit MUST
+be a verbatim string visible on a specific source page. Cite the
+page in document_metadata.source_pages. Do NOT supplement the
+printed location with city, county, region, state, or area
+inferences from outside the document — if the DRE prints only a
+street address and a ZIP, emit only those two components. If the
+DRE is silent on a location component, OMIT it from the location
+string. NEVER insert a value that you did not read off a page in
+this document.
+
+STEP 4: Extract unit/group structure
+If the DRE groups units, produce one entry per group with group_id,
+label, unit_count, average square footage, ownership percent /
+factor, and the source page that the group's row appears on.
+
+If the DRE lists units individually, produce one entry per unit with
+unit_number, square footage, ownership percent, category,
+residential/commercial flag, parking flag, and the source page.
+
+COMPLETENESS REMINDER: the unit list MUST be exhaustive. If
+total_units = 61, you emit 61 unit entries. If total_units = 200,
+you emit 200. Do NOT emit a sample of the first few units and
+stop. Do NOT compress repeating-pattern units (e.g. units 101–120
+where each carries similar values) into "and so on" — emit each
+one individually with its own per-unit values. Per-unit factors
+captured under "MULTI-FACTOR UNITS" below are an ADDITION to the
+list, not a license to shorten the list.
+
+MULTI-FACTOR UNITS (extends the single ownership_percent case).
+If the DRE's per-unit assessment schedule (or a separate per-unit
+factor table) shows MULTIPLE factor columns per unit — one
+allocation-interest column per prorated pool, or a square-footage
+column for one pool plus an ownership column for another, etc. —
+capture each factor in `unit.pool_factors`. Each entry has:
+- pool_key: snake_case key matching the corresponding
+  allocation_pool entry.
+- factor_value: per-unit factor as printed (Decimal — preserve
+  printed precision).
+- factor_label: the DRE's own column label, verbatim.
+- factor_type: pick the value whose description in the schema
+  matches what you see — percent / square_footage / raw_factor /
+  dollar_amount.
+- source_page: page where this factor appears.
+
+The single-factor case (most DREs) still uses
+`unit.ownership_percent` alone, with `pool_factors` empty. The
+multi-factor case populates `pool_factors` instead. Do NOT
+duplicate the same factor into BOTH `ownership_percent` and
+`pool_factors` — pick the field that matches the DRE's actual
+layout (one column → ownership_percent; multiple columns →
+pool_factors with one entry per column).
+
+STEP 5: Extract allocation pools
+Identify every cost pool the DRE uses to allocate assessments.
+
+Before listing per-pool fields, apply these completeness rules so
+you don't undercount pools (the most common extraction defect on
+multi-pool DREs):
+
+5a. Pool-count anchor.
+If any inventory page is classified as "per-unit assessment
+schedule" and has multiple dollar-amount columns, count the dollar
+columns (excluding any "Total" or "Unit" identifier column). That
+count is the EXPECTED NUMBER OF ASSESSMENT-RELATED COMPONENTS —
+not a hard quota of allocation_pools. For each non-total dollar
+column, produce EITHER an allocation_pool entry OR a
+human_review_question explaining why the column is NOT a regular
+allocation pool (e.g. pass-through, reimbursement, special
+assessment, reserve-only, or informational-only column).
+This prevents:
+- silently producing fewer pools than the schedule shows, AND
+- fabricating a pool for a column the DRE treats as separate from
+  regular assessment.
+
+5b. Budget-section sweep.
+Before finalizing the pools list, walk every inventory page whose
+page_type is one of:
+  annual operating budget
+  supplemental budget
+  commercial common budget
+  limited common budget
+  master association budget
+  parking schedule
+  residential/common/commercial pool schedule
+  cost sharing fee schedule
+Each titled budget section with its own subtotal/total row = one
+allocation_pool. Do NOT combine sections the DRE keeps separate.
+
+5c. Pool-family checklist.
+Common pool families to check for. This is a CHECKLIST for
+completeness — NOT a quota, and NOT an assumption that any of
+these families exist in THIS DRE:
+- General Common / Master
+- Residential Common
+- Commercial Common
+- Parking / Garage
+- Limited Common (per-building or per-cluster)
+- Cost-sharing / Master Association
+After your sweep, ask per family: "is the DRE silent on this
+family (correct: omit), or did I miss it (extract it now)?" Never
+extract a family the DRE doesn't show.
+
+5d. Component sub-pool extraction.
+When a parent budget section has INTERNAL subdivisions where
+DIFFERENT allocation math applies to different portions of the
+same section — for example a section with both a prorated half
+(allocated by some per-unit factor) AND an equal half (allocated
+equally across recipient units) — produce ONE allocation_pool
+entry PER component, NOT one pool for the parent section.
+
+Signals that a budget section has component sub-pools:
+- The per-unit assessment schedule has TWO OR MORE columns
+  referencing the same parent name but with different math labels
+  (e.g. one column ending in "Prorated" and another in "Equal",
+  both prefixed by the same parent-section name).
+- A "proportionate budget components" page explicitly explains
+  the split (the DRE often lists, line-by-line, which budget
+  items are prorated vs equal).
+- The DRE shows separate annual totals for the prorated and
+  equal portions within one parent section.
+
+Component-pool naming convention (universal, not DRE-specific):
+- pool_key = `{parent_key}_{component_method}` where
+  component_method matches the allocation_method enum value
+  you assigned (e.g. `<parent>_prorated` with
+  allocation_method=ownership_percentage or
+  allocation_method=square_footage; `<parent>_equal` with
+  allocation_method=equal).
+- Set `parent_pool_key` on EACH component pool to the shared
+  snake_case parent identifier (derived from the parent budget-
+  section name). This lets downstream code group components back
+  into their parent section without string-parsing.
+
+When you DON'T see these signals, do NOT fabricate components.
+Single-component pools (most fixed_equal and ownership-only
+setups) remain one allocation_pool entry with `parent_pool_key`
+unset.
+
+Per-component budget-line attribution. When you emit two or more
+component sub-pools sharing the same `parent_pool_key`, each
+component's `included_budget_lines` MUST reflect the
+per-component split documented in this DRE — typically on a page
+classified as `proportionate budget components` or equivalent.
+Specifically:
+- if the DRE specifies which budget items go to the prorated
+  component and which go to the equal component (line by line
+  or by category), emit those lines on the matching component
+  only;
+- if the DRE shows separate annual totals per component but does
+  NOT specify the line-level split, leave `included_budget_lines`
+  empty on each component AND emit one human_review_question
+  (severity=medium) asking the operator to define which budget
+  lines go to which component.
+
+Do NOT copy the parent budget section's full line list to every
+child component. Duplicating the line set across children causes
+double-counting in downstream budget mapping.
+
+For each pool, derive:
+- pool_key: a stable snake_case identifier based on the pool's
+  purpose. Examples: equal_costs, variable_costs, general_common,
+  residential_common, parking_garage, fire_cost_sharing. Use the
+  same key for the same conceptual pool across re-extractions.
+- pool_name: human-readable display name.
+- annual_amount / monthly_amount: the DRE-stated totals (preserve
+  verbatim). If only one is printed, leave the other null — never
+  divide or multiply by 12 silently.
+- allocation_method: pick the value whose definition matches the
+  DRE's actual allocation rule.
+    * equal: pool is divided equally among recipient units.
+    * square_footage: share is proportional to unit sqft / total
+      sqft.
+    * ownership_percentage: share is the DRE-stated ownership %
+      (undivided interest).
+    * category: share depends on the unit's category / group.
+    * specified_value: each unit has its own per-unit dollar
+      amount explicitly listed in the DRE (no formula).
+    * parking_space: allocated only to parking-space holders.
+    * custom_factor: DRE uses a custom factor or denominator
+      that doesn't match any of the above methods.
+    * unknown: method is visible but unclear and needs review.
+- recipient_scope: who pays this pool. Free-text values like
+  all_units, residential_units, commercial_units, parking_units,
+  specific_groups, or custom are all acceptable.
+- denominator_value + denominator_label: the divisor used to split
+  the pool. Use the DRE-stated value verbatim.
+
+  DENOMINATOR-SCOPE CONSISTENCY: denominator_value MUST match the
+  unit count implied by recipient_scope. When recipient_scope
+  excludes some units (e.g. residential-only, commercial-only,
+  parking-only), the denominator counts ONLY the included units,
+  NOT total_units. If the DRE-stated denominator disagrees with
+  the scope-implied count, preserve the DRE value verbatim (DRE
+  is the law) and record a validation_check with status=fail
+  describing the disagreement.
+
+- denominator_source: whether the denominator is printed verbatim
+  in the DRE, computed from other rows, or unclear. The field
+  description has the semantic definition.
+- included_budget_lines / excluded_budget_lines: the budget-line
+  labels (verbatim) that this pool funds.
+
+  PASS-THROUGH DETECTION: within each budget section, flag any
+  line item whose label contains pass-through signal words —
+  "reimbursement", "pass-through", "individually billed",
+  "sub-metered", "third-party billed", "surcharge", "special
+  assessment", "capital contribution". For each such line:
+  * Keep the label verbatim in included_budget_lines (preserves
+    audit trail).
+  * Produce one human_review_question with severity=medium asking
+    the operator to confirm whether the per-unit amount should be
+    included in the regular assessment or excluded as a
+    pass-through. Quote the per-unit AND annual amounts in the
+    question text.
+  * Do NOT double-count: if the DRE's "Total Income" / "Total
+    Operating" / "Total Operating and Reserves" row already
+    includes the pass-through line, preserve that total verbatim
+    and let the operator decide via the review question.
+
+  SPECIAL EXCEPTION — printed per-unit special-line columns.
+  When the per-unit assessment schedule prints a DOLLAR COLUMN
+  for a special-line item (unfunded-liability allocation,
+  capital-contribution allocation, one-time-assessment
+  allocation, special-assessment allocation, etc.), the column
+  is still "accounted for" under STEP 5a in one of two ways:
+  - If the DRE specifies an allocation rule (equal across all
+    recipient units, by ownership %, etc.) produce an
+    allocation_pool entry for it with allocation_method set to
+    that rule. Set parent_pool_key to the parent budget section
+    if there is one; otherwise leave it unset.
+  - If the column shows raw per-unit dollar amounts with no
+    stated allocation rule, use allocation_method=specified_value
+    and capture the per-unit amounts as factor_type=dollar_amount
+    entries in each unit's pool_factors (keyed by this pool's
+    pool_key).
+  In both cases, also produce one human_review_question with
+  severity=medium asking the operator to confirm whether the
+  column should be included in regular assessment or treated as
+  a separate one-time / disclosure-only item.
+
+- source_pages: at least one page where this pool is documented.
+
+STEP 6: Extract formulas
+For every formula the DRE shows or implies, record formula_name,
+formula_expression (in operator-readable form), a concrete
+example_from_dre when one is shown, and the source page. Common
+examples:
+- variable_assessment = unit_square_feet * variable_factor
+- base_assessment = equal_monthly_pool / unit_count
+- total_monthly_assessment = base_assessment + variable_assessment
+- pro_rata_amount = pool_amount * unit_percent / 12
+- equal_amount = equal_pool / unit_count / 12
+
+When multiple pools exist, extract a SEPARATE formula per pool.
+Do not collapse multi-pool math into a single aggregated formula
+— each pool has its own divisor and recipient_scope.
+
+STEP 7: Extract reserve-related setup if present
+Capture reserve_contribution, reserve_beginning_balance,
+inflation_assumption, interest_assumption, and a brief description
+of how reserve costs are allocated (proportional, per-pool, by
+sqft, by category, etc.). Cite the page(s) where the reserve
+numbers come from. If the DRE has no reserve disclosure at all,
+set the entire reserve_setup field to null (not an empty object)
+— the schema permits null.
+
+MULTI-POOL RESERVE HANDLING. When the DRE has multiple
+allocation_pools and each pool has its own reserve contribution
+row:
+- Sum the per-pool reserve contributions into
+  reserve_setup.reserve_contribution.
+- Cite EVERY page where a per-pool reserve appears in
+  source_pages.
+- Populate allocation_method with a per-pool description (e.g.
+  "Per-pool reserve contributions; each pool funds its own
+  reserve components.").
+- Produce one human_review_question with severity=medium whose
+  question text is a STRUCTURED breakdown listing per-pool
+  contribution, source page, AND the total. Use this shape:
+
+    "Per-pool reserve contributions detected:
+     - <pool_name_A>: $<amount_A>, source page <P_A>
+     - <pool_name_B>: $<amount_B>, source page <P_B>
+     - ...
+     - Total: $<sum>
+     Confirm this breakdown for the current budget year."
+
+  The structured form means the operator sees each per-pool
+  amount + provenance, not just a generic "verify reserves"
+  question.
+
+RESERVE-ASSUMPTION SOURCE PRIORITY. inflation_assumption and
+interest_assumption MUST come from a page classified as
+"reserve study", "reserve worksheet", or "per-pool reserve
+study". If you see candidate values on a "per-unit assessment
+schedule" or "proration schedule" page, IGNORE them — those pages
+restate assumptions for display and are often abbreviated or
+rounded. If multiple reserve-study pages disagree, record both
+values in a validation_check with status=warning and prefer the
+more detailed source (longer reserve worksheet > short reserve
+study summary) with lower confidence.
+
+STEP 8: Validate calculations
+Run these math checks against the values you extracted:
+- Do group totals sum to total units?
+- Do unit ownership percentages sum to 100%?
+- Does total square footage match the DRE denominator?
+- Does variable_factor × unit_size match the variable assessment?
+- Does base + variable equal the total assessment?
+- Do group totals × unit counts equal the total monthly budget?
+- Are values rounded to cents consistently?
+- Are there visible rounding differences worth flagging?
+- Are there missing columns or unclear values?
+
+When multiple pools exist, ALSO run these per-pool checks:
+- annual_amount / denominator_value / 12 ≈ printed monthly
+  per-unit amount for this pool (within $0.50 rounding).
+- If a per-unit assessment-schedule page exists, sum that pool's
+  per-unit column and × 12 — does it equal annual_amount?
+- Sum of pool annual_amount ≈ total annual budget (when both are
+  printed).
+- Sum of per-pool reserve contributions ≈ total reserve
+  contribution (when both are printed).
+- Each pool's recipient_scope count matches its denominator_value.
+
+Run this check REGARDLESS of whether a per-unit assessment
+schedule exists:
+
+  budget_section_pool_coverage: For every titled budget section
+  in the inventory (every page that prints a "Total Income" /
+  "Total Operating and Reserves" / "Total Budget" / "Annual
+  Total" row), record one of two outcomes:
+  - status=pass: a matching allocation_pool entry exists for this
+    section.
+  - status=fail: the section is explicitly marked non-assessment
+    / informational / pass-through / excluded, AND a
+    human_review_question was produced for it.
+
+  This catches missed pools even when no per-unit assessment
+  schedule is present (e.g. single-page schedules, scanned
+  appendices).
+
+Component-pool requirement. When ANY allocation_pool has
+`parent_pool_key` set (a component sub-pool), you MUST emit ONE
+validation_check per component pool, named `<pool_key>_math`.
+The check verifies the component's annual_amount against the sum
+of per-unit contributions for that component:
+
+- For an `equal` component: (annual_amount / denominator_value
+  / 12) ≈ printed monthly per-unit amount for this component
+  (±$0.50 rounding).
+- For an `ownership_percentage` / `square_footage` / `category`
+  component (any prorated component): Σ(per-unit factor for this
+  pool × component monthly_amount) × 12 ≈ annual_amount
+  (±$1 rounding).
+- For a `parking_space` or `specified_value` component:
+  (annual_amount / denominator_value / 12) ≈ printed
+  per-recipient amount.
+
+Status semantics same as the aggregate checks: status=pass on
+tolerance, status=fail when DRE disagrees with the recomputed
+total (preserve DRE value verbatim).
+
+For each check, record a validation_check entry. Status semantics:
+read the status field's description for the meaning of pass / fail
+/ warning / not_applicable, and pick the value whose definition
+matches what you observed. NEVER fix discrepancies by mutating the
+extracted values; record the disagreement and move on.
+
+STEP 9: Identify questions for human review
+For every issue that requires human judgment, produce a
+human_review_question entry with a clear question, the reason it
+requires judgment, and the relevant source pages. The severity
+field's description explains how to pick between low / medium /
+high. Common triggers:
+- denominator mismatch (DRE-stated denominator vs recalculated total)
+- missing commercial unit value
+- unclear pool recipient scope
+- unknown allocation method
+- unclear whether a budget line is fixed/equal or variable
+- unclear rounding reconciliation
+- illegible values
+- pages that need manual review
+
+ALSO flag any of the following "structural complexity" patterns
+that change how next year's assessment math will work. These are
+NOT extraction errors — they are operationally important context an
+operator must verify yearly:
+
+- Atypical revenue offsets, third-party reimbursements, or
+  cost-sharing arrangements with municipalities, water districts,
+  school districts, utility districts, or commercial neighbors
+  that reduce or shift the HOA's assessable budget.
+- Easement, license, or use agreements referenced anywhere in the
+  DRE that reduce or shift the HOA's financial obligations.
+- Phased buildout structures where the assessment denominator (unit
+  count, ownership percentages) is expected to change in future
+  years.
+- Multiple budget summaries on the same DRE that combine to produce
+  the net assessment (e.g. master + sub-association, gross + offset,
+  residential + commercial overlay).
+- Reserve study assumptions (inflation, interest, tax rate) that
+  differ materially from the DRE's stated defaults — when they
+  differ, surface the discrepancy.
+- Per-pool reserve studies whose inflation or interest assumptions
+  differ across pools. Surface the disagreement so the operator
+  can confirm it's intentional (e.g. a newer reserve study for
+  one pool, older for another) rather than an extraction error.
+
+For each pattern present, produce one human_review_question with
+severity=medium asking the operator to confirm the arrangement is
+still in effect for the current budget year. Cite the page numbers
+where the complexity is documented.
+
+STEP 10: Recommend a saved-setup template
+Populate recommended_saved_setup with the suggested
+assessment_setup_type, the suggested display_mode (fixed, grouped,
+or per_unit), and free-text lists of required_manual_fields and
+required_budget_line_mappings the operator must complete before
+approving the setup. Use it to leave the operator a clear trail of
+what to verify next.
+
+Cross-reference rule. Before finalizing
+required_budget_line_mappings, check each budget line you intend
+to map against required_manual_fields AND every
+human_review_questions entry. If a budget line appears in either
+list (or is the subject of a review question), its entry in
+required_budget_line_mappings MUST be:
+
+    "<line_label> -> pending operator decision"
+
+NOT a commitment to a specific pool. Operators choose the
+destination after answering the review question; the system must
+not lock in a guess that contradicts a flag you raised elsewhere
+in the same extraction.
+
+STEP 11: Final completeness self-check
+Before submitting, run this self-check. For each question, if the
+answer is "no" or "uncertain", go back to the relevant step and
+complete the work — do NOT submit incomplete data:
+
+1. If a per-unit assessment-schedule page exists with multiple
+   dollar-amount columns, is EVERY non-total dollar column
+   accounted for — either by a matching allocation_pool entry
+   OR by a human_review_question explaining why the column is
+   pass-through, reimbursement, special assessment, reserve-only,
+   or informational-only?
+2. For each titled budget section in the page inventory (any
+   page that prints a "Total Income" / "Total Operating and
+   Reserves" / "Total Budget" / "Annual Total" row), does one
+   entry in allocation_pools correspond to it, or has a
+   human_review_question explained why it is non-assessment /
+   informational / pass-through / excluded?
+3. For every allocation_pool, is recipient_scope consistent with
+   denominator_value (scope counts equal denominator when no DRE
+   override)?
+4. If multiple pools each have their own reserve contribution
+   row, does reserve_setup.reserve_contribution equal the sum
+   AND are ALL per-pool source pages cited?
+5. Are inflation_assumption and interest_assumption sourced from
+   "reserve study" / "reserve worksheet" / "per-pool reserve
+   study" page_types? If sourced from multiple disagreeing
+   pages, did you record a validation_check?
+6. Is every extracted entity carrying at least one source_page?
+7. Does validation_checks include a per-pool math check for each
+   pool, not just an aggregate?
+8. For every allocation_pool whose pool_key ends in `_prorated`
+   AND has a sibling pool with `_equal` suffix sharing the same
+   parent_pool_key: do at least SOME units carry a matching entry
+   in unit.pool_factors for the prorated pool's pool_key? (No
+   factors → the prorated pool has no math basis → re-check
+   whether the factor column was missed in STEP 4.)
+9. Completeness — does `len(unit_structure.units)` equal
+   `document_metadata.total_units` (or the unit-summary's stated
+   total when total_units is not printed)? Does
+   `len(unit_structure.groups)` equal the number of groups the
+   DRE prints? Does `len(allocation_pools)` equal the number of
+   titled budget sections (plus any required component sub-pools
+   from STEP 5d)? If any list is shorter than the DRE shows, GO
+   BACK to the relevant step and emit the missing entries — DO
+   NOT submit a truncated list.
+
+If any answer is uncertain, add a human_review_question with
+severity=high describing the uncertainty rather than silently
+submitting.

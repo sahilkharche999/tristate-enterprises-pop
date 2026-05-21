@@ -232,3 +232,118 @@ def test_from_hoa_record_rejects_zero_or_null_units():
     )
     with pytest.raises(ValueError, match="units"):
         from_hoa_record(null)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Real-world budget payload shape (drifting-puzzling-grove)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_from_budget_history_record_resolves_money_from_annual_budget_field():
+    """Real BudgetDraftPayload line items store the canonical money value
+    under ``annual_budget`` (not ``amount``). Earlier adapter versions read
+    only ``amount`` and silently returned Decimal(0) for every row, which
+    rendered every disclosure-package income statement as zeros even when
+    the UI showed the correct numbers."""
+    from app.disclosure_package.adapters import from_budget_history_record
+
+    record = {
+        "line_items": [
+            {
+                "label": "40000 - Assessment Income",
+                "annual_budget": 1148080.32,
+                "projection": 1148080.32,
+                "ytd_actual": 765386.88,
+                "percent_change": 0.0,
+                "category": "income",
+                "section": "income",
+            },
+            {
+                "label": "50050 - Management Service",
+                "annual_budget": 61740.0,
+                "category": "operating",
+                "section": "operating",
+            },
+        ],
+    }
+    draft = from_budget_history_record(record)
+    by_label = {li.label: li for li in draft.line_items}
+    assert by_label["40000 - Assessment Income"].amount == Decimal("1148080.32")
+    assert by_label["50050 - Management Service"].amount == Decimal("61740.0")
+
+
+def test_from_budget_history_record_derives_is_revenue_is_reserve_from_category():
+    """When the budget payload omits explicit is_revenue/is_reserve booleans
+    (the upstream extractor populates ``category`` only), the adapter must
+    derive both flags so income lines land in revenue buckets, reserve lines
+    land in the reserve fund column, and so on."""
+    from app.disclosure_package.adapters import from_budget_history_record
+
+    record = {
+        "line_items": [
+            # operating revenue
+            {"label": "Assessment", "annual_budget": 100.0, "category": "income"},
+            # operating expense
+            {"label": "Mgmt fee", "annual_budget": 200.0, "category": "operating"},
+            # reserve revenue
+            {"label": "Reserve interest", "annual_budget": 50.0, "category": "reserve_income"},
+            # reserve expense
+            {"label": "Roof", "annual_budget": 300.0, "category": "reserve_expense"},
+        ],
+    }
+    draft = from_budget_history_record(record)
+    by_label = {li.label: li for li in draft.line_items}
+
+    assert by_label["Assessment"].is_revenue is True
+    assert by_label["Assessment"].is_reserve is False
+
+    assert by_label["Mgmt fee"].is_revenue is False
+    assert by_label["Mgmt fee"].is_reserve is False
+
+    assert by_label["Reserve interest"].is_revenue is True
+    assert by_label["Reserve interest"].is_reserve is True
+
+    assert by_label["Roof"].is_revenue is False
+    assert by_label["Roof"].is_reserve is True
+
+
+def test_from_budget_history_record_explicit_flags_win_over_category_derivation():
+    """If a record carries explicit is_revenue/is_reserve, those win — the
+    category-derived defaults must not overwrite them."""
+    from app.disclosure_package.adapters import from_budget_history_record
+
+    record = {
+        "line_items": [
+            {
+                "label": "Weird Override",
+                "annual_budget": 10.0,
+                "category": "income",       # would derive (revenue=True, reserve=False)
+                "is_revenue": False,         # explicit — must win
+                "is_reserve": True,          # explicit — must win
+            },
+        ],
+    }
+    draft = from_budget_history_record(record)
+    li = draft.line_items[0]
+    assert li.is_revenue is False
+    assert li.is_reserve is True
+
+
+def test_from_budget_history_record_proposed_amount_outranks_annual_budget():
+    """When the operator has explicitly approved a proposed_amount distinct
+    from the prior annual_budget, the proposed value wins. Mirrors the UI
+    'Proposed Change' column which the disclosure should reflect."""
+    from app.disclosure_package.adapters import from_budget_history_record
+
+    record = {
+        "line_items": [
+            {
+                "label": "Assessment",
+                "annual_budget": 100.0,
+                "proposed_amount": 120.0,   # post-approval bump
+                "category": "income",
+            },
+        ],
+    }
+    draft = from_budget_history_record(record)
+    assert draft.line_items[0].amount == Decimal("120.0")

@@ -26,7 +26,12 @@ class HOADetail(HOAListItem):
 
 class HOACreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=255)
-    units: int = Field(ge=1, le=100000)
+    # Optional at create time — the DRE extraction is the source of truth for
+    # unit count. The HOA can be created with units=None (interpreted as 0,
+    # "Pending DRE" in the UI); dre_approval_service writes the extracted
+    # ``document_metadata.total_units`` back to ``properties.units`` once an
+    # operator approves the run.
+    units: Optional[int] = Field(default=None, ge=0, le=100000)
     fiscal_year_start_month: int = Field(ge=1, le=12)
     fiscal_year_end_month: Optional[int] = Field(default=None, ge=1, le=12)
     city: Optional[str] = Field(default=None, max_length=255)
@@ -40,3 +45,4 @@ class HOAUpdateRequest(BaseModel):
     fiscal_year_start_month: int = Field(ge=1, le=12)
     fiscal_year_end_month: Optional[int] = Field(default=None, ge=1, le=12)
     city: Optional[str] = Field(default=None, max_length=255)
+    reserve_inflation_rate: Optional[float] = Field(default=None, ge=0, le=1)

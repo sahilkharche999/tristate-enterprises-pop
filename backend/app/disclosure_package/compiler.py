@@ -65,6 +65,10 @@ from .formulas import (
 from .merge import merge_pdfs, qpdf_check, write_atomic_bytes
 from .preflight import validate_inputs
 from .render import render_template
+from .assessment_schedule_matrix import (
+    AssessmentScheduleMatrix,
+    build_universal_assessment_matrix,
+)
 from .schemas import (
     BudgetDraft,
     GeneratedPage,
@@ -109,65 +113,370 @@ class CompileResult(BaseModel):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _build_thirty_year_plan(
-    *,
-    spec: PackageSpec,
-    hoa_metadata: HOAMetadata,
-    total_estimated_liability: Decimal,
-    total_year_replacement_provision: Decimal,
-    cash_eoy_prior: Decimal,
-    fiscal_year_start: int,
-    inflation_rate: Optional[Decimal] = None,
-    interest_rate: Optional[Decimal] = None,
-) -> list[dict[str, Any]]:
-    """Project beginning balance, contribution, expenditures, interest, and
-    ending balance for 30 years starting at ``fiscal_year_start``.
+_HORIZON_YEARS = 30
 
-    This is a deliberately simple roll-forward: each year contributes the
-    constant `total_year_replacement_provision` (with a 3% inflation factor
-    applied to the cost basis, mirroring `replacement_cost_increase_rate`),
-    earns interest on the average balance at the configured after-tax rate,
-    and is debited the same provision as a notional expenditure flat across
-    the horizon. Phase 12+ will replace this with per-component scheduled
-    expenditures from the reserve study.
+
+def _per_component_expenditures(
+    components: Any, fiscal_year_start: int
+) -> list[dict[str, Any]]:
+    """One dict per reserve-study component with current-dollar expenditures by year.
+
+    Real Old Mill convention (drifting-puzzling-grove rebuild):
+        - Replacement events fall at offsets {RL, RL+UL, RL+2·UL, ...} truncated
+          to < 30. The last replacement event in the window is the largest such
+          offset ≤ 29.
+        - At each event, the cell shows the component's *current* replacement
+          cost — NO inflation applied. (Inflation only enters the cash-flow
+          aggregate; see ``_aggregate_expenditures_inflated``.)
+        - Components with remaining_life ≥ 30 contribute zero events but still
+          appear in the table (empty expenditure columns, Total = 0).
+
+    Header rows (``row_type == 'header'`` from the reserve-study extractor)
+    pass through as dicts with ``is_header: True`` so the major-component
+    schedule template can render them as full-width section breaks.
+    """
+    out: list[dict[str, Any]] = []
+    for c in components or []:
+        # Surface upstream header rows verbatim — major_component_schedule.html
+        # renders them as a colspan'd section title.
+        if getattr(c, "is_header", False) or getattr(c, "row_type", None) == "header":
+            out.append({
+                "is_header": True,
+                "line_item": str(getattr(c, "line_item", "") or ""),
+                "expenditures_by_year": [Decimal("0")] * _HORIZON_YEARS,
+                "total_expenditures": Decimal("0"),
+            })
+            continue
+
+        useful_life = getattr(c, "useful_life", None)
+        replacement_cost = getattr(c, "replacement_cost", None)
+        remaining_life = getattr(c, "remaining_life", None)
+        line_item = str(getattr(c, "line_item", "") or "")
+
+        expenditures = [Decimal("0")] * _HORIZON_YEARS
+        total = Decimal("0")
+
+        if useful_life and replacement_cost is not None:
+            ul = int(useful_life)
+            cost = Decimal(str(replacement_cost))
+            rl = int(remaining_life) if remaining_life is not None else ul
+            offset = max(rl, 0)
+            while offset < _HORIZON_YEARS:
+                expenditures[offset] = cost
+                total += cost
+                if ul <= 0:
+                    break
+                offset += ul
+
+        year_provision = (
+            (Decimal(str(replacement_cost)) / Decimal(useful_life)).quantize(Decimal("1"))
+            if useful_life and replacement_cost is not None
+            else Decimal("0")
+        )
+        # Liability already accrued: cost * (UL - RL) / UL. Clamp at 0 when
+        # remaining_life exceeds useful_life (zero-age component).
+        if useful_life and replacement_cost is not None and remaining_life is not None:
+            accrued_fraction = max(
+                Decimal("0"),
+                (Decimal(useful_life) - Decimal(remaining_life)) / Decimal(useful_life),
+            )
+            estimated_liability = (Decimal(str(replacement_cost)) * accrued_fraction).quantize(
+                Decimal("1")
+            )
+        else:
+            estimated_liability = Decimal("0")
+
+        out.append({
+            "is_header": False,
+            "line_item": line_item,
+            "useful_life": int(useful_life) if useful_life else 0,
+            "remaining_life": int(remaining_life) if remaining_life is not None else 0,
+            "replacement_cost": Decimal(str(replacement_cost)) if replacement_cost is not None else Decimal("0"),
+            "year_replacement_provision": year_provision,
+            "estimated_liability_through_year_25": estimated_liability,
+            "year_new": getattr(c, "year_new", None),
+            "expenditures_by_year": expenditures,
+            "total_expenditures": total,
+        })
+    return out
+
+
+def _aggregate_expenditures_inflated(
+    per_component: list[dict[str, Any]], inflation: Decimal
+) -> list[Decimal]:
+    """Sum per-component current-dollar expenditures by year, inflating each
+    year's sum to nominal dollars (cost × (1 + inflation)^offset).
+
+    This is the cash-flow forecast's "Repair and replacement costs" row —
+    the only place inflation enters the 30-year section. Per-component
+    cells remain in current dollars.
+    """
+    inflated = [Decimal("0")] * _HORIZON_YEARS
+    for offset in range(_HORIZON_YEARS):
+        factor = (Decimal("1") + inflation) ** offset
+        current_dollar_sum = sum(
+            (row["expenditures_by_year"][offset] for row in per_component if not row.get("is_header")),
+            Decimal("0"),
+        )
+        inflated[offset] = (current_dollar_sum * factor).quantize(Decimal("1"))
+    return inflated
+
+
+def _bracket_rate_for_year(year: int, schedule: list[dict[str, Any]]) -> Decimal:
+    """Return the assessment-increase rate that applies to ``year``.
+
+    ``schedule`` is the parsed ``assessment_increase_schedule_json`` list of
+    ``{start_year, end_year, rate}``. Returns Decimal("0") if no bracket
+    matches (i.e. the schedule has gaps or ends before ``year``).
+    """
+    for bracket in schedule or []:
+        start = int(bracket.get("start_year") or 0)
+        end = int(bracket.get("end_year") or 0)
+        if start <= year <= end:
+            return Decimal(str(bracket.get("rate") or 0))
+    return Decimal("0")
+
+
+def _cash_flow_rows(
+    *,
+    units: int,
+    base_monthly_per_unit: Decimal,
+    assessment_schedule: list[dict[str, Any]],
+    special_assessments_per_unit_by_year: list[Decimal],
+    reserve_cash_balance_eoy_prior: Decimal,
+    interest_rate: Decimal,
+    inflation: Decimal,
+    replacement_costs_by_year_inflated: list[Decimal],
+    board_deferrals_by_year: list[Decimal],
+    fiscal_year_start: int,
+) -> dict[str, Any]:
+    """Build the pivoted cash-flow matrix that the cash-flow panel template renders.
+
+    Returns a dict with these length-30 list[Decimal] keys plus scalar fields.
+    """
+    years = [fiscal_year_start + i for i in range(_HORIZON_YEARS)]
+    number_of_units = [Decimal(units)] * _HORIZON_YEARS
+    after_tax_interest_decimal = [interest_rate.quantize(Decimal("0.001"))] * _HORIZON_YEARS
+
+    # Walk the escalation schedule year-by-year. The base value applies to
+    # year 0; subsequent years compound at the bracket rate for that year.
+    monthly_per_unit_by_year: list[Decimal] = []
+    monthly = base_monthly_per_unit
+    for offset in range(_HORIZON_YEARS):
+        if offset > 0:
+            rate = _bracket_rate_for_year(years[offset], assessment_schedule)
+            monthly = monthly * (Decimal("1") + rate)
+        monthly_per_unit_by_year.append(monthly.quantize(Decimal("0.01")))
+
+    regular_assessments = [
+        (monthly_per_unit_by_year[i] * Decimal(units) * Decimal(12)).quantize(Decimal("1"))
+        for i in range(_HORIZON_YEARS)
+    ]
+    special_assessments_row = [
+        (special_assessments_per_unit_by_year[i] * Decimal(units)).quantize(Decimal("1"))
+        for i in range(_HORIZON_YEARS)
+    ]
+    repair_replacement_costs = [v.quantize(Decimal("1")) for v in replacement_costs_by_year_inflated]
+    board_approved_deferral = [v.quantize(Decimal("1")) for v in board_deferrals_by_year]
+
+    # Cash flow chain — interest is computed on the average balance, matching
+    # standard reserve-study convention and the prior _build_thirty_year_plan
+    # implementation.
+    interest_income: list[Decimal] = []
+    total_cash_receipts: list[Decimal] = []
+    total_cash_disbursements: list[Decimal] = []
+    cash_flow_deficiency: list[Decimal] = []
+    cash_balance_beginning: list[Decimal] = []
+    cash_balance_end: list[Decimal] = []
+
+    balance = reserve_cash_balance_eoy_prior
+    for i in range(_HORIZON_YEARS):
+        receipts_excl_interest = regular_assessments[i] + special_assessments_row[i]
+        disbursements = repair_replacement_costs[i] - board_approved_deferral[i]
+        avg_balance = balance + (receipts_excl_interest - disbursements) / Decimal("2")
+        interest = (avg_balance * interest_rate).quantize(Decimal("1"))
+        receipts_total = receipts_excl_interest + interest
+        deficiency = receipts_total - disbursements
+
+        cash_balance_beginning.append(balance.quantize(Decimal("1")))
+        interest_income.append(interest)
+        total_cash_receipts.append(receipts_total)
+        total_cash_disbursements.append(disbursements)
+        cash_flow_deficiency.append(deficiency)
+
+        balance = balance + deficiency
+        cash_balance_end.append(balance.quantize(Decimal("1")))
+
+    # Bracket label rows for the template ("Annual assmnt increase rate
+    # at 3.0% thru 2035", etc.).
+    increase_brackets = [
+        {
+            "start_year": int(b.get("start_year") or 0),
+            "end_year": int(b.get("end_year") or 0),
+            "rate": Decimal(str(b.get("rate") or 0)),
+        }
+        for b in (assessment_schedule or [])
+    ]
+
+    return {
+        "years": years,
+        "number_of_units": number_of_units,
+        "replace_fund_assmnt_per_unit_per_mo": monthly_per_unit_by_year,
+        "replace_fund_special_assmnt_per_unit_per_yr": [
+            v.quantize(Decimal("0.01")) for v in special_assessments_per_unit_by_year
+        ],
+        "after_tax_interest_decimal": after_tax_interest_decimal,
+        "regular_assessments": regular_assessments,
+        "special_assessments_row": special_assessments_row,
+        "interest_income": interest_income,
+        "total_cash_receipts": total_cash_receipts,
+        "repair_replacement_costs": repair_replacement_costs,
+        "board_approved_deferral": board_approved_deferral,
+        "total_cash_disbursements": total_cash_disbursements,
+        "cash_flow_deficiency": cash_flow_deficiency,
+        "cash_balance_beginning": cash_balance_beginning,
+        "cash_balance_end": cash_balance_end,
+        "increase_brackets": increase_brackets,
+        "after_tax_interest_rate": interest_rate,
+        "replacement_cost_increase_rate": inflation,
+    }
+
+
+def _legacy_funding_plan(
+    *,
+    cash_flow: dict[str, Any],
+    per_component: list[dict[str, Any]],
+    inflation: Decimal,
+    total_estimated_liability_now: Decimal,
+) -> list[dict[str, Any]]:
+    """Derive the legacy ``thirty_year_funding_plan`` list-of-dicts shape so
+    ``pro_forma_disclosure_summary.html:165`` keeps working without changes.
+
+    Keys: year, beginning_balance, annual_contribution, annual_expenditure,
+    interest, ending_balance, estimated_liability, percent_funded.
     """
     rows: list[dict[str, Any]] = []
-    balance = cash_eoy_prior
-    inflation = inflation_rate or spec.static_data.replacement_cost_increase_rate or Decimal("0.03")
-    rate = interest_rate or spec.static_data.interest_rate_after_tax or Decimal("0.018")
-    base_provision = total_year_replacement_provision or Decimal("0")
-    base_liability = total_estimated_liability or Decimal("0")
-
-    for offset in range(30):
-        year = fiscal_year_start + offset
-        # Contribution grows with inflation; expenditure equals contribution
-        # for the simple roll-forward (net change ~ interest only).
+    for offset in range(_HORIZON_YEARS):
         factor = (Decimal("1") + inflation) ** offset
-        annual_contribution = (base_provision * factor).quantize(Decimal("1"))
-        annual_expenditure = annual_contribution
-        avg_balance = balance + (annual_contribution - annual_expenditure) / Decimal("2")
-        interest = (avg_balance * rate).quantize(Decimal("1"))
-        ending = (balance + annual_contribution - annual_expenditure + interest).quantize(
-            Decimal("1")
-        )
-        liability = (base_liability * factor).quantize(Decimal("1"))
+        liability = (total_estimated_liability_now * factor).quantize(Decimal("1"))
+        ending = cash_flow["cash_balance_end"][offset]
         pct = (
             (ending / liability * Decimal("100")).quantize(Decimal("1"))
             if liability
             else Decimal("0")
         )
         rows.append({
-            "year": year,
-            "beginning_balance": int(balance),
-            "annual_contribution": int(annual_contribution),
-            "annual_expenditure": int(annual_expenditure),
-            "interest": int(interest),
+            "year": cash_flow["years"][offset],
+            "beginning_balance": int(cash_flow["cash_balance_beginning"][offset]),
+            "annual_contribution": int(cash_flow["regular_assessments"][offset]),
+            "annual_expenditure": int(cash_flow["repair_replacement_costs"][offset]),
+            "interest": int(cash_flow["interest_income"][offset]),
             "ending_balance": int(ending),
             "estimated_liability": int(liability),
             "percent_funded": int(pct),
         })
-        balance = ending
     return rows
+
+
+def _build_thirty_year_plan(
+    *,
+    spec: PackageSpec,
+    hoa_metadata: HOAMetadata,
+    components: Any,  # Sequence[ReserveStudyComponent]
+    total_estimated_liability: Decimal,
+    total_year_replacement_provision: Decimal,
+    cash_eoy_prior: Decimal,
+    fiscal_year_start: int,
+    inflation_rate: Optional[Decimal] = None,
+    interest_rate: Optional[Decimal] = None,
+    assessment_schedule: Optional[list[dict[str, Any]]] = None,
+    base_replacement_fund_monthly_per_unit: Optional[Decimal] = None,
+    special_assessments: Optional[list[dict[str, Any]]] = None,
+    board_deferrals: Optional[list[dict[str, Any]]] = None,
+) -> dict[str, Any]:
+    """30-year reserve funding study outputs (drifting-puzzling-grove rebuild).
+
+    Returns a dict with three keys:
+        thirty_year_cash_flow:
+            Pivoted matrix (rows × 30 cols) consumed by the cash-flow panel
+            template. See ``_cash_flow_rows`` for the row vocabulary.
+        major_component_expenditure_schedule:
+            list[dict] — one row per reserve-study component, with a length-30
+            ``expenditures_by_year`` array in *current* dollars (no inflation),
+            consumed by the major-component schedule template.
+        thirty_year_funding_plan:
+            list[dict] — back-compat shape preserved for
+            ``pro_forma_disclosure_summary.html:165``.
+
+    Real Old Mill 2026 convention: per-component cells = current dollars,
+    cash-flow "Repair and replacement costs" = inflated nominal dollars.
+    """
+    inflation = inflation_rate or spec.static_data.replacement_cost_increase_rate or Decimal("0.03")
+    rate = interest_rate or spec.static_data.interest_rate_after_tax or Decimal("0.018")
+
+    per_component = _per_component_expenditures(components, fiscal_year_start)
+    inflated_aggregate = _aggregate_expenditures_inflated(per_component, inflation)
+
+    # Base replacement-fund monthly per-unit: operator override wins, else
+    # derive from (annual provision / units / 12).
+    if base_replacement_fund_monthly_per_unit and base_replacement_fund_monthly_per_unit > 0:
+        base_monthly = Decimal(str(base_replacement_fund_monthly_per_unit)).quantize(Decimal("0.01"))
+    elif hoa_metadata.units > 0 and total_year_replacement_provision > 0:
+        base_monthly = (
+            Decimal(str(total_year_replacement_provision))
+            / Decimal(hoa_metadata.units)
+            / Decimal(12)
+        ).quantize(Decimal("0.01"))
+    else:
+        base_monthly = Decimal("0.00")
+
+    # Special assessments and board deferrals: map operator-entered structured
+    # lists into length-30 per-year arrays.
+    special_per_unit_by_year = [Decimal("0")] * _HORIZON_YEARS
+    for entry in special_assessments or []:
+        year = entry.get("year")
+        per_unit = entry.get("per_unit") or entry.get("amount_per_unit") or entry.get("amount")
+        if year is None or per_unit is None:
+            continue
+        offset = int(year) - fiscal_year_start
+        if 0 <= offset < _HORIZON_YEARS:
+            special_per_unit_by_year[offset] = Decimal(str(per_unit))
+
+    deferrals_by_year = [Decimal("0")] * _HORIZON_YEARS
+    for entry in board_deferrals or []:
+        year = entry.get("year")
+        amount = entry.get("amount")
+        if year is None or amount is None:
+            continue
+        offset = int(year) - fiscal_year_start
+        if 0 <= offset < _HORIZON_YEARS:
+            deferrals_by_year[offset] = Decimal(str(amount))
+
+    cash_flow = _cash_flow_rows(
+        units=hoa_metadata.units,
+        base_monthly_per_unit=base_monthly,
+        assessment_schedule=assessment_schedule or [],
+        special_assessments_per_unit_by_year=special_per_unit_by_year,
+        reserve_cash_balance_eoy_prior=cash_eoy_prior,
+        interest_rate=rate,
+        inflation=inflation,
+        replacement_costs_by_year_inflated=inflated_aggregate,
+        board_deferrals_by_year=deferrals_by_year,
+        fiscal_year_start=fiscal_year_start,
+    )
+
+    legacy = _legacy_funding_plan(
+        cash_flow=cash_flow,
+        per_component=per_component,
+        inflation=inflation,
+        total_estimated_liability_now=total_estimated_liability or Decimal("0"),
+    )
+
+    return {
+        "thirty_year_cash_flow": cash_flow,
+        "major_component_expenditure_schedule": per_component,
+        "thirty_year_funding_plan": legacy,
+    }
 
 
 def _compute_all(
@@ -229,12 +538,18 @@ def _compute_all(
 
     total_rev_op = total_revenues_operations(operating_line_items=operating_lis)
     total_rev_rep = total_revenues_replacement(reserve_line_items=reserve_lis)
+    # The keyword-matched formulas below keep firing so the audit log captures
+    # values for the legacy section labels ('Maintenance and operations', etc.),
+    # but they are NOT the source of truth for the income-statement total —
+    # sections in the active draft may use any label the operator's parser
+    # produced. Real total is summed from `expenses_by_section` below.
     exp_maint = expenses_maintenance_operating(operating_line_items=operating_lis)
     exp_util = expenses_utilities_operating(operating_line_items=operating_lis)
     exp_admin = expenses_administration_operating(operating_line_items=operating_lis)
     exp_rep = expenses_replacement(reserve_line_items=reserve_lis)
-    total_exp_op = total_expenses_operations(
-        maintenance=exp_maint, utilities=exp_util, administration=exp_admin
+    total_exp_op = sum(
+        (Decimal(str(b["total"])) for b in expenses_by_section.values()),
+        Decimal("0"),
     )
     total_exp_all = total_expenses(operations=total_exp_op, replacement=exp_rep)
     excess_op = excess_revenues_over_expenses_operations(
@@ -246,7 +561,33 @@ def _compute_all(
 
     total_liab = total_estimated_liability(components=reserve_snapshot.components)
     total_prov = total_year_replacement_provision(components=reserve_snapshot.components)
-    cash = _setting_decimal("reserve_cash_balance_eoy_prior")
+
+    # Data gaps: track every value that fell back to a default because the
+    # operator's draft / settings did not supply it. Surfaced at the top of
+    # the cover letter so the PDF cannot silently mislead the board.
+    data_gaps: list[str] = []
+
+    if not reserve_snapshot.components:
+        data_gaps.append(
+            "No reserve study components found — replacement provision, "
+            "30-year funding plan, and percent funded all default to $0/0%."
+        )
+    if not reserve_snapshot.study_date:
+        data_gaps.append(
+            "Reserve study date is unknown — Notes show a blank date. "
+            "Set 'reserve_study_date' under Disclosure Settings, or re-upload "
+            "the reserve study so the date is auto-extracted."
+        )
+
+    cash_setting = settings.get("reserve_cash_balance_eoy_prior")
+    if cash_setting in (None, "", 0, 0.0):
+        cash = Decimal("0")
+        data_gaps.append(
+            "Disclosure setting 'reserve_cash_balance_eoy_prior' is unset — "
+            "reserve cash balance treated as $0 for funding calculations."
+        )
+    else:
+        cash = Decimal(str(cash_setting))
     fund_balance_boy_op = _setting_decimal("fund_balance_boy_operations")
     pct = percent_funded(cash_reserves=cash, estimated_liability=total_liab)
     under_total = under_funded_balance_total(
@@ -258,14 +599,32 @@ def _compute_all(
         units=hoa_metadata.units,
     )
 
-    # Cover-letter "Reserves are being funded in the amount of $X monthly" comes
-    # from the reserve-study annual provision divided by 12 (NOT the budget-side
-    # reserve revenue rows, which is what the original implementation used and
-    # which was zero whenever the operator did not flag any draft line items as
-    # is_reserve revenue). The provision is the source of truth per § 5550.
+    # Cover-letter "Reserves are being funded in the amount of $X monthly".
+    # Three sources, operator picks via hoa_settings.reserve_funding_source:
+    #   - reserve_study_provision (default): reserve_study annual provision / 12
+    #     per § 5550. Most studies recommend this.
+    #   - budget_allocation_line: the budget draft's "Reserve - Allocation/Transfer"
+    #     line / 12. Used when the board has approved a transfer different from
+    #     the study's provision.
+    #   - manual: operator types the annual figure in hoa_settings.reserve_funding_manual_amount.
+    funding_source = (settings.get("reserve_funding_source") or "reserve_study_provision")
+    if funding_source == "budget_allocation_line":
+        budget_reserve_transfer = sum(
+            (li.amount or Decimal(0))
+            for li in operating_lis
+            if li.label and "reserve" in li.label.lower() and (
+                "allocation" in li.label.lower() or "transfer" in li.label.lower()
+            )
+        )
+        annual_funding = Decimal(budget_reserve_transfer) if budget_reserve_transfer else Decimal(0)
+    elif funding_source == "manual":
+        manual_amount = settings.get("reserve_funding_manual_amount")
+        annual_funding = Decimal(str(manual_amount)) if manual_amount is not None else Decimal(0)
+    else:
+        annual_funding = total_prov or Decimal(0)
     monthly_replacement_contribution_total = (
-        (total_prov / Decimal(12)).quantize(Decimal("0.01"))
-        if total_prov > 0
+        (annual_funding / Decimal(12)).quantize(Decimal("0.01"))
+        if annual_funding > 0
         else Decimal("0.00")
     )
 
@@ -286,13 +645,26 @@ def _compute_all(
         for li in operating_lis
         if li.is_revenue and li.label and "assessment" in li.label.lower()
     )
-    if annual_assessment_revenue and hoa_metadata.units > 0:
+    # Operator-approved override (Priority A #1) — when the board's approved
+    # monthly differs from `annual_assessment_revenue / units / 12` (typically
+    # because the draft includes parking/garage assessments that shouldn't be
+    # blended into the residential per-unit figure, or the board adopted a
+    # different rate). Cents are preserved — never rounded to whole dollars.
+    approved_override = settings.get("approved_monthly_assessment_per_unit")
+    if approved_override is not None:
+        monthly_assessment_per_unit_current = Decimal(str(approved_override)).quantize(
+            Decimal("0.01")
+        )
+    elif annual_assessment_revenue and hoa_metadata.units > 0:
         monthly_assessment_per_unit_current = (
             Decimal(annual_assessment_revenue) / Decimal(hoa_metadata.units) / Decimal(12)
         ).quantize(Decimal("0.01"))
     else:
-        monthly_assessment_per_unit_current = (
-            spec.static_data.monthly_assessment_per_unit_current
+        monthly_assessment_per_unit_current = Decimal("0.00")
+        data_gaps.append(
+            "No operating revenue line item with 'assessment' in its label — "
+            "monthly assessment per unit could not be derived from the active draft. "
+            "Set 'approved_monthly_assessment_per_unit' under Disclosure Settings to override."
         )
 
     # Pro-forma footnote counts — currently a strict subset of the reserve
@@ -314,13 +686,92 @@ def _compute_all(
         for li in (operating_lis + reserve_lis)
         if li.is_revenue and li.label and "interest" in li.label.lower()
     )
-    if interest_revenue_total:
+    # Operator override (Priority A #6) wins over the derived value when set.
+    tax_override = settings.get("income_tax_provision_override")
+    if tax_override is not None:
+        income_tax_provision = Decimal(str(tax_override)).quantize(Decimal("1"))
+    elif interest_revenue_total:
         income_tax_provision = (
             (Decimal(interest_revenue_total) * Decimal("0.30"))
             .quantize(Decimal("1"))
         )
     else:
-        income_tax_provision = spec.static_data.income_tax_provision_estimate
+        income_tax_provision = Decimal("0")
+        data_gaps.append(
+            "No revenue line item with 'interest' in its label — "
+            "income tax provision defaulted to $0. Set "
+            "'income_tax_provision_override' under Disclosure Settings to specify a value."
+        )
+
+    # Parse Priority-A structured inputs (special assessments / additional
+    # assessments / outstanding loan) from JSON-stored settings. Templates
+    # iterate over the lists; empty list → render "None scheduled" wording;
+    # outstanding_loan == None → render "no loans" wording.
+    def _parse_json_list(name: str) -> list[dict[str, Any]]:
+        raw = settings.get(name)
+        if raw in (None, "", "[]"):
+            return []
+        if isinstance(raw, list):
+            return raw
+        try:
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, list) else []
+        except (json.JSONDecodeError, TypeError):
+            return []
+
+    def _parse_json_object(name: str) -> Optional[dict[str, Any]]:
+        raw = settings.get(name)
+        if raw in (None, ""):
+            return None
+        if isinstance(raw, dict):
+            return raw
+        try:
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, dict) else None
+        except (json.JSONDecodeError, TypeError):
+            return None
+
+    special_assessments = _parse_json_list("special_assessments_json")
+    additional_assessments_needed = _parse_json_list("additional_assessments_needed_json")
+    outstanding_loan = _parse_json_object("outstanding_loan_json")
+
+    # 30-year reserve funding study inputs (drifting-puzzling-grove rebuild).
+    # When the settings JSON is unset, fall back to spec.static_data's
+    # assessment_increase_schedule (list[tuple[int,int,Decimal]]).
+    assessment_schedule_raw = _parse_json_list("assessment_increase_schedule_json")
+    if not assessment_schedule_raw and getattr(spec.static_data, "assessment_increase_schedule", None):
+        assessment_schedule_raw = [
+            {"start_year": int(s), "end_year": int(e), "rate": float(r)}
+            for s, e, r in spec.static_data.assessment_increase_schedule
+        ]
+    board_deferrals_list = _parse_json_list("board_deferrals_json")
+    replacement_fund_monthly_raw = settings.get("replacement_fund_monthly_assessment_per_unit")
+    base_replacement_fund_monthly = (
+        Decimal(str(replacement_fund_monthly_raw))
+        if replacement_fund_monthly_raw not in (None, "")
+        else None
+    )
+
+    # Assessment-change phrase for the cover letter. The real Old Mill
+    # package reads "will remain the same at $605.00" when the assessment
+    # is unchanged, "will increase to $X" / "will decrease to $X" otherwise.
+    # Compare current (after override resolution above) to prior-year.
+    prior_assessment_raw = settings.get("monthly_assessment_per_unit_prior")
+    if prior_assessment_raw is not None:
+        try:
+            prior_assessment = Decimal(str(prior_assessment_raw)).quantize(Decimal("0.01"))
+        except (ArithmeticError, ValueError):
+            prior_assessment = None
+    else:
+        prior_assessment = None
+    if prior_assessment is None or monthly_assessment_per_unit_current == Decimal("0.00"):
+        assessment_change_phrase = "is"
+    elif monthly_assessment_per_unit_current == prior_assessment:
+        assessment_change_phrase = "will remain the same at"
+    elif monthly_assessment_per_unit_current > prior_assessment:
+        assessment_change_phrase = "will increase to"
+    else:
+        assessment_change_phrase = "will decrease to"
 
     return {
         "computed": {
@@ -385,16 +836,32 @@ def _compute_all(
             # reference the field. StrictUndefined fails loudly if a
             # template references a missing key, so always emit the slot.
             "thirty_year_projections": [],
-            "thirty_year_funding_plan": _build_thirty_year_plan(
+            **_build_thirty_year_plan(
                 spec=spec,
                 hoa_metadata=hoa_metadata,
+                components=reserve_snapshot.components,
                 total_estimated_liability=total_liab,
                 total_year_replacement_provision=total_prov,
                 cash_eoy_prior=cash,
                 fiscal_year_start=spec.fiscal_year,
                 inflation_rate=_setting_decimal("replacement_cost_increase_rate"),
                 interest_rate=_setting_decimal("interest_rate_after_tax"),
+                assessment_schedule=assessment_schedule_raw,
+                base_replacement_fund_monthly_per_unit=base_replacement_fund_monthly,
+                special_assessments=special_assessments,
+                board_deferrals=board_deferrals_list,
             ),
+            "data_gaps": data_gaps,
+            # Priority-A structured inputs (drifting-puzzling-grove) — templates
+            # iterate over these. Lists are empty when the operator hasn't
+            # provided any → templates render "None scheduled" / "None at this
+            # time". outstanding_loan is None when no loan exists → templates
+            # render the "no outstanding loans" boilerplate.
+            "special_assessments": special_assessments,
+            "additional_assessments_needed": additional_assessments_needed,
+            "outstanding_loan": outstanding_loan,
+            "reserve_funding_source": funding_source,
+            "assessment_change_phrase": assessment_change_phrase,
             "assessment_change_disclosure": (
                 "0%"
                 if spec.static_data.monthly_assessment_per_unit_current
@@ -436,6 +903,8 @@ def compile_package(
     output_dir: Path,
     appendices_root: Optional[Path] = None,
     hoa_settings_overrides: Optional[dict] = None,
+    extra_appendix_paths: Optional[list[Path]] = None,
+    assessment_matrix: Optional[AssessmentScheduleMatrix] = None,
 ) -> CompileResult:
     """Run the full disclosure-package compilation pipeline.
 
@@ -450,8 +919,11 @@ def compile_package(
             responsible for sanitizing hoa_id / fiscal_year before
             building this path; compile_package treats it as trusted.
         appendices_root: directory containing static appendix files.
-            Defaults to ``compiler.APPENDICES_DIR / 'old_mill'`` —
-            override in tests.
+            Defaults to ``compiler.APPENDICES_DIR``. In the DRE-driven
+            architecture the per-HOA appendix manifest is driven by the
+            ``appendix_documents`` + ``annual_package_appendices`` tables
+            (see ``compile_inputs.resolve_compile_appendix_paths``); this
+            fallback only matters for legacy callers + tests.
 
     Returns:
         CompileResult with output paths, page count, and SHA-256 of the
@@ -472,7 +944,7 @@ def compile_package(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if appendices_root is None:
-        appendices_root = APPENDICES_DIR / "old_mill"
+        appendices_root = APPENDICES_DIR
 
     # 1. Preflight gate (REQ-D11-008) — fail fast with field paths.
     errors = validate_inputs(
@@ -481,6 +953,7 @@ def compile_package(
         reserve_snapshot=reserve_snapshot,
         hoa_metadata=hoa_metadata,
         appendices_root=appendices_root,
+        hoa_settings_overrides=hoa_settings_overrides,
     )
     blocking = [e for e in errors if e.severity == "blocking"]
     if blocking:
@@ -494,6 +967,14 @@ def compile_package(
     #    table (Phase 11 plan 11-08 Task 4). Templates and the audit log
     #    consume this dict in preference to spec.static_data so a settings
     #    edit changes the rendered package without a code change.
+    # Effective hoa_settings: text/contact defaults from spec.static_data
+    # are fine fallbacks (they don't lie about money). Numeric fields that
+    # represent operator-required disclosure inputs (cash balance, fund
+    # balance, prior assessment) are NOT pre-loaded — they must come from
+    # the operator-saved hoa_settings row. Otherwise the data-gap detection
+    # in `_compute_all` can't tell whether the operator supplied a value.
+    # Rate defaults (interest, inflation) stay pre-loaded since they have
+    # sensible spec defaults (1.8% / 3%) and operators rarely change them.
     effective_hoa_settings: dict[str, Any] = {
         "management_company": spec.static_data.management_company,
         "management_company_address": spec.static_data.management_company_address,
@@ -503,12 +984,39 @@ def compile_package(
         "cpa_firm_name": spec.static_data.cpa_firm_name,
         "cpa_firm_address": spec.static_data.cpa_firm_address,
         "reserve_study_expert_name": spec.static_data.reserve_study_expert_name,
-        "reserve_cash_balance_eoy_prior": float(spec.static_data.reserve_cash_balance_eoy_prior),
-        "fund_balance_boy_operations": float(spec.static_data.fund_balance_boy_operations),
-        "monthly_assessment_per_unit_prior": float(spec.static_data.monthly_assessment_per_unit_prior),
+        "reserve_study_date": "",
         "interest_rate_after_tax": float(spec.static_data.interest_rate_after_tax),
         "replacement_cost_increase_rate": float(spec.static_data.replacement_cost_increase_rate),
         "letter_signed_by": spec.static_data.letter_signed_by,
+        # Phase 1 boilerplate fields — pre-seeded as None so Jinja StrictUndefined
+        # template lookups (e.g. `hoa_settings.letter_date`) resolve cleanly to
+        # None and the templates fall through to their `or` defaults instead of
+        # raising UndefinedError. Operator-set values overlay these below.
+        "letter_date": None,
+        "letter_signed_by_title": None,
+        "accountant_report_date": None,
+        "reserve_funding_plan_date": None,
+        "hoa_state": None,
+        "hoa_entity_type": None,
+        "hoa_incorporation_year": None,
+        # Priority-A settings — same pre-seed for template safety.
+        "approved_monthly_assessment_per_unit": None,
+        "income_tax_provision_override": None,
+        "reserve_funding_source": "reserve_study_provision",
+        "reserve_funding_manual_amount": None,
+        "special_assessments_json": "[]",
+        "additional_assessments_needed_json": "[]",
+        "outstanding_loan_json": None,
+        "monthly_assessment_per_unit_prior": float(spec.static_data.monthly_assessment_per_unit_prior),
+        # Numeric template-input pre-seeds. Several templates format these
+        # directly via ``'{:,.0f}'.format(hoa_settings.X)`` with no ``or 0``
+        # fallback, so a missing/None value raises a StrictUndefined
+        # TypeError at render time. Operator-saved values overlay these.
+        "reserve_cash_balance_eoy_prior": 0.0,
+        "fund_balance_boy_operations": 0.0,
+        "management_company_phone": "",
+        "management_company_fax": "",
+        "management_company_web": "",
     }
     if hoa_settings_overrides:
         for key, value in hoa_settings_overrides.items():
@@ -553,6 +1061,9 @@ def compile_package(
         "hoa_metadata": hoa_metadata.model_dump(mode="json"),
         "static_data": spec.static_data.model_dump(mode="json"),
         "hoa_settings": effective_hoa_settings,
+        "assessment_matrix": (
+            assessment_matrix.model_dump(mode="json") if assessment_matrix else None
+        ),
         "expenses_by_section": _expenses_by_section,
         "revenues_by_section": _revenues_by_section,
     }
@@ -569,6 +1080,29 @@ def compile_package(
             spec, budget_draft, reserve_snapshot, hoa_metadata,
             effective_hoa_settings=effective_hoa_settings,
         )
+        if assessment_matrix is None:
+            # Backward-compatible fallback for tests and legacy callers.
+            # The live render job passes a DB-backed matrix built from the
+            # approved AssessmentSetup before entering compile_package.
+            from app.assessment_engine import CalcResultSet
+
+            assessment_matrix = build_universal_assessment_matrix(
+                CalcResultSet(
+                    pool_allocations=[],
+                    recipient_totals=[],
+                    rounding_delta_annual=Decimal("0"),
+                    rounding_delta_monthly=Decimal("0"),
+                    rounding_delta_percent=Decimal("0"),
+                    pool_sum_annual=Decimal("0"),
+                ),
+                setup_type="fixed",
+                hoa_name=hoa_metadata.name,
+                fiscal_year=spec.fiscal_year,
+                approved_visual_basis=False,
+                manual_review_reason=(
+                    "Assessment matrix was not supplied by the render job."
+                ),
+            )
         ctx_full: dict[str, Any] = {
             "spec": spec,
             "static_data": spec.static_data,
@@ -576,6 +1110,7 @@ def compile_package(
             "hoa": hoa_metadata,  # Property-record-derived; templates should
                                   # prefer hoa.name over static_data.hoa_legal_name
                                   # so the rendered name reflects the live DB row.
+            "matrix": assessment_matrix,
             "today": datetime.now(timezone.utc).strftime("%A %B %-d, %Y"),
             "today_iso": datetime.now(timezone.utc).date().isoformat(),
             "hoa_settings": effective_hoa_settings,
@@ -637,6 +1172,36 @@ def compile_package(
             for extra in extras:
                 logger.info("compiler: appending ad-hoc appendix %s", extra.name)
                 full_paths.append(extra)
+
+        # 5d. Append the DB-driven appendix manifest (Phase 5.4 of
+        #     dre-driven-assessment-engine, task 159). When the caller
+        #     supplies ``extra_appendix_paths`` (built by
+        #     ``compile_inputs.resolve_compile_appendix_paths`` from
+        #     ``annual_package_appendices`` + ``appendix_documents``),
+        #     those files merge in last. Skips files already merged
+        #     above (by file name) to avoid double-merging when the same
+        #     appendix is referenced via both the legacy directory scan
+        #     and the new DB manifest during transition.
+        if extra_appendix_paths:
+            already_merged = {p.name for p in full_paths}
+            for extra in extra_appendix_paths:
+                if extra.name in already_merged:
+                    logger.info(
+                        "compiler: skipping duplicate manifest appendix %s",
+                        extra.name,
+                    )
+                    continue
+                if not extra.exists():
+                    logger.warning(
+                        "compiler: manifest appendix file missing on disk: %s",
+                        extra,
+                    )
+                    continue
+                logger.info(
+                    "compiler: appending manifest appendix %s", extra.name,
+                )
+                full_paths.append(extra)
+                already_merged.add(extra.name)
 
         package_path = output_dir / "package.pdf"
         merge_pdfs(full_paths, package_path)

@@ -44,11 +44,14 @@ Thumbs.db
 .cache/
 .pytest_cache/
 
-# Project tooling
+# Project tooling / AI assistant local artifacts
 .claude/
+.codex/
+.agents/
+CLAUDE.md
+AGENTS.md
 openspec/
 docs/
-.agents/
 
 # Planning artifacts (generated, not source code)
 .planning/
@@ -67,16 +70,23 @@ mockdata/
 *.db-wal
 *.db-journal
 
-# Client documents (sensitive financial data, not source code)
+# Client document / PDF folders (sensitive financial data, not source code)
 Example Income Statements/
 Example Reserve Studies/
 Tri State Documents/
+DRE/
 
 # Client data files in project root (not source code)
 /Tri-State Budget.xlsx
 /Tri-State Product Delivery Draft 6.xlsx
-/*.xlsx
-/*.pdf
+
+# Generated/client document artifacts
+*.pdf
+*.xls
+*.xlsx
+*.xlsm
+*.doc
+*.docx
 
 # Reference disclosure-package PDFs and ad-hoc transcripts (large, not source)
 2026/
@@ -88,6 +98,7 @@ Tri State Documents/
 # Backend runtime storage (uploads, generated budgets, temp files)
 backend/tmp/
 backend/data/
+backend/data/budget-storage/
 backend/app/ai_implementation/data/budget_ai.db*
 
 # Unused seed data files (not needed for seeding or app)

@@ -23,6 +23,11 @@ from .routers.budget_history import router as budget_history_router
 from .routers.hoa import router as hoa_router
 from .routers.app_settings import router as app_settings_router
 from .disclosure_package.router import router as disclosure_package_router
+from .routers.annual_packages import router as annual_packages_router
+from .routers.appendices import router as appendices_router
+from .routers.dre import router as dre_router
+from .routers.dre_approval import router as dre_approval_router
+from .routers.dre_review import router as dre_review_router
 from .routers.hoa_settings import router as hoa_settings_router
 
 logging.basicConfig(
@@ -76,6 +81,26 @@ def create_app() -> FastAPI:
     # hoa_settings router applies Depends(get_current_user) per-endpoint, so no
     # router-level dependency needed (mirrors the disclosure_package pattern).
     app.include_router(hoa_settings_router)
+    # DRE upload router (Phase 3.1 of dre-driven-assessment-engine). Auth is
+    # applied per-route via Depends(get_current_user) on every endpoint.
+    app.include_router(dre_router)
+    # DRE approval router (Phase 4.2 + 5.9): promotes a reviewed extraction
+    # run into a live AssessmentSetup. Concurrent-approve protection via
+    # promoted_at IS NOT NULL check.
+    app.include_router(dre_approval_router)
+    # DRE Review Workbench read-side router (Phase 4.1): lists DRE
+    # documents + extraction runs, returns parsed_json + citations
+    # + edit history. Mutating endpoints (record edit, approve)
+    # live in dre_review and dre_approval routers respectively.
+    app.include_router(dre_review_router)
+    # Per-HOA appendix manifest router (Phase 5.4 of
+    # dre-driven-assessment-engine). Auth is applied per-route via
+    # Depends(get_current_user) on every endpoint.
+    app.include_router(appendices_router)
+    # AnnualPackage lifecycle router (Phase 4.8 of
+    # dre-driven-assessment-engine): draft → approved → finalized
+    # transitions; finalization freezes all four snapshot JSONs.
+    app.include_router(annual_packages_router)
 
     # Protected AI routes
     app.include_router(

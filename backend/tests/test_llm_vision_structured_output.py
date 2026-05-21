@@ -43,7 +43,7 @@ class _FakeGeminiClient:
 
 def test_call_llm_vision_returns_parsed_financial_statement(monkeypatch):
     """Controlled generation returns schema-valid ExtractedFinancialStatement via response.parsed."""
-    expected = ExtractedFinancialStatement.model_validate({
+    _payload = {
         "document_family": "pdf_visual_document",
         "report_type": "income_statement",
         "line_items": [
@@ -53,11 +53,13 @@ def test_call_llm_vision_returns_parsed_financial_statement(monkeypatch):
         "totals": [],
         "validation_issues": [],
         "confidence": 0.0,
-    })
-    fake_response = _FakeParsedResponse(parsed=expected)
+    }
+    expected = ExtractedFinancialStatement.model_validate(_payload)
+    import json as _json
+    fake_response = _FakeParsedResponse(text=_json.dumps(_payload))
     fake_client = _FakeGeminiClient(fake_response)
 
-    monkeypatch.setattr("app.ai_implementation.pipeline.llm_client._gemini_client", None)
+    monkeypatch.setattr("app.ai_implementation.pipeline.llm_client._gemini_client_no_loop", None)
     monkeypatch.setattr("app.ai_implementation.pipeline.llm_client.get_llm_client", lambda: fake_client)
 
     result = asyncio.run(
@@ -82,7 +84,7 @@ def test_call_llm_vision_returns_parsed_financial_statement(monkeypatch):
 
 def test_call_llm_vision_uses_response_schema_not_json_object(monkeypatch):
     """Gemini uses response_schema (controlled generation), NOT json_object mode."""
-    expected = ExtractedFinancialStatement.model_validate({
+    _payload = {
         "document_family": "pdf_visual_document",
         "report_type": "income_statement",
         "line_items": [
@@ -92,11 +94,13 @@ def test_call_llm_vision_uses_response_schema_not_json_object(monkeypatch):
         "totals": [],
         "validation_issues": [],
         "confidence": 0.0,
-    })
-    fake_response = _FakeParsedResponse(parsed=expected)
+    }
+    expected = ExtractedFinancialStatement.model_validate(_payload)
+    import json as _json
+    fake_response = _FakeParsedResponse(text=_json.dumps(_payload))
     fake_client = _FakeGeminiClient(fake_response)
 
-    monkeypatch.setattr("app.ai_implementation.pipeline.llm_client._gemini_client", None)
+    monkeypatch.setattr("app.ai_implementation.pipeline.llm_client._gemini_client_no_loop", None)
     monkeypatch.setattr("app.ai_implementation.pipeline.llm_client.get_llm_client", lambda: fake_client)
 
     asyncio.run(

@@ -19,6 +19,7 @@ import logging
 import re
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Optional
@@ -181,10 +182,30 @@ def delete_appendix(hoa_id: int, filename: str) -> bool:
     return True
 
 
-def _resolve_spec_for_hoa(hoa_name: str):
-    """Match the HOA name to a known PackageSpec (REQ-D11-016).
+def _resolve_spec_for_property(property_id: int, fiscal_year: int):
+    """Resolve the PackageSpec for ``(property_id, fiscal_year)`` via the
+    DB-backed ``package_specs.resolver`` (Phase 1.3 of
+    dre-driven-assessment-engine).
 
-    Phase 11 ships only Old Mill; other HOAs get a clear 501 from the router.
+    Replaces the old name-string match against ``OLD_MILL_LEGAL_NAME``;
+    the resolver inspects the ``properties`` row (name, hoa_code) and
+    picks the right manifest. Returns ``None`` when no manifest exists
+    for the property — caller surfaces a clear 501 to the router.
+    """
+    from .package_specs import UnsupportedHOAError, resolve
+
+    try:
+        return resolve(property_id, fiscal_year)
+    except UnsupportedHOAError:
+        return None
+
+
+def _resolve_spec_for_hoa(hoa_name: str):
+    """Backwards-compatible name-string resolver.
+
+    Existing call sites that have only the HOA name (not the property_id)
+    can keep working through this shim. New code SHOULD call
+    ``_resolve_spec_for_property`` directly.
     """
     if hoa_name == OLD_MILL_LEGAL_NAME:
         return SPECS["old_mill"]
@@ -192,8 +213,19 @@ def _resolve_spec_for_hoa(hoa_name: str):
 
 
 def is_supported_hoa(hoa_name: str) -> bool:
-    """Phase 11 scope check used by the router (REQ-D11-016)."""
-    return hoa_name in SUPPORTED_HOA_NAMES
+    """Phase-11 hardcoded scope check, retired by the DRE-driven
+    assessment-engine work. Every HOA with a promoted assessment_setup
+    + a finalized AnnualPackage is now supported via the universal
+    standard package spec. The actual gate is enforced downstream by
+    ``preflight.validate_inputs`` (raises a structured error when
+    prerequisites are missing); this name-based check always returns
+    True so the router doesn't 501 every non-Old-Mill HOA.
+
+    ``hoa_name`` kept on the signature for backward compatibility
+    with existing router call sites.
+    """
+    _ = hoa_name
+    return True
 
 
 def _user_id_from(current_user: dict) -> Optional[int]:
@@ -317,7 +349,12 @@ def _set_status(
     session.commit()
 
 
-def _build_reserve_doc_from_draft(draft_payload: Any) -> Any:
+def _build_reserve_doc_from_draft(
+    draft_payload: Any,
+    *,
+    session: Any = None,
+    hoa_id: int | None = None,
+) -> Any:
     """Adapt the draft payload's reserve_study_rows into a duck-typed
     `ExtractedReserveStudyDocument`-shaped object.
 
@@ -328,9 +365,72 @@ def _build_reserve_doc_from_draft(draft_payload: Any) -> Any:
     adapter `from_reserve_study_extraction` accepts duck-typed objects
     (RESEARCH Risk #3), so a SimpleNamespace with `study_date` and
     `rows` is enough — no Phase-10 row schema coupling.
+
+    Reserve study date is read from `hoa_settings.reserve_study_date`
+    (auto-populated when the operator uploads a reserve study, editable
+    via the Disclosure Settings form).
     """
     rows = list(getattr(draft_payload, "reserve_study_rows", []) or [])
-    return SimpleNamespace(study_date="", rows=rows)
+    study_date = ""
+    if session is not None and hoa_id is not None:
+        from ..services import hoa_settings_service as _hoa_settings_service
+        settings_row = _hoa_settings_service.get_or_create(session, hoa_id=hoa_id)
+        study_date = getattr(settings_row, "reserve_study_date", None) or ""
+    return SimpleNamespace(study_date=study_date, rows=rows)
+
+
+def _resolve_pool_forecast_overlay(
+    *,
+    session: Session,
+    property_id: int,
+) -> dict[str, Any]:
+    """Return AssessmentSetup-driven overrides for the 30-year forecast.
+
+    Task #185 of dre-driven-assessment-engine: ``escalation_schedule_json``
+    and ``starting_monthly_per_unit`` moved from ``hoa_settings`` to
+    ``allocation_pools``. When the operator has set either value on any
+    pool of the active AssessmentSetup, that value wins over the
+    deprecated hoa_settings column. The first pool (by display_order)
+    that supplies each value claims it — fits the current convention
+    where the reserve pool is the only one carrying forecast inputs.
+
+    Returns an empty dict when no active setup exists or no pool carries
+    forecast values; the caller's hoa_settings reads remain authoritative.
+    """
+    overlay: dict[str, Any] = {}
+    raw_conn = session.connection().connection
+    row = raw_conn.execute(
+        "SELECT id FROM assessment_setups "
+        "WHERE property_id = ? AND status = 'approved' "
+        "ORDER BY id DESC LIMIT 1",
+        (property_id,),
+    ).fetchone()
+    if row is None:
+        return overlay
+    setup_id = row[0]
+    pools = raw_conn.execute(
+        "SELECT escalation_schedule_json, starting_monthly_per_unit "
+        "FROM allocation_pools WHERE assessment_setup_id = ? "
+        "ORDER BY display_order, id",
+        (setup_id,),
+    ).fetchall()
+    for schedule, monthly in pools:
+        if (
+            schedule not in (None, "", "[]")
+            and "assessment_increase_schedule_json" not in overlay
+        ):
+            overlay["assessment_increase_schedule_json"] = schedule
+        if (
+            monthly is not None
+            and "replacement_fund_monthly_assessment_per_unit" not in overlay
+        ):
+            overlay["replacement_fund_monthly_assessment_per_unit"] = monthly
+        if {
+            "assessment_increase_schedule_json",
+            "replacement_fund_monthly_assessment_per_unit",
+        } <= overlay.keys():
+            break
+    return overlay
 
 
 def run_render_job(
@@ -377,7 +477,7 @@ def run_render_job(
             raise CompileError(f"HOA not found: {hoa_id}")
         hoa_metadata = from_hoa_record(property_row)
 
-        spec = _resolve_spec_for_hoa(hoa_metadata.name)
+        spec = _resolve_spec_for_property(hoa_id, fiscal_year)
         if spec is None:
             raise CompileError(
                 f"HOA not yet supported in Phase 11: {hoa_metadata.name}"
@@ -388,7 +488,9 @@ def run_render_job(
         )
         budget_draft = from_budget_history_record(budget_payload)
 
-        reserve_doc = _build_reserve_doc_from_draft(budget_payload)
+        reserve_doc = _build_reserve_doc_from_draft(
+            budget_payload, session=session, hoa_id=hoa_id
+        )
         reserve_snapshot = from_reserve_study_extraction(reserve_doc)
 
         _set_status(session, job_id, stage=DISCLOSURE_STAGE_COMPUTING)
@@ -401,17 +503,105 @@ def run_render_job(
 
         settings_row = hoa_settings_module.get_or_create(session, hoa_id=hoa_id)
         overrides: dict = {}
+        # Skip-rule: only None and "" are treated as "operator didn't set this".
+        # An explicit 0 / 0.0 is a valid value — e.g. setting interest_rate to 0
+        # for an HOA whose reserves earn no interest, or setting reserve cash
+        # to 0 for a brand-new HOA. The previous filter ``val not in (None, "", 0, 0.0)``
+        # silently fell back to spec.static_data when the operator entered 0.
         for field in (
             "management_company", "management_company_address",
             "management_company_phone", "management_company_fax", "management_company_web",
             "cpa_firm_name", "cpa_firm_address", "reserve_study_expert_name",
+            "reserve_study_date",
             "reserve_cash_balance_eoy_prior", "fund_balance_boy_operations",
             "monthly_assessment_per_unit_prior", "interest_rate_after_tax",
             "replacement_cost_increase_rate", "letter_signed_by",
+            # Priority-A disclosure inputs (drifting-puzzling-grove)
+            "approved_monthly_assessment_per_unit",
+            "income_tax_provision_override",
+            "reserve_funding_source",
+            "reserve_funding_manual_amount",
+            "special_assessments_json",
+            "additional_assessments_needed_json",
+            "outstanding_loan_json",
+            # Phase 1 boilerplate-gap fields (drifting-puzzling-grove)
+            "letter_date",
+            "letter_signed_by_title",
+            "accountant_report_date",
+            "reserve_funding_plan_date",
+            "hoa_state",
+            "hoa_entity_type",
+            "hoa_incorporation_year",
+            # 30-year reserve funding study (drifting-puzzling-grove rebuild).
+            # ``assessment_increase_schedule_json`` and
+            # ``replacement_fund_monthly_assessment_per_unit`` are read from
+            # the active AssessmentSetup's allocation pools when present
+            # (Task #185 of dre-driven-assessment-engine) — the
+            # ``_pool_forecast_overlay`` block below overrides any hoa_settings
+            # value with the per-pool one.
+            "assessment_increase_schedule_json",
+            "replacement_fund_monthly_assessment_per_unit",
+            "board_deferrals_json",
         ):
             val = getattr(settings_row, field, None)
-            if val not in (None, "", 0, 0.0):
+            if val not in (None, ""):
                 overrides[field] = val
+
+        # Task #185: prefer AssessmentSetup pool-level forecast inputs over
+        # the deprecated hoa_settings columns. When the operator has set
+        # ``escalation_schedule_json`` or ``starting_monthly_per_unit`` on
+        # the reserve allocation pool (recipient_scope='all_units' is the
+        # current convention — Phase 12+ will support per-pool variants),
+        # those values take precedence.
+        pool_overlay = _resolve_pool_forecast_overlay(
+            session=session, property_id=hoa_id,
+        )
+        overrides.update(pool_overlay)
+
+        # Resolve the per-HOA appendix manifest (Phase 5.4 task 159 of
+        # dre-driven-assessment-engine). When the operator has uploaded
+        # appendix PDFs through the Settings → Appendices tab, the manifest
+        # resolver returns their on-disk paths in deterministic order. The
+        # render job doesn't yet have an AnnualPackage row to anchor on,
+        # so we pass ``package_id=None`` to get the property-wide
+        # include-by-default set. When the compile flow becomes
+        # AnnualPackage-driven (deferred), pass the package_id here.
+        from .compile_inputs import resolve_compile_appendix_paths
+
+        raw_conn = session.connection().connection
+        manifest_paths = resolve_compile_appendix_paths(
+            property_id=hoa_id, package_id=None, connection=raw_conn,
+        )
+        from .assessment_schedule_matrix import (
+            build_matrix_from_approved_assessment_setup,
+        )
+
+        assessment_revenue = sum(
+            (
+                item.amount
+                for item in budget_draft.line_items
+                if item.is_revenue and "assessment" in item.label.lower()
+            ),
+            start=Decimal("0"),
+        )
+        if assessment_revenue == Decimal("0"):
+            monthly_raw = overrides.get("approved_monthly_assessment_per_unit")
+            if monthly_raw not in (None, ""):
+                assessment_revenue = (
+                    Decimal(str(monthly_raw))
+                    * Decimal(hoa_metadata.units)
+                    * Decimal("12")
+                ).quantize(Decimal("0.01"))
+
+        assessment_matrix = build_matrix_from_approved_assessment_setup(
+            connection=raw_conn,
+            property_id=hoa_id,
+            fiscal_year=fiscal_year,
+            budget_draft=budget_draft,
+            hoa_name=hoa_metadata.name,
+            unit_count=hoa_metadata.units,
+            approved_assessment_revenue_annual=assessment_revenue,
+        )
 
         output_dir = _output_dir_for(hoa_id, fiscal_year, job_id)
         result = compile_package(
@@ -424,6 +614,8 @@ def run_render_job(
             output_dir=output_dir,
             appendices_root=appendix_dir_for(hoa_id),
             hoa_settings_overrides=overrides,
+            extra_appendix_paths=manifest_paths,
+            assessment_matrix=assessment_matrix,
         )
 
         _set_status(

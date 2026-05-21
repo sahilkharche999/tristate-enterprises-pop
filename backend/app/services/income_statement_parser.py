@@ -107,6 +107,31 @@ _RESERVE_STUDY_SUBHEADERS = {
 _LLM_REQUIRED_COLUMNS = ("ytd_actual", "annual_budget", "variance")
 _LLM_PROMPT_MAX_COLUMNS = 40
 _LLM_LEFT_SHIFT_LIMIT = 5
+
+
+class IncomeStatementMissingAnnualColumn(ValueError):
+    """Raised when the income-statement extractor cannot identify an
+    "Annual Budget" column.
+
+    Per the DRE-driven assessment engine invariant
+    (``BudgetDraft.line_items.amount`` is ALWAYS annual; promotion picks
+    ONLY the Annual Budget column), the parser MUST refuse to promote
+    line items when the Annual Budget column is unresolvable. Otherwise
+    a hardcoded fallback column index can silently promote YTD or
+    current-period values, which the engine would then treat as annual
+    dues and produce wrong assessments.
+
+    Operator sees an actionable error; promotion never happens.
+    """
+
+    def __init__(self, *, detected_columns: Optional[dict] = None) -> None:
+        self.detected_columns = detected_columns or {}
+        super().__init__(
+            "Income statement extractor could not identify an 'Annual Budget' "
+            "column. The DRE-driven assessment engine requires the annual "
+            "amount; no fallback is applied. Detected columns: "
+            f"{ {k: v for k, v in self.detected_columns.items() if not k.startswith('_')} }"
+        )
 _LLM_NUMERIC_CONFIDENCE_RATIO = 0.6
 
 
@@ -599,9 +624,11 @@ def detect_columns(rows: list) -> dict:
                         break
 
     if len(matched) >= 2:
+        real_keys = [k for k in matched.keys() if not k.startswith("_")]
         for key in _FALLBACK_COLUMNS:
             matched.setdefault(key, _FALLBACK_COLUMNS[key])
         matched["_detection_tier"] = 1
+        matched["_real_matched_keys"] = real_keys
         logger.debug("Column detection tier 1 (alias): %s", matched)
         return matched
 
@@ -614,9 +641,11 @@ def detect_columns(rows: list) -> dict:
     llm_result = _sanitize_llm_column_map(llm_result, max_prompt_width)
     llm_result = _validate_llm_columns_against_data(llm_result, line_item_sample_rows)
     if llm_result is not None and len(llm_result) >= 2:
+        real_keys = [k for k in llm_result.keys() if not k.startswith("_")]
         for key in _FALLBACK_COLUMNS:
             llm_result.setdefault(key, _FALLBACK_COLUMNS[key])
         llm_result["_detection_tier"] = 2
+        llm_result["_real_matched_keys"] = real_keys
         logger.info("Column detection tier 2 (LLM): %s", llm_result)
         return llm_result
 
@@ -624,6 +653,7 @@ def detect_columns(rows: list) -> dict:
     logger.warning("Column detection: all tiers failed, using hardcoded fallback %s", _FALLBACK_COLUMNS)
     result = dict(_FALLBACK_COLUMNS)
     result["_detection_tier"] = 3
+    result["_real_matched_keys"] = []
     return result
 
 
@@ -651,6 +681,7 @@ def parse_rows_with_sections(
         annual_budget, projection, percent_change, read_only,
         section, validation_warning, raw
     """
+    real_matched_keys = col_indices.get("_real_matched_keys") if col_indices else None
     # Pop metadata key so it doesn't interfere with column lookups
     col_indices = {k: v for k, v in col_indices.items() if not k.startswith("_")}
 
@@ -706,6 +737,19 @@ def parse_rows_with_sections(
         annual_budget = _parse_financial_float(_safe_get(row, annual_idx))
         variance = _parse_financial_float(_safe_get(row, variance_idx))
 
+        # Per the DRE-driven assessment engine invariant
+        # (BudgetDraft.line_items.amount = annual), every line records
+        # which source column its annual_budget came from. 'annual_budget'
+        # = real match against the source's Annual Budget column;
+        # 'annual_budget (fallback)' = column-detection fallback was used
+        # (operator should treat as suspect).
+        annual_real = (
+            "annual_budget" in real_matched_keys
+            if real_matched_keys is not None
+            else False
+        )
+        source_column = "annual_budget" if annual_real else "annual_budget (fallback)"
+
         line_items.append(
             {
                 "line_item_key": str(account_code if account_code is not None else label),
@@ -718,6 +762,8 @@ def parse_rows_with_sections(
                 "percent_change": _parse_financial_float(_safe_get(row, pct_change_idx)),
                 "read_only": is_read_only,
                 "section": current_section,
+                "source_column": source_column,
+                "source_page_or_cell": None,  # Excel doesn't carry per-cell location here
                 "raw": {
                     "section": current_section,
                     "label": col_b.strip() if col_b else None,
@@ -732,6 +778,32 @@ def parse_rows_with_sections(
             item["section"] = item["category"]
 
     return line_items
+
+
+def parse_rows_with_sections_strict(
+    rows: list,
+    col_indices: dict,
+) -> list:
+    """Strict-mode wrapper around ``parse_rows_with_sections``.
+
+    Refuses to proceed when the column detector did NOT find a real
+    "Annual Budget" column match (i.e. ``annual_budget`` was filled by
+    the hardcoded fallback rather than alias-matched or LLM-suggested).
+
+    Use this entry point when promoting parsed rows to
+    ``BudgetDraft.line_items`` for the DRE-driven assessment engine.
+    The legacy ``parse_rows_with_sections`` keeps lenient behavior for
+    review-screen display where YTD/variance are useful even when the
+    Annual Budget column is missing.
+
+    Raises:
+        IncomeStatementMissingAnnualColumn: when ``annual_budget`` is
+            not in ``col_indices['_real_matched_keys']``.
+    """
+    real_matched_keys = col_indices.get("_real_matched_keys", [])
+    if "annual_budget" not in (real_matched_keys or []):
+        raise IncomeStatementMissingAnnualColumn(detected_columns=col_indices)
+    return parse_rows_with_sections(rows, col_indices)
 
 
 # ---------------------------------------------------------------------------

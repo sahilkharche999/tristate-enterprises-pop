@@ -1,0 +1,61 @@
+{% extends "_base.html" %}
+{% block title %}Notes 1-3 to Financial Statements{% endblock %}
+{% block content %}
+<h1 id="notes">Notes to Financial Statements</h1>
+<p class="muted">{{ hoa.name }} —
+For the Year Ending December 31, {{ fiscal_year }}</p>
+
+<h2 id="note-1">Note 1 — The Association</h2>
+<p>{{ hoa.name }} (the &ldquo;Association&rdquo;) is a common
+interest residential community located in
+{{ hoa.city or static_data.city }},
+{{ hoa.state or static_data.state }}, comprising
+<span class="bold">{{ hoa.units }}</span> residential
+{%- if hoa.units == 1 %} unit{%- else %} units{%- endif %}.
+The Association is organized as a
+{{ hoa.entity_type or 'non-profit mutual benefit corporation' }}
+under California law{% if hoa.incorporation_year %},
+created in {{ hoa.incorporation_year }}{% endif %}, and is
+responsible for the maintenance, repair, and replacement of common-area
+components shared by the separate interests of its members.</p>
+
+<p>The Association is governed by a Board of Directors elected by the
+membership and is managed under contract by
+{{ hoa_settings.management_company }}. Day-to-day administration,
+financial recordkeeping, and member communications are conducted from
+{{ hoa_settings.management_company_address }}.</p>
+
+<h2 id="note-2">Note 2 — Forecast Period</h2>
+<p>The accompanying forecasted statement of revenues and expenses
+covers the twelve-month period beginning January 1, {{ fiscal_year }}
+and ending December 31, {{ fiscal_year }}. The forecast is presented
+on the accrual basis of accounting and reflects management's good-faith
+estimate of expected operations during the forecast period, based on
+information available as of {{ today }}.</p>
+
+<p>The forecast does not constitute audited or reviewed financial
+statements. Actual results during the forecast period may differ
+materially from the forecast, and such differences are expected to
+arise in the ordinary course of operations.</p>
+
+<h2 id="note-3">Note 3 — Basis of Presentation</h2>
+<p>The forecasted statement is presented in accordance with guidelines
+established by the American Institute of Certified Public Accountants
+(AICPA) for the presentation of financial forecasts. Revenues and
+expenses are recorded under the accrual method when earned or incurred,
+respectively. The Association maintains separate fund-balance accounts
+for the Operations Fund (which collects assessments allocated to
+day-to-day operating expenses) and the Replacement Fund (which collects
+assessments and interest income allocated to the future replacement of
+major components identified in the reserve study).</p>
+
+<p>Inter-fund transfers, if any, are recorded in the period in which
+the Board approves the transfer. The Association applies the
+disbursements method to its Replacement Fund for forecasting purposes,
+recognizing reserve expenditures only as the underlying replacement
+work is performed.</p>
+
+<p>Reserve study inputs supporting the Replacement Fund forecast are
+maintained by {{ hoa_settings.reserve_study_expert_name }} pursuant to
+California Civil Code §§ 5550 and 5570.</p>
+{% endblock %}

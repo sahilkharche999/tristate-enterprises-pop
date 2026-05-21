@@ -21,16 +21,17 @@ import { getErrorMessage } from '../lib/errors';
 import { getStatusColor } from '../lib/statusColors';
 import { MONTH_NAMES, monthNameToNumber, toHOAViewModel, type HOAViewModel } from '../lib/hoa';
 
+// Units are intentionally NOT collected at create time — they are populated
+// from the DRE extraction once the operator approves the run. See
+// dre_approval_service.approve_extraction_run for the write-back path.
 interface CreateHoaFormState {
   name: string;
-  units: string;
   fiscalYearStart: string;
   city: string;
 }
 
 const DEFAULT_CREATE_FORM: CreateHoaFormState = {
   name: '',
-  units: '',
   fiscalYearStart: MONTH_NAMES[0],
   city: '',
 };
@@ -185,18 +186,11 @@ export function HOAWorkspace() {
       return;
     }
 
-    const parsedUnits = Number(createForm.units);
-    if (!Number.isInteger(parsedUnits) || parsedUnits <= 0) {
-      setCreateError('Units must be a positive whole number.');
-      return;
-    }
-
     setIsCreating(true);
     setCreateError(null);
     try {
       const created = await createHOA({
         name: trimmedName,
-        units: parsedUnits,
         fiscal_year_start_month: monthNameToNumber(createForm.fiscalYearStart),
         city: createForm.city.trim() || undefined,
       });
@@ -398,7 +392,7 @@ export function HOAWorkspace() {
                       <span className="text-[#d4d4d4]">•</span>
                       <span>Fiscal: {hoa.fiscalYear}</span>
                       <span className="text-[#d4d4d4]">•</span>
-                      <span>{hoa.units} Units</span>
+                      <span>{hoa.units > 0 ? `${hoa.units} Units` : 'Pending DRE'}</span>
                     </div>
                   </div>
                   <div className={`px-3 py-1.5 rounded-md text-xs font-medium border ${getStatusColor(hoa.status)}`}>
@@ -438,7 +432,9 @@ export function HOAWorkspace() {
                     </div>
                     <div className="flex items-center justify-between text-sm">
                       <span className="text-[#737373]">Total Units</span>
-                      <span className="font-medium text-[#111111]">{hoa.units}</span>
+                      <span className="font-medium text-[#111111]">
+                        {hoa.units > 0 ? hoa.units : 'Pending DRE'}
+                      </span>
                     </div>
                   </div>
                 </div>
@@ -536,21 +532,13 @@ export function HOAWorkspace() {
                 />
               </div>
 
-              <div className="grid grid-cols-1 gap-6 md:grid-cols-3">
-                <div className="space-y-2">
-                  <Label htmlFor="createHoaUnits">Units</Label>
-                  <Input
-                    id="createHoaUnits"
-                    type="number"
-                    min="1"
-                    step="1"
-                    value={createForm.units}
-                    onChange={(e) => handleCreateFieldChange('units', e.target.value)}
-                    className="bg-white border-[#E5E5E5]"
-                    disabled={isCreating}
-                  />
-                </div>
+              <div className="rounded-md border border-dashed border-[#E5E5E5] bg-[#FAFAFA] px-3 py-2 text-xs text-[#737373]">
+                Units, groups, and assessment math populate automatically when
+                you upload + approve a DRE for this HOA. No need to type them
+                in now.
+              </div>
 
+              <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
                 <div className="space-y-2">
                   <Label htmlFor="createHoaCity">City</Label>
                   <Input

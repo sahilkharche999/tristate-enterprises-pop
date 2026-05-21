@@ -1,0 +1,87 @@
+{% extends "_base.html" %}
+{% block title %}Major Component Repair and Replacement Costs &mdash; {{ fiscal_year }}{% endblock %}
+{% block content %}
+
+{# Major Component Repair and Replacement Costs schedule (pages 32-45 of the
+   real Old Mill 2026 PDF). Rendered from computed.major_component_expenditure_schedule.
+
+   Each component row has columns:
+     Description | Est. Use Life | Rem. Life | Curr. Repl. Cost |
+     Year Rplc. Prov. | Est. 12-25 Liab. | Y_start..Y_end | (Total — last panel only)
+
+   Three horizontal slices (1-10, 11-20, 21-30); same components repeat in each slice.
+   Per-component cells are CURRENT dollars (no inflation per Old Mill convention).
+
+   Group-header rows (is_header=True) are rendered as colspan-spanning section
+   breaks (BUILDING SYSTEMS / Balcony / Clubhouse / High Rise Bldg. A / ...). #}
+
+{% set rows = computed.major_component_expenditure_schedule %}
+{% set slices = [(0, 10, false), (10, 20, false), (20, 30, true)] %}
+
+{% macro panel(slice_start, slice_end, is_last) %}
+  {% set ncols_yr = slice_end - slice_start %}
+  {# 6 fixed cols + year cols + optional Total col #}
+  {% set total_cols = 6 + ncols_yr + (1 if is_last else 0) %}
+  <p class="center bold" style="font-size:9pt; line-height:1.3; margin:0 0 4pt 0">
+    {{ hoa.name | upper }}<br>
+    FORECASTED STATEMENTS OF REPLACEMENT FUND<br>
+    MAJOR COMPONENT REPAIR AND REPLACEMENT COSTS<br>
+    YEARS ENDING DECEMBER 31, {{ fiscal_year }} TO {{ fiscal_year + 29 }}
+    {% if slice_start > 0 %}<br>(CONTINUED){% endif %}
+  </p>
+  <table class="major-component-table">
+    <thead>
+      <tr>
+        <th colspan="6"></th>
+        {% for offset in range(slice_start, slice_end) %}
+          <th>{{ offset + 1 }}</th>
+        {% endfor %}
+        {% if is_last %}<th></th>{% endif %}
+      </tr>
+      <tr>
+        <th>Description</th>
+        <th>Est.<br>Use<br>Life</th>
+        <th>Est.<br>Rem.<br>Life</th>
+        <th>Curr.<br>Repl.<br>Cost</th>
+        <th>Year<br>Rplc.<br>Prov.</th>
+        <th>Est.<br>{{ (fiscal_year - 1) % 100 }}-{{ (fiscal_year + 24) % 100 }}<br>Liab.</th>
+        {% for offset in range(slice_start, slice_end) %}
+          <th>{{ fiscal_year + offset }}</th>
+        {% endfor %}
+        {% if is_last %}<th>Total</th>{% endif %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for c in rows %}
+        {% if c.is_header %}
+          <tr class="group-row">
+            <td colspan="{{ total_cols }}">{{ c.line_item }}</td>
+          </tr>
+        {% else %}
+          <tr>
+            <td>{{ c.line_item }}</td>
+            <td>{{ c.useful_life }}</td>
+            <td>{{ c.remaining_life }}</td>
+            <td>{{ '{:,}'.format(c.replacement_cost|int) }}</td>
+            <td>{{ '{:,}'.format(c.year_replacement_provision|int) }}</td>
+            <td>{{ '{:,}'.format(c.estimated_liability_through_year_25|int) }}</td>
+            {% for offset in range(slice_start, slice_end) %}
+              {% set v = c.expenditures_by_year[offset] %}
+              <td>{% if v and v|int != 0 %}{{ '{:,}'.format(v|int) }}{% endif %}</td>
+            {% endfor %}
+            {% if is_last %}
+              <td>{% if c.total_expenditures and c.total_expenditures|int != 0 %}{{ '{:,}'.format(c.total_expenditures|int) }}{% endif %}</td>
+            {% endif %}
+          </tr>
+        {% endif %}
+      {% endfor %}
+    </tbody>
+  </table>
+{% endmacro %}
+
+{% for slice in slices %}
+  {{ panel(slice[0], slice[1], slice[2]) }}
+  {% if not loop.last %}<div class="page-break"></div>{% endif %}
+{% endfor %}
+
+{% endblock %}

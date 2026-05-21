@@ -61,12 +61,41 @@ def _attr_or_key(obj: Any, name: str, default: Any = None) -> Any:
     return getattr(obj, name, default)
 
 
+# Category → (is_revenue, is_reserve) lookup. Mirrors
+# services.budget_history_service.SECTION_KINDS ('income', 'operating',
+# 'reserve_income', 'reserve_expense'). When the upstream extractor stores
+# a category but not the boolean flags, we derive them here so the
+# disclosure compiler doesn't have to know about the budget vocabulary.
+_CATEGORY_TO_FLAGS: dict[str, tuple[bool, bool]] = {
+    "income": (True, False),            # operating revenue
+    "operating": (False, False),        # operating expense
+    "reserve_income": (True, True),     # reserve revenue
+    "reserve_expense": (False, True),   # reserve expense
+}
+
+
 def from_budget_history_record(record: Any) -> BudgetDraft:
     """Translate a Phase 4 BudgetHistoryRecord (or BudgetDraftPayload) → BudgetDraft.
 
     Trusts Phase 7 section-aware classification metadata on each line item
-    (RESEARCH Pitfall 3 — do NOT re-classify). The source ``line_items`` is
-    list[dict[str, Any]]; this adapter coerces money fields and shape-validates.
+    (RESEARCH Pitfall 3 — do NOT re-classify the *category*; we only derive
+    is_revenue/is_reserve from it when the explicit booleans are absent).
+    The source ``line_items`` is list[dict[str, Any]]; this adapter coerces
+    money fields and shape-validates.
+
+    Money field resolution (priority order):
+        1. proposed_amount — when the operator has explicitly approved a
+           proposed 2026 number distinct from the prior annual budget.
+        2. annual_budget — the canonical forward-looking budget value the
+           UI surfaces in the "Annual Budget" / "Proposed Change" columns.
+        3. amount — legacy synonym, kept for the existing direct-payload tests.
+
+    Classification resolution:
+        - is_revenue / is_reserve are read from explicit booleans when present.
+        - Otherwise derived from ``category`` via _CATEGORY_TO_FLAGS so that
+          rows produced by the budget extractor (which sets only category)
+          land in the correct revenue / expense / operating / replacement
+          bucket downstream.
 
     Raises:
         ValueError: when ``line_items`` is missing or empty.
@@ -78,15 +107,34 @@ def from_budget_history_record(record: Any) -> BudgetDraft:
         )
     items: list[LineItem] = []
     for raw in raw_items:
-        # raw is expected to be a dict (Phase 4/7 line item shape) but we
-        # accept attribute access too for forward compatibility.
+        # Money: try proposed → annual_budget → amount, first non-None wins.
+        money_value: Any = None
+        for field in ("proposed_amount", "annual_budget", "amount"):
+            candidate = _attr_or_key(raw, field)
+            if candidate is not None:
+                money_value = candidate
+                break
+
+        explicit_revenue = _attr_or_key(raw, "is_revenue")
+        explicit_reserve = _attr_or_key(raw, "is_reserve")
+        category = _attr_or_key(raw, "category")
+        derived_revenue, derived_reserve = _CATEGORY_TO_FLAGS.get(
+            (category or "").strip().lower(), (False, False)
+        )
+
         items.append(LineItem(
             label=str(_attr_or_key(raw, "label", "")),
-            amount=_to_decimal(_attr_or_key(raw, "amount")),
+            amount=_to_decimal(money_value),
             section=_attr_or_key(raw, "section"),
-            category=_attr_or_key(raw, "category"),
-            is_reserve=bool(_attr_or_key(raw, "is_reserve", False)),
-            is_revenue=bool(_attr_or_key(raw, "is_revenue", False)),
+            category=category,
+            is_reserve=(
+                bool(explicit_reserve) if explicit_reserve is not None
+                else derived_reserve
+            ),
+            is_revenue=(
+                bool(explicit_revenue) if explicit_revenue is not None
+                else derived_revenue
+            ),
             read_only=bool(_attr_or_key(raw, "read_only", False)),
         ))
     return BudgetDraft(line_items=items)
@@ -148,4 +196,8 @@ def from_hoa_record(property_row: Any) -> HOAMetadata:
             _attr_or_key(property_row, "fiscal_year_end_month", 12) or 12
         ),
         tax_id=_attr_or_key(property_row, "tax_id"),
+        city=_attr_or_key(property_row, "city"),
+        state=_attr_or_key(property_row, "state"),
+        entity_type=_attr_or_key(property_row, "entity_type"),
+        incorporation_year=_attr_or_key(property_row, "incorporation_year"),
     )

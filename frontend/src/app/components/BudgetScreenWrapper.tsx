@@ -21,12 +21,13 @@ import type { SheetTable } from '../api/macros';
 import { initialLineItems, type AISuggestionResponse, type LineItem } from '../data/mockData';
 import { getErrorMessage } from '../lib/errors';
 
-// UI-SPEC §5.2 visibility rule: the panel renders for every HOA workspace,
-// but is enabled only for Old Mill in Phase 11. Other HOAs see the locked
-// "not yet available" state. The match is exact (case-sensitive) against
-// the canonical HOA name; a backend-driven `disclosure_supported` field
-// would supersede this when Phase 12+ widens support (UI-SPEC OQ-3).
-const OLD_MILL_HOA_NAME = 'Old Mill Homeowners Association';
+// The Phase 11 hardcode that gated generation on `hoa.name === "Old Mill
+// Homeowners Association"` was retired by the DRE-driven assessment-engine
+// work — every HOA with a promoted assessment_setup + a finalized
+// AnnualPackage is now supported. The backend re-runs preflight on every
+// generate call (see disclosure_package/preflight.py) and returns a
+// failure block via the existing DisclosureFailureBlock path when
+// prerequisites aren't met, so the UI gate is purely an affordance hint.
 
 export function BudgetScreenWrapper() {
   const { id } = useParams<{ id: string }>();
@@ -278,13 +279,14 @@ export function BudgetScreenWrapper() {
   }
 
   // UI-SPEC §5.1: the disclosure-package panel lives inside the BudgetScreenWrapper
-  // shell as a new sibling section below the budget workspace. Old Mill (the
-  // only HOA with full Phase 11 support) gets the enabled CTA; other HOAs see
-  // the locked "not yet available" state.
+  // shell as a new sibling section below the budget workspace.
   // UI-SPEC OQ-7 / BudgetScreen.tsx:810 precedent: fiscal year is sourced from
   // hoa.portfolio_year, falling back to the current calendar year.
   const disclosureFiscalYear = hoa.portfolio_year ?? new Date().getFullYear();
-  const isSupportedHoa = hoa.name === OLD_MILL_HOA_NAME;
+  // Universal unlock per DRE-driven architecture: every HOA can attempt
+  // generation. Backend preflight rejects with a structured error if a
+  // promoted assessment_setup or a finalized AnnualPackage is missing.
+  const isSupportedHoa = true;
 
   return (
     <>

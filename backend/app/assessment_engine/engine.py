@@ -1,0 +1,591 @@
+"""Calculation orchestrator.
+
+Combines pool math, recipient resolution, and the per-recipient
+summation/rounding/reconciliation flow into a single ``run(calc_input)``
+entry point. Pure function — no DB, no I/O. The Phase 1.3 resolver is
+what builds ``CalcInput`` from ``(assessment_setup_id, budget_year)``.
+
+The 8-step flow (per spec §Calculation Flow):
+    1. Route budget lines to pools via BudgetLinePoolMapping.
+    2. For each pool: convert annual→monthly at the boundary, resolve
+       recipients by scope, dispatch to the appropriate allocator,
+       record PoolAllocationResult rows at full Decimal precision.
+    3. Apply pool-scope overrides (rewrite pool_allocations with
+       source='override').
+    4. Sum components per recipient → raw_monthly_total.
+    5. Round once at the recipient level → rounded_monthly_total.
+    6. Apply package/group/unit-scope overrides (replace
+       rounded_monthly_total).
+    7. Compute annual_total = rounded × 12 × unit_count.
+    8. Compute reconciliation deltas against
+       AnnualPackage.approved_assessment_revenue_annual.
+"""
+
+from __future__ import annotations
+
+from collections import defaultdict
+from decimal import ROUND_HALF_UP, Decimal
+from typing import Iterable, Literal, Optional
+
+from .errors import NeedsHumanReview, UnsupportedAllocationMethod
+from .pools import (
+    equal_allocation,
+    ownership_percentage_allocation,
+    specified_value_allocation,
+    square_footage_allocation,
+)
+from .recipients import resolve_recipients
+from .schemas import (
+    AppliedOverrideEntry,
+    AssessmentOverride,
+    BudgetLineInput,
+    BudgetLineMappingInput,
+    CalcInput,
+    CalcResultSet,
+    PoolAllocationResult,
+    PoolDefinition,
+    RecipientReference,
+    RecipientTotalResult,
+    SpecialAssessmentInput,
+    SpecialAssessmentRendererEvent,
+)
+
+
+CENTS = Decimal("0.01")
+TWELVE = Decimal("12")
+
+
+# -- step 1: route budget lines to pools -----------------------------------
+
+
+def _mapping_key(
+    label: str,
+    section: str,
+    category: str,
+    fund_type: str,
+    account_code: str | None,
+) -> tuple[str, str, str, str, str | None]:
+    return (label, section, category, fund_type, account_code)
+
+
+def _aggregate_by_pool(
+    budget_lines: Iterable[BudgetLineInput],
+    mappings: Iterable[BudgetLineMappingInput],
+) -> dict[str, Decimal]:
+    """Sum annual budget-line amounts by ``pool_key``.
+
+    Raises ``NeedsHumanReview`` for any line lacking an ``active=True``
+    BudgetLinePoolMapping. Inactive mappings are ignored.
+    """
+    routing: dict[tuple, str] = {}
+    for m in mappings:
+        if not m.active:
+            continue
+        key = _mapping_key(
+            m.budget_line_normalized_label,
+            m.section,
+            m.category,
+            m.fund_type,
+            m.account_code,
+        )
+        routing[key] = m.pool_key
+
+    pool_totals: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
+    for line in budget_lines:
+        key = _mapping_key(
+            line.normalized_label,
+            line.section,
+            line.category,
+            line.fund_type,
+            line.account_code,
+        )
+        if key not in routing:
+            raise NeedsHumanReview(line)
+        pool_totals[routing[key]] += line.amount
+
+    return dict(pool_totals)
+
+
+# -- step 2: per-pool dispatch ---------------------------------------------
+
+
+def _allocate_pool(
+    pool: PoolDefinition,
+    monthly_total: Decimal,
+    recipients: list[RecipientReference],
+    specified_value_lookup: dict[tuple[int, str], Decimal],
+) -> tuple[list[PoolAllocationResult], list[str]]:
+    """Run the right allocator for one pool. Returns
+    (pool_allocation_rows, warnings).
+    """
+    warnings: list[str] = []
+    rows: list[PoolAllocationResult] = []
+
+    if pool.allocation_method == "equal":
+        total_units = sum((r.unit_count for r in recipients), start=0)
+        per_unit = equal_allocation(monthly_total, total_units)
+        for r in recipients:
+            rows.append(
+                PoolAllocationResult(
+                    recipient_ref=r,
+                    pool_id=pool.pool_id,
+                    pool_key=pool.pool_key,
+                    unrounded_component_monthly=per_unit * Decimal(r.unit_count),
+                )
+            )
+        return rows, warnings
+
+    if pool.allocation_method == "square_footage":
+        if pool.denominator_value is None:
+            raise UnsupportedAllocationMethod(
+                "square_footage (denominator missing)", pool.pool_key
+            )
+        recomputed = sum(
+            (
+                r.square_feet * Decimal(r.unit_count)
+                for r in recipients
+                if r.square_feet is not None
+            ),
+            start=Decimal("0"),
+        )
+        if recomputed and recomputed != pool.denominator_value:
+            warnings.append(
+                f"DenominatorMismatchWarning: pool '{pool.pool_key}' "
+                f"DRE-frozen denominator={pool.denominator_value} differs "
+                f"from current recipient sum={recomputed} "
+                f"(delta={recomputed - pool.denominator_value}); "
+                "engine used DRE value verbatim"
+            )
+        per_unit_within_group = square_footage_allocation(
+            monthly_total, pool.denominator_value, recipients
+        )
+        # Normalize sqft components to per-recipient (per-group for groups,
+        # per-unit for units). The allocator returns per-unit-within-group
+        # because group.square_feet is avg-per-unit; multiplying by unit_count
+        # collapses to per-group dollars. For unit recipients, unit_count=1
+        # so this is a no-op.
+        for r in recipients:
+            per_recipient_value = (
+                per_unit_within_group[(r.ref_type, r.ref_id)] * Decimal(r.unit_count)
+            )
+            rows.append(
+                PoolAllocationResult(
+                    recipient_ref=r,
+                    pool_id=pool.pool_id,
+                    pool_key=pool.pool_key,
+                    unrounded_component_monthly=per_recipient_value,
+                )
+            )
+        return rows, warnings
+
+    if pool.allocation_method == "ownership_percentage":
+        per_recipient, pool_warnings = ownership_percentage_allocation(
+            monthly_total, recipients
+        )
+        warnings.extend(pool_warnings)
+        for r in recipients:
+            rows.append(
+                PoolAllocationResult(
+                    recipient_ref=r,
+                    pool_id=pool.pool_id,
+                    pool_key=pool.pool_key,
+                    unrounded_component_monthly=per_recipient[(r.ref_type, r.ref_id)],
+                )
+            )
+        return rows, warnings
+
+    if pool.allocation_method == "specified_value":
+        per_recipient = specified_value_allocation(
+            pool.pool_key, recipients, specified_value_lookup
+        )
+        for r in recipients:
+            rows.append(
+                PoolAllocationResult(
+                    recipient_ref=r,
+                    pool_id=pool.pool_id,
+                    pool_key=pool.pool_key,
+                    unrounded_component_monthly=per_recipient[(r.ref_type, r.ref_id)],
+                )
+            )
+        return rows, warnings
+
+    raise UnsupportedAllocationMethod(pool.allocation_method, pool.pool_key)
+
+
+# -- step 3.5: special-assessment behavior matrix (Phase 4.4) --------------
+
+
+def _apply_special_assessments(
+    pool_allocations: list[PoolAllocationResult],
+    special_assessments: list[SpecialAssessmentInput],
+    recipient_set,
+) -> list[SpecialAssessmentRendererEvent]:
+    """Apply each SA entry per the Phase 4.4 matrix.
+
+    - ``approved_scheduled`` + ``included_in_regular_monthly=True``:
+      append one pseudo-pool component row per applicable recipient with
+      ``pool_id=None``, ``pool_key='special_assessment'``,
+      ``source='special_assessment'``. These flow into the regular
+      recipient_total → reconciliation path.
+    - ``approved_scheduled`` + ``included_in_regular_monthly=False``:
+      emit a ``separate_disclosure_block`` renderer event; engine
+      doesn't touch pool_allocations or reconciliation.
+    - ``possible_disclosure_only``: emit a ``disclosure_language``
+      renderer event; engine takes no financial action.
+    - ``none``: ignored.
+
+    Mutates ``pool_allocations`` in place; returns the list of renderer
+    events for inclusion in CalcResultSet.
+    """
+    events: list[SpecialAssessmentRendererEvent] = []
+    for entry in special_assessments:
+        if entry.status == "none":
+            continue
+
+        if entry.status == "approved_scheduled":
+            if not entry.included_in_regular_monthly:
+                events.append(
+                    SpecialAssessmentRendererEvent(
+                        kind="separate_disclosure_block",
+                        label=entry.label,
+                        amount_per_unit=entry.amount_per_unit,
+                        due_date=entry.due_date,
+                    )
+                )
+                continue
+
+            # Add one pseudo-pool row per applicable recipient
+            recipients = resolve_recipients(
+                recipient_set,
+                entry.recipient_scope or "all_units",
+                custom_unit_ids=entry.custom_unit_ids or None,
+            )
+            for r in recipients:
+                pool_allocations.append(
+                    PoolAllocationResult(
+                        recipient_ref=r,
+                        pool_id=None,
+                        pool_key="special_assessment",
+                        unrounded_component_monthly=entry.amount_per_unit,
+                        source="special_assessment",
+                    )
+                )
+
+        elif entry.status == "possible_disclosure_only":
+            events.append(
+                SpecialAssessmentRendererEvent(
+                    kind="disclosure_language",
+                    label=entry.label,
+                    display_language=entry.display_language,
+                )
+            )
+
+    return events
+
+
+# -- step 3: pool-scope overrides ------------------------------------------
+
+
+def _apply_pool_overrides(
+    pool_allocations: list[PoolAllocationResult],
+    overrides: Iterable[AssessmentOverride],
+    applied_overrides: list[AppliedOverrideEntry],
+) -> list[PoolAllocationResult]:
+    """Rewrite every component row in an overridden pool to
+    ``source='override'`` with the operator-supplied monthly amount.
+
+    Audit: appends one ``AppliedOverrideEntry`` per pool-scoped
+    override into ``applied_overrides`` capturing the pre-override
+    monthly total (sum across recipients) so the operator UI can show
+    the delta.
+    """
+    pool_overrides = {
+        o.scope_ref_id: o for o in overrides if o.scope == "pool" and o.scope_ref_id is not None
+    }
+    if not pool_overrides:
+        return pool_allocations
+
+    pre_override_totals: dict[int, Decimal] = defaultdict(lambda: Decimal("0"))
+    for row in pool_allocations:
+        if row.pool_id in pool_overrides:
+            pre_override_totals[row.pool_id] += row.unrounded_component_monthly
+
+    out: list[PoolAllocationResult] = []
+    for row in pool_allocations:
+        ov = pool_overrides.get(row.pool_id)
+        if ov is not None:
+            out.append(
+                row.model_copy(
+                    update={
+                        "unrounded_component_monthly": ov.override_monthly_amount,
+                        "source": "override",
+                    }
+                )
+            )
+        else:
+            out.append(row)
+
+    for pool_id, ov in pool_overrides.items():
+        original = pre_override_totals.get(pool_id)
+        applied_overrides.append(
+            AppliedOverrideEntry(
+                scope="pool",
+                scope_ref_id=pool_id,
+                override_type=ov.override_type,
+                original_calculated_monthly=original,
+                override_monthly=ov.override_monthly_amount,
+                delta_monthly=(
+                    ov.override_monthly_amount - original
+                    if original is not None
+                    else None
+                ),
+                reason=ov.reason,
+                approved_by=ov.approved_by,
+            )
+        )
+
+    return out
+
+
+# -- steps 4–5: per-recipient summation + rounding -------------------------
+
+
+def _round_cents(value: Decimal) -> Decimal:
+    return value.quantize(CENTS, rounding=ROUND_HALF_UP)
+
+
+def _summarize_recipients(
+    pool_allocations: list[PoolAllocationResult],
+) -> list[RecipientTotalResult]:
+    """Sum components per recipient, round once, compute annual total.
+
+    Recipients appear in the order their first PoolAllocationResult row
+    appeared — preserves stable output for templates.
+    """
+    components_by_recipient: dict[tuple[str, int], Decimal] = defaultdict(
+        lambda: Decimal("0")
+    )
+    recipient_ref_by_key: dict[tuple[str, int], RecipientReference] = {}
+    insertion_order: list[tuple[str, int]] = []
+
+    for row in pool_allocations:
+        key = (row.recipient_ref.ref_type, row.recipient_ref.ref_id)
+        if key not in recipient_ref_by_key:
+            recipient_ref_by_key[key] = row.recipient_ref
+            insertion_order.append(key)
+        components_by_recipient[key] += row.unrounded_component_monthly
+
+    totals: list[RecipientTotalResult] = []
+    for key in insertion_order:
+        r = recipient_ref_by_key[key]
+        raw = components_by_recipient[key]
+        rounded = _round_cents(raw)
+        # All pool components are normalized to per-recipient dollars
+        # (per-group for groups, per-unit for units) inside _allocate_pool.
+        # Annual is therefore rounded × 12 with no further multiplication.
+        annual = rounded * TWELVE
+        totals.append(
+            RecipientTotalResult(
+                recipient_ref=r,
+                raw_monthly_total=raw,
+                rounded_monthly_total=rounded,
+                annual_total=annual,
+                rounding_delta_contribution=Decimal("0"),
+            )
+        )
+    return totals
+
+
+# -- step 6: package / group / unit overrides ------------------------------
+
+
+def _apply_recipient_overrides(
+    totals: list[RecipientTotalResult],
+    overrides: Iterable[AssessmentOverride],
+    applied_overrides: list[AppliedOverrideEntry],
+) -> list[RecipientTotalResult]:
+    """Apply package/group/unit-scope overrides.
+
+    - ``package``: every recipient's rounded_monthly_total is replaced.
+    - ``group`` / ``unit``: only matching recipients are replaced.
+
+    Annual totals are recomputed after each override.
+
+    Audit: appends one ``AppliedOverrideEntry`` per override actually
+    used (package override fires per matching recipient; group/unit
+    overrides fire per matching scope_ref_id).
+    """
+    package_override: AssessmentOverride | None = next(
+        (o for o in overrides if o.scope == "package"), None
+    )
+    group_overrides = {
+        o.scope_ref_id: o
+        for o in overrides
+        if o.scope == "group" and o.scope_ref_id is not None
+    }
+    unit_overrides = {
+        o.scope_ref_id: o
+        for o in overrides
+        if o.scope == "unit" and o.scope_ref_id is not None
+    }
+
+    if not (package_override or group_overrides or unit_overrides):
+        return totals
+
+    package_audit_done = False
+    out: list[RecipientTotalResult] = []
+    for t in totals:
+        new_monthly: Decimal | None = None
+        fired: tuple[Literal["package", "group", "unit"], Optional[int], AssessmentOverride] | None = None
+        if package_override is not None:
+            new_monthly = package_override.override_monthly_amount
+            fired = ("package", None, package_override)
+        if t.recipient_ref.ref_type == "group" and t.recipient_ref.ref_id in group_overrides:
+            ov = group_overrides[t.recipient_ref.ref_id]
+            new_monthly = ov.override_monthly_amount
+            fired = ("group", t.recipient_ref.ref_id, ov)
+        if t.recipient_ref.ref_type == "unit" and t.recipient_ref.ref_id in unit_overrides:
+            ov = unit_overrides[t.recipient_ref.ref_id]
+            new_monthly = ov.override_monthly_amount
+            fired = ("unit", t.recipient_ref.ref_id, ov)
+
+        if new_monthly is None:
+            out.append(t)
+            continue
+
+        rounded = _round_cents(new_monthly)
+        annual = rounded * TWELVE
+        out.append(
+            t.model_copy(
+                update={
+                    "rounded_monthly_total": rounded,
+                    "annual_total": annual,
+                }
+            )
+        )
+
+        if fired is not None:
+            scope, ref_id, ov = fired
+            # Package override applies to every recipient; only audit once
+            if scope == "package":
+                if package_audit_done:
+                    continue
+                package_audit_done = True
+                original = None  # package override doesn't capture per-recipient pre-state
+            else:
+                original = t.rounded_monthly_total
+            applied_overrides.append(
+                AppliedOverrideEntry(
+                    scope=scope,
+                    scope_ref_id=ref_id,
+                    override_type=ov.override_type,
+                    original_calculated_monthly=original,
+                    override_monthly=ov.override_monthly_amount,
+                    delta_monthly=(
+                        ov.override_monthly_amount - original
+                        if original is not None
+                        else None
+                    ),
+                    reason=ov.reason,
+                    approved_by=ov.approved_by,
+                )
+            )
+    return out
+
+
+# -- step 7: reconciliation ------------------------------------------------
+
+
+def _reconcile(
+    totals: list[RecipientTotalResult],
+    approved_revenue: Decimal,
+) -> tuple[Decimal, Decimal, Decimal]:
+    total_calculated = sum(
+        (t.annual_total for t in totals), start=Decimal("0")
+    )
+    delta_annual = total_calculated - approved_revenue
+    delta_monthly = delta_annual / TWELVE
+    delta_percent = (
+        delta_annual / approved_revenue
+        if approved_revenue != 0
+        else Decimal("0")
+    )
+    return delta_annual, delta_monthly, delta_percent
+
+
+# -- public entry point ----------------------------------------------------
+
+
+def run(calc_input: CalcInput) -> CalcResultSet:
+    """Run the full calculation flow against a pre-resolved CalcInput.
+
+    Returns a ``CalcResultSet`` with pool_allocations, recipient_totals,
+    rounding deltas, pool_sum diagnostic, and warnings.
+    """
+    pool_totals_annual = _aggregate_by_pool(
+        calc_input.budget_lines, calc_input.mappings
+    )
+
+    pool_allocations: list[PoolAllocationResult] = []
+    warnings: list[str] = []
+    pool_sum_annual = Decimal("0")
+
+    for pool in sorted(calc_input.pools, key=lambda p: p.display_order):
+        annual_total = pool_totals_annual.get(pool.pool_key, Decimal("0"))
+        pool_sum_annual += annual_total
+        monthly_total = annual_total / TWELVE
+
+        custom_ids = calc_input.pool_custom_recipients.get(pool.pool_key)
+        recipients = resolve_recipients(
+            calc_input.recipient_set,
+            pool.recipient_scope,
+            custom_unit_ids=custom_ids,
+        )
+        if not recipients:
+            continue
+
+        rows, pool_warnings = _allocate_pool(
+            pool,
+            monthly_total,
+            recipients,
+            calc_input.specified_value_lookup,
+        )
+        pool_allocations.extend(rows)
+        warnings.extend(pool_warnings)
+
+    # Step 3.5: special-assessment behavior matrix (Phase 4.4).
+    # ``approved_scheduled`` + ``included_in_regular_monthly`` adds
+    # pseudo-pool rows so they flow through recipient summation +
+    # reconciliation just like any other pool component. The other
+    # branches emit renderer events that bypass financial math.
+    special_assessment_events = _apply_special_assessments(
+        pool_allocations,
+        calc_input.special_assessments,
+        calc_input.recipient_set,
+    )
+
+    applied_overrides: list[AppliedOverrideEntry] = []
+    pool_allocations = _apply_pool_overrides(
+        pool_allocations, calc_input.overrides, applied_overrides
+    )
+
+    recipient_totals = _summarize_recipients(pool_allocations)
+    recipient_totals = _apply_recipient_overrides(
+        recipient_totals, calc_input.overrides, applied_overrides
+    )
+
+    delta_annual, delta_monthly, delta_percent = _reconcile(
+        recipient_totals, calc_input.approved_assessment_revenue_annual
+    )
+
+    return CalcResultSet(
+        pool_allocations=pool_allocations,
+        recipient_totals=recipient_totals,
+        rounding_delta_annual=delta_annual,
+        rounding_delta_monthly=delta_monthly,
+        rounding_delta_percent=delta_percent,
+        pool_sum_annual=pool_sum_annual,
+        warnings=warnings,
+        special_assessment_events=special_assessment_events,
+        applied_overrides=applied_overrides,
+    )

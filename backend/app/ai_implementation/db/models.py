@@ -63,6 +63,10 @@ class Property(Base):
     fiscal_year_start_month = Column(Integer, default=1)
     fiscal_year_end_month = Column(Integer, default=12)
     city = Column(Text)
+    # HOA-permanent facts (drifting-puzzling-grove refactor)
+    state = Column(Text, default="CA")
+    entity_type = Column(Text)
+    incorporation_year = Column(Integer)
     portfolio_year = Column(Integer)
     workflow_status = Column(Text, default="Not Started")
     created_at = Column(Text, server_default=_CREATED_AT_DEFAULT)
@@ -89,12 +93,40 @@ class HOASettings(Base):
     cpa_firm_name = Column(Text)
     cpa_firm_address = Column(Text)
     reserve_study_expert_name = Column(Text)
+    reserve_study_date = Column(Text)
+    # Priority-A disclosure inputs (drifting-puzzling-grove) — operator can
+    # override values that would otherwise be derived from the budget draft
+    # or reserve study, and supply data the templates need but can't compute.
+    approved_monthly_assessment_per_unit = Column(Float)
+    income_tax_provision_override = Column(Float)
+    reserve_funding_source = Column(Text, default="reserve_study_provision")
+    reserve_funding_manual_amount = Column(Float)
+    special_assessments_json = Column(Text, default="[]")
+    additional_assessments_needed_json = Column(Text, default="[]")
+    outstanding_loan_json = Column(Text)  # nullable: null = no loan
+    # Phase 1 boilerplate-gap fields (drifting-puzzling-grove). Letter +
+    # accountant + funding-plan dates are distinct from the rendering date;
+    # signed-by-title pairs with letter_signed_by for the 2-line signature
+    # block; hoa_state/entity_type/incorporation_year fill in Note 1.
+    letter_date = Column(Text)
+    letter_signed_by_title = Column(Text)
+    accountant_report_date = Column(Text)
+    reserve_funding_plan_date = Column(Text)
+    hoa_state = Column(Text, default="CA")
+    hoa_entity_type = Column(Text)
+    hoa_incorporation_year = Column(Integer)
     reserve_cash_balance_eoy_prior = Column(Float, default=0.0)
     fund_balance_boy_operations = Column(Float, default=0.0)
     monthly_assessment_per_unit_prior = Column(Float, default=0.0)
     interest_rate_after_tax = Column(Float, default=0.0)
     replacement_cost_increase_rate = Column(Float, default=0.03)
-    assessment_increase_schedule_json = Column(Text)
+    assessment_increase_schedule_json = Column(Text, default="[]")
+    # 30-year reserve funding study (drifting-puzzling-grove rebuild).
+    # Separate per-unit monthly assessment dedicated to the replacement fund,
+    # distinct from the operations monthly assessment.
+    replacement_fund_monthly_assessment_per_unit = Column(Float)
+    # Operator-entered deferrals: list of {year, amount}. Usually [].
+    board_deferrals_json = Column(Text, default="[]")
     letter_signed_by = Column(Text, default="Board of Directors")
     updated_at = Column(Text, server_default=_CREATED_AT_DEFAULT)
 

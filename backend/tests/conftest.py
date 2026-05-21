@@ -8,6 +8,13 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "live: live network call (Gemini API) — runs only with -m live",
+    )
+
 from app import main as main_module
 from app import config as app_config
 from app.ai_implementation import database as database_module
@@ -312,7 +319,16 @@ def session() -> Iterator:
     event.listen(engine, "connect", session_module._set_sqlite_pragmas)
 
     with engine.begin() as conn:
-        for statement in schema_sql.split(";"):
+        # Strip line-comments before splitting so semicolons inside
+        # ``-- ... ;`` comments don't fragment a statement. SQLite's
+        # native executescript handles this; SQLAlchemy's split-and-
+        # execute path doesn't, so we pre-clean here.
+        stripped_sql = "\n".join(
+            line.split("--", 1)[0] if line.lstrip().startswith("--") else
+            line if "--" not in line else line[: line.index("--")]
+            for line in schema_sql.splitlines()
+        )
+        for statement in stripped_sql.split(";"):
             stmt = statement.strip()
             if stmt:
                 conn.exec_driver_sql(stmt)
@@ -518,22 +534,6 @@ def disclosure_storage_root(tmp_path, monkeypatch) -> Path:
     root.mkdir()
     monkeypatch.setenv("BUDGET_STORAGE_ROOT", str(tmp_path))
     return root
-
-
-@pytest.fixture
-def golden_old_mill_pdf() -> Path:
-    """Path to the golden 2026 Old Mill disclosure PDF for raster-diff tests.
-
-    The smoking-gun success criterion (CONTEXT D-13) is page-for-page parity on
-    the 18 generated pages between the system output and this PDF. Skip if the
-    file is not present in the working tree (e.g., open-source clone without
-    the client's reference document).
-    """
-    repo_root = Path(__file__).resolve().parents[2]
-    path = repo_root / "2026" / "Old Mill 2026 budget disclosure.pdf"
-    if not path.exists():
-        pytest.skip(f"Golden PDF not present at {path}; cannot run parity test.")
-    return path
 
 
 @pytest.fixture

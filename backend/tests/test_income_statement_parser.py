@@ -152,8 +152,14 @@ class TestSectionStateMachine(unittest.TestCase):
         self.assertEqual(items[0]["category"], "operating")
         self.assertFalse(items[0]["read_only"])
 
-    def test_reserve_income_items_not_read_only(self):
-        """Items under Reserve Income are category=reserve_income and NOT read_only."""
+    def test_reserve_income_items_are_read_only(self):
+        """Items under Reserve Income are category=reserve_income AND read_only.
+
+        Reserve income rows are flagged read_only because they come from the
+        reserve study extraction, not operator-editable budget input. The
+        ``READ_ONLY_SECTIONS`` set in ``income_statement_parser`` is the
+        source of truth.
+        """
         rows = [
             _section_header_row("Reserve Income"),
             _line_item_row("45000 - Reserve Interest", ytd=300.0, annual=300.0),
@@ -161,7 +167,7 @@ class TestSectionStateMachine(unittest.TestCase):
         items = parse_rows_with_sections(rows, _FALLBACK_COLUMNS)
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["category"], "reserve_income")
-        self.assertFalse(items[0]["read_only"])
+        self.assertTrue(items[0]["read_only"])
 
     def test_total_rows_skipped(self):
         """Rows starting with 'Total ' are excluded from line items."""
@@ -734,11 +740,12 @@ def test_full_pipeline_esprit_park_structure(esprit_park_full_rows):
     assert mgmt["category"] == "operating"
     assert mgmt["read_only"] is False
 
-    # Reserve income items — NOT read_only
+    # Reserve income items — read_only (sourced from reserve study, not
+    # editable as budget input). Matches READ_ONLY_SECTIONS in the parser.
     assert "45000 - Reserve Interest Income" in items_by_label
     reserve_interest = items_by_label["45000 - Reserve Interest Income"]
     assert reserve_interest["category"] in ("reserve", "reserve_income", "reserve_expense")
-    assert reserve_interest["read_only"] is False  # reserve income is editable
+    assert reserve_interest["read_only"] is True
 
     # Reserve expense (per reserve study) items — read_only
     assert "91228 - Exposed Brick Repointing" in items_by_label

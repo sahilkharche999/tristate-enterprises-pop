@@ -63,7 +63,7 @@ def create_hoa(session: Session, payload: HOACreateRequest) -> HOADetail:
 
     row = Property(
         name=normalized_name,
-        units=payload.units,
+        units=payload.units if payload.units is not None else 0,
         reserve_inflation_rate=0.0,
         fiscal_year_start_month=payload.fiscal_year_start_month,
         fiscal_year_end_month=_derive_fiscal_year_end(payload.fiscal_year_start_month),
@@ -94,7 +94,16 @@ def update_hoa(session: Session, hoa_id: int, payload: HOAUpdateRequest) -> Opti
     row.fiscal_year_end_month = _derive_fiscal_year_end(payload.fiscal_year_start_month)
     if payload.city is not None:
         row.city = payload.city.strip()
+    if payload.reserve_inflation_rate is not None:
+        row.reserve_inflation_rate = payload.reserve_inflation_rate
     session.commit()
     session.refresh(row)
-    reserve_inflation_rate = app_settings_service.get_global_reserve_inflation_rate(session)
+    # Prefer the HOA-saved rate when non-zero so the per-HOA value
+    # round-trips through the PUT/GET response; fall back to the global
+    # app-level default for HOAs that haven't set one.
+    hoa_rate = getattr(row, "reserve_inflation_rate", None) or 0.0
+    if hoa_rate > 0.0:
+        reserve_inflation_rate = hoa_rate
+    else:
+        reserve_inflation_rate = app_settings_service.get_global_reserve_inflation_rate(session)
     return _serialize_hoa(row, reserve_inflation_rate=reserve_inflation_rate)

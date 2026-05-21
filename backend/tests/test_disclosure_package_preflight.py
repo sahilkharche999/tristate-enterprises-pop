@@ -183,7 +183,35 @@ def test_validate_inputs_flags_invalid_fiscal_year_end_month():
 # ── Test 5: reserve_cash_balance.amount <= 0 → blocking error (REQ-D11-004) ──
 
 
-def test_validate_inputs_flags_zero_or_negative_reserve_cash_balance():
+def test_validate_inputs_flags_negative_reserve_cash_balance():
+    """In the DRE-driven model the operator supplies the reserve cash
+    balance via hoa_settings; ``spec.static_data`` defaults to 0.
+
+    Preflight only blocks on *negative* values (a sign error). A 0 value
+    flows through as a downstream data_gap so the operator can fill it
+    in via the Settings tab without compilation hard-failing.
+    """
+    from app.disclosure_package.preflight import validate_inputs
+
+    spec = _spec_with_cash_balance(Decimal("-1"))
+    errors = validate_inputs(
+        spec=spec,
+        budget_draft=_valid_budget(),
+        reserve_snapshot=_valid_reserve_snapshot(),
+        hoa_metadata=_valid_hoa_metadata(),
+        appendices_root=None,
+    )
+    paths = [e.field_path for e in errors]
+    assert "reserve_cash_balance.amount" in paths
+
+
+def test_validate_inputs_does_not_block_on_zero_reserve_cash_balance():
+    """A 0 reserve cash balance is treated as a data_gap, not a block.
+
+    Operators with brand-new HOAs legitimately start with $0 in reserves;
+    the compile-side data_gap detection surfaces the missing-setting case
+    distinctly from the genuinely-$0 case.
+    """
     from app.disclosure_package.preflight import validate_inputs
 
     spec = _spec_with_cash_balance(Decimal("0"))
@@ -195,7 +223,7 @@ def test_validate_inputs_flags_zero_or_negative_reserve_cash_balance():
         appendices_root=None,
     )
     paths = [e.field_path for e in errors]
-    assert "reserve_cash_balance.amount" in paths
+    assert "reserve_cash_balance.amount" not in paths
 
 
 # ── Test 6: missing static appendix files do NOT block preflight ──────────────
@@ -233,7 +261,7 @@ def test_validate_inputs_returns_multiple_errors_in_order():
         ReserveStudySnapshot,
     )
 
-    spec = _spec_with_cash_balance(Decimal("0"))
+    spec = _spec_with_cash_balance(Decimal("-1"))
     empty_budget = BudgetDraft.model_construct(line_items=[])
     empty_snap = ReserveStudySnapshot.model_construct(
         study_date="X", components=[]

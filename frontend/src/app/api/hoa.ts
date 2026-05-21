@@ -27,7 +27,9 @@ export interface HOAUpdatePayload {
 
 export interface HOACreatePayload {
   name: string;
-  units: number;
+  // Optional at create time — populated from the DRE extraction once the
+  // operator approves the run. Backend defaults to 0 when omitted.
+  units?: number;
   fiscal_year_start_month: number;
   city?: string;
 }

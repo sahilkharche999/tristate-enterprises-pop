@@ -42,12 +42,16 @@ class _FakeGeminiClient:
 
 
 def test_call_llm_returns_parsed_model(monkeypatch):
-    """call_llm should return response.parsed when it is a valid Pydantic instance."""
-    expected = SimpleModel(name="test", value=42)
-    fake_response = _FakeParsedResponse(parsed=expected)
+    """call_llm should return a Pydantic instance parsed from response.text.
+
+    The current implementation calls ``response_schema.model_validate_json``
+    on ``response.text``; ``response.parsed`` is no longer the preferred
+    accessor (Gemini returns JSON text via ``response_mime_type``).
+    """
+    fake_response = _FakeParsedResponse(text='{"name": "test", "value": 42}')
     fake_client = _FakeGeminiClient(fake_response)
 
-    monkeypatch.setattr("app.ai_implementation.pipeline.llm_client._gemini_client", None)
+    monkeypatch.setattr("app.ai_implementation.pipeline.llm_client._gemini_client_no_loop", None)
     monkeypatch.setattr("app.ai_implementation.pipeline.llm_client.get_llm_client", lambda: fake_client)
 
     result = asyncio.run(
@@ -69,7 +73,7 @@ def test_call_llm_falls_back_to_text_parsing(monkeypatch):
     fake_response = _FakeParsedResponse(parsed=None, text='{"name": "fallback", "value": 99}')
     fake_client = _FakeGeminiClient(fake_response)
 
-    monkeypatch.setattr("app.ai_implementation.pipeline.llm_client._gemini_client", None)
+    monkeypatch.setattr("app.ai_implementation.pipeline.llm_client._gemini_client_no_loop", None)
     monkeypatch.setattr("app.ai_implementation.pipeline.llm_client.get_llm_client", lambda: fake_client)
 
     result = asyncio.run(
@@ -91,7 +95,7 @@ def test_call_llm_returns_none_on_empty_response(monkeypatch):
     fake_response = _FakeParsedResponse(parsed=None, text=None)
     fake_client = _FakeGeminiClient(fake_response)
 
-    monkeypatch.setattr("app.ai_implementation.pipeline.llm_client._gemini_client", None)
+    monkeypatch.setattr("app.ai_implementation.pipeline.llm_client._gemini_client_no_loop", None)
     monkeypatch.setattr("app.ai_implementation.pipeline.llm_client.get_llm_client", lambda: fake_client)
 
     result = asyncio.run(
@@ -110,7 +114,9 @@ def test_call_llm_retries_on_rate_limit(monkeypatch):
     from google.genai import errors as genai_errors
 
     expected = SimpleModel(name="retry_success", value=200)
-    fake_success_response = _FakeParsedResponse(parsed=expected)
+    fake_success_response = _FakeParsedResponse(
+        text='{"name": "retry_success", "value": 200}',
+    )
 
     call_count = 0
 
@@ -137,7 +143,7 @@ def test_call_llm_retries_on_rate_limit(monkeypatch):
             self.aio = _FakeAioRetry()
 
     fake_client = _FakeRetryClient()
-    monkeypatch.setattr("app.ai_implementation.pipeline.llm_client._gemini_client", None)
+    monkeypatch.setattr("app.ai_implementation.pipeline.llm_client._gemini_client_no_loop", None)
     monkeypatch.setattr("app.ai_implementation.pipeline.llm_client.get_llm_client", lambda: fake_client)
 
     # Patch asyncio.sleep to avoid real delays and to verify backoff was called
@@ -167,12 +173,13 @@ def test_call_llm_retries_on_rate_limit(monkeypatch):
 
 
 def test_call_llm_vision_returns_parsed_model(monkeypatch):
-    """call_llm_vision should return response.parsed for multimodal requests."""
-    expected = SimpleModel(name="vision", value=7)
-    fake_response = _FakeParsedResponse(parsed=expected)
+    """call_llm_vision should return a Pydantic instance parsed from response.text
+    for multimodal requests (same JSON-text path as call_llm).
+    """
+    fake_response = _FakeParsedResponse(text='{"name": "vision", "value": 7}')
     fake_client = _FakeGeminiClient(fake_response)
 
-    monkeypatch.setattr("app.ai_implementation.pipeline.llm_client._gemini_client", None)
+    monkeypatch.setattr("app.ai_implementation.pipeline.llm_client._gemini_client_no_loop", None)
     monkeypatch.setattr("app.ai_implementation.pipeline.llm_client.get_llm_client", lambda: fake_client)
 
     result = asyncio.run(

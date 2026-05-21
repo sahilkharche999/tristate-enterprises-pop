@@ -22,6 +22,8 @@ lets operators drop ad-hoc appendix PDFs in without updating the PackageSpec.
 """
 from __future__ import annotations
 
+from datetime import date, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Optional
 
@@ -34,6 +36,124 @@ from .schemas import (
 )
 
 
+# Accepted reserve-study-date formats. ISO + US numeric are most common;
+# month-name formats ("September 2025", "Sep 2025", "Sep 1, 2025") are
+# accepted because operators commonly type reserve-study dates that way
+# (the reserve-study cover page itself usually shows month + year).
+_RESERVE_STUDY_DATE_FORMATS = (
+    "%Y-%m-%d",
+    "%m/%d/%Y",
+    "%Y/%m/%d",
+    "%B %d, %Y",   # "September 1, 2025"
+    "%b %d, %Y",   # "Sep 1, 2025"
+    "%B %Y",       # "September 2025" → first of month
+    "%b %Y",       # "Sep 2025" → first of month
+    "%B, %Y",      # "September, 2025"
+)
+
+
+def _parse_reserve_study_date(value: str) -> Optional[date]:
+    cleaned = (value or "").strip()
+    if not cleaned:
+        return None
+    for fmt in _RESERVE_STUDY_DATE_FORMATS:
+        try:
+            return datetime.strptime(cleaned, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def check_reserve_study_age(
+    *,
+    reserve_study_date: Optional[str],
+    package_fiscal_year: int,
+) -> list[PreflightError]:
+    """California Civil Code §5550: the reserve study used in an annual
+    disclosure package must be ≤ 3 years old.
+
+    Emits:
+    - ``blocking`` when the study is > 3 years old as of the package's
+      fiscal year start (Jan 1 of the package year).
+    - ``warning`` when the study is exactly 3 years old (refresh
+      overdue next package year).
+    - ``warning`` when the study is 2 years old (refresh due next year).
+    - ``warning`` when ``reserve_study_date`` is missing/unparseable —
+      operator must supply a date before package generation.
+
+    All findings reference ``hoa_settings.reserve_study_date`` so the
+    Disclosure Settings form can deep-link the operator to the field.
+    """
+    field_path = "hoa_settings.reserve_study_date"
+
+    if not reserve_study_date or not str(reserve_study_date).strip():
+        return [
+            PreflightError(
+                field_path=field_path,
+                message=(
+                    "Reserve study date is missing. California Civil Code "
+                    "§5550 requires a reserve study dated within the past 3 years."
+                ),
+                severity="warning",
+            )
+        ]
+
+    parsed = _parse_reserve_study_date(str(reserve_study_date))
+    if parsed is None:
+        return [
+            PreflightError(
+                field_path=field_path,
+                message=(
+                    f"Reserve study date {reserve_study_date!r} is unparseable. "
+                    "Use YYYY-MM-DD or MM/DD/YYYY."
+                ),
+                severity="warning",
+            )
+        ]
+
+    # Use calendar-year arithmetic — matches the statute's plain reading
+    # ("dated within the past 3 years") and avoids quirky month-day anchor
+    # edge cases that would let a study dated, say, June 2023 pass for an
+    # entire 2026 package because the package "starts" before June.
+    age_years = package_fiscal_year - parsed.year
+
+    if age_years > 3:
+        return [
+            PreflightError(
+                field_path=field_path,
+                message=(
+                    f"Reserve study dated {reserve_study_date} is {age_years} "
+                    "years old at the start of the package fiscal year. CA §5550 "
+                    "requires ≤ 3 years."
+                ),
+                severity="blocking",
+            )
+        ]
+    if age_years == 3:
+        return [
+            PreflightError(
+                field_path=field_path,
+                message=(
+                    f"Reserve study dated {reserve_study_date} is exactly 3 "
+                    "years old; next package year will require a refresh."
+                ),
+                severity="warning",
+            )
+        ]
+    if age_years == 2:
+        return [
+            PreflightError(
+                field_path=field_path,
+                message=(
+                    f"Reserve study dated {reserve_study_date} is 2 years old; "
+                    "refresh due next package year."
+                ),
+                severity="warning",
+            )
+        ]
+    return []
+
+
 def validate_inputs(
     *,
     spec: PackageSpec,
@@ -41,6 +161,7 @@ def validate_inputs(
     reserve_snapshot: ReserveStudySnapshot,
     hoa_metadata: HOAMetadata,
     appendices_root: Optional[Path] = None,
+    hoa_settings_overrides: Optional[dict] = None,
 ) -> list[PreflightError]:
     """Return the list of blocking + warning errors. Empty list = ready to render.
 
@@ -52,9 +173,13 @@ def validate_inputs(
         appendices_root: accepted for backward compatibility; no longer used.
             Static appendix existence is no longer a preflight concern —
             see compiler.py for the merge-time skip-and-warn behaviour.
+        hoa_settings_overrides: operator-saved per-HOA settings. In the
+            DRE-driven model the numeric disclosure inputs (reserve cash
+            balance, etc.) live here, not in ``spec.static_data``.
     """
     del appendices_root  # appendix existence is checked at merge time, not here
 
+    overrides = hoa_settings_overrides or {}
     errors: list[PreflightError] = []
 
     # 1. Budget line items present (REQ-D11-005)
@@ -82,14 +207,271 @@ def validate_inputs(
             severity="blocking",
         ))
 
-    # 4. Reserve cash balance set (REQ-D11-004; for Phase 11 this comes from
-    #    spec.static_data — Phase 12+ moves it into a database-backed admin
-    #    form and the field_path stays the same).
-    if spec.static_data.reserve_cash_balance_eoy_prior <= 0:
+    # 4. Reserve cash balance set (REQ-D11-004). In the DRE-driven model the
+    #    operator-supplied value lives in ``hoa_settings``; the spec carries
+    #    only a sentinel default. Preflight checks the *effective* value
+    #    (override if present, else spec.static_data) so a missing setting
+    #    surfaces as a data_gap downstream rather than blocking compile.
+    override_cash = overrides.get("reserve_cash_balance_eoy_prior")
+    effective_cash = (
+        Decimal(str(override_cash))
+        if override_cash is not None
+        else spec.static_data.reserve_cash_balance_eoy_prior
+    )
+    if effective_cash < 0:
         errors.append(PreflightError(
             field_path="reserve_cash_balance.amount",
-            message="Reserve cash balance for end of prior year must be > 0",
+            message="Reserve cash balance for end of prior year must be >= 0",
             severity="blocking",
         ))
 
+    # 5. Reserve study staleness (CA §5550; Phase 5.7 of
+    #    dre-driven-assessment-engine).
+    errors.extend(
+        check_reserve_study_age(
+            reserve_study_date=reserve_snapshot.study_date,
+            package_fiscal_year=spec.fiscal_year,
+        )
+    )
+
     return errors
+
+
+# -- Orchestration helpers (Phase 5.1) -------------------------------------
+
+
+def partition_errors(
+    errors: list[PreflightError],
+) -> tuple[list[PreflightError], list[PreflightError]]:
+    """Split a flat error list into (blocking, warnings).
+
+    Callers that only need to surface warnings (e.g., ``computed.data_gaps``
+    in the audit JSON) consume the second tuple element; the first
+    element is what halts compilation.
+    """
+    blocking: list[PreflightError] = []
+    warnings: list[PreflightError] = []
+    for e in errors:
+        if e.severity == "blocking":
+            blocking.append(e)
+        else:
+            warnings.append(e)
+    return blocking, warnings
+
+
+class PreflightBlockedError(RuntimeError):
+    """Raised by ``raise_if_blocking`` when at least one blocking error
+    is present. Carries the full error list and the field paths so the
+    Disclosure Settings form can deep-link the operator to every offender.
+    """
+
+    def __init__(self, blocking: list[PreflightError]) -> None:
+        self.blocking = blocking
+        self.field_paths = tuple(e.field_path for e in blocking)
+        super().__init__(
+            f"Preflight blocked with {len(blocking)} error(s): "
+            + "; ".join(f"{e.field_path}: {e.message}" for e in blocking)
+        )
+
+
+def raise_if_blocking(errors: list[PreflightError]) -> list[PreflightError]:
+    """Halt compilation when any blocking errors exist; otherwise return
+    the warnings so the caller can stash them in ``computed.data_gaps``.
+
+    Wires into ``compile_package`` so a single call covers both the
+    halt-on-blocking and the surface-warnings paths.
+    """
+    blocking, warnings = partition_errors(errors)
+    if blocking:
+        raise PreflightBlockedError(blocking)
+    return warnings
+
+
+# -- Appendix cadence preflight (Phase 5.6) --------------------------------
+
+
+def check_appendix_cadence(
+    *,
+    appendix_documents: list[dict],
+    package_fiscal_year: int,
+) -> list[PreflightError]:
+    """Validate the per-HOA appendix manifest for the package year.
+
+    Each ``appendix_documents[i]`` dict must carry at minimum
+    ``display_title``, ``cadence``, ``annual_year`` (nullable),
+    ``valid_through_year`` (nullable), and ``required_flag``. The check
+    enforces:
+
+    - Annual appendix missing for the package year — emit blocking when
+      ``required_flag=1`` (insurance disclosures and the like); warning
+      otherwise.
+    - Package year exceeds ``valid_through_year`` for any appendix —
+      blocking (operator must refresh).
+
+    The check is data-driven (takes a plain list of dicts) so the
+    compile pipeline can adapt the AppendixDocument ORM rows into the
+    expected shape without coupling preflight to a particular ORM.
+    """
+    out: list[PreflightError] = []
+
+    has_annual_for_year = False
+    annual_required = False
+    for a in appendix_documents:
+        cadence = (a.get("cadence") or "persistent").strip().lower()
+        title = a.get("display_title") or a.get("file_name") or "(unnamed)"
+        required = bool(a.get("required_flag"))
+        annual_year = a.get("annual_year")
+        valid_through = a.get("valid_through_year")
+
+        if cadence == "annual":
+            if required:
+                annual_required = True
+            if annual_year == package_fiscal_year:
+                has_annual_for_year = True
+
+        if valid_through is not None and package_fiscal_year > int(valid_through):
+            out.append(
+                PreflightError(
+                    field_path=f"appendix.{title}.valid_through_year",
+                    message=(
+                        f"Appendix {title!r} expired at end of fiscal year "
+                        f"{valid_through}; package year {package_fiscal_year} requires a refresh."
+                    ),
+                    severity="blocking",
+                )
+            )
+
+    if annual_required and not has_annual_for_year:
+        out.append(
+            PreflightError(
+                field_path="appendix.annual_required_missing",
+                message=(
+                    f"A required annual-cadence appendix is missing for "
+                    f"fiscal year {package_fiscal_year}. Upload this year's "
+                    "version (e.g. annual insurance disclosure) before generating "
+                    "the package."
+                ),
+                severity="blocking",
+            )
+        )
+
+    return out
+
+
+# -- Special assessments (Phase 4.4) ---------------------------------------
+
+
+SpecialAssessmentStatus = "approved_scheduled | possible_disclosure_only | none"
+
+
+def infer_special_assessment_status(entry: dict) -> str:
+    """Resolve the status of a ``hoa_settings.special_assessments_json`` entry.
+
+    The JSON shape was extended with an optional ``status`` field as part
+    of Phase 4.4. Legacy rows without that field are mapped to a status
+    via these rules (also documented in tasks.md §4.4):
+
+    - ``amount_per_unit > 0`` → ``approved_scheduled`` (scheduled charge)
+    - ``amount_per_unit == 0 && display_language present`` → ``possible_disclosure_only``
+    - else → ``none``
+
+    Returns one of ``approved_scheduled`` / ``possible_disclosure_only``
+    / ``none``. Honors an explicit ``status`` field when present.
+    """
+    explicit = (entry.get("status") or "").strip().lower()
+    if explicit in ("approved_scheduled", "possible_disclosure_only", "none"):
+        return explicit
+
+    amount = entry.get("amount_per_unit")
+    if amount is None:
+        amount = entry.get("per_unit")
+    if amount is None:
+        amount = entry.get("amount")
+
+    try:
+        numeric = float(amount) if amount is not None else 0.0
+    except (TypeError, ValueError):
+        numeric = 0.0
+
+    if numeric > 0:
+        return "approved_scheduled"
+    display = (entry.get("display_language") or "").strip()
+    if display:
+        return "possible_disclosure_only"
+    return "none"
+
+
+def check_special_assessments(
+    *,
+    entries: list[dict],
+) -> list[PreflightError]:
+    """Validate ``hoa_settings.special_assessments_json`` entries.
+
+    Per Phase 4.4 preflight rules:
+
+    - ``status='approved_scheduled'`` requires ``amount_per_unit > 0``.
+    - ``status='approved_scheduled'`` requires ``due_date`` OR a
+      non-empty ``due_dates`` array (either satisfies; multi-date wins
+      when both present).
+    - ``status='possible_disclosure_only'`` requires non-empty
+      ``display_language``.
+
+    Entries without an explicit status are checked against the
+    inferred status from ``infer_special_assessment_status``.
+    """
+    out: list[PreflightError] = []
+    for i, entry in enumerate(entries):
+        label = entry.get("label") or entry.get("description") or f"entry[{i}]"
+        status = infer_special_assessment_status(entry)
+
+        if status == "approved_scheduled":
+            amount = entry.get("amount_per_unit")
+            if amount is None:
+                amount = entry.get("per_unit") or entry.get("amount")
+            try:
+                numeric = float(amount) if amount is not None else 0.0
+            except (TypeError, ValueError):
+                numeric = 0.0
+            if numeric <= 0:
+                out.append(
+                    PreflightError(
+                        field_path=f"special_assessments[{i}].amount_per_unit",
+                        message=(
+                            f"Special assessment {label!r} status='approved_scheduled' "
+                            "but amount_per_unit is missing or 0."
+                        ),
+                        severity="blocking",
+                    )
+                )
+
+            has_due_date = bool((entry.get("due_date") or "").strip()) if isinstance(
+                entry.get("due_date"), str
+            ) else bool(entry.get("due_date"))
+            has_due_dates = bool(entry.get("due_dates"))
+            if not (has_due_date or has_due_dates):
+                out.append(
+                    PreflightError(
+                        field_path=f"special_assessments[{i}].due_date",
+                        message=(
+                            f"Special assessment {label!r} status='approved_scheduled' "
+                            "needs either due_date or due_dates."
+                        ),
+                        severity="blocking",
+                    )
+                )
+
+        elif status == "possible_disclosure_only":
+            display = (entry.get("display_language") or "").strip()
+            if not display:
+                out.append(
+                    PreflightError(
+                        field_path=f"special_assessments[{i}].display_language",
+                        message=(
+                            f"Special assessment {label!r} "
+                            "status='possible_disclosure_only' needs display_language."
+                        ),
+                        severity="blocking",
+                    )
+                )
+
+    return out

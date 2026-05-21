@@ -83,13 +83,15 @@ def test_table_to_line_items_supports_headerless_income_statement_layout():
     # so this item inherits the current section state ("income"). Not read_only (editable).
     reserve_transfer = next(item for item in line_items if item["label"] == "90000 - Reserve - Allocation/Transfer")
     assert reserve_transfer["read_only"] is False
-    # "Reserve Income" section → category=reserve, but NOT read_only (Reserve Income items are editable)
+    # "Reserve Income" section → category=reserve, read_only=True (Reserve
+    # Income items come from the reserve study extraction, not editable
+    # budget input). See READ_ONLY_SECTIONS in income_statement_parser.py.
     reserve_income = next(item for item in line_items if item["label"] == "45000 - Reserve Income")
     assert reserve_income["category"] in ("reserve", "reserve_income", "reserve_expense")
-    assert reserve_income["read_only"] is False
+    assert reserve_income["read_only"] is True
     reserve_asset_value = next(item for item in line_items if item["label"] == "47001 - Change in Asset Value")
     assert reserve_asset_value["category"] in ("reserve", "reserve_income", "reserve_expense")
-    assert reserve_asset_value["read_only"] is False
+    assert reserve_asset_value["read_only"] is True
     assert all(item["label"] != "Total Administration Expenses" for item in line_items)
     # "Reserve Expenses (Per Reserve Study)" triggers read_only=True for items in that sub-section
     reserve_item = next(item for item in line_items if item["label"] == "95220 - Roof")

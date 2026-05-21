@@ -1846,3 +1846,228 @@ def test_extraction_returns_review_required_when_no_reserve_pages_found(monkeypa
 
     assert isinstance(result, DocumentExtractionFailure)
     assert result.code == "reserve_pages_not_found"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Wrong-section parser fixes (drifting-puzzling-grove plan)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_drop_annual_schedule_noise_filters_known_headers():
+    """Rows whose line_item matches an annual-schedule header pattern
+    (e.g., "Replacement Year 2031", "Total for 2031", "No Replacement in 2032",
+    "Description Expenditures") are dropped from the extracted set even when
+    they have numeric values."""
+    from app.services.reserve_study_extractor import _drop_annual_schedule_noise
+
+    rows = [
+        ExtractedReserveStudyRow(
+            row_id="r1", row_type="item", line_item="Replacement Year 2031",
+            useful_life=None, remaining_life=None, replacement_cost=None,
+        ),
+        ExtractedReserveStudyRow(
+            row_id="r2", row_type="item", line_item="Total for 2031",
+            useful_life=None, remaining_life=None, replacement_cost=329932.0,
+        ),
+        ExtractedReserveStudyRow(
+            row_id="r3", row_type="item", line_item="No Replacement in 2032",
+            useful_life=None, remaining_life=None, replacement_cost=None,
+        ),
+        ExtractedReserveStudyRow(
+            row_id="r4", row_type="item", line_item="Description Expenditures",
+            useful_life=None, remaining_life=None, replacement_cost=None,
+        ),
+        ExtractedReserveStudyRow(
+            row_id="r5", row_type="item",
+            line_item="Painting - Building; Exterior",
+            useful_life=10, remaining_life=6, replacement_cost=105853.0,
+        ),
+    ]
+    kept, dropped = _drop_annual_schedule_noise(rows)
+    assert dropped == 4
+    assert [r.line_item for r in kept] == ["Painting - Building; Exterior"]
+
+
+def test_drop_annual_schedule_noise_drops_rows_without_lifecycle_data():
+    """Item rows with no useful_life AND no remaining_life AND no
+    replacement_cost cannot be real components — drop them. A row with any
+    one of those three set survives so partial extractions still flow
+    through the missing_* flag system."""
+    from app.services.reserve_study_extractor import _drop_annual_schedule_noise
+
+    rows = [
+        ExtractedReserveStudyRow(
+            row_id="empty1", row_type="item", line_item="Mystery Item",
+            useful_life=None, remaining_life=None, replacement_cost=None,
+        ),
+        ExtractedReserveStudyRow(
+            row_id="partial1", row_type="item", line_item="Has useful_life only",
+            useful_life=20, remaining_life=None, replacement_cost=None,
+        ),
+        ExtractedReserveStudyRow(
+            row_id="partial2", row_type="item", line_item="Has cost only",
+            useful_life=None, remaining_life=None, replacement_cost=1000.0,
+        ),
+    ]
+    kept, dropped = _drop_annual_schedule_noise(rows)
+    assert dropped == 1
+    assert {r.line_item for r in kept} == {"Has useful_life only", "Has cost only"}
+
+
+def test_drop_annual_schedule_noise_preserves_headers():
+    """Header rows are rendered as visual breaks in the UI, not components.
+    They must survive the noise filter regardless of their line_item text."""
+    from app.services.reserve_study_extractor import _drop_annual_schedule_noise
+
+    rows = [
+        ExtractedReserveStudyRow(
+            row_id="h1", row_type="header",
+            line_item="Replacement Year 2031",  # would match noise regex but it's a header
+        ),
+        ExtractedReserveStudyRow(
+            row_id="h2", row_type="header", line_item="Component Funding Summary",
+        ),
+    ]
+    kept, dropped = _drop_annual_schedule_noise(rows)
+    assert dropped == 0
+    assert len(kept) == 2
+
+
+def test_sequence_score_disqualifies_annual_schedule_span():
+    """A short clean component-summary span beats a longer span that
+    contains any page flagged is_year_provision_or_liability_schedule=True,
+    regardless of how many pages or columns the longer span has.
+
+    This is the gate that fixes the user-reported bug — the 8-page Annual
+    Expenditure Detail used to beat the 3-page Component Funding Summary.
+    """
+    from app.services.reserve_study_extractor import (
+        _ReserveStudySequence,
+        _sequence_score,
+    )
+
+    def _cls(page, *, year_provision=False, primary=True, fields=None):
+        return ReserveStudyPageClassification(
+            page_number=page,
+            role=ReserveStudyPageRole.RESERVE_TABLE,
+            confidence=0.9,
+            ui_fields_present=fields or ["line_item", "useful_life", "remaining_life", "replacement_cost"],
+            is_primary_ui_table=primary,
+            is_tabular_schedule=True,
+            is_year_provision_or_liability_schedule=year_provision,
+            adds_new_component_rows=True,
+        )
+
+    # Clean 3-page Component Funding Summary.
+    clean = _ReserveStudySequence(items=[_cls(7), _cls(8), _cls(9)])
+    # Longer 8-page Annual Expenditure Detail (every page flagged year_provision).
+    dirty = _ReserveStudySequence(items=[
+        _cls(p, year_provision=True, fields=["line_item", "replacement_cost"])
+        for p in range(10, 18)
+    ])
+
+    assert _sequence_score(clean) > _sequence_score(dirty), (
+        "Clean component-summary span must outrank any span containing "
+        "an annual-schedule / year-provision page"
+    )
+
+
+def test_discovery_prompt_warns_against_annual_expenditure_schedules():
+    """Regression guard: the prompt must describe the page STRUCTURE (year-
+    organized, one or two numeric columns, missing lifecycle data) rather
+    than rely on vendor-specific titles. Different vendors use different
+    labels (Annual Expenditure Detail, Cash Flow Detail, Cash Flow Summary,
+    Funding Analysis), and the classifier must recognize the pattern across
+    all of them — including vendors not represented in our example PDFs."""
+    from app.services.reserve_study_extractor import _DISCOVERY_SYSTEM_PROMPT
+
+    # Structural language (vendor-agnostic — this is what generalizes to
+    # PDFs we have not seen).
+    assert "organized by year" in _DISCOVERY_SYSTEM_PROMPT
+    assert "exactly once" in _DISCOVERY_SYSTEM_PROMPT.lower()
+    assert "match on structure" in _DISCOVERY_SYSTEM_PROMPT
+    # Known vendor labels appear as concrete fingerprints to anchor on,
+    # but are explicitly framed in the prompt as non-exhaustive examples.
+    for vendor_label in (
+        "Annual Expenditure Detail",
+        "Cash Flow Detail",
+        "Cash Flow Funding Plan",
+        "Funding Analysis",
+    ):
+        assert vendor_label in _DISCOVERY_SYSTEM_PROMPT, vendor_label
+    for primary_label in (
+        "Component Funding Summary",
+        "Component Inventory",
+        "Component Details",
+    ):
+        assert primary_label in _DISCOVERY_SYSTEM_PROMPT, primary_label
+
+
+def test_drop_annual_schedule_noise_filters_cross_vendor_year_patterns():
+    """The noise regex must catch year-organized headers across vendors,
+    not just CIRMS-style 'Replacement Year YYYY'."""
+    from app.services.reserve_study_extractor import _drop_annual_schedule_noise
+
+    noisy_labels = [
+        "Replacement Year 2031",
+        "Expenditures for 2028",
+        "2030 Expenditures",
+        "Year-by-Year",
+        "Cash Flow Detail",
+        "Cash Flow Funding Plan",
+        "Funding Analysis",
+        "Annual Cash Flow",
+        "Subtotal",
+        "Grand Total",
+    ]
+    rows = [
+        ExtractedReserveStudyRow(
+            row_id=f"r{i}", row_type="item", line_item=label,
+            useful_life=10, remaining_life=5, replacement_cost=1000.0,
+        )
+        for i, label in enumerate(noisy_labels)
+    ]
+    rows.append(
+        ExtractedReserveStudyRow(
+            row_id="real", row_type="item",
+            line_item="Roof - Built Up; Replacement",
+            useful_life=20, remaining_life=16, replacement_cost=213165.0,
+        )
+    )
+    kept, dropped = _drop_annual_schedule_noise(rows)
+    assert dropped == len(noisy_labels)
+    assert [r.line_item for r in kept] == ["Roof - Built Up; Replacement"]
+
+
+def test_drop_annual_schedule_noise_handles_unknown_vendor_via_lifecycle_check():
+    """Vendor-agnostic backstop: even if the noise regex doesn't recognize
+    a year header from an unseen vendor, the lifecycle-data check still
+    drops rows that lack useful_life AND remaining_life AND replacement_cost.
+
+    This is the primary defense for PDFs from vendors we have not seen —
+    a row with no lifecycle data cannot be a real reserve component
+    regardless of its label."""
+    from app.services.reserve_study_extractor import _drop_annual_schedule_noise
+
+    rows = [
+        # Unknown-vendor year-band label the regex won't catch:
+        ExtractedReserveStudyRow(
+            row_id="unseen1", row_type="item",
+            line_item="Reserve Component Outlook: FY 2031",
+            useful_life=None, remaining_life=None, replacement_cost=None,
+        ),
+        # An arbitrary section divider with no real data:
+        ExtractedReserveStudyRow(
+            row_id="unseen2", row_type="item", line_item="*** Replacement Phase III ***",
+            useful_life=None, remaining_life=None, replacement_cost=None,
+        ),
+        # A real component still passes through.
+        ExtractedReserveStudyRow(
+            row_id="real", row_type="item",
+            line_item="Some New Vendor Component Name",
+            useful_life=15, remaining_life=8, replacement_cost=42000.0,
+        ),
+    ]
+    kept, dropped = _drop_annual_schedule_noise(rows)
+    assert dropped == 2
+    assert [r.line_item for r in kept] == ["Some New Vendor Component Name"]

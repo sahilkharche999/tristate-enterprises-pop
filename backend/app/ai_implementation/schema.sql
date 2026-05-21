@@ -12,6 +12,11 @@ CREATE TABLE IF NOT EXISTS properties (
     city                    TEXT,
     portfolio_year          INTEGER,
     workflow_status         TEXT DEFAULT 'Not Started',
+    tenant_id               INTEGER NOT NULL DEFAULT 1,
+    default_assessment_setup_id INTEGER,
+    state                   TEXT DEFAULT 'CA',
+    entity_type             TEXT,
+    incorporation_year      INTEGER,
     created_at              TEXT DEFAULT (datetime('now'))
 );
 
@@ -234,13 +239,32 @@ CREATE TABLE IF NOT EXISTS hoa_settings (
     cpa_firm_name                       TEXT,
     cpa_firm_address                    TEXT,
     reserve_study_expert_name           TEXT,
+    reserve_study_date                  TEXT,
+    approved_monthly_assessment_per_unit REAL,
+    income_tax_provision_override       REAL,
+    reserve_funding_source              TEXT DEFAULT 'reserve_study_provision',
+    reserve_funding_manual_amount       REAL,
+    special_assessments_json            TEXT DEFAULT '[]',
+    additional_assessments_needed_json  TEXT DEFAULT '[]',
+    outstanding_loan_json               TEXT,
+    letter_date                         TEXT,
+    letter_signed_by_title              TEXT,
+    accountant_report_date              TEXT,
+    reserve_funding_plan_date           TEXT,
+    hoa_state                           TEXT DEFAULT 'CA',
+    hoa_entity_type                     TEXT,
+    hoa_incorporation_year              INTEGER,
     reserve_cash_balance_eoy_prior      REAL DEFAULT 0,
     fund_balance_boy_operations         REAL DEFAULT 0,
     monthly_assessment_per_unit_prior   REAL DEFAULT 0,
     interest_rate_after_tax             REAL DEFAULT 0,
     replacement_cost_increase_rate      REAL DEFAULT 0.03,
     assessment_increase_schedule_json   TEXT,
+    replacement_fund_monthly_assessment_per_unit REAL,
+    board_deferrals_json                TEXT DEFAULT '[]',
     letter_signed_by                    TEXT DEFAULT 'Board of Directors',
+    tenant_id                           INTEGER NOT NULL DEFAULT 1,
+    version_int                         INTEGER NOT NULL DEFAULT 0,
     updated_at                          TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -261,3 +285,407 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_budget_drafts_active_property
 CREATE INDEX IF NOT EXISTS idx_budget_versions_property ON budget_versions(property_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_budget_notes_property ON budget_notes(property_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_budget_audit_events_property ON budget_audit_events(property_id, created_at DESC);
+
+-- ── DRE-driven assessment engine tables (dre-driven-assessment-engine) ──
+-- One row per HOA per supersession. Only status='approved' rows are
+-- consumed by the assessment engine. Drafts live alongside until the
+-- operator approves them via the Review Workbench.
+CREATE TABLE IF NOT EXISTS assessment_setups (
+    id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+    tenant_id                INTEGER NOT NULL DEFAULT 1,
+    property_id              INTEGER NOT NULL
+                             REFERENCES properties(id) ON DELETE CASCADE,
+    source_dre_document_id   INTEGER,
+    setup_type               TEXT NOT NULL CHECK (setup_type IN ('fixed','grouped','per_unit')),
+    display_mode             TEXT NOT NULL CHECK (display_mode IN ('fixed','grouped','per_unit')),
+    effective_from           TEXT,
+    reviewed_by              TEXT,
+    reviewed_at              TEXT,
+    approved_at              TEXT,
+    status                   TEXT NOT NULL DEFAULT 'draft'
+                             CHECK (status IN ('draft','approved','superseded')),
+    version_int              INTEGER NOT NULL DEFAULT 0,
+    created_at               TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at               TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_assessment_setups_property
+    ON assessment_setups(property_id, status);
+
+-- Allocation pool: one bucket of assessment dollars allocated by a
+-- single method. pool_key is stable across setup supersessions so
+-- BudgetLinePoolMapping survives setup rewrites.
+CREATE TABLE IF NOT EXISTS allocation_pools (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    assessment_setup_id  INTEGER NOT NULL
+                         REFERENCES assessment_setups(id) ON DELETE CASCADE,
+    pool_key             TEXT NOT NULL,
+    pool_name            TEXT NOT NULL,
+    allocation_method    TEXT NOT NULL CHECK (allocation_method IN (
+                             'equal','square_footage','ownership_percentage','specified_value'
+                         )),
+    recipient_scope      TEXT NOT NULL CHECK (recipient_scope IN (
+                             'all_units','residential_only','commercial_only',
+                             'parking_users','custom_unit_list'
+                         )),
+    denominator_source   TEXT NOT NULL DEFAULT 'dre_value'
+                         CHECK (denominator_source IN ('dre_value','calculated','manual')),
+    denominator_value    NUMERIC,
+    variable_flag        INTEGER NOT NULL DEFAULT 0,
+    display_order        INTEGER NOT NULL DEFAULT 0,
+    include_in_pdf       INTEGER NOT NULL DEFAULT 1,
+    -- 30-year forecast inputs migrated from hoa_settings (Task #185 of
+    -- dre-driven-assessment-engine). When set on a pool, these supersede
+    -- the deprecated hoa_settings columns of the same purpose.
+    escalation_schedule_json     TEXT DEFAULT '[]',
+    starting_monthly_per_unit    REAL,
+    UNIQUE (assessment_setup_id, pool_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_allocation_pools_setup
+    ON allocation_pools(assessment_setup_id);
+
+-- AssessmentGroup: used by grouped HOAs (Esprit Park-style); unused
+-- for fixed and per-unit setups.
+CREATE TABLE IF NOT EXISTS assessment_groups (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    assessment_setup_id  INTEGER NOT NULL
+                         REFERENCES assessment_setups(id) ON DELETE CASCADE,
+    group_name           TEXT NOT NULL,
+    unit_count           INTEGER NOT NULL,
+    average_square_feet  NUMERIC,
+    ownership_percent    NUMERIC,
+    dre_factor           NUMERIC,
+    display_order        INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_assessment_groups_setup
+    ON assessment_groups(assessment_setup_id);
+
+-- AssessmentUnit: per-unit HOAs (800 High-style); also unused for
+-- fixed HOAs. specified_monthly_amount is a CACHED total of the
+-- unit's AssessmentUnitPoolAllocation rows; consumers should compute
+-- from child rows when present.
+CREATE TABLE IF NOT EXISTS assessment_units (
+    id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+    assessment_setup_id      INTEGER NOT NULL
+                             REFERENCES assessment_setups(id) ON DELETE CASCADE,
+    unit_number              TEXT NOT NULL,
+    square_feet              NUMERIC,
+    ownership_percent        NUMERIC,
+    category                 TEXT CHECK (category IN ('residential','commercial','mixed')),
+    parking_spaces           INTEGER NOT NULL DEFAULT 0,
+    custom_factor            NUMERIC,
+    specified_monthly_amount NUMERIC,
+    source                   TEXT NOT NULL DEFAULT 'dre'
+                             CHECK (source IN ('dre','manual')),
+    UNIQUE (assessment_setup_id, unit_number)
+);
+
+CREATE INDEX IF NOT EXISTS idx_assessment_units_setup
+    ON assessment_units(assessment_setup_id);
+
+-- AssessmentUnitPoolAllocation: multi-pool per-unit specified values
+-- (e.g. 800 High needs one row per unit per specified_value pool with
+-- its own monthly amount and provenance). The engine consumes these
+-- directly when computing specified_value pool allocations.
+CREATE TABLE IF NOT EXISTS assessment_unit_pool_allocations (
+    id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+    assessment_unit_id       INTEGER NOT NULL
+                             REFERENCES assessment_units(id) ON DELETE CASCADE,
+    assessment_setup_id      INTEGER NOT NULL
+                             REFERENCES assessment_setups(id) ON DELETE CASCADE,
+    pool_key                 TEXT NOT NULL,
+    pool_id                  INTEGER REFERENCES allocation_pools(id) ON DELETE SET NULL,
+    specified_monthly_amount NUMERIC NOT NULL,
+    source                   TEXT NOT NULL DEFAULT 'dre'
+                             CHECK (source IN ('dre','manual')),
+    source_page              INTEGER,
+    notes                    TEXT,
+    UNIQUE (assessment_unit_id, pool_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_assessment_unit_pool_alloc_setup
+    ON assessment_unit_pool_allocations(assessment_setup_id);
+
+-- BudgetLinePoolMapping: AI-suggested + human-approved routing of
+-- budget lines to pools. Disambiguating key is
+-- (property_id, assessment_setup_id, normalized_label, section,
+--  category, fund_type, account_code) plus active=1.
+CREATE TABLE IF NOT EXISTS budget_line_pool_mappings (
+    id                            INTEGER PRIMARY KEY AUTOINCREMENT,
+    property_id                   INTEGER NOT NULL
+                                  REFERENCES properties(id) ON DELETE CASCADE,
+    assessment_setup_id           INTEGER NOT NULL
+                                  REFERENCES assessment_setups(id) ON DELETE CASCADE,
+    budget_line_normalized_label  TEXT NOT NULL,
+    section                       TEXT NOT NULL,
+    category                      TEXT NOT NULL CHECK (category IN (
+                                      'income','operating','reserve_income','reserve_expense'
+                                  )),
+    fund_type                     TEXT NOT NULL CHECK (fund_type IN ('operating','reserve')),
+    account_code                  TEXT,
+    pool_key                      TEXT NOT NULL,
+    pool_id                       INTEGER REFERENCES allocation_pools(id) ON DELETE SET NULL,
+    approved_by                   TEXT,
+    approved_at                   TEXT,
+    active                        INTEGER NOT NULL DEFAULT 1
+);
+
+-- NULL account_code must collide with NULL account_code (SQLite's
+-- default UNIQUE treats NULLs as distinct). Use COALESCE so two rows
+-- with the same disambiguating key but no account_code conflict.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_budget_line_pool_mappings_disambig
+    ON budget_line_pool_mappings(
+        property_id, assessment_setup_id, budget_line_normalized_label,
+        section, category, fund_type, COALESCE(account_code, '')
+    );
+
+CREATE INDEX IF NOT EXISTS idx_budget_line_pool_mappings_setup
+    ON budget_line_pool_mappings(assessment_setup_id, active);
+
+-- ── DRE document vault (Phase 3.1) ──
+-- One row per uploaded DRE PDF; new uploads supersede prior ones via
+-- supersedes_id. The runtime stores files under
+-- BUDGET_STORAGE_ROOT/dre/<property_id>/ — file_id is the relative path.
+CREATE TABLE IF NOT EXISTS dre_documents (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    tenant_id       INTEGER NOT NULL DEFAULT 1,
+    property_id     INTEGER NOT NULL
+                    REFERENCES properties(id) ON DELETE CASCADE,
+    file_id         TEXT NOT NULL,
+    file_name       TEXT NOT NULL,
+    page_count      INTEGER,
+    supersedes_id   INTEGER REFERENCES dre_documents(id) ON DELETE SET NULL,
+    status          TEXT NOT NULL DEFAULT 'active'
+                    CHECK (status IN ('active','superseded','retired')),
+    uploaded_by     TEXT,
+    uploaded_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_dre_documents_property
+    ON dre_documents(property_id, status);
+
+-- DRE extraction run: one row per Gemini extraction attempt. Mirrors
+-- the in-memory DREExtractionRunRecord (backend/app/dre_extraction).
+-- review_status='promoted' means the operator approved the draft and
+-- promoted_setup_id was assigned the resulting AssessmentSetup row.
+CREATE TABLE IF NOT EXISTS dre_extraction_runs (
+    id                         INTEGER PRIMARY KEY AUTOINCREMENT,
+    dre_document_id            INTEGER NOT NULL
+                               REFERENCES dre_documents(id) ON DELETE CASCADE,
+    property_id                INTEGER NOT NULL
+                               REFERENCES properties(id) ON DELETE CASCADE,
+    started_at                 TEXT NOT NULL DEFAULT (datetime('now')),
+    completed_at               TEXT,
+    model_name                 TEXT NOT NULL,
+    prompt_version             TEXT NOT NULL,
+    prompt_sha256              TEXT NOT NULL,
+    raw_model_output           TEXT,
+    parsed_json                TEXT,
+    schema_validation_errors   TEXT NOT NULL DEFAULT '[]',
+    repair_attempt_count       INTEGER NOT NULL DEFAULT 0,
+    citation_audit_json        TEXT NOT NULL DEFAULT '[]',
+    low_confidence_flags_json  TEXT NOT NULL DEFAULT '[]',
+    validation_warnings_json   TEXT NOT NULL DEFAULT '[]',
+    status                     TEXT NOT NULL DEFAULT 'failed'
+                               CHECK (status IN ('succeeded','extraction_partial','failed')),
+    review_status              TEXT NOT NULL DEFAULT 'pending'
+                               CHECK (review_status IN ('pending','approved','rejected','promoted')),
+    promoted_setup_id          INTEGER REFERENCES assessment_setups(id) ON DELETE SET NULL,
+    promoted_at                TEXT,
+    reviewed_by                TEXT,
+    -- SHA-256 of WireDRESetupExtraction.model_json_schema() at the time
+    -- of this extraction run. Surfaces wire-schema drift independently of
+    -- prompt drift; empty string means a pre-structured-output run.
+    wire_schema_sha256         TEXT NOT NULL DEFAULT '',
+    -- Audit-trail capture for the Gemini call itself. ``model_name`` above
+    -- records what we ASKED for (often an alias like 'gemini-flash-latest');
+    -- ``model_version_resolved`` records what Gemini's response.model_version
+    -- actually resolved to, so when the alias rotates the audit row remains
+    -- unambiguous. finish_reason captures STOP / MAX_TOKENS / SAFETY / etc.
+    -- output_tokens_used is the candidates_token_count from usage_metadata.
+    model_version_resolved     TEXT NOT NULL DEFAULT '',
+    finish_reason              TEXT NOT NULL DEFAULT '',
+    output_tokens_used         INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_dre_extraction_runs_doc
+    ON dre_extraction_runs(dre_document_id);
+CREATE INDEX IF NOT EXISTS idx_dre_extraction_runs_property
+    ON dre_extraction_runs(property_id, review_status);
+
+-- ── Assessment override (Phase 4.5) ──
+-- Operator-applied adjustments that win over engine-calculated math.
+-- Applied AFTER recipient summation+rounding; original_calculated_amount
+-- is preserved for audit. Internal-only; never rendered in the
+-- homeowner PDF.
+CREATE TABLE IF NOT EXISTS assessment_overrides (
+    id                          INTEGER PRIMARY KEY AUTOINCREMENT,
+    package_id                  INTEGER NOT NULL,
+    scope                       TEXT NOT NULL
+                                CHECK (scope IN ('package','group','unit','pool')),
+    scope_ref_id                INTEGER,
+    override_type               TEXT NOT NULL
+                                CHECK (override_type IN (
+                                    'board_approved','rounding',
+                                    'manual_correction','spreadsheet'
+                                )),
+    original_calculated_amount  NUMERIC,
+    override_amount             NUMERIC NOT NULL,
+    delta                       NUMERIC,
+    reason                      TEXT,
+    approved_by                 TEXT,
+    approved_at                 TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_assessment_overrides_package
+    ON assessment_overrides(package_id, scope);
+
+-- ── DRE review edit log (Phase 4.6) ──
+-- One row per change made in the Review Workbench. Captures the path,
+-- old/new values, and who/when. Internal audit only.
+CREATE TABLE IF NOT EXISTS dre_review_edits (
+    id                          INTEGER PRIMARY KEY AUTOINCREMENT,
+    dre_extraction_run_id       INTEGER NOT NULL
+                                REFERENCES dre_extraction_runs(id) ON DELETE CASCADE,
+    field_path                  TEXT NOT NULL,
+    old_value                   TEXT,
+    new_value                   TEXT,
+    reason                      TEXT,
+    edited_by                   TEXT,
+    edited_at                   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_dre_review_edits_run
+    ON dre_review_edits(dre_extraction_run_id, edited_at);
+
+-- ── Per-field source evidence (Phase 4.7) ──
+-- For high-risk fields (denominator_value, allocation_method, unit_count,
+-- variable_flag, ownership_percent, assessment amounts), the extraction
+-- pipeline records a field-level source pointer beyond the entity-level
+-- citation. Other leaf fields may inherit from the containing entity.
+CREATE TABLE IF NOT EXISTS extracted_field_sources (
+    id                          INTEGER PRIMARY KEY AUTOINCREMENT,
+    dre_extraction_run_id       INTEGER NOT NULL
+                                REFERENCES dre_extraction_runs(id) ON DELETE CASCADE,
+    entity_type                 TEXT NOT NULL,
+    entity_id                   TEXT,
+    field_name                  TEXT NOT NULL,
+    page_number                 INTEGER NOT NULL,
+    bounding_box_json           TEXT,
+    confidence                  NUMERIC
+);
+
+CREATE INDEX IF NOT EXISTS idx_extracted_field_sources_run
+    ON extracted_field_sources(dre_extraction_run_id, entity_type);
+
+-- ── Annual disclosure package (Phase 4.8 + 5.8 + 5.9) ──
+-- Finalization snapshots: when a package transitions to 'finalized',
+-- the four *_snapshot_json columns are frozen in a single transaction
+-- so a future re-render uses the same inputs even if live state has
+-- drifted. ``regen_of_package_id`` points at the original package for
+-- regeneration workflows; the new row gets its own finalization.
+--
+-- ``approved_assessment_revenue_annual`` is the operator-approved
+-- target the engine reconciles against. ``tenant_id`` is reserved
+-- for v2 multi-tenant rollout (all rows default to 1 in v1).
+-- ``version_int`` is the optimistic-lock counter for concurrent edit
+-- isolation; clients send If-Match on PUT/PATCH and the backend 409s
+-- on mismatch.
+CREATE TABLE IF NOT EXISTS annual_packages (
+    id                              INTEGER PRIMARY KEY AUTOINCREMENT,
+    tenant_id                       INTEGER NOT NULL DEFAULT 1,
+    property_id                     INTEGER NOT NULL
+                                    REFERENCES properties(id) ON DELETE CASCADE,
+    assessment_setup_id             INTEGER REFERENCES assessment_setups(id) ON DELETE SET NULL,
+    budget_year                     INTEGER NOT NULL,
+    fiscal_year                     INTEGER NOT NULL,
+    letter_date                     TEXT,
+    effective_date                  TEXT,
+    approved_assessment_revenue_annual NUMERIC,
+    approved_by                     TEXT,
+    approved_at                     TEXT,
+    status                          TEXT NOT NULL DEFAULT 'draft'
+                                    CHECK (status IN (
+                                        'draft','preflight_failed','approved',
+                                        'rendered','finalized'
+                                    )),
+    rounding_delta_annual           NUMERIC,
+    rounding_delta_monthly          NUMERIC,
+    rounding_delta_percent          NUMERIC,
+    -- Finalization snapshots (Phase 4.8). Frozen at status → finalized.
+    -- Serialize with sort_keys=True for byte-equal re-renders.
+    assessment_setup_snapshot_json  TEXT,
+    budget_snapshot_json            TEXT,
+    reserve_snapshot_json           TEXT,
+    appendix_manifest_snapshot_json TEXT,
+    finalized_at                    TEXT,
+    regen_of_package_id             INTEGER REFERENCES annual_packages(id) ON DELETE SET NULL,
+    version_int                     INTEGER NOT NULL DEFAULT 0,
+    created_at                      TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at                      TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (property_id, fiscal_year, regen_of_package_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_annual_packages_property
+    ON annual_packages(property_id, fiscal_year);
+CREATE INDEX IF NOT EXISTS idx_annual_packages_status
+    ON annual_packages(status);
+
+-- ── Persistent appendix manifest (Phase 5.4 + 5.6) ──
+-- Per-HOA appendix vault: operator uploads once; every annual package
+-- inherits. Each year the operator can override (exclude, reorder,
+-- swap a one-off) via the AnnualPackageAppendix junction without
+-- losing the saved row. ``cadence`` controls re-use:
+--   persistent — same file used every year (ADR/IDR policy, election rules)
+--   annual     — fresh upload required for the package year (insurance disclosures)
+--   one_time   — used for one package only (legal exhibits)
+-- ``needs_cadence_review`` is set during migration when the cadence
+-- can't be inferred confidently; the Settings UI shows a "Review
+-- cadence" badge until the operator confirms.
+CREATE TABLE IF NOT EXISTS appendix_documents (
+    id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+    tenant_id                INTEGER NOT NULL DEFAULT 1,
+    property_id              INTEGER NOT NULL
+                             REFERENCES properties(id) ON DELETE CASCADE,
+    file_id                  TEXT NOT NULL,
+    file_name                TEXT NOT NULL,
+    display_title            TEXT NOT NULL,
+    default_display_order    INTEGER NOT NULL DEFAULT 0,
+    required_flag            INTEGER NOT NULL DEFAULT 0,
+    include_by_default       INTEGER NOT NULL DEFAULT 1,
+    cadence                  TEXT NOT NULL DEFAULT 'persistent'
+                             CHECK (cadence IN ('persistent','annual','one_time')),
+    annual_year              INTEGER,
+    valid_through_year       INTEGER,
+    needs_cadence_review     INTEGER NOT NULL DEFAULT 0,
+    status                   TEXT NOT NULL DEFAULT 'active'
+                             CHECK (status IN ('active','retired')),
+    uploaded_by              TEXT,
+    uploaded_at              TEXT NOT NULL DEFAULT (datetime('now')),
+    version_int              INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_appendix_documents_property
+    ON appendix_documents(property_id, status);
+CREATE INDEX IF NOT EXISTS idx_appendix_documents_cadence
+    ON appendix_documents(cadence, annual_year);
+
+-- Junction table: per-package overrides of the inherited manifest.
+-- If no rows exist for a package, the compile picks up every
+-- ``appendix_documents.include_by_default = 1`` row for the HOA.
+CREATE TABLE IF NOT EXISTS annual_package_appendices (
+    id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+    package_id               INTEGER NOT NULL
+                             REFERENCES annual_packages(id) ON DELETE CASCADE,
+    appendix_id              INTEGER NOT NULL
+                             REFERENCES appendix_documents(id) ON DELETE CASCADE,
+    display_order            INTEGER NOT NULL DEFAULT 0,
+    included                 INTEGER NOT NULL DEFAULT 1,
+    override_display_title   TEXT,
+    UNIQUE (package_id, appendix_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_annual_package_appendices_package
+    ON annual_package_appendices(package_id, display_order);
