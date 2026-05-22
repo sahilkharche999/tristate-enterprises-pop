@@ -10,7 +10,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Optional, Any
 
-from pydantic import ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from ..config import settings
 from ..models.financial_document_extraction import (
@@ -42,6 +42,102 @@ logger = logging.getLogger(__name__)
 # under Gemini's per-image limits for a 6-page statement).
 _HYBRID_RENDER_DPI = 72
 _SCANNED_FALLBACK_RENDER_DPI = 200
+
+
+class StatementPageCandidate(BaseModel):
+    page: int = Field(ge=1)
+    classification: str = Field(default="unknown")
+    selected: bool = False
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    reason: str = ""
+
+
+class StatementPageSelection(BaseModel):
+    selected_pages: list[int] = Field(default_factory=list)
+    candidates: list[StatementPageCandidate] = Field(default_factory=list)
+    rejected_pages: list[StatementPageCandidate] = Field(default_factory=list)
+
+
+class StatementPagesNotFound(RuntimeError):
+    def __init__(self, selection: StatementPageSelection):
+        super().__init__(
+            "No income statement pages with annual budget columns were found in this PDF package."
+        )
+        self.selection = selection
+
+
+_PAGE_SELECTION_SYSTEM_PROMPT = """You are classifying pages from a scanned HOA financial PDF package.
+
+Goal:
+Find the page numbers that should be sent to a financial-statement line-item extractor for budget drafting.
+
+Select pages ONLY if they are income statement / revenues and expenses pages that contain detail line items. This includes operating statement pages and reserve income/expense statement pages when they are part of the same financial statement package.
+
+A page SHOULD be selected when:
+- The title or header indicates an operating statement, such as:
+  - Statement of Revenues and Expenses
+  - Income and Expense to Budget
+  - Operating Income and Expense
+  - Statement of Operating Revenues and Expenses
+  - Budget Comparison
+  - Income Statement
+- The page contains detail line items with account codes or account labels.
+- The page has budget-related columns, especially:
+  - Annual Budget
+  - Budget
+  - Current Period Budget
+  - Year To Date Budget
+- The page is part of a continued operating statement split across multiple pages.
+- The page is a reserve income/expense statement page with detail line items, such as:
+  - Reserve Income
+  - Reserve Expense
+  - Reserve Fund Activity
+  - Reserve Income and Expense to Budget
+
+A page SHOULD NOT be selected when it is:
+- Cover letter, title page, table of contents, notes, assumptions, compilation report
+- Assessment schedule or assessments per unit/month
+- Reserve study schedule or component schedule
+- Insurance disclosure
+- Balance sheet
+- AP aging
+- GL trial balance
+- Check register or check images
+- Invoice backup
+- Bank statement
+- Any page with only totals and no detail line items
+- Any page whose main purpose is per-unit assessments rather than income/expense budget drafting
+
+Important:
+- Do not select pages merely because they contain dollar amounts.
+- Do not select an assessment schedule even if it has monthly assessment or annual total columns.
+- Prefer statement pages with an Annual Budget column, but do not reject a reserve income/expense continuation page only because its Annual Budget column is blank.
+- If there are multiple consecutive pages of the same operating or reserve statement, select all of them.
+- If a reserve income/expense statement appears separately, select it and classify it as reserve_statement.
+- Do not select reserve study component schedules; classify those as reserve_study_schedule and reject them.
+
+Return JSON only:
+
+{
+  "selected_pages": [28, 29],
+  "candidates": [
+    {
+      "page": 28,
+      "classification": "operating_statement",
+      "selected": true,
+      "confidence": 0.96,
+      "reason": "Statement of Revenues and Expenses with Annual Budget column and detail line items"
+    }
+  ],
+  "rejected_pages": [
+    {
+      "page": 24,
+      "classification": "assessment_schedule",
+      "selected": false,
+      "reason": "Assessments per unit per month, not an income statement"
+    }
+  ]
+}"""
 
 
 def render_pdf_pages(
@@ -88,6 +184,114 @@ def render_pdf_pages(
         document.close()
 
     return rendered_pages
+
+
+def _get_pdf_page_count(pdf_path: str) -> int:
+    try:
+        import fitz  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError(
+            "PDF inspection requires PyMuPDF (fitz). Install pymupdf to enable the VLM PDF path."
+        ) from exc
+
+    document = fitz.open(pdf_path)
+    try:
+        return int(document.page_count)
+    finally:
+        document.close()
+
+
+def _should_run_page_selection(pdf_path: str) -> bool:
+    return _get_pdf_page_count(pdf_path) > settings.DOCUMENT_VLM_PAGE_SELECTION_THRESHOLD
+
+
+def render_pdf_pages_for_numbers(
+    path: str,
+    page_numbers: list[int],
+    *,
+    dpi: int = _HYBRID_RENDER_DPI,
+) -> list[RenderedPage]:
+    """Render explicit 1-based PDF pages and preserve original page numbers."""
+    try:
+        import fitz  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError(
+            "PDF rendering requires PyMuPDF (fitz). Install pymupdf to enable the VLM PDF path."
+        ) from exc
+
+    document = fitz.open(path)
+    scale = dpi / 72.0
+    matrix = fitz.Matrix(scale, scale) if scale != 1.0 else None
+    rendered_pages: list[RenderedPage] = []
+    try:
+        for page_number in page_numbers:
+            if page_number < 1 or page_number > document.page_count:
+                continue
+            page = document[page_number - 1]
+            pixmap = page.get_pixmap(matrix=matrix) if matrix is not None else page.get_pixmap()
+            rendered_pages.append(
+                RenderedPage(
+                    page_number=page_number,
+                    mime_type="image/png",
+                    content=pixmap.tobytes("png"),
+                )
+            )
+    finally:
+        document.close()
+    return rendered_pages
+
+
+def _render_page_selection_images(pdf_path: str, max_pages: int) -> list[RenderedPage]:
+    return render_pdf_pages(pdf_path, max_pages=max_pages, dpi=_HYBRID_RENDER_DPI)
+
+
+async def _select_income_statement_pages(
+    pdf_path: str,
+    prompt_context: DocumentPromptContext,
+    *,
+    max_pages: int,
+) -> StatementPageSelection:
+    from ..ai_implementation.pipeline.llm_client import call_llm_vision
+
+    rendered_pages = _render_page_selection_images(pdf_path, max_pages=max_pages)
+    user_content_parts: list[dict] = [
+        {
+            "type": "text",
+            "text": (
+                f"Filename: {prompt_context.filename}\n"
+                f"Rendered page count: {len(rendered_pages)}\n\n"
+                "Classify these pages and identify the operating income statement pages."
+            ),
+        }
+    ]
+    for page in rendered_pages:
+        user_content_parts.append(
+            {
+                "type": "text",
+                "text": f"PDF page {page.page_number}",
+            }
+        )
+        if page.content is not None:
+            user_content_parts.append(
+                {
+                    "type": "image",
+                    "data": page.content,
+                    "mime_type": page.mime_type,
+                }
+            )
+
+    result = await call_llm_vision(
+        [
+            {"role": "system", "content": _PAGE_SELECTION_SYSTEM_PROMPT},
+            {"role": "user", "content": user_content_parts},
+        ],
+        StatementPageSelection,
+        temperature=0.0,
+        timeout=120.0,
+    )
+    if isinstance(result, StatementPageSelection):
+        return result
+    return StatementPageSelection()
 
 
 def _extract_pdf_text_table(path: str, max_pages: int = 6) -> str:
@@ -142,6 +346,58 @@ def _extract_pdf_text_table(path: str, max_pages: int = 6) -> str:
             if page_lines:
                 all_text_parts.append(f"--- Page {pg_num} ---")
                 all_text_parts.extend(page_lines)
+
+    return "\n".join(all_text_parts)
+
+
+def _extract_pdf_text_table_for_pages(path: str, selected_pages: list[int]) -> str:
+    import pdfplumber
+
+    wanted = {int(page) for page in selected_pages if int(page) > 0}
+    all_text_parts: list[str] = []
+    total_words = 0
+
+    with pdfplumber.open(path) as pdf:
+        for pg_num, page in enumerate(pdf.pages, start=1):
+            if pg_num not in wanted:
+                continue
+            words = page.extract_words(x_tolerance=3, y_tolerance=3)
+            total_words += len(words)
+
+            lines_by_y: dict[int, list] = {}
+            for w in words:
+                y_key = round(w["top"] / 2) * 2
+                lines_by_y.setdefault(y_key, []).append(w)
+
+            page_lines: list[str] = []
+            for y_key in sorted(lines_by_y.keys()):
+                line_words = sorted(lines_by_y[y_key], key=lambda w: w["x0"])
+                if len(line_words) == 1 and len(line_words[0]["text"].strip()) <= 1:
+                    continue
+
+                parts: list[str] = []
+                prev_x1 = 0.0
+                for w in line_words:
+                    gap = w["x0"] - prev_x1
+                    if gap > 30 and parts:
+                        parts.append("\t")
+                    elif gap > 1.5 and parts:
+                        parts.append(" ")
+                    parts.append(w["text"])
+                    prev_x1 = w["x1"]
+
+                line_text = "".join(parts).strip()
+                if line_text:
+                    page_lines.append(line_text)
+
+            if page_lines:
+                all_text_parts.append(f"--- Page {pg_num} ---")
+                all_text_parts.extend(page_lines)
+
+    if total_words < 10:
+        raise ValueError(
+            "PDF has no text layer (scanned). Upload text-based PDF or Excel."
+        )
 
     return "\n".join(all_text_parts)
 
@@ -276,6 +532,24 @@ def _split_pages(pdf_text: str) -> list[str]:
     return [p.strip() for p in parts if p.strip()]
 
 
+def _split_pages_with_numbers(pdf_text: str) -> list[tuple[int, str]]:
+    """Split PDF text and retain the original 1-based PDF page numbers."""
+    pattern = re.compile(r"--- Page (\d+) ---\n?")
+    matches = list(pattern.finditer(pdf_text))
+    if not matches:
+        stripped = pdf_text.strip()
+        return [(1, stripped)] if stripped else []
+
+    pages: list[tuple[int, str]] = []
+    for idx, match in enumerate(matches):
+        start = match.end()
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(pdf_text)
+        page_text = pdf_text[start:end].strip()
+        if page_text:
+            pages.append((int(match.group(1)), page_text))
+    return pages
+
+
 def _is_reserve_statement_page(page_text: str) -> bool:
     """Detect if a page belongs to a separate Reserve statement (not the Operating statement).
 
@@ -337,6 +611,16 @@ def _is_reserve_statement_page(page_text: str) -> bool:
         return True
 
     return False
+
+
+def _is_reserve_statement_classification(classification: str) -> bool:
+    normalized = (classification or "").strip().lower()
+    return (
+        "reserve" in normalized
+        and "study" not in normalized
+        and "schedule" not in normalized
+        and "component" not in normalized
+    )
 
 
 async def _extract_single_page(
@@ -456,17 +740,45 @@ async def _extract_full_document(
     """
     import asyncio
 
+    page_count = _get_pdf_page_count(pdf_path)
+    page_selection: StatementPageSelection | None = None
+    selected_pages: list[int] | None = None
+    selected_page_classifications: dict[int, str] = {}
+    if page_count > settings.DOCUMENT_VLM_PAGE_SELECTION_THRESHOLD:
+        page_selection = await _select_income_statement_pages(
+            pdf_path,
+            prompt_context,
+            max_pages=min(page_count, settings.DOCUMENT_VLM_PAGE_SELECTION_MAX_PAGES),
+        )
+        selected_pages = sorted(
+            {
+                int(page)
+                for page in page_selection.selected_pages
+                if 1 <= int(page) <= page_count
+            }
+        )
+        if not selected_pages:
+            raise StatementPagesNotFound(page_selection)
+        selected_page_classifications = {
+            int(candidate.page): candidate.classification
+            for candidate in page_selection.candidates
+            if candidate.selected and 1 <= int(candidate.page) <= page_count
+        }
+
     # Try the hybrid path first. If pdfplumber reports no text layer we fall
     # through to vision-only; any other exception bubbles up unchanged.
     no_text_layer = False
     try:
-        pdf_text = _extract_pdf_text_table(pdf_path, max_pages=max_pages)
-        page_texts = _split_pages(pdf_text)
+        if selected_pages is not None:
+            pdf_text = _extract_pdf_text_table_for_pages(pdf_path, selected_pages)
+        else:
+            pdf_text = _extract_pdf_text_table(pdf_path, max_pages=max_pages)
+        page_entries = _split_pages_with_numbers(pdf_text)
     except ValueError as exc:
         if not _is_scanned_pdf_error(exc):
             raise
         no_text_layer = True
-        page_texts = []
+        page_entries = []
         logger.warning(
             "Scanned PDF fallback engaged for %s: %s. Switching to vision-only "
             "extraction (no text layer). Hybrid text+image mode remains the "
@@ -480,7 +792,10 @@ async def _extract_full_document(
     # hybrid PDFs stay at the default 72 DPI to keep payloads small — their
     # numerics come from the text block anyway.
     render_dpi = _SCANNED_FALLBACK_RENDER_DPI if no_text_layer else _HYBRID_RENDER_DPI
-    rendered_pages = render_pdf_pages(pdf_path, max_pages=max_pages, dpi=render_dpi)
+    if selected_pages is not None:
+        rendered_pages = render_pdf_pages_for_numbers(pdf_path, selected_pages, dpi=render_dpi)
+    else:
+        rendered_pages = render_pdf_pages(pdf_path, max_pages=max_pages, dpi=render_dpi)
     if no_text_layer:
         # In scanned mode we have no text to split — use the rendered page
         # count as the authoritative page count and pass empty strings so the
@@ -490,28 +805,45 @@ async def _extract_full_document(
                 "Scanned PDF fallback failed: no pages could be rendered by PyMuPDF. "
                 "The file may be corrupted or password-protected."
             )
-        page_texts = [""] * len(rendered_pages)
+        page_entries = [(page.page_number, "") for page in rendered_pages]
 
     # Metadata about HOW this extraction was produced. Surfaced to the
     # end user via the upload response so the frontend can show a quality
     # warning when we took the degraded vision-only path.
     extraction_metadata: dict[str, Any] = {}
+    if page_selection is not None:
+        extraction_metadata["page_selection_used"] = True
+        extraction_metadata["selected_pages"] = selected_pages or []
+        extraction_metadata["selection_candidates"] = [
+            candidate.model_dump() for candidate in page_selection.candidates
+        ]
+    else:
+        extraction_metadata["page_selection_used"] = False
     if no_text_layer:
         extraction_metadata["used_vision_only_fallback"] = True
         extraction_metadata["fallback_reason"] = "no_text_layer"
         extraction_metadata["render_dpi"] = render_dpi
 
+    images_by_page = {page.page_number: page for page in rendered_pages}
+
     # If only 1 page, use simpler single-call path
-    if len(page_texts) == 1:
+    if len(page_entries) == 1:
+        page_num, page_text = page_entries[0]
         # Scanned single-page PDFs default to the operating prompt. We can't
         # classify reserve vs operating without text, and the operating prompt
         # covers the vast majority of real HOA statements. If a reserve-only
         # scan ever shows up in production, we'll need vision-only reserve
         # detection as a follow-up.
-        is_reserve = False if no_text_layer else _is_reserve_statement_page(page_texts[0])
+        if no_text_layer:
+            is_reserve = _is_reserve_statement_classification(
+                selected_page_classifications.get(page_num, "")
+            )
+        else:
+            is_reserve = _is_reserve_statement_page(page_text)
         page_result = await _extract_single_page(
-            1, page_texts[0],
-            rendered_pages[0] if rendered_pages else None,
+            page_num,
+            page_text,
+            images_by_page.get(page_num),
             prompt_context, is_reserve,
             no_text_layer=no_text_layer,
         )
@@ -531,10 +863,14 @@ async def _extract_full_document(
     # Tag each page as operating or reserve. In scanned mode we can't inspect
     # text for reserve markers — every page is classified as operating.
     page_infos = []
-    for i, text in enumerate(page_texts):
-        page_num = i + 1
-        image = rendered_pages[i] if i < len(rendered_pages) else None
-        is_reserve = False if no_text_layer else _is_reserve_statement_page(text)
+    for page_num, text in page_entries:
+        image = images_by_page.get(page_num)
+        if no_text_layer:
+            is_reserve = _is_reserve_statement_classification(
+                selected_page_classifications.get(page_num, "")
+            )
+        else:
+            is_reserve = _is_reserve_statement_page(text)
         page_infos.append((page_num, text, image, is_reserve))
 
     logger.info(
@@ -688,6 +1024,21 @@ async def extract_pdf_statement(
                 code="schema_validation_failed",
                 message="Structured PDF extraction could not satisfy the canonical schema.",
                 details={"error": str(exc)},
+            )
+        except StatementPagesNotFound as exc:
+            return DocumentExtractionFailure(
+                code="statement_pages_not_found",
+                message=(
+                    "No income statement pages with annual budget columns were found "
+                    "in this PDF package."
+                ),
+                details={
+                    "selected_pages": exc.selection.selected_pages,
+                    "candidates": [candidate.model_dump() for candidate in exc.selection.candidates],
+                    "rejected_pages": [
+                        candidate.model_dump() for candidate in exc.selection.rejected_pages
+                    ],
+                },
             )
         except Exception as exc:
             # Include the exception message in the surfaced error so the user

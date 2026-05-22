@@ -4,7 +4,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class ReserveStudyPageRole(str, Enum):
@@ -65,6 +65,28 @@ class ExtractedReserveStudyRow(BaseModel):
     estimated_liability: Optional[int] = Field(default=None, ge=0)
     source_page: Optional[int] = Field(default=None, ge=1)
     flags: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _blank_invalid_negative_amounts(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+
+        normalized = dict(data)
+        flags = list(normalized.get("flags") or [])
+        for field_name in (
+            "useful_life",
+            "remaining_life",
+            "replacement_cost",
+            "year_replacement_provision",
+            "estimated_liability",
+        ):
+            value = normalized.get(field_name)
+            if isinstance(value, (int, float)) and value < 0:
+                normalized[field_name] = None
+                flags.append(f"invalid_negative_{field_name}")
+        normalized["flags"] = list(dict.fromkeys(flags))
+        return normalized
 
     @field_validator("quantity", mode="before")
     @classmethod

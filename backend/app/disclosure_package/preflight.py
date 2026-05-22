@@ -190,12 +190,17 @@ def validate_inputs(
             severity="blocking",
         ))
 
-    # 2. Reserve study components present
+    # 2. Reserve study components present. Income-statement-only PDFs can still
+    # render a package; the compiler surfaces this as a data gap and defaults
+    # reserve-derived calculations to $0/0%.
     if not reserve_snapshot.components:
         errors.append(PreflightError(
             field_path="reserve_study_snapshot.components",
-            message="Reserve study has no components — at least one is required",
-            severity="blocking",
+            message=(
+                "Reserve study has no components — reserve-derived schedules "
+                "will render with default $0/0% values"
+            ),
+            severity="warning",
         ))
 
     # 3. HOA fiscal year end month set + valid (1-12)

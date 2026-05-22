@@ -128,10 +128,10 @@ def test_validate_inputs_flags_empty_budget_line_items():
     assert relevant[0].severity == "blocking"
 
 
-# ── Test 3: Empty reserve study components → blocking error ───────────────────
+# ── Test 3: Empty reserve study components → warning only ─────────────────────
 
 
-def test_validate_inputs_flags_empty_reserve_components():
+def test_validate_inputs_warns_empty_reserve_components_without_blocking():
     from app.disclosure_package.preflight import validate_inputs
     from app.disclosure_package.package_specs import OLD_MILL_2026
     from app.disclosure_package.schemas import ReserveStudySnapshot
@@ -149,6 +149,8 @@ def test_validate_inputs_flags_empty_reserve_components():
     )
     paths = [e.field_path for e in errors]
     assert "reserve_study_snapshot.components" in paths
+    relevant = [e for e in errors if e.field_path == "reserve_study_snapshot.components"]
+    assert relevant[0].severity == "warning"
 
 
 # ── Test 4: fiscal_year_end_month out of 1-12 range → blocking error ──────────

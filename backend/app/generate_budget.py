@@ -553,11 +553,19 @@ class BudgetGenerator:
         for row in range(self.DATA_START_ROW, ws.max_row + 1):
             col_a = ws[f'{self.COL_SECTION}{row}'].value
             col_b = ws[f'{self.COL_LABEL}{row}'].value
+            col_c = ws[f'C{row}'].value
             annual_budget_raw = ws[f'{source_col}{row}'].value
             ytd_actual_raw = ws[f'{self.COL_YTD_ACTUAL}{row}'].value
 
             label = ''
-            if col_b:
+            normalized_pdf_row = (
+                col_b is not None
+                and col_c is not None
+                and str(col_b).strip().isdigit()
+            )
+            if normalized_pdf_row:
+                label = str(col_c).strip()
+            elif col_b:
                 label = str(col_b).strip()
             elif col_a:
                 label = str(col_a).strip()
@@ -570,9 +578,12 @@ class BudgetGenerator:
 
             # Extract account code from label (e.g. "40000 - Assessment Income" → "40000")
             account_code = ''
-            account_match = re.match(r'^(\d{4,6})\s*[-–—]', label)
-            if account_match:
-                account_code = account_match.group(1)
+            if normalized_pdf_row:
+                account_code = str(col_b).strip()
+            else:
+                account_match = re.match(r'^(\d{4,6})\s*[-–—]', label)
+                if account_match:
+                    account_code = account_match.group(1)
 
             row_type = 'item'
             if 'Total' in label:
@@ -682,6 +693,21 @@ class BudgetGenerator:
         """Recalculate total rows from item values."""
         print("  Recalculating totals by summing line items...")
 
+        def _section_kind(row: Dict) -> str:
+            matched = _match_section_header(str(row.get('section') or ''))
+            return matched or ''
+
+        fallback_income_total = sum(
+            row.get('proposed') or 0.0
+            for row in budget_rows
+            if row['type'] == 'item' and _section_kind(row) == 'income'
+        )
+        fallback_operating_expense_total = sum(
+            row.get('proposed') or 0.0
+            for row in budget_rows
+            if row['type'] == 'item' and _section_kind(row) == 'operating'
+        )
+
         total_mappings = {
             'Total Income': 'Income',
             'Total Administration Expenses': 'Administration Expenses',
@@ -719,7 +745,25 @@ class BudgetGenerator:
             if row['label'] in expense_totals and row.get('budget_total'):
                 total_expense += row['budget_total']
 
+        if total_expense == 0 and fallback_operating_expense_total:
+            total_expense = fallback_operating_expense_total
+
         print(f"    Total Operating Expense: Calculated ${total_expense:,.2f}")
+
+        found_total_income = False
+        for row in budget_rows:
+            if row['label'] == 'Total Income':
+                found_total_income = True
+                if not row.get('budget_total') and fallback_income_total:
+                    self._set_total_row(row, fallback_income_total)
+
+        if not found_total_income and fallback_income_total:
+            budget_rows.append({
+                'label': 'Total Income',
+                'type': 'total',
+                **{month: fallback_income_total / 12 for month in self.MONTHS},
+                'budget_total': fallback_income_total,
+            })
 
         found_total_expense = False
         for row in budget_rows:

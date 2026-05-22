@@ -1067,15 +1067,26 @@ def _render_draft_snapshot_from_upload(
     if not upload.storage_key:
         raise LookupError("Source upload file not found")
 
-    source_path = _budget_storage_path(upload.storage_key)
-    if not source_path.exists():
-        raise LookupError("Source upload file not found")
-
-    temp_input_path = _write_temp_workbook(source_path.read_bytes(), upload.original_filename)
+    route = choose_financial_document_route(upload.original_filename, upload.content_type)
+    if route.path == "pdf_vlm":
+        canonical_statement = _canonical_statement_from_line_items(
+            line_items,
+            family="pdf_visual_document",
+        )
+        temp_input_path = build_normalized_statement_workbook(canonical_statement)
+    else:
+        source_path = _budget_storage_path(upload.storage_key)
+        if not source_path.exists():
+            raise LookupError("Source upload file not found")
+        temp_input_path = _write_temp_workbook(source_path.read_bytes(), upload.original_filename)
     temp_output_dir = Path(tempfile.mkdtemp(prefix="budget_draft_snapshot_"))
     try:
         temp_input_path = _ensure_xlsx(temp_input_path)
 
+        pdf_known_columns = (
+            {"ytd_actual": 6, "annual_budget": 9}
+            if route.path == "pdf_vlm" else None
+        )
         macros_service.write_percent_changes_by_label(
             temp_input_path,
             "Income Statement",
@@ -1090,6 +1101,7 @@ def _render_draft_snapshot_from_upload(
             growth_factor=growth_factor,
             growth_factor_note=growth_factor_note,
             enrich_only=False,
+            known_columns=pdf_known_columns,
         )
         pipeline.run()
         preview = macros_service.read_first_sheet_preview(output_path, settings.MAX_PREVIEW_ROWS)
@@ -1146,6 +1158,8 @@ def _ensure_draft_enriched_workbook(
     except LookupError as exc:
         raise LookupError("Enriched draft file unavailable") from exc
     except FileNotFoundError as exc:
+        raise LookupError("Enriched draft file unavailable") from exc
+    except ValueError as exc:
         raise LookupError("Enriched draft file unavailable") from exc
 
     if not draft.enriched_storage_key:
@@ -2055,12 +2069,21 @@ def create_budget_version(
     line_items = payload.line_items or _json_loads(draft.line_items_json, [])
     global_note = payload.global_note if payload.global_note is not None else draft.global_note
 
-    source_path = _budget_storage_path(upload.storage_key)
-    temp_input_path = _write_temp_workbook(source_path.read_bytes(), upload.original_filename)
+    route = choose_financial_document_route(upload.original_filename, upload.content_type)
+    if route.path == "pdf_vlm":
+        source_path = _ensure_draft_enriched_workbook(session, draft)
+        temp_input_path = _write_temp_workbook(source_path.read_bytes(), "enriched-income-statement.xlsx")
+    else:
+        source_path = _budget_storage_path(upload.storage_key)
+        temp_input_path = _write_temp_workbook(source_path.read_bytes(), upload.original_filename)
     temp_output_dir = Path(tempfile.mkdtemp(prefix="budget_version_"))
     try:
         temp_input_path = _ensure_xlsx(temp_input_path)
 
+        pdf_known_columns = (
+            {"ytd_actual": 6, "annual_budget": 9}
+            if route.path == "pdf_vlm" else None
+        )
         macros_service.write_percent_changes_by_label(
             temp_input_path,
             "Income Statement",
@@ -2076,6 +2099,7 @@ def create_budget_version(
             growth_factor_note=draft.growth_factor_note or upload.growth_factor_note,
             enrich_only=False,
             hoa_name=hoa.name or '',
+            known_columns=pdf_known_columns,
         )
         pipeline.run()
         enriched_bytes = Path(intermediate_path).read_bytes()
@@ -2278,7 +2302,21 @@ def reopen_version_as_draft(
     )
     session.add(draft)
     session.flush()
-    _refresh_draft_snapshot_from_upload(session, draft, upload)
+
+    route = choose_financial_document_route(upload.original_filename, upload.content_type)
+    copied_enriched_snapshot = False
+    if route.path == "pdf_vlm" and source_draft is not None:
+        source_enriched_key = source_draft.enriched_storage_key
+        if _storage_file_available(source_enriched_key):
+            source_enriched_path = _budget_storage_path(source_enriched_key or "")
+            _persist_draft_enriched_workbook(
+                draft,
+                enriched_bytes=source_enriched_path.read_bytes(),
+            )
+            copied_enriched_snapshot = True
+
+    if not copied_enriched_snapshot:
+        _refresh_draft_snapshot_from_upload(session, draft, upload)
 
     event = _create_audit_event(
         session,

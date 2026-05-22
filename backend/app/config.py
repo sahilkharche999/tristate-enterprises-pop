@@ -61,6 +61,8 @@ class Settings(BaseSettings):
     DB_PATH: str = str(Path(__file__).parent / "ai_implementation" / "data" / "budget_ai.db")
     DOCUMENT_VLM_ENABLED: bool = False
     DOCUMENT_VLM_MAX_PAGES: int = 6
+    DOCUMENT_VLM_PAGE_SELECTION_THRESHOLD: int = 10
+    DOCUMENT_VLM_PAGE_SELECTION_MAX_PAGES: int = 80
     DOCUMENT_VLM_MAX_RETRIES: int = 1
     CBR_THRESHOLD: float = 0.95
     CATBOOST_ENABLED: bool = False  # Set True to enable CatBoost ML stage

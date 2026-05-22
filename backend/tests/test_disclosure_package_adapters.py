@@ -192,6 +192,17 @@ def test_from_reserve_study_extraction_skips_rows_without_useful_life():
     assert snap.components[0].line_item == "Valid"
 
 
+def test_from_reserve_study_extraction_allows_income_statement_only_draft():
+    from app.disclosure_package.adapters import from_reserve_study_extraction
+
+    doc = SimpleNamespace(study_date="", rows=[])
+
+    snap = from_reserve_study_extraction(doc)
+
+    assert snap.study_date == ""
+    assert snap.components == []
+
+
 # ── Test 7: Property ORM row → HOAMetadata (units >= 1, fiscal months 1-12) ──
 def test_from_hoa_record_converts_property_row():
     from app.disclosure_package.adapters import from_hoa_record

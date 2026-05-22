@@ -18,6 +18,8 @@ from app.services.pdf_vlm_extractor import (
     _extract_full_document,
     _is_reserve_statement_page,
     _is_scanned_pdf_error,
+    StatementPageCandidate,
+    StatementPageSelection,
     extract_pdf_statement,
 )
 from app.ai_implementation.pipeline.document_extraction_provider import DocumentPromptContext
@@ -477,6 +479,10 @@ class TestScannedPdfFallback:
         ]
 
         monkeypatch.setattr(
+            "app.services.pdf_vlm_extractor._get_pdf_page_count",
+            lambda path: 2,
+        )
+        monkeypatch.setattr(
             "app.services.pdf_vlm_extractor._extract_pdf_text_table",
             _raise_no_text_layer,
         )
@@ -574,6 +580,10 @@ class TestScannedPdfFallback:
         monkeypatch.setattr(
             "app.services.pdf_vlm_extractor._extract_pdf_text_table",
             lambda path, max_pages=None: "--- Page 1 ---\nLine 1 100\nLine 2 200\n--- Page 2 ---\nLine 3 300\n",
+        )
+        monkeypatch.setattr(
+            "app.services.pdf_vlm_extractor._get_pdf_page_count",
+            lambda path: 2,
         )
 
         render_call_kwargs: list[dict] = []
@@ -708,6 +718,10 @@ class TestScannedPdfFallback:
             "app.services.pdf_vlm_extractor._extract_pdf_text_table",
             _raise_generic,
         )
+        monkeypatch.setattr(
+            "app.services.pdf_vlm_extractor._get_pdf_page_count",
+            lambda path: 2,
+        )
 
         import pytest
 
@@ -720,3 +734,245 @@ class TestScannedPdfFallback:
                     max_pages=6,
                 )
             )
+
+
+class TestIncomeStatementPageSelection:
+    """Large mixed PDF packages need page selection before detail extraction."""
+
+    def test_small_pdf_skips_page_selection(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(
+            "app.services.pdf_vlm_extractor._get_pdf_page_count",
+            lambda path: 10,
+        )
+        monkeypatch.setattr(
+            "app.services.pdf_vlm_extractor._extract_pdf_text_table",
+            lambda path, max_pages=None: "--- Page 1 ---\nIncome Statement\nAssessment Income 100\n",
+        )
+        monkeypatch.setattr(
+            "app.services.pdf_vlm_extractor.render_pdf_pages",
+            lambda path, max_pages=None, *, dpi=72: [
+                RenderedPage(page_number=1, mime_type="image/png", content=b"page-1")
+            ],
+        )
+
+        async def _selector_should_not_run(*args, **kwargs):
+            raise AssertionError("small PDFs must not run page selection")
+
+        monkeypatch.setattr(
+            "app.services.pdf_vlm_extractor._select_income_statement_pages",
+            _selector_should_not_run,
+        )
+
+        async def _fake_extract_single_page(
+            page_num, page_text, page_image, prompt_context, is_reserve_page, *, no_text_layer=False,
+        ):
+            assert page_num == 1
+            assert page_text
+            return ExtractedFinancialStatementPage.model_validate(
+                {
+                    "document_family": "pdf_visual_document",
+                    "report_type": "income_statement",
+                    "line_items": [
+                        {
+                            "label": "Assessment Income",
+                            "section_kind": "income",
+                            "ytd_actual": 100.0,
+                            "annual_budget": 200.0,
+                            "page_number": page_num,
+                        },
+                        {
+                            "label": "Management Fee",
+                            "section_kind": "operating",
+                            "ytd_actual": 50.0,
+                            "annual_budget": 100.0,
+                            "page_number": page_num,
+                        }
+                    ],
+                    "totals": [],
+                    "validation_issues": [],
+                    "confidence": 0.0,
+                }
+            )
+
+        monkeypatch.setattr(
+            "app.services.pdf_vlm_extractor._extract_single_page",
+            _fake_extract_single_page,
+        )
+
+        result = asyncio.run(
+            _extract_full_document(
+                str(tmp_path / "small.pdf"),
+                DocumentPromptContext(filename="small.pdf", route_family="pdf_visual_document"),
+                ExtractedFinancialStatement,
+                max_pages=6,
+            )
+        )
+
+        assert isinstance(result, ExtractedFinancialStatement)
+        assert result.extraction_metadata.get("page_selection_used") is False
+
+    def test_large_scanned_pdf_extracts_only_selected_original_pages(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(
+            "app.services.pdf_vlm_extractor._get_pdf_page_count",
+            lambda path: 64,
+        )
+
+        def _raise_no_text_layer(path, max_pages=None):
+            raise ValueError(
+                "PDF has no text layer (scanned). Upload text-based PDF or Excel."
+            )
+
+        monkeypatch.setattr(
+            "app.services.pdf_vlm_extractor._extract_pdf_text_table",
+            _raise_no_text_layer,
+        )
+        monkeypatch.setattr(
+            "app.services.pdf_vlm_extractor._extract_pdf_text_table_for_pages",
+            lambda path, selected_pages: _raise_no_text_layer(path),
+        )
+        selection = StatementPageSelection(
+            selected_pages=[28, 29, 30],
+            candidates=[
+                StatementPageCandidate(
+                    page=28,
+                    classification="operating_statement",
+                    selected=True,
+                    confidence=0.96,
+                    reason="Statement of Revenues and Expenses with Annual Budget column",
+                ),
+                StatementPageCandidate(
+                    page=29,
+                    classification="operating_statement",
+                    selected=True,
+                    confidence=0.95,
+                    reason="Continued operating statement with Annual Budget column",
+                ),
+                StatementPageCandidate(
+                    page=30,
+                    classification="reserve_statement",
+                    selected=True,
+                    confidence=0.94,
+                    reason="Reserve income and expense page from the same statement package",
+                ),
+            ],
+            rejected_pages=[
+                StatementPageCandidate(
+                    page=24,
+                    classification="assessment_schedule",
+                    selected=False,
+                    confidence=0.98,
+                    reason="Assessments per unit, not an income statement",
+                )
+            ],
+        )
+
+        async def _fake_select(path, prompt_context, *, max_pages):
+            assert max_pages == 64
+            return selection
+
+        monkeypatch.setattr(
+            "app.services.pdf_vlm_extractor._select_income_statement_pages",
+            _fake_select,
+        )
+        rendered_selected_pages = [
+            RenderedPage(page_number=28, mime_type="image/png", content=b"page-28"),
+            RenderedPage(page_number=29, mime_type="image/png", content=b"page-29"),
+            RenderedPage(page_number=30, mime_type="image/png", content=b"page-30"),
+        ]
+
+        monkeypatch.setattr(
+            "app.services.pdf_vlm_extractor.render_pdf_pages_for_numbers",
+            lambda path, page_numbers, *, dpi=72: rendered_selected_pages,
+        )
+
+        captured_page_numbers: list[int] = []
+        captured_reserve_flags: dict[int, bool] = {}
+
+        async def _fake_extract_single_page(
+            page_num, page_text, page_image, prompt_context, is_reserve_page, *, no_text_layer=False,
+        ):
+            captured_page_numbers.append(page_num)
+            captured_reserve_flags[page_num] = is_reserve_page
+            assert no_text_layer is True
+            assert page_text == ""
+            assert page_image.page_number == page_num
+            return ExtractedFinancialStatementPage.model_validate(
+                {
+                    "document_family": "pdf_visual_document",
+                    "report_type": "income_statement",
+                    "line_items": [
+                        {
+                            "account_code_text": f"4{page_num}",
+                            "label": f"Selected Page {page_num}",
+                            "section_kind": "operating",
+                            "ytd_actual": 100.0,
+                            "annual_budget": 200.0,
+                            "page_number": page_num,
+                        }
+                    ],
+                    "totals": [],
+                    "validation_issues": [],
+                    "confidence": 0.0,
+                }
+            )
+
+        monkeypatch.setattr(
+            "app.services.pdf_vlm_extractor._extract_single_page",
+            _fake_extract_single_page,
+        )
+
+        result = asyncio.run(
+            _extract_full_document(
+                str(tmp_path / "large-package.pdf"),
+                DocumentPromptContext(filename="large-package.pdf", route_family="pdf_visual_document"),
+                ExtractedFinancialStatement,
+                max_pages=6,
+            )
+        )
+
+        assert isinstance(result, ExtractedFinancialStatement)
+        assert captured_page_numbers == [28, 29, 30]
+        assert captured_reserve_flags == {28: False, 29: False, 30: True}
+        assert [item.page_number for item in result.line_items] == [28, 29, 30]
+        assert result.extraction_metadata["page_selection_used"] is True
+        assert result.extraction_metadata["selected_pages"] == [28, 29, 30]
+
+    def test_large_pdf_with_no_selected_statement_pages_returns_clear_failure(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(
+            "app.services.pdf_vlm_extractor._get_pdf_page_count",
+            lambda path: 64,
+        )
+        monkeypatch.setattr(
+            "app.services.pdf_vlm_extractor._extract_pdf_text_table",
+            lambda path, max_pages=None: "--- Page 1 ---\nCover Page\n",
+        )
+
+        async def _fake_select(path, prompt_context, *, max_pages):
+            return StatementPageSelection(
+                selected_pages=[],
+                candidates=[],
+                rejected_pages=[
+                    StatementPageCandidate(
+                        page=1,
+                        classification="cover_page",
+                        selected=False,
+                        confidence=0.9,
+                        reason="Cover page",
+                    )
+                ],
+            )
+
+        monkeypatch.setattr(
+            "app.services.pdf_vlm_extractor._select_income_statement_pages",
+            _fake_select,
+        )
+
+        result = asyncio.run(extract_pdf_statement(str(tmp_path / "large-package.pdf")))
+
+        assert isinstance(result, DocumentExtractionFailure)
+        assert result.code == "statement_pages_not_found"
+        assert "No income statement pages" in result.message

@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from openpyxl import load_workbook
+
 from app.generate_budget_pipeline import BudgetPipeline
 from app.models.financial_document_extraction import ExtractedFinancialStatement
 from app.services.budget_history_service import _table_to_line_items
@@ -81,6 +83,7 @@ def test_normalized_workbook_preserves_four_category_taxonomy_end_to_end(tmp_pat
     pipeline.run()
 
     enriched = macros_service.read_sheet_as_table(intermediate_path, "Income Statement")
+    preview = macros_service.read_first_sheet_preview(output_path, 200)
     line_items, warnings = _table_to_line_items(enriched)
 
     # Exactly 4 line items — no ghost rows from the section header markers
@@ -109,6 +112,11 @@ def test_normalized_workbook_preserves_four_category_taxonomy_end_to_end(tmp_pat
     # READ_ONLY_SECTIONS must match the actual read-only set
     read_only_cats = {li["category"] for li in line_items if li["read_only"]}
     assert read_only_cats.issubset(READ_ONLY_SECTIONS)
+
+    preview_rows = {row[1]: row for row in preview["rows"] if len(row) > 1 and row[1]}
+    assert preview_rows["Total Income"][5] == 695790
+    assert preview_rows["Total Operating Expense"][5] == 52500
+    assert preview_rows["Net Operating Income"][5] == 643290
 
 
 def test_budget_pipeline_accepts_normalized_pdf_workbook_without_header_row_above_data(tmp_path):

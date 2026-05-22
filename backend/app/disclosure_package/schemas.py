@@ -63,7 +63,7 @@ class ReserveStudySnapshot(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     study_date: str
-    components: List[ReserveStudyComponent] = Field(min_length=1)
+    components: List[ReserveStudyComponent] = Field(default_factory=list)
 
 
 class HOAMetadata(BaseModel):

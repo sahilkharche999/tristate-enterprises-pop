@@ -1,6 +1,9 @@
 import sqlite3
+import json
 from pathlib import Path
 
+from app.ai_implementation.db import BUDGET_DRAFT_ACTIVE, BudgetDraft, BudgetUpload
+from app.services import macros_service
 from app.services.budget_history_service import _table_to_line_items
 
 
@@ -26,6 +29,33 @@ def _generate_version(client, draft, *, global_note="Generated for test"):
             "global_note": global_note,
         },
     )
+
+
+def test_write_percent_changes_matches_normalized_pdf_label_column(tmp_path):
+    from openpyxl import Workbook, load_workbook
+
+    path = tmp_path / "normalized.xlsx"
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Income Statement"
+    worksheet.append(["Section", "Account Code", "Label", "% Change"])
+    worksheet.append(["income", "40000", "Assessment Income", None])
+    workbook.save(path)
+    workbook.close()
+
+    matched = macros_service.write_percent_changes_by_label(
+        str(path),
+        "Income Statement",
+        {"Assessment Income": 0.05},
+        pct_change_col=4,
+    )
+
+    workbook = load_workbook(path, data_only=True)
+    try:
+        assert matched == 1
+        assert workbook["Income Statement"].cell(row=2, column=4).value == 0.05
+    finally:
+        workbook.close()
 
 
 def _sheet_row(*values, width: int = 39):
@@ -127,7 +157,7 @@ def test_table_to_line_items_marks_reserve_expense_block_rows_as_reserve_compone
 def test_upload_creates_history(client, budget_history_test_harness):
     response = _upload_income_statement(client)
 
-    assert response.status_code == 200
+    assert response.status_code == 200, response.text
     payload = response.json()
     assert payload["upload_id"] > 0
     assert payload["draft"]["source_upload_id"] == payload["upload_id"]
@@ -468,6 +498,128 @@ def test_download_enriched_draft_artifact_supports_active_generated_and_supersed
     assert history_response.status_code == 200
     timeline_types = [event["event_type"] for event in history_response.json()["timeline"]]
     assert timeline_types.count("draft_enriched_downloaded") == 3
+
+
+def test_generate_pdf_origin_draft_uses_persisted_enriched_workbook(
+    client,
+    db_session,
+    budget_history_test_harness,
+    monkeypatch,
+):
+    from app.services import budget_history_service
+
+    storage_root = Path(budget_history_test_harness["storage_root"])
+    upload = BudgetUpload(
+        property_id=1,
+        original_filename="scanned-income-statement.pdf",
+        storage_key="hoa/1/uploads/pdf-source/source.pdf",
+        content_type="application/pdf",
+        byte_size=32,
+        sha256="b" * 64,
+        enrichment_status="completed",
+        line_items_json=json.dumps([]),
+        budget_preview_json=json.dumps({}),
+        statement_month=8,
+        growth_factor=1.0,
+        growth_factor_note="stub",
+        uploaded_by_user_id=1,
+        uploaded_by_name="Test User",
+        created_at="2026-03-21T09:00:00+00:00",
+    )
+    db_session.add(upload)
+    db_session.flush()
+
+    source_pdf = storage_root / upload.storage_key
+    source_pdf.parent.mkdir(parents=True, exist_ok=True)
+    source_pdf.write_bytes(b"scanned pdf bytes")
+
+    line_items = [
+        {
+            "line_item_key": "40000",
+            "account_code": 40000,
+            "category": "income",
+            "label": "40000 - Assessment Income",
+            "annual_budget": 120000.0,
+            "percent_change": 0.0,
+            "read_only": False,
+        },
+        {
+            "line_item_key": "6100",
+            "account_code": 6100,
+            "category": "operating",
+            "label": "6100 - Insurance",
+            "annual_budget": 32000.0,
+            "percent_change": 0.0,
+            "read_only": False,
+        },
+    ]
+    draft = BudgetDraft(
+        property_id=1,
+        source_upload_id=upload.id,
+        reopened_from_version_id=None,
+        status=BUDGET_DRAFT_ACTIVE,
+        line_items_json=json.dumps(line_items),
+        global_note=None,
+        statement_month=8,
+        growth_factor=1.0,
+        growth_factor_note="stub",
+        budget_preview_json=json.dumps({}),
+        enriched_storage_key="hoa/1/drafts/pdf-draft/enriched.xlsx",
+        created_by_user_id=1,
+        updated_by_user_id=1,
+        actor_name="Test User",
+        created_at="2026-03-21T10:00:00+00:00",
+        updated_at="2026-03-21T10:00:00+00:00",
+    )
+    db_session.add(draft)
+    db_session.commit()
+
+    enriched = storage_root / draft.enriched_storage_key
+    enriched.parent.mkdir(parents=True, exist_ok=True)
+    enriched.write_bytes(b"normalized workbook bytes")
+
+    seen_input_suffixes: list[str] = []
+    seen_known_columns: list[dict | None] = []
+
+    class CapturingPipeline:
+        def __init__(self, **kwargs):
+            self.intermediate_path = kwargs["intermediate_path"]
+            self.output_path = kwargs["output_path"]
+            seen_known_columns.append(kwargs.get("known_columns"))
+
+        def run(self):
+            Path(self.intermediate_path).write_bytes(b"fake enriched workbook")
+            Path(self.output_path).write_bytes(b"fake generated workbook")
+
+    def _assert_xlsx_only(path: str) -> str:
+        suffix = Path(path).suffix.lower()
+        seen_input_suffixes.append(suffix)
+        assert suffix == ".xlsx"
+        return path
+
+    monkeypatch.setattr(budget_history_service, "_ensure_xlsx", _assert_xlsx_only)
+    monkeypatch.setattr(budget_history_service, "BudgetPipeline", CapturingPipeline)
+
+    response = client.post(
+        "/hoa/1/budget/generate",
+        json={
+            "draft_id": draft.id,
+            "line_items": line_items,
+            "global_note": "Generated from scanned PDF draft",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert seen_input_suffixes == [".xlsx"]
+    assert seen_known_columns == [{"ytd_actual": 6, "annual_budget": 9}]
+
+    version_id = response.json()["version"]["id"]
+    reopen_response = client.post(f"/hoa/1/versions/{version_id}/reopen")
+
+    assert reopen_response.status_code == 200
+    assert seen_input_suffixes == [".xlsx"]
+    assert seen_known_columns == [{"ytd_actual": 6, "annual_budget": 9}]
+    assert reopen_response.json()["draft"]["enriched_file_available"] is True
 
 
 def test_save_draft_refreshes_persisted_enriched_download(

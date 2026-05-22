@@ -343,12 +343,18 @@ def write_percent_changes_by_label(path: str, sheet: str, changes: Dict[str, flo
                     break
 
         for r in range(1, ws.max_row + 1):
-            label = ws.cell(row=r, column=2).value  # col B
-            if label is not None:
+            # Legacy statements keep the label in column B. Normalized PDF
+            # workbooks keep Account Code in B and Label in C. Check both so
+            # manual percent changes survive the PDF -> XLSX round-trip.
+            for label_col in (2, 3):
+                label = ws.cell(row=r, column=label_col).value
+                if label is None:
+                    continue
                 norm_label = _normalize_label(str(label))
                 if norm_label in normalized_changes:
                     ws.cell(row=r, column=target_col, value=normalized_changes[norm_label])
                     matched_keys.add(norm_label)
+                    break
         wb.save(path)
     finally:
         wb.close()

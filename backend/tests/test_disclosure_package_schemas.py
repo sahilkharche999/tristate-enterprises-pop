@@ -62,9 +62,9 @@ def test_reserve_study_snapshot_components_are_typed():
         ],
     )
     assert snap.components[0].replacement_cost == Decimal("500000")
-    # min_length=1 enforced
-    with pytest.raises(ValidationError):
-        ReserveStudySnapshot(study_date="2025", components=[])
+    # Income-statement-only PDFs may not provide reserve-study rows.
+    empty = ReserveStudySnapshot(study_date="2025", components=[])
+    assert empty.components == []
 
 
 # ── Test 3: Currency fields coerce str/int → Decimal, never float ─────────────

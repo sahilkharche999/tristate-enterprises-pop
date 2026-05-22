@@ -40,6 +40,22 @@ def _pages_from_batch_prompt(prompt: str) -> list[int]:
     ]
 
 
+def test_negative_reserve_numeric_values_are_flagged_not_rejected():
+    row = ExtractedReserveStudyRow.model_validate(
+        {
+            "row_id": "paint-negative",
+            "line_item": "Paint",
+            "useful_life": 5,
+            "remaining_life": 1,
+            "replacement_cost": 10000,
+            "year_replacement_provision": -154,
+        }
+    )
+
+    assert row.year_replacement_provision is None
+    assert "invalid_negative_year_replacement_provision" in row.flags
+
+
 def test_discovery_default_scans_beyond_previous_page_cap(monkeypatch, tmp_path):
     pages = [f"boilerplate page {index}" for index in range(1, 20)]
     pages.append(
