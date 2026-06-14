@@ -53,3 +53,54 @@ def test_llm_client_fails_fast_when_gemini_model_missing(monkeypatch):
     import pytest
     with pytest.raises(RuntimeError, match="GEMINI_MODEL is not set"):
         llm_client_module.get_llm_client()
+
+
+def test_enterprise_gemini_settings_load_from_env(monkeypatch):
+    """Enterprise/Vertex Gemini settings should load from environment."""
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setenv("GOOGLE_GENAI_USE_ENTERPRISE", "true")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "budgeting-01")
+    monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "global")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-3.5-flash")
+
+    from app.config import Settings
+
+    fresh_settings = Settings()
+    assert fresh_settings.GOOGLE_GENAI_USE_ENTERPRISE is True
+    assert fresh_settings.GOOGLE_CLOUD_PROJECT == "budgeting-01"
+    assert fresh_settings.GOOGLE_CLOUD_LOCATION == "global"
+    assert fresh_settings.GEMINI_MODEL == "gemini-3.5-flash"
+
+
+def test_enterprise_mode_does_not_require_api_key(monkeypatch):
+    """Vertex/ADC mode must not fail because GEMINI_API_KEY is unset."""
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setenv("GOOGLE_GENAI_USE_ENTERPRISE", "true")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "budgeting-01")
+    monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "global")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-3.5-flash")
+
+    import importlib
+    from app import config as config_module
+    importlib.reload(config_module)
+    from app.ai_implementation.pipeline import llm_client as llm_client_module
+    importlib.reload(llm_client_module)
+
+    class _FakeClient:
+        pass
+
+    captured: dict[str, object] = {}
+
+    def _fake_client(**kwargs):
+        captured.update(kwargs)
+        return _FakeClient()
+
+    monkeypatch.setattr(llm_client_module.genai, "Client", _fake_client)
+
+    client = llm_client_module.get_llm_client()
+
+    assert isinstance(client, _FakeClient)
+    assert captured["vertexai"] is True
+    assert captured["project"] == "budgeting-01"
+    assert captured["location"] == "global"
+    assert "api_key" not in captured or captured["api_key"] is None

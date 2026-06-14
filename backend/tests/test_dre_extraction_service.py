@@ -153,3 +153,65 @@ def test_extraction_job_marks_placeholder_failed_on_crash(
     assert row[1] == "failed"
     assert "boom" in row[2]
     assert row[3] is not None
+
+
+def test_gemini_client_from_env_uses_vertex_mode_when_enterprise_enabled(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setenv("GOOGLE_GENAI_USE_ENTERPRISE", "true")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "budgeting-01")
+    monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "global")
+
+    import importlib
+    from app import config as config_module
+    importlib.reload(config_module)
+    from app.dre_extraction import gemini_callbacks as callbacks
+    importlib.reload(callbacks)
+
+    captured: dict[str, object] = {}
+
+    class FakeClient:
+        pass
+
+    def fake_client(**kwargs):
+        captured.update(kwargs)
+        return FakeClient()
+
+    monkeypatch.setattr("google.genai.Client", fake_client)
+
+    client = callbacks.gemini_client_from_env()
+
+    assert isinstance(client, FakeClient)
+    assert captured["vertexai"] is True
+    assert captured["project"] == "budgeting-01"
+    assert captured["location"] == "global"
+
+
+def test_gemini_client_from_env_returns_none_without_api_key_in_local_mode(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setenv("GOOGLE_GENAI_USE_ENTERPRISE", "false")
+    monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
+    monkeypatch.delenv("GOOGLE_CLOUD_LOCATION", raising=False)
+
+    import importlib
+    from app import config as config_module
+    importlib.reload(config_module)
+    from app.dre_extraction import gemini_callbacks as callbacks
+    importlib.reload(callbacks)
+
+    assert callbacks.gemini_client_from_env() is None
+
+
+def test_default_model_name_uses_settings_model(monkeypatch) -> None:
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-3.5-flash")
+
+    import importlib
+    from app import config as config_module
+    importlib.reload(config_module)
+    from app.dre_extraction import gemini_callbacks as callbacks
+    importlib.reload(callbacks)
+
+    assert callbacks.default_model_name() == "gemini-3.5-flash"

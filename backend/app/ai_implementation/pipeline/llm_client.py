@@ -133,16 +133,39 @@ def _require_gemini_config() -> None:
     import modules that transitively reference llm_client without needing a
     live API key.
     """
-    if not settings.GEMINI_API_KEY:
-        raise RuntimeError(
-            "GEMINI_API_KEY is not set. Add it to your .env or environment. "
-            "See .env.example for the expected format."
-        )
     if not settings.GEMINI_MODEL:
         raise RuntimeError(
             "GEMINI_MODEL is not set. Add it to your .env or environment. "
             "Deployment policy belongs in env, not in source."
         )
+    if settings.GOOGLE_GENAI_USE_ENTERPRISE:
+        if not settings.GOOGLE_CLOUD_PROJECT:
+            raise RuntimeError(
+                "GOOGLE_CLOUD_PROJECT is not set. Add it to your .env or environment "
+                "when GOOGLE_GENAI_USE_ENTERPRISE=true."
+            )
+        if not settings.GOOGLE_CLOUD_LOCATION:
+            raise RuntimeError(
+                "GOOGLE_CLOUD_LOCATION is not set. Add it to your .env or environment "
+                "when GOOGLE_GENAI_USE_ENTERPRISE=true."
+            )
+        return
+    if not settings.GEMINI_API_KEY:
+        raise RuntimeError(
+            "GEMINI_API_KEY is not set. Add it to your .env or environment. "
+            "See .env.example for the expected format."
+        )
+
+
+def _create_gemini_client() -> genai.Client:
+    """Create a Gemini client using either Vertex/ADC or API-key auth."""
+    if settings.GOOGLE_GENAI_USE_ENTERPRISE:
+        return genai.Client(
+            vertexai=True,
+            project=settings.GOOGLE_CLOUD_PROJECT,
+            location=settings.GOOGLE_CLOUD_LOCATION,
+        )
+    return genai.Client(api_key=settings.GEMINI_API_KEY)
 
 
 def get_llm_client() -> genai.Client:
@@ -165,11 +188,11 @@ def get_llm_client() -> genai.Client:
     except RuntimeError:
         # No running loop (sync call path). Cache in a dedicated slot.
         if _gemini_client_no_loop is None:
-            _gemini_client_no_loop = genai.Client(api_key=settings.GEMINI_API_KEY)
+            _gemini_client_no_loop = _create_gemini_client()
         return _gemini_client_no_loop
     cached = _gemini_clients.get(loop)
     if cached is None:
-        cached = genai.Client(api_key=settings.GEMINI_API_KEY)
+        cached = _create_gemini_client()
         _gemini_clients[loop] = cached
     return cached
 

@@ -1,0 +1,10 @@
+services:
+  backend:
+    volumes:
+      - /opt/tristate/data/sqlite:/app/app/ai_implementation/data
+      - /opt/tristate/data/budget-storage:/app/data/budget-storage
+
+  frontend:
+    depends_on:
+      backend:
+        condition: service_healthy

@@ -15,9 +15,9 @@ plus the rendered-page-by-number lookup, get back two callables that
 
 from __future__ import annotations
 
-import os
 from typing import Any, Callable, Optional
 
+from app.config import settings
 from .prompts import DRE_SETUP_EXTRACTOR_PROMPT
 from .schemas import PageInventoryEntry
 from .wire_schemas import WireDRESetupExtraction, WirePageInventoryBatch
@@ -25,7 +25,7 @@ from .wire_schemas import WireDRESetupExtraction, WirePageInventoryBatch
 
 def default_model_name() -> str:
     """Resolve the Gemini model from ``GEMINI_MODEL`` (matches live test)."""
-    return os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
+    return settings.GEMINI_MODEL or "gemini-flash-latest"
 
 
 def build_classify_callback(
@@ -232,11 +232,18 @@ def gemini_client_from_env() -> Optional[Any]:
     Production callers should treat ``None`` as a misconfiguration and
     surface a 503 rather than running the pipeline against a stub.
     """
-    api_key = os.environ.get("GEMINI_API_KEY")
+    from google import genai
+    if settings.GOOGLE_GENAI_USE_ENTERPRISE:
+        if not settings.GOOGLE_CLOUD_PROJECT or not settings.GOOGLE_CLOUD_LOCATION:
+            return None
+        return genai.Client(
+            vertexai=True,
+            project=settings.GOOGLE_CLOUD_PROJECT,
+            location=settings.GOOGLE_CLOUD_LOCATION,
+        )
+    api_key = settings.GEMINI_API_KEY
     if not api_key:
         return None
-    from google import genai
-
     return genai.Client(api_key=api_key)
 
 

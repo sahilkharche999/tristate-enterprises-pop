@@ -20,6 +20,7 @@ from ..dre_extraction.gemini_callbacks import (
     default_model_name,
     gemini_client_from_env,
 )
+from ..config import settings
 from ..dre_extraction.page_rendering import render_dre_pages
 from ..dre_extraction.persistence import (
     create_placeholder_extraction_run,
@@ -148,15 +149,20 @@ def run_extraction_job(
 
         client = gemini_client_from_env()
         if client is None:
+            auth_hint = (
+                "Vertex/ADC configuration incomplete"
+                if settings.GOOGLE_GENAI_USE_ENTERPRISE
+                else "GEMINI_API_KEY not set"
+            )
             _persist_failed_job(
                 connection=connection,
                 run_id=run_id,
-                message="DRE extraction skipped: GEMINI_API_KEY not set",
+                message=f"DRE extraction skipped: {auth_hint}",
             )
             logger.error(
-                "DRE extraction skipped: GEMINI_API_KEY not set "
+                "DRE extraction skipped: %s "
                 "(property=%s document=%s)",
-                property_id, dre_document_id,
+                auth_hint, property_id, dre_document_id,
             )
             return
 

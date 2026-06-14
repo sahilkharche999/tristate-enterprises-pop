@@ -55,7 +55,14 @@ def create_app() -> FastAPI:
             logger.warning("AI pipeline seed failed: %s", e)
         yield
 
-    app = FastAPI(title="VBA -> Python Macro Pipeline", lifespan=lifespan)
+    docs_url = "/docs" if settings.ENABLE_DOCS else None
+    openapi_url = "/openapi.json" if settings.ENABLE_DOCS else None
+    app = FastAPI(
+        title="VBA -> Python Macro Pipeline",
+        lifespan=lifespan,
+        docs_url=docs_url,
+        openapi_url=openapi_url,
+    )
 
     allow_origins = [o.strip() for o in settings.ALLOW_ORIGINS.split(',')] if settings.ALLOW_ORIGINS else ["*"]
 
@@ -66,6 +73,14 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.get("/healthz")
+    def healthz() -> dict[str, str]:
+        return {"status": "ok"}
+
+    @app.get("/readyz")
+    def readyz() -> dict[str, str]:
+        return {"status": "ready"}
 
     # Auth routes (unprotected)
     app.include_router(auth_router)

@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     # App server
     APP_HOST: str = "127.0.0.1"
     APP_PORT: int = 8000
+    ENABLE_DOCS: bool = True
 
     # CORS (must list specific origins for credentials: 'include' to work)
     ALLOW_ORIGINS: str = "http://localhost,http://localhost:80,http://localhost:5173,http://0.0.0.0,http://0.0.0.0:80"
@@ -52,6 +53,9 @@ class Settings(BaseSettings):
     COOKIE_SECURE: bool = True
 
     # AI Pipeline (Gemini)
+    GOOGLE_GENAI_USE_ENTERPRISE: bool = False
+    GOOGLE_CLOUD_PROJECT: str = ""
+    GOOGLE_CLOUD_LOCATION: str = "global"
     # Both must be provided via environment (.env or shell). No hardcoded defaults:
     # GEMINI_API_KEY is a secret, and GEMINI_MODEL is deployment policy. The app
     # fails fast at call time (see llm_client.py) when either is empty, rather

@@ -349,3 +349,57 @@ def test_get_llm_client_does_not_share_across_event_loops(monkeypatch):
         "on the second loop if the first loop closed between calls."
     )
     assert call_count == 2
+
+
+def test_get_llm_client_uses_vertex_mode_when_enterprise_enabled(monkeypatch):
+    """Enterprise mode should create a Vertex/ADC Gemini client."""
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setenv("GOOGLE_GENAI_USE_ENTERPRISE", "true")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "budgeting-01")
+    monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "global")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-3.5-flash")
+
+    import importlib
+    from app import config as config_module
+    importlib.reload(config_module)
+    from app.ai_implementation.pipeline import llm_client as llm_client_module
+    importlib.reload(llm_client_module)
+
+    llm_client_module._gemini_client_no_loop = None
+    llm_client_module._gemini_clients.clear()
+
+    captured: dict[str, object] = {}
+
+    class FakeClient:
+        pass
+
+    def fake_genai_client(**kwargs):
+        captured.update(kwargs)
+        return FakeClient()
+
+    monkeypatch.setattr("app.ai_implementation.pipeline.llm_client.genai.Client", fake_genai_client)
+
+    client = llm_client_module.get_llm_client()
+
+    assert isinstance(client, FakeClient)
+    assert captured["vertexai"] is True
+    assert captured["project"] == "budgeting-01"
+    assert captured["location"] == "global"
+
+
+def test_get_llm_client_requires_api_key_when_enterprise_disabled(monkeypatch):
+    """Local/API-key mode should still fail fast without GEMINI_API_KEY."""
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setenv("GOOGLE_GENAI_USE_ENTERPRISE", "false")
+    monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
+    monkeypatch.delenv("GOOGLE_CLOUD_LOCATION", raising=False)
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-3.5-flash")
+
+    import importlib
+    from app import config as config_module
+    importlib.reload(config_module)
+    from app.ai_implementation.pipeline import llm_client as llm_client_module
+    importlib.reload(llm_client_module)
+
+    with pytest.raises(RuntimeError, match="GEMINI_API_KEY is not set"):
+        llm_client_module.get_llm_client()
