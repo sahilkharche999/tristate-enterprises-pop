@@ -20,12 +20,14 @@ import pytest
 
 from app.dre_extraction.schemas import (
     AllocationPoolBlock,
+    BudgetLineMappingEvidence,
     DRESetupExtraction,
     DocumentMetadata,
 )
 from app.dre_extraction.wire_schemas import (
     WireAllocationPoolBlock,
     WireAssessmentSetupBlock,
+    WireBudgetLineMappingEvidence,
     WireDocumentMetadata,
     WireDRESetupExtraction,
     WireFormulaBlock,
@@ -74,6 +76,7 @@ def _empty_wire() -> WireDRESetupExtraction:
         allocation_pools=[],
         formulas=[],
         reserve_setup=None,
+        budget_line_mapping_evidence=[],
         validation_checks=[],
         human_review_questions=[],
         recommended_saved_setup=None,
@@ -161,6 +164,9 @@ class TestDecimalCoercion:
                 denominator_source="dre_shown",
                 included_budget_lines=None,
                 excluded_budget_lines=None,
+                budget_line_derivation="explicit_lines",
+                residual_after_pool_keys=None,
+                residual_exclusions=None,
                 source_pages=[5],
                 confidence=0.92,
             )
@@ -249,6 +255,35 @@ class TestOptionalSubObjects:
         assert r.notes == ""
         assert r.required_manual_fields == ["board_approved_amount"]
 
+    def test_budget_line_mapping_evidence_present_converts(self) -> None:
+        wire = _empty_wire()
+        wire.budget_line_mapping_evidence = [
+            WireBudgetLineMappingEvidence(
+                account_code="93008",
+                source_label="Package",
+                parent_category="Insurance",
+                assessment_pool_key="variable_costs",
+                assessment_type="prorated_variable",
+                match_confidence=0.95,
+                review_required=False,
+                review_reason=None,
+                source_page=2,
+                source_evidence_text="Insurance category appears in variable assessment computation.",
+            )
+        ]
+
+        domain = to_domain(wire)
+
+        evidence = domain.budget_line_mapping_evidence[0]
+        assert isinstance(evidence, BudgetLineMappingEvidence)
+        assert evidence.account_code == "93008"
+        assert evidence.parent_category == "Insurance"
+        assert evidence.assessment_pool_key == "variable_costs"
+        assert evidence.assessment_type == "prorated_variable"
+        assert evidence.match_confidence == 0.95
+        assert evidence.review_required is False
+        assert evidence.source_page == 2
+
 
 class TestFullRoundTrip:
     def test_esprit_park_shaped_wire_round_trips(self) -> None:
@@ -314,6 +349,9 @@ class TestFullRoundTrip:
                     denominator_source="dre_shown",
                     included_budget_lines=["Insurance", "Landscaping"],
                     excluded_budget_lines=None,
+                    budget_line_derivation="explicit_lines",
+                    residual_after_pool_keys=None,
+                    residual_exclusions=None,
                     source_pages=[5],
                     confidence=0.91,
                 ),
@@ -336,6 +374,7 @@ class TestFullRoundTrip:
                 source_pages=[7, 8],
                 confidence=0.88,
             ),
+            budget_line_mapping_evidence=[],
             validation_checks=[
                 WireValidationCheck(
                     check_name="ownership_percent_sums_to_100",
@@ -522,6 +561,9 @@ class TestParentPoolKey:
                 denominator_source="unknown",
                 included_budget_lines=None,
                 excluded_budget_lines=None,
+                budget_line_derivation="unknown",
+                residual_after_pool_keys=None,
+                residual_exclusions=None,
                 source_pages=[1],
                 confidence=1.0,
             )
@@ -545,6 +587,9 @@ class TestParentPoolKey:
                 denominator_source="dre_shown",
                 included_budget_lines=None,
                 excluded_budget_lines=None,
+                budget_line_derivation="formula_only",
+                residual_after_pool_keys=None,
+                residual_exclusions=None,
                 source_pages=[2],
                 confidence=0.95,
             ),
@@ -561,6 +606,9 @@ class TestParentPoolKey:
                 denominator_source="dre_shown",
                 included_budget_lines=None,
                 excluded_budget_lines=None,
+                budget_line_derivation="formula_only",
+                residual_after_pool_keys=None,
+                residual_exclusions=None,
                 source_pages=[2],
                 confidence=0.95,
             ),
@@ -570,3 +618,71 @@ class TestParentPoolKey:
         assert domain.allocation_pools[1].parent_pool_key == "general_common"
         assert domain.allocation_pools[0].pool_key == "general_common_prorated"
         assert domain.allocation_pools[1].pool_key == "general_common_equal"
+
+
+class TestAllocationPoolDerivationMetadata:
+    def test_residual_pool_derivation_threads_through_wire_adapter(self) -> None:
+        wire = _empty_wire()
+        wire.allocation_pools = [
+            WireAllocationPoolBlock(
+                pool_key="total_budget_equal",
+                parent_pool_key="total_budget",
+                pool_name="Total Budget - Equal Component",
+                annual_amount=Decimal("102451"),
+                monthly_amount=Decimal("8538"),
+                allocation_method="equal",
+                recipient_scope="all_units",
+                denominator_label="units",
+                denominator_value=Decimal("20"),
+                denominator_source="dre_shown",
+                included_budget_lines=[],
+                excluded_budget_lines=None,
+                budget_line_derivation="residual_default",
+                residual_after_pool_keys=["total_budget_prorated", "exempted_costs"],
+                residual_exclusions=["income_only", "pass_through"],
+                source_pages=[6],
+                confidence=0.95,
+            )
+        ]
+
+        domain = to_domain(wire)
+
+        pool = domain.allocation_pools[0]
+        assert pool.budget_line_derivation == "residual_default"
+        assert pool.residual_after_pool_keys == [
+            "total_budget_prorated",
+            "exempted_costs",
+        ]
+        assert pool.residual_exclusions == ["income_only", "pass_through"]
+
+    def test_empty_included_lines_without_residual_signal_stays_unknown(self) -> None:
+        wire = _empty_wire()
+        wire.allocation_pools = [
+            WireAllocationPoolBlock(
+                pool_key="unclear_pool",
+                parent_pool_key=None,
+                pool_name="Unclear Pool",
+                annual_amount=None,
+                monthly_amount=None,
+                allocation_method="equal",
+                recipient_scope="all_units",
+                denominator_label=None,
+                denominator_value=None,
+                denominator_source="unknown",
+                included_budget_lines=[],
+                excluded_budget_lines=None,
+                budget_line_derivation="unknown",
+                residual_after_pool_keys=None,
+                residual_exclusions=None,
+                source_pages=[8],
+                confidence=0.4,
+            )
+        ]
+
+        domain = to_domain(wire)
+
+        pool = domain.allocation_pools[0]
+        assert pool.included_budget_lines == []
+        assert pool.budget_line_derivation == "unknown"
+        assert pool.residual_after_pool_keys == []
+        assert pool.residual_exclusions == []

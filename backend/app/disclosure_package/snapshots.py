@@ -76,6 +76,7 @@ def freeze_package_snapshots(
     budget: Any,
     reserve: Any,
     appendix_manifest: Any,
+    assessment_mode: str = "variable",
     connection: sqlite3.Connection,
 ) -> None:
     """Atomic UPDATE: write all four snapshots + ``finalized_at`` +
@@ -85,8 +86,14 @@ def freeze_package_snapshots(
     issues one UPDATE and commits. Pre-conditions (package must exist
     and be in a finalizable status) are enforced by the caller.
     """
+    assessment_setup_snapshot = assessment_setup
+    if isinstance(assessment_setup, dict):
+        assessment_setup_snapshot = {
+            **assessment_setup,
+            "assessment_mode": assessment_mode,
+        }
     snapshots = {
-        "assessment_setup_snapshot_json": serialize_snapshot(assessment_setup),
+        "assessment_setup_snapshot_json": serialize_snapshot(assessment_setup_snapshot),
         "budget_snapshot_json": serialize_snapshot(budget),
         "reserve_snapshot_json": serialize_snapshot(reserve),
         "appendix_manifest_snapshot_json": serialize_snapshot(appendix_manifest),

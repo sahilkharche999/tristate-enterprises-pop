@@ -1,5 +1,6 @@
 """Unit tests for the Gemini LLM client wrapper (llm_client.py)."""
 import asyncio
+import logging
 import os
 import sys
 
@@ -8,7 +9,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import pytest
 from pydantic import BaseModel
 from typing import Optional
-from app.ai_implementation.pipeline.llm_client import call_llm, call_llm_vision, get_llm_client
+from app.ai_implementation.pipeline.llm_client import (
+    call_llm,
+    call_llm_vision,
+    get_llm_client,
+)
 
 
 class SimpleModel(BaseModel):
@@ -42,13 +47,11 @@ class _FakeGeminiClient:
 
 
 def test_call_llm_returns_parsed_model(monkeypatch):
-    """call_llm should return a Pydantic instance parsed from response.text.
-
-    The current implementation calls ``response_schema.model_validate_json``
-    on ``response.text``; ``response.parsed`` is no longer the preferred
-    accessor (Gemini returns JSON text via ``response_mime_type``).
-    """
-    fake_response = _FakeParsedResponse(text='{"name": "test", "value": 42}')
+    """call_llm should prefer response.parsed when the SDK provides it."""
+    fake_response = _FakeParsedResponse(
+        parsed={"name": "test", "value": 42},
+        text='{"name": "wrong", "value": 0}',
+    )
     fake_client = _FakeGeminiClient(fake_response)
 
     monkeypatch.setattr("app.ai_implementation.pipeline.llm_client._gemini_client_no_loop", None)
@@ -200,6 +203,59 @@ def test_call_llm_vision_returns_parsed_model(monkeypatch):
     assert isinstance(result, SimpleModel)
     assert result.name == "vision"
     assert result.value == 7
+
+
+def test_call_llm_vision_timeout_log_includes_request_context(monkeypatch, caplog):
+    """Timeout logs should identify which vision job hung."""
+
+    class _TimeoutModels:
+        async def generate_content(self, *, model, contents, config):
+            raise asyncio.TimeoutError()
+
+    class _TimeoutAio:
+        def __init__(self):
+            self.models = _TimeoutModels()
+
+    class _TimeoutClient:
+        def __init__(self):
+            self.aio = _TimeoutAio()
+
+    async def _no_sleep(seconds):
+        return None
+
+    monkeypatch.setattr("app.ai_implementation.pipeline.llm_client.get_llm_client", lambda: _TimeoutClient())
+    monkeypatch.setattr("app.ai_implementation.pipeline.llm_client.asyncio.sleep", _no_sleep)
+    caplog.set_level(logging.WARNING, logger="app.ai_implementation.pipeline.llm_client")
+
+    result = asyncio.run(
+        call_llm_vision(
+            messages=[
+                {"role": "system", "content": "You are a parser."},
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Filename: Old Mill Final 2024.pdf\nPage: 3\nImage for Page: 7",
+                        },
+                        {"type": "image", "data": b"abc", "mime_type": "image/png"},
+                        {"type": "image", "data": b"defg", "mime_type": "image/png"},
+                    ],
+                },
+            ],
+            response_schema=SimpleModel,
+            temperature=0.0,
+            timeout=5.0,
+        )
+    )
+
+    assert result is None
+    assert "purpose=SimpleModel" in caplog.text
+    assert "schema=SimpleModel" in caplog.text
+    assert "filename=Old Mill Final 2024.pdf" in caplog.text
+    assert "pages=3,7" in caplog.text
+    assert "image_count=2" in caplog.text
+    assert "image_bytes=7" in caplog.text
 
 
 def test_get_llm_client_caches_within_same_loop(monkeypatch):

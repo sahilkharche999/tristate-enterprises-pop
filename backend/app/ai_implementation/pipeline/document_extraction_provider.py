@@ -25,6 +25,7 @@ class DocumentPromptContext:
 
     filename: str
     route_family: str | None = None
+    source_mode: str | None = None
     notes: list[str] = field(default_factory=list)
 
 

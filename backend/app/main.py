@@ -28,6 +28,7 @@ from .routers.appendices import router as appendices_router
 from .routers.dre import router as dre_router
 from .routers.dre_approval import router as dre_approval_router
 from .routers.dre_review import router as dre_review_router
+from .routers.assessment_mapping_review import router as assessment_mapping_review_router
 from .routers.hoa_settings import router as hoa_settings_router
 
 logging.basicConfig(
@@ -45,9 +46,13 @@ def create_app() -> FastAPI:
         try:
             init_db()
             logger.info("AI pipeline database initialized")
+        except Exception:
+            logger.exception("AI pipeline database initialization failed")
+            raise
+        try:
             await asyncio.to_thread(run_seed)
         except Exception as e:
-            logger.warning(f"AI pipeline startup failed: {e}")
+            logger.warning("AI pipeline seed failed: %s", e)
         yield
 
     app = FastAPI(title="VBA -> Python Macro Pipeline", lifespan=lifespan)
@@ -93,6 +98,7 @@ def create_app() -> FastAPI:
     # + edit history. Mutating endpoints (record edit, approve)
     # live in dre_review and dre_approval routers respectively.
     app.include_router(dre_review_router)
+    app.include_router(assessment_mapping_review_router)
     # Per-HOA appendix manifest router (Phase 5.4 of
     # dre-driven-assessment-engine). Auth is applied per-route via
     # Depends(get_current_user) on every endpoint.

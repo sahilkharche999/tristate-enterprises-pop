@@ -19,7 +19,14 @@ def test_update_persists_fields(session):
 
     s = hoa_settings_service.update(
         session, hoa_id=prop.id,
-        payload={"management_company": "Acme", "reserve_cash_balance_eoy_prior": 1234.5},
+        payload={
+            "management_company": "Acme",
+            "reserve_cash_balance_eoy_prior": 1234.5,
+            "financial_packet_archetype": "reserve-only",
+            "reserve_interest_income_override": 22000.0,
+        },
     )
     assert s.management_company == "Acme"
     assert s.reserve_cash_balance_eoy_prior == 1234.5
+    assert s.financial_packet_archetype == "reserve-only"
+    assert s.reserve_interest_income_override == 22000.0

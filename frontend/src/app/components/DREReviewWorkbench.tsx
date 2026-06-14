@@ -12,7 +12,7 @@
 // Path: ``/hoa/{hoaId}/dre/review/{runId}`` — wired via routes (TODO when
 // the app router lands; for now exported as a standalone panel).
 
-import { Fragment, useEffect, useMemo, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import {
   type DREExtractionRunDetail,
   type DREReviewEdit,
@@ -28,6 +28,9 @@ type Props = {
   hoaId: number;
   runId: number;
 };
+
+const EXTRACTION_REFRESH_MS = 2000;
+const ACTIVE_JOB_STATUSES = new Set(['queued', 'running']);
 
 const SETUP_TYPE_LABELS: Record<'fixed' | 'grouped' | 'per_unit', string> = {
   fixed: 'Fixed (all units pay the same)',
@@ -124,8 +127,11 @@ function formatNumber(v: unknown, decimals = 0): string {
 
 // ── Visual primitives ─────────────────────────────────────────────────
 
-function StatusPill({ kind, value }: { kind: 'status' | 'review'; value: string }) {
+function StatusPill({ kind, value }: { kind: 'job' | 'status' | 'review'; value: string }) {
   const palette: Record<string, string> = {
+    queued: 'bg-amber-50 text-amber-700 ring-amber-600/20',
+    running: 'bg-blue-50 text-blue-700 ring-blue-600/20',
+    completed: 'bg-slate-50 text-slate-700 ring-slate-500/20',
     succeeded: 'bg-emerald-50 text-emerald-700 ring-emerald-600/20',
     extraction_partial: 'bg-amber-50 text-amber-700 ring-amber-600/20',
     failed: 'bg-rose-50 text-rose-700 ring-rose-600/20',
@@ -135,7 +141,7 @@ function StatusPill({ kind, value }: { kind: 'status' | 'review'; value: string 
     rejected: 'bg-rose-50 text-rose-700 ring-rose-600/20',
   };
   const tone = palette[value] || 'bg-slate-50 text-slate-700 ring-slate-500/20';
-  const prefix = kind === 'status' ? 'Status' : 'Review';
+  const prefix = kind === 'job' ? 'Job' : kind === 'status' ? 'Status' : 'Review';
   return (
     <span
       className={cn(
@@ -471,7 +477,7 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
   );
   const [showPageInventory, setShowPageInventory] = useState(false);
 
-  async function refresh() {
+  const refresh = useCallback(async () => {
     try {
       const [d, history] = await Promise.all([
         getExtractionRun(hoaId, runId),
@@ -487,13 +493,20 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
     } finally {
       setLoading(false);
     }
-  }
+  }, [hoaId, runId]);
 
   useEffect(() => {
     setLoading(true);
-    refresh();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hoaId, runId]);
+    void refresh();
+  }, [refresh]);
+
+  useEffect(() => {
+    if (!detail || !ACTIVE_JOB_STATUSES.has(detail.job_status)) return;
+    const timer = setInterval(() => {
+      void refresh();
+    }, EXTRACTION_REFRESH_MS);
+    return () => clearInterval(timer);
+  }, [detail, refresh]);
 
   async function onSaveEdit(
     fieldPath: string,
@@ -509,7 +522,7 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
         new_value: newValue,
         reason,
       });
-      refresh();
+      void refresh();
     } catch (exc) {
       setError(String(exc));
     }
@@ -528,7 +541,7 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
     setApproving(true);
     try {
       await approveExtractionRun(hoaId, runId, chosenSetupType);
-      refresh();
+      void refresh();
     } catch (exc) {
       setError(String(exc));
     } finally {
@@ -614,7 +627,55 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
     return <div className="p-4 text-rose-600">{error || 'Run not found'}</div>;
   }
 
+  const jobStillRunning = ACTIVE_JOB_STATUSES.has(detail.job_status);
+  if (jobStillRunning) {
+    return (
+      <section className="space-y-4 p-4">
+        <header className="space-y-1.5">
+          <h1 className="text-xl font-semibold text-slate-900">DRE Review Workbench</h1>
+          <div className="flex flex-wrap items-center gap-2 text-sm text-slate-600">
+            <span>HOA {hoaId}</span>
+            <span className="text-slate-300">·</span>
+            <span>Run #{runId}</span>
+            <StatusPill kind="job" value={detail.job_status} />
+            <StatusPill kind="review" value={detail.review_status} />
+          </div>
+        </header>
+        <div className="rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-900">
+          Extraction still running. This page refreshes automatically and will show the
+          extracted setup when the run finishes.
+        </div>
+        {error ? (
+          <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+            {error}
+          </div>
+        ) : null}
+      </section>
+    );
+  }
+
+  if (detail.job_status === 'failed' && !detail.parsed_json) {
+    return (
+      <section className="space-y-4 p-4">
+        <header className="space-y-1.5">
+          <h1 className="text-xl font-semibold text-slate-900">DRE Review Workbench</h1>
+          <div className="flex flex-wrap items-center gap-2 text-sm text-slate-600">
+            <span>HOA {hoaId}</span>
+            <span className="text-slate-300">·</span>
+            <span>Run #{runId}</span>
+            <StatusPill kind="job" value={detail.job_status} />
+            <StatusPill kind="review" value={detail.review_status} />
+          </div>
+        </header>
+        <div className="rounded-lg border border-rose-200 bg-rose-50 p-4 text-sm text-rose-900">
+          {detail.error_message || 'Extraction failed before review data was available.'}
+        </div>
+      </section>
+    );
+  }
+
   const alreadyPromoted = detail.review_status === 'promoted';
+  const reviewReady = detail.job_status === 'completed';
 
   // Curate metadata / setup keys in display order, filter empty values.
   const METADATA_KEYS = [
@@ -688,6 +749,7 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
             <span>HOA {hoaId}</span>
             <span className="text-slate-300">·</span>
             <span>Run #{runId}</span>
+            <StatusPill kind="job" value={detail.job_status} />
             <StatusPill kind="status" value={detail.status} />
             <StatusPill kind="review" value={detail.review_status} />
           </div>
@@ -701,7 +763,7 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
           <select
             className="rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-sm text-slate-700 shadow-sm focus:outline-none focus:ring-2 focus:ring-slate-300 disabled:bg-slate-50"
             value={chosenSetupType}
-            disabled={alreadyPromoted || approving}
+            disabled={alreadyPromoted || approving || !reviewReady}
             onChange={(e) =>
               setChosenSetupType(
                 e.target.value as 'fixed' | 'grouped' | 'per_unit',
@@ -719,7 +781,7 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
           <button
             type="button"
             onClick={onApprove}
-            disabled={alreadyPromoted || approving}
+            disabled={alreadyPromoted || approving || !reviewReady}
             className={cn(
               'inline-flex items-center gap-2 rounded-md px-4 py-1.5 text-sm font-semibold shadow-sm transition',
               alreadyPromoted

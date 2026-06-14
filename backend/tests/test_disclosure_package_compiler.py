@@ -22,6 +22,12 @@ import pytest
 import fitz  # PyMuPDF
 
 from app.disclosure_package import compiler as compiler_module
+from app.disclosure_package.assessment_schedule_matrix import (
+    AssessmentScheduleMatrix,
+    LayoutHints,
+    ManualReviewAssessmentRow,
+    MethodSummary,
+)
 from app.disclosure_package.compiler import (
     CompileError,
     CompileResult,
@@ -33,6 +39,8 @@ from app.disclosure_package.schemas import (
     GeneratedPage,
     HOAMetadata,
     LineItem,
+    PreflightError,
+    ReserveFundingPlanRow,
     ReserveStudyComponent,
     ReserveStudySnapshot,
     StaticAppendix,
@@ -170,8 +178,53 @@ def _patch_render(monkeypatch) -> dict[str, int]:
     return counts
 
 
+def _patch_render_capture(monkeypatch) -> dict[str, dict[str, Any]]:
+    """Stub render_template and capture each template context."""
+    contexts: dict[str, dict[str, Any]] = {}
+
+    def fake_render(*, template_name: str, context: dict[str, Any], templates_subdir: str = "standard") -> bytes:
+        contexts[template_name] = context
+        for entry in OLD_MILL_2026.entries:
+            if isinstance(entry, GeneratedPage) and entry.template == template_name:
+                return _make_pdf_bytes(page_count=entry.page_count_hint, label=template_name)
+        return _make_pdf_bytes(page_count=1, label=template_name)
+
+    monkeypatch.setattr(compiler_module, "render_template", fake_render)
+    return contexts
+
+
 def _spec_static_data():
     return OLD_MILL_2026.static_data
+
+
+def _summary_assessment_matrix() -> AssessmentScheduleMatrix:
+    return AssessmentScheduleMatrix(
+        title="Assessment Summary",
+        hoa={"name": "Old Mill Homeowners Association"},
+        fiscal_year=2026,
+        recipient_grain="summary",
+        method_summary=MethodSummary(
+            assessment_method="All units pay the same regular monthly assessment.",
+            display_basis="Fixed summary.",
+        ),
+        rows=[],
+        layout_hints=LayoutHints(visible_column_count=1),
+    )
+
+
+def _group_assessment_matrix() -> AssessmentScheduleMatrix:
+    return AssessmentScheduleMatrix(
+        title="Assessment Schedule",
+        hoa={"name": "Old Mill Homeowners Association"},
+        fiscal_year=2026,
+        recipient_grain="group",
+        method_summary=MethodSummary(
+            assessment_method="Each approved group pays the applicable monthly assessment for that type.",
+            display_basis="Grouped schedule.",
+        ),
+        rows=[],
+        layout_hints=LayoutHints(visible_column_count=1),
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -221,6 +274,54 @@ def test_compile_package_output_passes_qpdf_check(monkeypatch, tmp_path: Path, q
         appendices_root=appendices,
     )
     assert result.output_path.exists()
+
+
+def test_compile_package_blocks_when_assessment_matrix_has_blocking_review_issues(
+    monkeypatch,
+    tmp_path: Path,
+    qpdf_required,
+) -> None:
+    appendices = tmp_path / "appendices"
+    _seed_appendices(appendices)
+    output_dir = tmp_path / "out"
+    _patch_render(monkeypatch)
+
+    blocking_matrix = AssessmentScheduleMatrix(
+        title="Assessment Schedule Manual Review",
+        hoa={"name": "Old Mill Homeowners Association"},
+        fiscal_year=2026,
+        recipient_grain="manual_review",
+        method_summary=MethodSummary(
+            assessment_method="Mapping review required.",
+            display_basis="Budget mapping review required before final rendering.",
+        ),
+        rows=[
+            ManualReviewAssessmentRow(
+                missing_basis_reason="Pending split rows still block final rendering.",
+            )
+        ],
+        preflight_issues=[
+            PreflightError(
+                field_path="assessment_schedule.mapping_review.pending_split",
+                message="Assessment mapping review blocker: pending_split: Landscape",
+                severity="blocking",
+            )
+        ],
+        layout_hints=LayoutHints(visible_column_count=1),
+    )
+
+    with pytest.raises(CompileError) as excinfo:
+        compile_package(
+            spec=OLD_MILL_2026,
+            budget_draft=_budget_draft(),
+            reserve_snapshot=_reserve_snapshot(),
+            hoa_metadata=_hoa_metadata(),
+            output_dir=output_dir,
+            appendices_root=appendices,
+            assessment_matrix=blocking_matrix,
+        )
+
+    assert "assessment_schedule.mapping_review.pending_split" in excinfo.value.field_paths
 
 
 def test_compile_package_page_count_matches_hint_sum(monkeypatch, tmp_path: Path, qpdf_required) -> None:
@@ -278,6 +379,268 @@ def test_compile_package_writes_audit_json(monkeypatch, tmp_path: Path, qpdf_req
         assert {"formula_id", "version", "inputs", "output", "computed_at"} <= set(call.keys())
     # The audit log captures both the started_at and completed_at timestamps
     assert audit["started_at"] and audit["completed_at"]
+
+
+def test_compile_package_resolves_reserve_funding_from_budget_before_component_fallback(
+    monkeypatch,
+    tmp_path: Path,
+    qpdf_required,
+) -> None:
+    """Budget reserve contribution is current-year funding; component annual
+    provision remains a component-schedule value, not the default funding
+    amount."""
+    appendices = tmp_path / "appendices"
+    _seed_appendices(appendices)
+    contexts = _patch_render_capture(monkeypatch)
+
+    draft = BudgetDraft(line_items=[
+        LineItem(label="Member assessments", amount=Decimal("2025540"), is_revenue=True),
+        LineItem(label="Monthly Contribution to Reserve", amount=Decimal("824414")),
+        LineItem(label="Management", amount=Decimal("100000"), section="Administration"),
+    ])
+
+    compile_package(
+        spec=OLD_MILL_2026,
+        budget_draft=draft,
+        reserve_snapshot=_reserve_snapshot(),
+        hoa_metadata=_hoa_metadata(),
+        output_dir=tmp_path / "out",
+        appendices_root=appendices,
+    )
+
+    ctx = contexts["cover_letter.html"]
+    computed = ctx["computed"]
+    assert computed["reserve_funding_facts"]["source"] == "budget_reserve_contribution"
+    assert computed["monthly_replacement_contribution_total"] == Decimal("68701.17")
+    assert computed["monthly_replacement_contribution_per_unit_2026"] == Decimal("246.24")
+    assert computed["total_year_replacement_provision"] == Decimal("60000")
+
+
+def test_compile_package_reuses_resolved_reserve_funding_across_templates(
+    monkeypatch,
+    tmp_path: Path,
+    qpdf_required,
+) -> None:
+    appendices = tmp_path / "appendices"
+    _seed_appendices(appendices)
+    contexts = _patch_render_capture(monkeypatch)
+
+    draft = BudgetDraft(line_items=[
+        LineItem(label="Member assessments", amount=Decimal("2025540"), is_revenue=True),
+        LineItem(label="Monthly Contribution to Reserve", amount=Decimal("824414")),
+        LineItem(label="Management", amount=Decimal("100000"), section="Administration"),
+    ])
+
+    compile_package(
+        spec=OLD_MILL_2026,
+        budget_draft=draft,
+        reserve_snapshot=_reserve_snapshot(),
+        hoa_metadata=_hoa_metadata(),
+        output_dir=tmp_path / "out",
+        appendices_root=appendices,
+    )
+
+    expected_monthly_total = Decimal("68701.17")
+    expected_monthly_per_unit = Decimal("246.24")
+    for template in ("cover_letter.html", "note_4_5.html", "note_6_funding_plan.html"):
+        computed = contexts[template]["computed"]
+        assert computed["monthly_replacement_contribution_total"] == expected_monthly_total
+        assert computed["monthly_replacement_contribution_per_unit_2026"] == expected_monthly_per_unit
+        assert computed["reserve_funding_source_label"].startswith("approved budget reserve contribution")
+
+    cash_flow = contexts["thirty_year_cash_flow_panel.html"]["computed"]["thirty_year_cash_flow"]
+    assert cash_flow["replace_fund_assmnt_per_unit_per_mo"][0] == expected_monthly_per_unit
+    assert cash_flow["regular_assessments"][0] == Decimal("824412")
+
+
+def test_compile_package_assessment_override_updates_resolved_annual_revenue(
+    monkeypatch,
+    tmp_path: Path,
+    qpdf_required,
+) -> None:
+    appendices = tmp_path / "appendices"
+    _seed_appendices(appendices)
+    contexts = _patch_render_capture(monkeypatch)
+
+    compile_package(
+        spec=OLD_MILL_2026,
+        budget_draft=_budget_draft(),
+        reserve_snapshot=_reserve_snapshot(),
+        hoa_metadata=_hoa_metadata(),
+        output_dir=tmp_path / "out",
+        appendices_root=appendices,
+        hoa_settings_overrides={"approved_monthly_assessment_per_unit": 606.97},
+    )
+
+    for template in (
+        "cover_letter.html",
+        "pro_forma_disclosure_summary.html",
+        "note_4_5.html",
+        "forecasted_income_statement.html",
+    ):
+        computed = contexts[template]["computed"]
+        assert computed["assessment_facts"]["source"] == "manual_monthly_override"
+        assert computed["monthly_assessment_per_unit_current"] == Decimal("606.97")
+        assert computed["annual_assessment_revenue"] == Decimal("2032135.56")
+        assert computed["assessment_facts"]["uploaded_annual_assessment_revenue"] == Decimal("2025540")
+        assert any("differs" in warning for warning in computed["assessment_facts"]["warnings"])
+
+
+def test_compile_package_explicit_zero_interest_stays_zero_in_cash_flow(
+    monkeypatch,
+    tmp_path: Path,
+    qpdf_required,
+) -> None:
+    appendices = tmp_path / "appendices"
+    _seed_appendices(appendices)
+    contexts = _patch_render_capture(monkeypatch)
+
+    compile_package(
+        spec=OLD_MILL_2026,
+        budget_draft=_budget_draft(),
+        reserve_snapshot=_reserve_snapshot(),
+        hoa_metadata=_hoa_metadata(),
+        output_dir=tmp_path / "out",
+        appendices_root=appendices,
+        hoa_settings_overrides={"interest_rate_after_tax": 0},
+    )
+
+    cash_flow = contexts["thirty_year_cash_flow_panel.html"]["computed"]["thirty_year_cash_flow"]
+    assert cash_flow["after_tax_interest_rate"] == Decimal("0")
+    assert cash_flow["after_tax_interest_decimal"][0] == Decimal("0.000")
+
+
+def test_compile_package_surfaces_old_mill_style_conflicts_without_hardcoding(
+    monkeypatch,
+    tmp_path: Path,
+    qpdf_required,
+) -> None:
+    """Regression fixture for conflicting real-world inputs:
+    budget reserve funding, reserve-study cash-flow funding, implied unit
+    count, and manual assessment override all disagree.
+    """
+    appendices = tmp_path / "appendices"
+    _seed_appendices(appendices)
+    contexts = _patch_render_capture(monkeypatch)
+    spec = OLD_MILL_2026.model_copy(update={"fiscal_year": 2026})
+    draft = BudgetDraft(line_items=[
+        LineItem(label="Assessment Income", amount=Decimal("2025540"), is_revenue=True),
+        LineItem(label="Monthly Contribution to Reserve", amount=Decimal("824414")),
+        LineItem(label="Management", amount=Decimal("100000"), section="Administration"),
+    ])
+    reserve_snapshot = ReserveStudySnapshot(
+        study_date="September 2025",
+        components=_reserve_snapshot().components,
+        funding_plan_rows=[
+            # 850,998 / 241.21 / 12 ≈ 294 units, while metadata below says 279.
+            ReserveFundingPlanRow(
+                year=2026,
+                annual_contribution=Decimal("850998"),
+                monthly_per_unit=Decimal("241.21"),
+            )
+        ],
+    )
+
+    compile_package(
+        spec=spec,
+        budget_draft=draft,
+        reserve_snapshot=reserve_snapshot,
+        hoa_metadata=_hoa_metadata(),
+        output_dir=tmp_path / "out",
+        appendices_root=appendices,
+        hoa_settings_overrides={
+            "approved_monthly_assessment_per_unit": 606.97,
+            "reserve_cash_balance_eoy_prior": "",
+        },
+    )
+
+    computed = contexts["cover_letter.html"]["computed"]
+    assert computed["reserve_funding_facts"]["source"] == "budget_reserve_contribution"
+    assert computed["reserve_funding_facts"]["budget_annual_contribution"] == Decimal("824414")
+    assert computed["reserve_funding_facts"]["study_recommended_annual_contribution"] == Decimal("850998")
+    assert computed["monthly_replacement_contribution_per_unit_2026"] == Decimal("246.24")
+    assert computed["assessment_facts"]["source"] == "manual_monthly_override"
+    assert computed["annual_assessment_revenue"] == Decimal("2032135.56")
+    assert any("Reserve study cash-flow contribution differs" in gap for gap in computed["data_gaps"])
+    assert any("Approved monthly assessment revenue differs" in gap for gap in computed["data_gaps"])
+
+    for template in ("cover_letter.html", "pro_forma_disclosure_summary.html", "note_4_5.html"):
+        assert contexts[template]["computed"]["monthly_assessment_per_unit_current"] == Decimal("606.97")
+        assert contexts[template]["computed"]["monthly_replacement_contribution_per_unit_2026"] == Decimal("246.24")
+
+
+def test_compile_package_builds_canonical_dual_fund_statement_facts(
+    monkeypatch,
+    tmp_path: Path,
+    qpdf_required,
+) -> None:
+    appendices = tmp_path / "appendices"
+    _seed_appendices(appendices)
+    contexts = _patch_render_capture(monkeypatch)
+
+    draft = BudgetDraft(line_items=[
+        LineItem(label="Assessment Income", amount=Decimal("2025540"), is_revenue=True),
+        LineItem(label="Late Fees", amount=Decimal("5000"), is_revenue=True),
+        LineItem(label="Monthly Contribution to Reserve", amount=Decimal("824414")),
+        LineItem(label="Management", amount=Decimal("100000"), section="Administration"),
+        LineItem(
+            label="Reserve Interest Income",
+            amount=Decimal("22000"),
+            is_reserve=True,
+            is_revenue=True,
+        ),
+    ])
+
+    compile_package(
+        spec=OLD_MILL_2026,
+        budget_draft=draft,
+        reserve_snapshot=_reserve_snapshot(),
+        hoa_metadata=_hoa_metadata(),
+        output_dir=tmp_path / "out",
+        appendices_root=appendices,
+        hoa_settings_overrides={
+            "reserve_cash_balance_eoy_prior": 1_500_000,
+            "fund_balance_boy_operations": 100_000,
+            "income_tax_provision_override": 6_200,
+        },
+        assessment_matrix=_summary_assessment_matrix(),
+    )
+
+    computed = contexts["forecasted_income_statement.html"]["computed"]
+    assert computed["packet_archetype_facts"]["archetype"] == "dual-fund"
+    assert computed["presentation_facts"]["mode"] == "fixed"
+    assert computed["annual_statement_facts"]["operating_assessment_revenue"] == Decimal("1201126.00")
+    assert computed["annual_statement_facts"]["reserve_assessment_revenue"] == Decimal("824414")
+    assert computed["annual_statement_facts"]["reserve_interest_income"] == Decimal("22000")
+    assert computed["annual_statement_facts"]["reserve_tax_provision"] == Decimal("6200")
+    assert computed["annual_statement_facts"]["total_revenues_operations"] == Decimal("1206126.00")
+    assert computed["annual_statement_facts"]["total_revenues_replacement"] == Decimal("846414")
+
+
+def test_compile_package_keeps_packet_archetype_independent_from_variable_wording(
+    monkeypatch,
+    tmp_path: Path,
+    qpdf_required,
+) -> None:
+    appendices = tmp_path / "appendices"
+    _seed_appendices(appendices)
+    contexts = _patch_render_capture(monkeypatch)
+
+    compile_package(
+        spec=OLD_MILL_2026,
+        budget_draft=_budget_draft(),
+        reserve_snapshot=_reserve_snapshot(),
+        hoa_metadata=_hoa_metadata(),
+        output_dir=tmp_path / "out",
+        appendices_root=appendices,
+        hoa_settings_overrides={"financial_packet_archetype": "dual-fund"},
+        assessment_matrix=_group_assessment_matrix(),
+    )
+
+    computed = contexts["cover_letter.html"]["computed"]
+    assert computed["packet_archetype_facts"]["archetype"] == "dual-fund"
+    assert computed["presentation_facts"]["mode"] == "variable"
+    assert computed["presentation_facts"]["assessments_vary"] is True
 
 
 def test_compile_package_skips_missing_appendices(monkeypatch, tmp_path: Path, qpdf_required) -> None:
@@ -872,6 +1235,43 @@ def test_special_assessments_parsed_from_json_string_setting(
     )
     audit = json.loads((tmp_path / "out" / "audit.json").read_text())
     assert audit["input_snapshot"]["hoa_settings"]["special_assessments_json"] == payload
+
+
+def test_compile_package_infers_legacy_special_assessment_status_before_templates(
+    monkeypatch, tmp_path: Path, qpdf_required
+) -> None:
+    """Legacy rows without explicit ``status`` should be normalized before
+    template rendering so strict Jinja ``selectattr('status', ...)`` calls
+    cannot crash the package job.
+    """
+    appendices = tmp_path / "appendices"
+    _seed_appendices(appendices)
+    contexts = _patch_render_capture(monkeypatch)
+
+    payload = json.dumps([
+        {
+            "label": "Pool deck repair",
+            "amount_per_unit": 850.0,
+            "due_date": "2026-07-01",
+            "included_in_regular_monthly": False,
+        }
+    ])
+
+    compile_package(
+        spec=OLD_MILL_2026,
+        budget_draft=_budget_draft(),
+        reserve_snapshot=_reserve_snapshot(),
+        hoa_metadata=_hoa_metadata(),
+        output_dir=tmp_path / "out",
+        appendices_root=appendices,
+        hoa_settings_overrides={
+            "special_assessments_json": payload,
+        },
+    )
+
+    for template in ("cover_letter.html", "pro_forma_disclosure_summary.html"):
+        special_assessments = contexts[template]["computed"]["special_assessments"]
+        assert special_assessments[0]["status"] == "approved_scheduled"
 
 
 def test_outstanding_loan_parsed_from_json_object(

@@ -26,6 +26,7 @@ from typing import Any, Optional
 
 from sqlalchemy.orm import Session
 
+from ..assessment_mode import normalize_assessment_mode
 from ..ai_implementation.db.models import (
     DISCLOSURE_JOB_COMPLETED,
     DISCLOSURE_JOB_FAILED,
@@ -37,6 +38,10 @@ from ..ai_implementation.db.models import (
     Property,
 )
 from ..config import settings
+from ..services.assessment_budget_mapping_rule_service import (
+    materialize_budget_line_pool_mappings,
+    select_assessment_mapping_amount,
+)
 from .adapters import (
     from_budget_history_record,
     from_hoa_record,
@@ -97,6 +102,36 @@ def appendix_dir_for(hoa_id: int) -> Path:
 # separators, control bytes, and shell metacharacters are NOT in this set
 # (T-11-05 mitigation).
 _APPENDIX_SAFE_CHAR_RE = re.compile(r"[^A-Za-z0-9._\- ()]")
+
+
+def _line_item_value(item: Any, key: str, default: Any = None) -> Any:
+    if isinstance(item, dict):
+        return item.get(key, default)
+    return getattr(item, key, default)
+
+
+def _assessment_revenue_for_budget_draft(budget_draft: Any) -> Decimal:
+    total = Decimal("0")
+    for item in getattr(budget_draft, "line_items", []) or []:
+        label = str(_line_item_value(item, "label", "") or "")
+        category = str(_line_item_value(item, "category", "") or "").lower()
+        is_revenue = bool(_line_item_value(item, "is_revenue", False)) or category in {"income", "reserve_income"}
+        if not is_revenue or "assessment" not in label.lower():
+            continue
+        amount, _source_column_used = select_assessment_mapping_amount(
+            {
+                "assessment_mapping_amount": _line_item_value(item, "assessment_mapping_amount"),
+                "source_column_used": _line_item_value(item, "source_column_used"),
+                "proposed_amount": _line_item_value(item, "proposed_amount"),
+                "proposedAmount": _line_item_value(item, "proposedAmount"),
+                "annual_budget": _line_item_value(item, "annual_budget"),
+                "projection": _line_item_value(item, "projection"),
+                "amount": _line_item_value(item, "amount"),
+            }
+        )
+        if amount is not None:
+            total += amount
+    return total
 
 
 def _sanitize_appendix_filename(filename: str) -> str:
@@ -349,6 +384,86 @@ def _set_status(
     session.commit()
 
 
+def _compile_error_status_message(exc: CompileError) -> str:
+    base = str(exc)
+    if not exc.field_paths:
+        return base
+    if exc.field_paths == ["hoa_metadata.units"]:
+        return (
+            "Preflight blocked compilation: HOA unit count is missing or invalid. "
+            "Go to Settings and enter a positive unit count for this HOA."
+        )
+    return f"{base}: {', '.join(exc.field_paths)}"
+
+
+def _assessment_mapping_category(raw_category: object) -> str:
+    category = str(raw_category or "").lower()
+    if category == "income":
+        return "income"
+    if category == "reserve_income":
+        return "reserve_income"
+    if category in {"reserve", "reserve_expense"}:
+        return "reserve_expense"
+    return "operating"
+
+
+def _assessment_mapping_fund_type(category: str) -> str:
+    return "reserve" if category in {"reserve_income", "reserve_expense"} else "operating"
+
+
+def _line_item_to_assessment_mapping_line(item: Any) -> dict[str, Any]:
+    label = str(getattr(item, "label", "") or "")
+    category = _assessment_mapping_category(getattr(item, "category", None))
+    return {
+        "label": label,
+        "normalized_label": " ".join(label.lower().split()),
+        "section": str(getattr(item, "section", None) or category),
+        "category": category,
+        "fund_type": _assessment_mapping_fund_type(category),
+        "account_code": None,
+        "amount": getattr(item, "amount", None),
+        "active": True,
+    }
+
+
+def _materialize_assessment_mappings_for_budget_draft(
+    *,
+    connection: Any,
+    hoa_id: int,
+    budget_draft: Any,
+) -> dict[str, int]:
+    setup_row = connection.execute(
+        """
+        SELECT id
+          FROM assessment_setups
+         WHERE property_id = ?
+           AND status = 'approved'
+         ORDER BY id DESC
+         LIMIT 1
+        """,
+        (hoa_id,),
+    ).fetchone()
+    if setup_row is None:
+        return {
+            "auto_approved": 0,
+            "manual_preserved": 0,
+            "suggested": 0,
+            "conflict": 0,
+            "unmatched": 0,
+        }
+
+    return materialize_budget_line_pool_mappings(
+        property_id=hoa_id,
+        assessment_setup_id=int(setup_row[0]),
+        budget_lines=[
+            _line_item_to_assessment_mapping_line(line)
+            for line in budget_draft.line_items
+        ],
+        connection=connection,
+        commit=False,
+    )
+
+
 def _build_reserve_doc_from_draft(
     draft_payload: Any,
     *,
@@ -475,7 +590,16 @@ def run_render_job(
         )
         if property_row is None:
             raise CompileError(f"HOA not found: {hoa_id}")
-        hoa_metadata = from_hoa_record(property_row)
+        assessment_mode = normalize_assessment_mode(
+            getattr(property_row, "assessment_mode", None)
+        )
+        try:
+            hoa_metadata = from_hoa_record(property_row)
+        except ValueError as exc:
+            raise CompileError(
+                "Preflight blocked compilation: 1 error(s)",
+                field_paths=["hoa_metadata.units"],
+            ) from exc
 
         spec = _resolve_spec_for_property(hoa_id, fiscal_year)
         if spec is None:
@@ -518,6 +642,8 @@ def run_render_job(
             "replacement_cost_increase_rate", "letter_signed_by",
             # Priority-A disclosure inputs (drifting-puzzling-grove)
             "approved_monthly_assessment_per_unit",
+            "financial_packet_archetype",
+            "reserve_interest_income_override",
             "income_tax_provision_override",
             "reserve_funding_source",
             "reserve_funding_manual_amount",
@@ -572,18 +698,20 @@ def run_render_job(
         manifest_paths = resolve_compile_appendix_paths(
             property_id=hoa_id, package_id=None, connection=raw_conn,
         )
-        from .assessment_schedule_matrix import (
-            build_matrix_from_approved_assessment_setup,
+        from .assessment_schedule_matrix import build_matrix_for_assessment_mode
+
+        assessment_mapping_counts = _materialize_assessment_mappings_for_budget_draft(
+            connection=raw_conn,
+            hoa_id=hoa_id,
+            budget_draft=budget_draft,
+        )
+        logger.info(
+            "Materialized assessment mappings for disclosure job %s: %s",
+            job_id,
+            assessment_mapping_counts,
         )
 
-        assessment_revenue = sum(
-            (
-                item.amount
-                for item in budget_draft.line_items
-                if item.is_revenue and "assessment" in item.label.lower()
-            ),
-            start=Decimal("0"),
-        )
+        assessment_revenue = _assessment_revenue_for_budget_draft(budget_draft)
         if assessment_revenue == Decimal("0"):
             monthly_raw = overrides.get("approved_monthly_assessment_per_unit")
             if monthly_raw not in (None, ""):
@@ -593,7 +721,7 @@ def run_render_job(
                     * Decimal("12")
                 ).quantize(Decimal("0.01"))
 
-        assessment_matrix = build_matrix_from_approved_assessment_setup(
+        assessment_matrix = build_matrix_for_assessment_mode(
             connection=raw_conn,
             property_id=hoa_id,
             fiscal_year=fiscal_year,
@@ -601,6 +729,7 @@ def run_render_job(
             hoa_name=hoa_metadata.name,
             unit_count=hoa_metadata.units,
             approved_assessment_revenue_annual=assessment_revenue,
+            assessment_mode=assessment_mode,
         )
 
         output_dir = _output_dir_for(hoa_id, fiscal_year, job_id)
@@ -627,12 +756,13 @@ def run_render_job(
             audit_path=str(result.audit_path),
         )
     except CompileError as exc:
-        logger.warning("Compile error for job %s: %s", job_id, exc)
+        error_message = _compile_error_status_message(exc)
+        logger.warning("Compile error for job %s: %s", job_id, error_message)
         _set_status(
             session,
             job_id,
             status=DISCLOSURE_JOB_FAILED,
-            error_message=str(exc),
+            error_message=error_message,
         )
     except LookupError as exc:
         # raised by services.budget_history_service.get_active_draft when

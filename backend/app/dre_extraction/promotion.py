@@ -110,8 +110,11 @@ def _insert_pool(
             assessment_setup_id, pool_key, pool_name,
             allocation_method, recipient_scope,
             denominator_source, denominator_value,
-            variable_flag, display_order, include_in_pdf
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, 1)
+            variable_flag, display_order, include_in_pdf,
+            budget_line_derivation,
+            residual_after_pool_keys_json,
+            residual_exclusions_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, 1, ?, ?, ?)
         """,
         (
             setup_id, pool.pool_key, pool.pool_name or pool.pool_key,
@@ -119,6 +122,9 @@ def _insert_pool(
             denom_source,
             str(pool.denominator_value) if pool.denominator_value is not None else None,
             display_order,
+            pool.budget_line_derivation,
+            json.dumps(pool.residual_after_pool_keys),
+            json.dumps(pool.residual_exclusions),
         ),
     )
     return cur.lastrowid

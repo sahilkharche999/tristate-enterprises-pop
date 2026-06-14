@@ -6,7 +6,10 @@
 <p>The accompanying forecast reflects the following significant
 assumptions:</p>
 
-{% set assessments_vary = matrix.recipient_grain == 'group' or matrix.recipient_grain == 'unit' %}
+{% set presentation = computed.presentation_facts if computed.presentation_facts is defined else none %}
+{% set packet = computed.packet_archetype_facts if computed.packet_archetype_facts is defined else none %}
+{% set matrix_says_vary = matrix.recipient_grain == 'group' or matrix.recipient_grain == 'unit' %}
+{% set assessments_vary = matrix_says_vary or (presentation.assessments_vary if presentation else false) %}
 
 <ul>
   <li><span class="bold">Reserve study basis:</span> the Replacement
@@ -35,6 +38,11 @@ assumptions:</p>
     ${{ '{:,.2f}'.format(computed.monthly_assessment_per_unit_current) }}
     per unit per month.
     {% endif %}</li>
+  {% if packet and packet.archetype == 'reserve-only' %}
+  <li><span class="bold">Reserve-only packet:</span> the accountant-style
+    forecast statement pages present replacement-fund activity only and
+    exclude operations-fund activity.</li>
+  {% endif %}
   <li><span class="bold">Funding plan schedule:</span> the funding plan
     adjusts the per-unit Replacement Fund contribution per the Board's
     adopted schedule, applied piecewise across the 30-year horizon

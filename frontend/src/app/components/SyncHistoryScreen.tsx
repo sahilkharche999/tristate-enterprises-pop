@@ -28,6 +28,8 @@ import {
 } from '../api/budgetHistory';
 import { getHOA, type HOARecord } from '../api/hoa';
 import { formatCurrency, formatTimestamp } from '../lib/budget';
+import { assessmentModeLabel } from '../lib/assessmentMode';
+import { budgetSourceModeLabel } from '../lib/budgetSourceMode';
 import { getErrorMessage } from '../lib/errors';
 import { formatFiscalYearLabel } from '../lib/hoa';
 
@@ -40,7 +42,15 @@ function eventMetadata(event: BudgetTimelineEvent) {
     event.version_code ||
     (typeof payload.version_code === 'string' ? payload.version_code : undefined) ||
     (typeof payload.source_version_code === 'string' ? payload.source_version_code : undefined);
-  return { relatedFile, relatedVersion };
+  const sourceMode =
+    typeof payload.source_mode === 'string'
+      ? budgetSourceModeLabel(payload.source_mode as 'income_statement' | 'proforma_final_budget')
+      : undefined;
+  const assessmentMode =
+    typeof payload.assessment_mode === 'string'
+      ? assessmentModeLabel(payload.assessment_mode as 'fixed' | 'variable')
+      : undefined;
+  return { relatedFile, relatedVersion, sourceMode, assessmentMode };
 }
 
 function downloadBlob(blob: Blob, filename: string) {
@@ -80,7 +90,9 @@ function compareFieldValue(
     | 'growth_factor_note'
     | 'statement_month'
     | 'fiscal_year_start_month'
-    | 'fiscal_year_end_month',
+    | 'fiscal_year_end_month'
+    | 'source_mode'
+    | 'assessment_mode',
 ) {
   if (key === 'created_at') {
     return formatTimestamp(new Date(version.created_at));
@@ -96,6 +108,12 @@ function compareFieldValue(
   }
   if (key === 'fiscal_year_start_month' || key === 'fiscal_year_end_month') {
     return monthLabel(version[key]);
+  }
+  if (key === 'source_mode') {
+    return budgetSourceModeLabel(version.source_mode ?? 'income_statement');
+  }
+  if (key === 'assessment_mode') {
+    return assessmentModeLabel(version.assessment_mode ?? 'variable');
   }
   return version[key] || '—';
 }
@@ -328,7 +346,9 @@ export function SyncHistoryScreen() {
         | 'growth_factor_note'
         | 'statement_month'
         | 'fiscal_year_start_month'
-        | 'fiscal_year_end_month';
+        | 'fiscal_year_end_month'
+        | 'source_mode'
+        | 'assessment_mode';
       label: string;
     }> = [
       { key: 'version_code', label: 'Version Code' },
@@ -345,6 +365,8 @@ export function SyncHistoryScreen() {
       { key: 'statement_month', label: 'Statement Month' },
       { key: 'fiscal_year_start_month', label: 'Fiscal Year Start Month' },
       { key: 'fiscal_year_end_month', label: 'Fiscal Year End Month' },
+      { key: 'source_mode', label: 'Source Mode' },
+      { key: 'assessment_mode', label: 'Assessment Mode' },
     ];
 
     return (
@@ -448,7 +470,7 @@ export function SyncHistoryScreen() {
               <div className="p-6 text-sm text-[#666666]">No persisted events yet for this HOA.</div>
             ) : (
               history.timeline.map((event) => {
-                const { relatedFile, relatedVersion } = eventMetadata(event);
+                const { relatedFile, relatedVersion, sourceMode, assessmentMode } = eventMetadata(event);
                 return (
                   <div key={event.id} className="flex items-start justify-between gap-6 px-6 py-4">
                     <div className="flex items-start gap-3">
@@ -466,6 +488,12 @@ export function SyncHistoryScreen() {
                             {relatedVersion ? `Version: ${relatedVersion}` : null}
                           </p>
                         )}
+                        {sourceMode ? (
+                          <p className="mt-1 text-xs text-[#666666]">Source mode: {sourceMode}</p>
+                        ) : null}
+                        {assessmentMode ? (
+                          <p className="mt-1 text-xs text-[#666666]">Assessment mode: {assessmentMode}</p>
+                        ) : null}
                       </div>
                     </div>
                   </div>
@@ -518,7 +546,13 @@ export function SyncHistoryScreen() {
                         {draft.updated_at ? formatTimestamp(new Date(draft.updated_at)) : '—'}
                       </td>
                       <td className="px-6 py-4 text-sm text-[#666666]">
-                        {draft.source_upload_filename || '—'}
+                        <div>{draft.source_upload_filename || '—'}</div>
+                        <div className="mt-1 text-xs text-[#999999]">
+                          {budgetSourceModeLabel(draft.source_mode ?? 'income_statement')}
+                        </div>
+                        <div className="mt-1 text-xs text-[#999999]">
+                          {assessmentModeLabel(draft.assessment_mode ?? 'variable')}
+                        </div>
                       </td>
                       <td className="px-6 py-4 text-sm text-[#666666]">
                         {draft.reopened_from_version_code || '—'}
@@ -613,6 +647,12 @@ export function SyncHistoryScreen() {
                         <div>{version.version_code} • {version.stage}</div>
                         <div className="mt-1 text-xs text-[#666666]">
                           Reserve inflation {formatReserveInflation(version.reserve_inflation_rate)}
+                        </div>
+                        <div className="mt-1 text-xs text-[#666666]">
+                          {budgetSourceModeLabel(version.source_mode ?? 'income_statement')}
+                        </div>
+                        <div className="mt-1 text-xs text-[#666666]">
+                          {assessmentModeLabel(version.assessment_mode ?? 'variable')}
                         </div>
                       </td>
                       <td className="px-6 py-4 text-sm text-[#666666]">
@@ -742,6 +782,12 @@ export function SyncHistoryScreen() {
                         Source upload: {reviewVersion.source_upload_filename}
                       </p>
                     ) : null}
+                    <p className="mt-2 text-sm text-[#666666]">
+                      Source mode: {budgetSourceModeLabel(reviewVersion.source_mode ?? 'income_statement')}
+                    </p>
+                    <p className="mt-2 text-sm text-[#666666]">
+                      Assessment mode: {assessmentModeLabel(reviewVersion.assessment_mode ?? 'variable')}
+                    </p>
                   </div>
                   <History className="h-5 w-5 text-[#525252]" />
                 </div>

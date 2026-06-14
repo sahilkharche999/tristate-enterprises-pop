@@ -1,5 +1,6 @@
 import { BASE_URL } from './config';
 import { authHeaders, handleResponse } from './http';
+import type { AssessmentMode } from '../lib/assessmentMode';
 
 export interface HOARecord {
   id: number;
@@ -13,6 +14,7 @@ export interface HOARecord {
   city: string;
   portfolio_year: number | null;
   workflow_status: string;
+  assessment_mode: AssessmentMode;
   created_at?: string | null;
 }
 
@@ -23,6 +25,7 @@ export interface HOAUpdatePayload {
   units?: number;
   fiscal_year_start_month: number;
   city?: string;
+  assessment_mode?: AssessmentMode;
 }
 
 export interface HOACreatePayload {
@@ -32,6 +35,7 @@ export interface HOACreatePayload {
   units?: number;
   fiscal_year_start_month: number;
   city?: string;
+  assessment_mode?: AssessmentMode;
 }
 
 export async function listHOAs(): Promise<HOARecord[]> {

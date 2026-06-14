@@ -98,6 +98,65 @@ def test_discovery_default_scans_beyond_previous_page_cap(monkeypatch, tmp_path)
     assert result.page_spans[0].end_page == 20
 
 
+def test_reserve_study_vision_calls_use_shorter_timeouts(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "app.services.reserve_study_extractor._get_pdf_page_count",
+        lambda path: 1,
+    )
+    monkeypatch.setattr(
+        "app.services.reserve_study_extractor._extract_pdf_text_table",
+        lambda path, max_pages=1: _page_text(
+            "Component Inventory\nUseful Life Remaining Life Quantity Replacement Cost\nRoof 20 2 1 250000"
+        ),
+    )
+    monkeypatch.setattr(
+        "app.services.reserve_study_extractor.render_pdf_pages",
+        lambda path, max_pages=None, dpi=72: _rendered_pages(max_pages or 1),
+    )
+    monkeypatch.setattr(
+        "app.services.reserve_study_extractor._render_reserve_study_page_subset",
+        lambda path, page_numbers, dpi: {},
+    )
+
+    calls: list[dict[str, object]] = []
+
+    async def _fake_call(messages, response_schema, temperature=0.0, timeout=120.0, context=None):
+        calls.append({"schema": response_schema, "timeout": timeout, "context": context})
+        if response_schema.__name__ == "_ReserveStudyBatchClassification":
+            return response_schema(
+                classifications=[
+                    ReserveStudyPageClassification(
+                        page_number=1,
+                        role=ReserveStudyPageRole.RESERVE_TABLE,
+                        confidence=0.94,
+                        reasons=["reserve table"],
+                    )
+                ]
+            )
+        return ExtractedReserveStudyPage(
+            rows=[
+                ExtractedReserveStudyRow(
+                    row_id="roof",
+                    line_item="Roof",
+                    useful_life=20,
+                    remaining_life=2,
+                    quantity="1",
+                    replacement_cost=250000,
+                    source_page=1,
+                )
+            ],
+            confidence=0.93,
+        )
+
+    monkeypatch.setattr("app.services.reserve_study_extractor.call_llm_vision", _fake_call)
+
+    result = asyncio.run(extract_reserve_study(str(tmp_path / "Old Mill Final 2024.pdf")))
+
+    assert isinstance(result, ExtractedReserveStudyDocument)
+    assert calls[0]["timeout"] == 60.0
+    assert calls[1]["timeout"] == 60.0
+
+
 def test_discovery_keeps_late_empty_text_pages_addressable_in_mixed_pdf(monkeypatch, tmp_path):
     monkeypatch.setattr(
         "app.services.reserve_study_extractor._get_pdf_page_count",

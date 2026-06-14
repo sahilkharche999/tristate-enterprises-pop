@@ -1,6 +1,8 @@
 {% extends "_base.html" %}
 {% block title %}Forecasted Statement of Revenues and Expenses — {{ fiscal_year }}{% endblock %}
 {% block content %}
+{% set statement = computed.annual_statement_facts if computed.annual_statement_facts is defined else none %}
+{% set packet = computed.packet_archetype_facts if computed.packet_archetype_facts is defined else none %}
 
 <p class="center bold" style="text-decoration: underline; font-size:11pt; margin-bottom:4pt">
   {{ hoa.name | upper }}
@@ -11,6 +13,73 @@
   YEAR ENDING DECEMBER 31, {{ fiscal_year }}
 </p>
 
+{% if packet and packet.archetype == 'reserve-only' %}
+<p class="center small italic" style="margin-bottom:12pt">
+  This reserve-only accountant statement excludes operations-fund activities and reports
+  replacement-fund activity only.
+</p>
+
+<table class="statement">
+  <thead>
+    <tr>
+      <th></th>
+      <th>Replacement<br>Fund</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr><td class="section-label">REVENUES</td><td></td></tr>
+    <tr>
+      <td class="indent">Regular reserve assessments</td>
+      <td>${{ '{:,.0f}'.format(statement.reserve_assessment_revenue if statement else 0) }}</td>
+    </tr>
+    <tr>
+      <td class="indent">Reserve interest income</td>
+      <td>${{ '{:,.0f}'.format(statement.reserve_interest_income if statement else 0) }}</td>
+    </tr>
+    {% if statement and statement.other_replacement_revenue %}
+    <tr>
+      <td class="indent">Other replacement revenue</td>
+      <td>${{ '{:,.0f}'.format(statement.other_replacement_revenue) }}</td>
+    </tr>
+    {% endif %}
+    <tr class="subtotal">
+      <td>Total revenues</td>
+      <td>${{ '{:,.0f}'.format(statement.total_revenues_replacement if statement else 0) }}</td>
+    </tr>
+
+    <tr class="blank-row"><td colspan="2">&nbsp;</td></tr>
+    <tr><td class="section-label">EXPENSES</td><td></td></tr>
+    <tr>
+      <td class="indent2">Major component replacement provision (Notes 3 and 5)</td>
+      <td>${{ '{:,.0f}'.format(statement.replacement_provision_expense if statement else 0) }}</td>
+    </tr>
+    <tr>
+      <td class="indent2">Income tax provision</td>
+      <td>${{ '{:,.0f}'.format(statement.reserve_tax_provision if statement else 0) }}</td>
+    </tr>
+    <tr class="subtotal">
+      <td><span class="bold">Total expenses</span></td>
+      <td>${{ '{:,.0f}'.format(statement.total_expenses_replacement if statement else 0) }}</td>
+    </tr>
+
+    <tr class="blank-row"><td colspan="2">&nbsp;</td></tr>
+    <tr>
+      <td class="bold">EXCESS (DEFICIENCY) OF<br>REVENUES OVER EXPENSES</td>
+      <td>${{ '{:,.0f}'.format(statement.excess_revenues_over_expenses_replacement if statement else 0) }}</td>
+    </tr>
+
+    <tr class="blank-row"><td colspan="2">&nbsp;</td></tr>
+    <tr>
+      <td class="bold">FUND BALANCE (DEFICIT),<br>BEGINNING OF YEAR (NOTE 5)</td>
+      <td>${{ '{:,.0f}'.format(statement.beginning_balance_replacement if statement else 0) }}</td>
+    </tr>
+    <tr class="total-row">
+      <td>FUND BALANCE (DEFICIT),<br>END OF YEAR</td>
+      <td>${{ '{:,.0f}'.format(statement.ending_balance_replacement if statement else 0) }}</td>
+    </tr>
+  </tbody>
+</table>
+{% else %}
 <table class="statement">
   <thead>
     <tr>
@@ -24,25 +93,42 @@
 
     <tr><td class="section-label">REVENUES</td><td></td><td></td><td></td></tr>
 
-    {% set op_rev_total = computed.total_revenues_operations %}
-    {% set rep_rev_total = computed.total_revenues_replacement %}
-
-    {% for section_name, section in computed.revenues_by_section.items() %}
-      {% for item in section.rows %}
-      <tr>
-        <td class="indent">{{ item.label }}</td>
-        <td>${{ '{:,.0f}'.format(item.amount) }}</td>
-        <td>{% if 'reserve' in section_name|lower %}${{ '{:,.0f}'.format(item.amount) }}{% else %}—{% endif %}</td>
-        <td>${{ '{:,.0f}'.format(item.amount) }}</td>
-      </tr>
-      {% endfor %}
-    {% endfor %}
+    <tr>
+      <td class="indent">Regular assessments</td>
+      <td>${{ '{:,.0f}'.format(statement.operating_assessment_revenue if statement else 0) }}</td>
+      <td>${{ '{:,.0f}'.format(statement.reserve_assessment_revenue if statement else 0) }}</td>
+      <td>${{ '{:,.0f}'.format((statement.operating_assessment_revenue + statement.reserve_assessment_revenue) if statement else 0) }}</td>
+    </tr>
+    {% if statement and statement.other_operating_revenue %}
+    <tr>
+      <td class="indent">Other operating revenue</td>
+      <td>${{ '{:,.0f}'.format(statement.other_operating_revenue) }}</td>
+      <td>—</td>
+      <td>${{ '{:,.0f}'.format(statement.other_operating_revenue) }}</td>
+    </tr>
+    {% endif %}
+    {% if statement and statement.reserve_interest_income %}
+    <tr>
+      <td class="indent">Reserve interest income</td>
+      <td>—</td>
+      <td>${{ '{:,.0f}'.format(statement.reserve_interest_income) }}</td>
+      <td>${{ '{:,.0f}'.format(statement.reserve_interest_income) }}</td>
+    </tr>
+    {% endif %}
+    {% if statement and statement.other_replacement_revenue %}
+    <tr>
+      <td class="indent">Other replacement revenue</td>
+      <td>—</td>
+      <td>${{ '{:,.0f}'.format(statement.other_replacement_revenue) }}</td>
+      <td>${{ '{:,.0f}'.format(statement.other_replacement_revenue) }}</td>
+    </tr>
+    {% endif %}
 
     <tr class="subtotal">
       <td>Total revenues</td>
-      <td>${{ '{:,.0f}'.format(op_rev_total) }}</td>
-      <td>${{ '{:,.0f}'.format(rep_rev_total) }}</td>
-      <td>${{ '{:,.0f}'.format(op_rev_total + rep_rev_total) }}</td>
+      <td>${{ '{:,.0f}'.format(statement.total_revenues_operations if statement else 0) }}</td>
+      <td>${{ '{:,.0f}'.format(statement.total_revenues_replacement if statement else 0) }}</td>
+      <td>${{ '{:,.0f}'.format(statement.total_revenues if statement else 0) }}</td>
     </tr>
 
     <tr class="blank-row"><td colspan="4">&nbsp;</td></tr>
@@ -52,8 +138,8 @@
     <tr>
       <td class="indent2">Major component replacement provision (Notes 3 and 5)</td>
       <td>—</td>
-      <td>${{ '{:,.0f}'.format(computed.total_expenses_replacement) }}</td>
-      <td>${{ '{:,.0f}'.format(computed.total_expenses_replacement) }}</td>
+      <td>${{ '{:,.0f}'.format(statement.replacement_provision_expense if statement else 0) }}</td>
+      <td>${{ '{:,.0f}'.format(statement.replacement_provision_expense if statement else 0) }}</td>
     </tr>
 
     <tr class="blank-row"><td colspan="4">&nbsp;</td></tr>
@@ -83,51 +169,47 @@
     <tr>
       <td class="indent2">Income tax provision</td>
       <td>—</td>
-      <td>${{ '{:,.0f}'.format(computed.income_tax_provision) }}</td>
-      <td>${{ '{:,.0f}'.format(computed.income_tax_provision) }}</td>
+      <td>${{ '{:,.0f}'.format(statement.reserve_tax_provision if statement else 0) }}</td>
+      <td>${{ '{:,.0f}'.format(statement.reserve_tax_provision if statement else 0) }}</td>
     </tr>
 
     <tr class="blank-row"><td colspan="4">&nbsp;</td></tr>
 
     <tr class="subtotal">
       <td><span class="bold">Total expenses</span></td>
-      <td>${{ '{:,.0f}'.format(computed.total_expenses_operations) }}</td>
-      <td>${{ '{:,.0f}'.format(computed.total_expenses_replacement) }}</td>
-      <td>${{ '{:,.0f}'.format(computed.total_expenses) }}</td>
+      <td>${{ '{:,.0f}'.format(statement.total_expenses_operations if statement else 0) }}</td>
+      <td>${{ '{:,.0f}'.format(statement.total_expenses_replacement if statement else 0) }}</td>
+      <td>${{ '{:,.0f}'.format(statement.total_expenses if statement else 0) }}</td>
     </tr>
 
     <tr class="blank-row"><td colspan="4">&nbsp;</td></tr>
 
     <tr>
       <td class="bold">EXCESS (DEFICIENCY) OF<br>REVENUES OVER EXPENSES</td>
-      <td>${{ '{:,.0f}'.format(computed.excess_revenues_over_expenses_operations) }}</td>
-      <td>${{ '{:,.0f}'.format(computed.excess_revenues_over_expenses_replacement) }}</td>
-      <td>${{ '{:,.0f}'.format(computed.excess_revenues_over_expenses_operations + computed.excess_revenues_over_expenses_replacement) }}</td>
+      <td>${{ '{:,.0f}'.format(statement.excess_revenues_over_expenses_operations if statement else 0) }}</td>
+      <td>${{ '{:,.0f}'.format(statement.excess_revenues_over_expenses_replacement if statement else 0) }}</td>
+      <td>${{ '{:,.0f}'.format(((statement.excess_revenues_over_expenses_operations if statement else 0) + (statement.excess_revenues_over_expenses_replacement if statement else 0))) }}</td>
     </tr>
 
     <tr class="blank-row"><td colspan="4">&nbsp;</td></tr>
 
-    {# hoa_settings.* values are floats (JSON-clean for the audit log) and
-       computed.* values are Decimals; cast the Decimals to float here so
-       Jinja arithmetic doesn't cross types. #}
-    {% set tel = computed.total_estimated_liability|float %}
-    {% set rep_boy = (hoa_settings.reserve_cash_balance_eoy_prior or 0) - tel %}
     <tr>
       <td class="bold">FUND BALANCE (DEFICIT),<br>BEGINNING OF YEAR (NOTE 5)</td>
-      <td>${{ '{:,.0f}'.format(hoa_settings.fund_balance_boy_operations or 0) }}</td>
-      <td>${{ '{:,.0f}'.format(rep_boy) }}</td>
-      <td>${{ '{:,.0f}'.format((hoa_settings.fund_balance_boy_operations or 0) + rep_boy) }}</td>
+      <td>${{ '{:,.0f}'.format(statement.beginning_balance_operations if statement else 0) }}</td>
+      <td>${{ '{:,.0f}'.format(statement.beginning_balance_replacement if statement else 0) }}</td>
+      <td>${{ '{:,.0f}'.format(((statement.beginning_balance_operations if statement else 0) + (statement.beginning_balance_replacement if statement else 0))) }}</td>
     </tr>
 
     <tr class="total-row">
       <td>FUND BALANCE (DEFICIT),<br>END OF YEAR</td>
-      <td>${{ '{:,.0f}'.format(computed.fund_balance_eoy_operations|float) }}</td>
-      <td>${{ '{:,.0f}'.format(computed.fund_balance_eoy_replacement|float - tel) }}</td>
-      <td>${{ '{:,.0f}'.format(computed.fund_balance_eoy_operations|float + computed.fund_balance_eoy_replacement|float - tel) }}</td>
+      <td>${{ '{:,.0f}'.format(statement.ending_balance_operations if statement else 0) }}</td>
+      <td>${{ '{:,.0f}'.format(statement.ending_balance_replacement if statement else 0) }}</td>
+      <td>${{ '{:,.0f}'.format(statement.ending_balance_total if statement else 0) }}</td>
     </tr>
 
   </tbody>
 </table>
+{% endif %}
 
 <p class="center small italic" style="margin-top:18pt">
   See accountants&rsquo; compilation report and accompanying notes and significant assumptions.

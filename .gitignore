@@ -65,6 +65,7 @@ venv/
 
 # Data / runtime artifacts
 mockdata/
+tmp/
 *.db
 *.db-shm
 *.db-wal

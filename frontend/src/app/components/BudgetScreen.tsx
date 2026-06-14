@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router';
-import { AlertTriangle, ArrowLeft, Download, FileText, Settings, Trash2, Upload } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, Download, FileText, PackageCheck, Settings, Trash2, Upload } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { Button } from './ui/button';
@@ -19,25 +19,64 @@ import { AISuggestionMode } from './AISuggestionMode';
 import { BudgetView } from './BudgetView';
 import { DraftBaselineComparePanel } from './DraftBaselineComparePanel';
 import { EnrichedView } from './EnrichedView';
+import { GLMergeSuggestions } from './GLMergeSuggestions';
 import { ReserveStudyView } from './ReserveStudyView';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 import {
   applyReserveStudyToBudget,
+  commitBudgetGlMerge,
   deleteActiveDraft,
   downloadBudgetDraftEnriched,
+  fetchBudgetGlMergeSuggestions,
+  getActiveBudgetDraft,
+  listBudgetGlMerges,
   mapBudgetHistoryLineItems,
   mapEditorLineItemsToBudgetHistory,
   saveBudgetDraft,
   saveReserveStudyRows,
+  unmergeBudgetGlMergeApplication,
   uploadBudgetBundle,
   uploadBudgetSource,
+  type BudgetGlMergeListItem,
+  type BudgetGlMergeSuggestionPayload,
+  type BudgetSourceMode,
   type BudgetBundleUploadResponse,
   type BudgetDraftPayload,
+  type ExtractionDebugInfo,
   type ExtractionQualityWarning,
   type ReserveStudyRow,
 } from '../api/budgetHistory';
 import { type AISuggestion, type AISuggestionResponse, type FeedbackDecision, type LineItem } from '../data/mockData';
 import type { HOARecord } from '../api/hoa';
-import { formatTimestamp } from '../lib/budget';
+import { formatCurrency, formatTimestamp } from '../lib/budget';
+import {
+  buildBudgetGlIdentity,
+  findMergeCandidates,
+  mergeSuggestionKey,
+  resolveMergeSuggestionItems,
+} from '../lib/glMerge.ts';
+import {
+  glMergeSuggestionStorageKey,
+  readGlMergeSuggestionCache,
+  writeGlMergeSuggestionCache,
+} from '../lib/glMergeSuggestionCache.ts';
+import {
+  ASSESSMENT_MODE_OPTIONS,
+  assessmentModeHelperCopy,
+  assessmentModeLabel,
+  assessmentModeWorkflowCopy,
+  type AssessmentMode,
+} from '../lib/assessmentMode';
+import {
+  BUDGET_SOURCE_MODE_OPTIONS,
+  budgetSourceModeCreateSuccess,
+  budgetSourceModeGenericDraftError,
+  budgetSourceModeHelperCopy,
+  budgetSourceModeLabel,
+  budgetSourceModeMissingUploadError,
+  budgetSourceModeUploadPlaceholder,
+  budgetSourceModeUploadTitle,
+} from '../lib/budgetSourceMode';
 import { getErrorMessage } from '../lib/errors';
 import { computeTimingInputs } from '../lib/fiscalYear';
 import { formatFiscalYearRangeLabel } from '../lib/hoa';
@@ -49,6 +88,11 @@ interface GenerateBudgetRequest {
   statementMonth: number | null;
   growthFactor: number | null;
   growthFactorNote: string;
+}
+
+interface MergeDialogState {
+  primaryId: string | null;
+  secondaryId: string | null;
 }
 
 interface BudgetScreenProps {
@@ -111,6 +155,27 @@ function reserveSnapshotFromDraft(draft: BudgetDraftPayload | null): string {
   );
 }
 
+function looksLikeFinalBudgetFilename(filename: string): boolean {
+  return /\b(budget|final|pro[\s_-]*forma)\b/i.test(filename);
+}
+
+function renderExtractionDebug(debugInfo?: ExtractionDebugInfo | null) {
+  if (!debugInfo) {
+    return null;
+  }
+
+  return (
+    <details className="mt-3 rounded-lg border border-[#e5e5e5] bg-[#fafafa] p-3 text-xs text-[#525252]">
+      <summary className="cursor-pointer font-semibold text-[#111111]">
+        Technical extraction details
+      </summary>
+      <pre className="mt-3 max-h-48 overflow-auto whitespace-pre-wrap rounded-md bg-white p-3 font-mono text-[11px] leading-5 text-[#262626]">
+        {JSON.stringify(debugInfo, null, 2)}
+      </pre>
+    </details>
+  );
+}
+
 export function BudgetScreen({
   hoa,
   hoaId,
@@ -147,6 +212,12 @@ export function BudgetScreen({
   const [autoSaveEnabled, setAutoSaveEnabled] = useState(false);
   const [budgetSourceFile, setBudgetSourceFile] = useState<File | null>(null);
   const [reserveStudyFile, setReserveStudyFile] = useState<File | null>(null);
+  const [budgetSourceMode, setBudgetSourceMode] = useState<BudgetSourceMode>(
+    activeDraft?.source_mode ?? 'income_statement',
+  );
+  const [assessmentMode, setAssessmentMode] = useState<AssessmentMode>(
+    activeDraft?.assessment_mode ?? hoa.assessment_mode ?? 'variable',
+  );
   const [bundleUploadResult, setBundleUploadResult] = useState<BudgetBundleUploadResponse | null>(null);
   const [aiResponse, internalSetAiResponse] = useState<AISuggestionResponse | null>(savedAiResponse);
   const [appliedSuggestionSnapshot, setAppliedSuggestionSnapshot] = useState<
@@ -171,6 +242,19 @@ export function BudgetScreen({
   const lastAutoSaveAttemptSnapshotRef = useRef<string | null>(null);
   const lastPersistedReserveSnapshotRef = useRef<string>(reserveSnapshotFromDraft(activeDraft));
   const allowReserveHydrationRef = useRef(true);
+  const glMergeSuggestionCacheKeyRef = useRef<string | null>(null);
+  const skipNextGlMergeSuggestionPersistRef = useRef(false);
+  const [glMerges, setGlMerges] = useState<BudgetGlMergeListItem[]>([]);
+  const [glMergeSuggestions, setGlMergeSuggestions] = useState<BudgetGlMergeSuggestionPayload[]>([]);
+  const [glMergeSuggestionsLoading, setGlMergeSuggestionsLoading] = useState(false);
+  const [glMergeSuggestionsError, setGlMergeSuggestionsError] = useState<string | null>(null);
+  const [glMergeActionLoading, setGlMergeActionLoading] = useState(false);
+  const [glMergeDialog, setGlMergeDialog] = useState<MergeDialogState>({
+    primaryId: null,
+    secondaryId: null,
+  });
+  const [unmergingApplicationId, setUnmergingApplicationId] = useState<number | null>(null);
+  const [dismissedMergeSuggestionKeys, setDismissedMergeSuggestionKeys] = useState<string[]>([]);
   const activeReserveInflationRate =
     typeof hoa.reserve_inflation_rate === 'number' && Number.isFinite(hoa.reserve_inflation_rate)
       ? hoa.reserve_inflation_rate
@@ -183,6 +267,31 @@ export function BudgetScreen({
     hoa.fiscal_year_end_month,
     hoa.portfolio_year,
   );
+  const visibleGlMergeSuggestions = glMergeSuggestions.filter(
+    (suggestion) => !dismissedMergeSuggestionKeys.includes(mergeSuggestionKey(suggestion)),
+  );
+  const selectedMergePrimary =
+    glMergeDialog.primaryId == null
+      ? null
+      : lineItems.find((item) => item.id === glMergeDialog.primaryId) ?? null;
+  const mergeCandidates = selectedMergePrimary
+    ? findMergeCandidates(lineItems, selectedMergePrimary.id)
+    : [];
+  const selectedMergeSecondary =
+    glMergeDialog.secondaryId == null
+      ? null
+      : mergeCandidates.find((item) => item.id === glMergeDialog.secondaryId) ?? null;
+  const selectedMergePreview = selectedMergePrimary && selectedMergeSecondary
+    ? {
+        ytdActual: selectedMergePrimary.ytdActual + selectedMergeSecondary.ytdActual,
+        annualBudget: selectedMergePrimary.annualBudget + selectedMergeSecondary.annualBudget,
+        projection:
+          (selectedMergePrimary.projection ?? 0) + (selectedMergeSecondary.projection ?? 0),
+        proposed:
+          selectedMergePrimary.annualBudget * (1 + selectedMergePrimary.percentChange / 100) +
+          selectedMergeSecondary.annualBudget * (1 + selectedMergeSecondary.percentChange / 100),
+      }
+    : null;
 
   const setAiResponse = (response: AISuggestionResponse | null) => {
     internalSetAiResponse(response);
@@ -199,6 +308,12 @@ export function BudgetScreen({
   useEffect(() => {
     setAiResponse(savedAiResponse);
   }, [savedAiResponse]);
+
+  useEffect(() => {
+    if (!activeDraft) {
+      setAssessmentMode(hoa.assessment_mode ?? 'variable');
+    }
+  }, [activeDraft, hoa.assessment_mode]);
 
   useEffect(() => {
     reserveRowsRef.current = reserveStudyRows;
@@ -226,6 +341,8 @@ export function BudgetScreen({
       setReserveStudyStatus('none');
       lastPersistedReserveSnapshotRef.current = reserveSnapshotFromDraft(null);
       allowReserveHydrationRef.current = true;
+      setBudgetSourceMode('income_statement');
+      setAssessmentMode(hoa.assessment_mode ?? 'variable');
       setUploadState('initial');
       return;
     }
@@ -245,12 +362,14 @@ export function BudgetScreen({
     setStatementMonth(activeDraft.statement_month ?? null);
     setWorkingGrowthFactor(activeDraft.growth_factor ?? null);
     setGrowthFactorNote(activeDraft.growth_factor_note ?? '');
+    setBudgetSourceMode(activeDraft.source_mode ?? 'income_statement');
+    setAssessmentMode(activeDraft.assessment_mode ?? hoa.assessment_mode ?? 'variable');
     if (isDraftSwitch || allowReserveHydrationRef.current || !hasUnsavedLocalReserveEdits) {
       hydrateReserveState(activeDraft);
     }
     allowReserveHydrationRef.current = false;
     setUploadState('complete');
-  }, [activeDraft]);
+  }, [activeDraft, draftId, hoa.assessment_mode]);
 
   const hydrateDraftState = (draft: BudgetDraftPayload, options?: { hydrateReserve?: boolean }) => {
     const mappedLineItems = mapBudgetHistoryLineItems(draft.line_items);
@@ -260,6 +379,8 @@ export function BudgetScreen({
     setStatementMonth(draft.statement_month ?? null);
     setWorkingGrowthFactor(draft.growth_factor ?? null);
     setGrowthFactorNote(draft.growth_factor_note ?? '');
+    setBudgetSourceMode(draft.source_mode ?? 'income_statement');
+    setAssessmentMode(draft.assessment_mode ?? hoa.assessment_mode ?? 'variable');
     if (options?.hydrateReserve !== false) {
       hydrateReserveState(draft);
     }
@@ -269,14 +390,98 @@ export function BudgetScreen({
     setUploadState('complete');
   };
 
+  const closeMergeDialog = () => {
+    setGlMergeDialog({ primaryId: null, secondaryId: null });
+  };
+
+  const refreshDraftAndMerges = async () => {
+    const refreshedDraft = await getActiveBudgetDraft(hoaId);
+    hydrateDraftState(refreshedDraft, { hydrateReserve: false });
+    const rows = await listBudgetGlMerges(hoaId);
+    setGlMerges(rows);
+    return refreshedDraft;
+  };
+
+  const handleMergeConflictRefresh = async (fallbackMessage: string) => {
+    try {
+      await refreshDraftAndMerges();
+      toast.warning(fallbackMessage);
+    } catch {
+      toast.error(fallbackMessage);
+    }
+  };
+
+  useEffect(() => {
+    if (!draftId) {
+      glMergeSuggestionCacheKeyRef.current = null;
+      skipNextGlMergeSuggestionPersistRef.current = false;
+      setGlMerges([]);
+      setGlMergeSuggestions([]);
+      setDismissedMergeSuggestionKeys([]);
+      closeMergeDialog();
+      return;
+    }
+
+    const cacheKey = glMergeSuggestionStorageKey(hoaId, draftId);
+    glMergeSuggestionCacheKeyRef.current = cacheKey;
+    skipNextGlMergeSuggestionPersistRef.current = true;
+
+    if (typeof window !== 'undefined') {
+      const cache = readGlMergeSuggestionCache(window.sessionStorage, hoaId, draftId);
+      setGlMergeSuggestions(cache.suggestions);
+      setDismissedMergeSuggestionKeys(cache.dismissedKeys);
+    }
+
+    void (async () => {
+      try {
+        const rows = await listBudgetGlMerges(hoaId);
+        setGlMerges(rows);
+      } catch {
+        setGlMerges([]);
+      }
+    })();
+  }, [draftId, hoaId]);
+
+  useEffect(() => {
+    if (!draftId || typeof window === 'undefined') {
+      return;
+    }
+
+    const cacheKey = glMergeSuggestionStorageKey(hoaId, draftId);
+    if (glMergeSuggestionCacheKeyRef.current !== cacheKey) {
+      return;
+    }
+    if (skipNextGlMergeSuggestionPersistRef.current) {
+      skipNextGlMergeSuggestionPersistRef.current = false;
+      return;
+    }
+
+    writeGlMergeSuggestionCache(window.sessionStorage, hoaId, draftId, {
+      suggestions: glMergeSuggestions,
+      dismissedKeys: dismissedMergeSuggestionKeys,
+    });
+  }, [draftId, hoaId, glMergeSuggestions, dismissedMergeSuggestionKeys]);
+
   const handleBundleUpload = async () => {
     if (!budgetSourceFile || !reserveStudyFile) {
       toast.error('Select both the budget file and the reserve study PDF first.');
       return;
     }
+    if (budgetSourceMode === 'income_statement' && looksLikeFinalBudgetFilename(budgetSourceFile.name)) {
+      toast.warning(
+        'This file name looks like a final/pro forma budget. If extraction fails, switch Source Mode to Pro Forma / Final Budget and retry.',
+        { duration: 12000 },
+      );
+    }
     setUploadState('uploading');
     try {
-      const response = await uploadBudgetBundle(hoaId, budgetSourceFile, reserveStudyFile);
+      const response = await uploadBudgetBundle(
+        hoaId,
+        budgetSourceFile,
+        reserveStudyFile,
+        budgetSourceMode,
+        assessmentMode,
+      );
       setBundleUploadResult(response);
 
       if (!response.draft) {
@@ -319,9 +524,20 @@ export function BudgetScreen({
       toast.error('Select a budget file first.');
       return;
     }
+    if (budgetSourceMode === 'income_statement' && looksLikeFinalBudgetFilename(budgetSourceFile.name)) {
+      toast.warning(
+        'This file name looks like a final/pro forma budget. If extraction fails, switch Source Mode to Pro Forma / Final Budget and retry.',
+        { duration: 12000 },
+      );
+    }
     setUploadState('uploading');
     try {
-      const response = await uploadBudgetSource(hoaId, budgetSourceFile);
+      const response = await uploadBudgetSource(
+        hoaId,
+        budgetSourceFile,
+        budgetSourceMode,
+        assessmentMode,
+      );
       if (!response.draft) {
         const reason =
           response.review_reason ||
@@ -330,12 +546,15 @@ export function BudgetScreen({
         for (const warning of response.warnings ?? []) {
           toast.warning(warning, { duration: 10000 });
         }
+        if (response.debug_info?.code) {
+          toast.warning(`Extraction detail: ${response.debug_info.code}`, { duration: 12000 });
+        }
         setUploadState('initial');
         return;
       }
 
       hydrateDraftState(response.draft);
-      toast.success('Income statement uploaded and draft created.');
+      toast.success(budgetSourceModeCreateSuccess(budgetSourceMode));
       for (const warning of response.warnings ?? []) {
         toast.warning(warning, { duration: 10000 });
       }
@@ -393,7 +612,7 @@ export function BudgetScreen({
 
   const persistDraftSnapshot = async (): Promise<BudgetDraftPayload> => {
     if (!draftId) {
-      throw new Error('Upload an income statement first.');
+      throw new Error(budgetSourceModeMissingUploadError(budgetSourceMode));
     }
 
     setIsSavingDraft(true);
@@ -563,7 +782,7 @@ export function BudgetScreen({
 
   const handleDownloadEnriched = async () => {
     if (!draftId) {
-      toast.error('Upload an income statement first.');
+      toast.error(budgetSourceModeGenericDraftError());
       return;
     }
 
@@ -605,6 +824,156 @@ export function BudgetScreen({
     }
   };
 
+  const handleRequestMerge = (itemId: string) => {
+    if (findMergeCandidates(lineItems, itemId).length === 0) {
+      toast.error('No same-section candidates found for this row.');
+      return;
+    }
+    setGlMergeDialog({ primaryId: itemId, secondaryId: null });
+  };
+
+  const handleDismissMergeSuggestion = (suggestion: BudgetGlMergeSuggestionPayload) => {
+    setDismissedMergeSuggestionKeys((current) => [
+      ...current,
+      mergeSuggestionKey(suggestion),
+    ]);
+  };
+
+  const handleFetchGlMergeSuggestions = async () => {
+    if (!draftId) {
+      toast.error('Create a draft before requesting merge suggestions.');
+      return;
+    }
+
+    setGlMergeSuggestionsLoading(true);
+    setGlMergeSuggestionsError(null);
+    try {
+      const suggestions = await fetchBudgetGlMergeSuggestions(hoaId);
+      setGlMergeSuggestions(suggestions);
+      setDismissedMergeSuggestionKeys([]);
+      if (suggestions.length === 0) {
+        toast.success('No merge suggestions found for this draft.');
+      }
+    } catch (error) {
+      const message = getErrorMessage(error, 'Failed to load merge suggestions.');
+      setGlMergeSuggestionsError(message);
+      toast.error(message);
+    } finally {
+      setGlMergeSuggestionsLoading(false);
+    }
+  };
+
+  const runBudgetGlMerge = async (
+    primary: LineItem,
+    secondary: LineItem,
+    source: 'manual' | 'gemini_suggestion',
+    suggestionToRemoveKey?: string,
+  ) => {
+    setGlMergeActionLoading(true);
+    try {
+      const persistedDraft = await ensurePersistedDraftSnapshot();
+      await commitBudgetGlMerge(
+        hoaId,
+        {
+          primary: buildBudgetGlIdentity(primary),
+          secondary: buildBudgetGlIdentity(secondary),
+          source,
+        },
+        persistedDraft.version_int,
+      );
+      await refreshDraftAndMerges();
+      closeMergeDialog();
+      if (suggestionToRemoveKey) {
+        setGlMergeSuggestions((current) =>
+          current.filter((entry) => mergeSuggestionKey(entry) !== suggestionToRemoveKey),
+        );
+      }
+      toast.success(`Merged ${primary.name} with ${secondary.name}.`);
+    } catch (error) {
+      if (
+        error &&
+        typeof error === 'object' &&
+        'status' in error &&
+        (error.status === 412 || error.status === 428)
+      ) {
+        await handleMergeConflictRefresh('Draft changed while merging. Refreshed latest draft.');
+        return;
+      }
+      toast.error(getErrorMessage(error, 'Failed to merge these budget rows.'));
+    } finally {
+      setGlMergeActionLoading(false);
+    }
+  };
+
+  const handleApplyMergeSuggestion = async (suggestion: BudgetGlMergeSuggestionPayload) => {
+    const resolved = resolveMergeSuggestionItems(lineItems, suggestion);
+    if (!resolved) {
+      setGlMergeSuggestionsError(
+        'Suggestion no longer matches the active draft exactly. Use “Modify” or refresh suggestions.',
+      );
+      toast.error('Suggestion no longer matches the active draft exactly.');
+      return;
+    }
+    await runBudgetGlMerge(
+      resolved.primary,
+      resolved.secondary,
+      'gemini_suggestion',
+      mergeSuggestionKey(suggestion),
+    );
+  };
+
+  const handleModifyMergeSuggestion = (suggestion: BudgetGlMergeSuggestionPayload) => {
+    const resolved = resolveMergeSuggestionItems(lineItems, suggestion);
+    if (!resolved) {
+      toast.error('Suggestion no longer maps cleanly. Choose a row manually instead.');
+      return;
+    }
+    setGlMergeDialog({
+      primaryId: resolved.primary.id,
+      secondaryId: resolved.secondary.id,
+    });
+  };
+
+  const handleCommitSelectedMerge = async () => {
+    if (!selectedMergePrimary || !selectedMergeSecondary) {
+      toast.error('Choose both rows before committing a merge.');
+      return;
+    }
+    await runBudgetGlMerge(selectedMergePrimary, selectedMergeSecondary, 'manual');
+  };
+
+  const handleUnmergeMerge = async (merge: BudgetGlMergeListItem) => {
+    if (!merge.application_id) {
+      toast.error('Applied merge record not found.');
+      return;
+    }
+
+    setUnmergingApplicationId(merge.application_id);
+    try {
+      const persistedDraft = await ensurePersistedDraftSnapshot();
+      await unmergeBudgetGlMergeApplication(
+        hoaId,
+        merge.application_id,
+        persistedDraft.version_int,
+      );
+      await refreshDraftAndMerges();
+      toast.success(`Separated ${merge.primary_label} and ${merge.secondary_label}.`);
+    } catch (error) {
+      if (
+        error &&
+        typeof error === 'object' &&
+        'status' in error &&
+        (error.status === 412 || error.status === 428)
+      ) {
+        await handleMergeConflictRefresh('Draft changed while unmerging. Refreshed latest draft.');
+        return;
+      }
+      toast.error(getErrorMessage(error, 'Failed to unmerge this application.'));
+    } finally {
+      setUnmergingApplicationId(null);
+    }
+  };
+
   const submitImplicitAiFeedback = async () => {
     if (!aiResponse?.run_id || !appliedSuggestionSnapshot || appliedSuggestionSnapshot.size === 0) {
       return;
@@ -641,7 +1010,7 @@ export function BudgetScreen({
 
   const handleGenerateBudgetClick = async () => {
     if (!draftId) {
-      toast.error('Upload an income statement first.');
+      toast.error(budgetSourceModeGenericDraftError());
       return;
     }
 
@@ -881,11 +1250,23 @@ export function BudgetScreen({
                 <p className="text-sm text-[#737373]">Fiscal Year: {fiscalYearLabel}</p>
               </div>
             </div>
-            <Link to={`/hoa/${hoaId}/settings`}>
+            <div className="flex items-center gap-2">
+              <Link to={`/hoa/${hoaId}/disclosure`}>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="border-[#d4d4d4] text-[#111111] hover:border-[#a3a3a3] hover:bg-[#f5f5f5]"
+                >
+                  <PackageCheck className="mr-1.5 h-4 w-4" />
+                  Disclosure Package
+                </Button>
+              </Link>
+              <Link to={`/hoa/${hoaId}/settings`}>
               <Button variant="ghost" size="icon" className="hover:bg-[#f5f5f5]">
                 <Settings className="h-5 w-5 text-[#525252]" />
               </Button>
-            </Link>
+              </Link>
+            </div>
           </div>
         </header>
 
@@ -901,6 +1282,71 @@ export function BudgetScreen({
                   {uploadState === 'uploading'
                     ? 'Processing the selected file...'
                     : 'Select a budget source. Add a reserve study PDF if available.'}
+                </p>
+              </div>
+              <div className="w-full rounded-xl border border-[#e5e5e5] bg-[#fafafa] p-5 text-left">
+                <div className="mb-5 rounded-xl border border-[#e5e5e5] bg-white p-4">
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <p className="mb-3 text-xs font-medium uppercase tracking-[0.18em] text-[#737373]">
+                        Assessment Mode
+                      </p>
+                      <div className="grid gap-3 md:grid-cols-2">
+                        {ASSESSMENT_MODE_OPTIONS.map((option) => (
+                          <button
+                            key={option.value}
+                            type="button"
+                            onClick={() => setAssessmentMode(option.value)}
+                            className={
+                              assessmentMode === option.value
+                                ? 'rounded-xl border-2 border-[#111111] bg-white p-4 text-left shadow-sm'
+                                : 'rounded-xl border border-[#d4d4d4] bg-white p-4 text-left shadow-sm hover:border-[#a3a3a3]'
+                            }
+                          >
+                            <p className="text-sm font-medium text-[#111111]">{option.label}</p>
+                            <p className="mt-2 text-xs leading-5 text-[#737373]">{option.description}</p>
+                          </button>
+                        ))}
+                      </div>
+                      <p className="mt-4 text-xs leading-5 text-[#737373]">
+                        {assessmentModeHelperCopy(assessmentMode)}
+                      </p>
+                      <p className="mt-2 text-xs leading-5 text-[#737373]">
+                        {assessmentModeWorkflowCopy(assessmentMode)}
+                      </p>
+                    </div>
+                    <div className="shrink-0 rounded-lg border border-[#e5e5e5] bg-[#fafafa] px-3 py-2 text-xs text-[#525252]">
+                      <span className="block text-[10px] uppercase tracking-[0.18em] text-[#8a8a8a]">
+                        Current HOA Mode
+                      </span>
+                      <span className="mt-1 block font-medium text-[#111111]">
+                        {assessmentModeLabel(hoa.assessment_mode)}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+                <p className="mb-3 text-xs font-medium uppercase tracking-[0.18em] text-[#737373]">
+                  Budget Source Mode
+                </p>
+                <div className="grid gap-3 md:grid-cols-2">
+                  {BUDGET_SOURCE_MODE_OPTIONS.map((option) => (
+                    <button
+                      key={option.value}
+                      type="button"
+                      onClick={() => setBudgetSourceMode(option.value)}
+                      className={
+                        budgetSourceMode === option.value
+                          ? 'rounded-xl border-2 border-[#111111] bg-white p-4 text-left shadow-sm'
+                          : 'rounded-xl border border-[#d4d4d4] bg-white p-4 text-left shadow-sm hover:border-[#a3a3a3]'
+                      }
+                    >
+                      <p className="text-sm font-medium text-[#111111]">{option.label}</p>
+                      <p className="mt-2 text-xs leading-5 text-[#737373]">{option.description}</p>
+                    </button>
+                  ))}
+                </div>
+                <p className="mt-4 text-xs leading-5 text-[#737373]">
+                  {budgetSourceModeHelperCopy(budgetSourceMode)}
                 </p>
               </div>
               <div className="grid w-full gap-4 md:grid-cols-2">
@@ -920,15 +1366,15 @@ export function BudgetScreen({
                   <div className="flex items-start justify-between gap-4">
                     <div>
                       <span className="mb-2 block text-xs font-medium uppercase tracking-[0.18em] text-[#737373]">
-                        Budget File
+                        {budgetSourceModeUploadTitle(budgetSourceMode)}
                       </span>
                       <p className="text-sm font-medium text-[#111111]">
-                        {budgetSourceFile?.name ?? 'Excel workbook or PDF income statement'}
+                        {budgetSourceFile?.name ?? budgetSourceModeUploadPlaceholder(budgetSourceMode)}
                       </p>
                       <p className="mt-2 text-xs text-[#737373]">
                         {budgetSourceFile
                           ? 'Selected and ready to upload.'
-                          : 'Required. Choose the operating budget source first.'}
+                          : budgetSourceModeHelperCopy(budgetSourceMode)}
                       </p>
                     </div>
                     <span className="rounded-lg border border-[#d4d4d4] bg-white px-3 py-2 text-xs font-medium text-[#111111] shadow-sm">
@@ -1006,6 +1452,7 @@ export function BudgetScreen({
                           ))}
                         </ul>
                       ) : null}
+                      {renderExtractionDebug(bundleUploadResult.budget_source.debug_info)}
                     </div>
                     <div className="rounded-xl border border-[#e5e5e5] bg-white p-4">
                       <p className="text-sm font-medium text-[#111111]">Reserve Study</p>
@@ -1027,6 +1474,7 @@ export function BudgetScreen({
                           ))}
                         </ul>
                       ) : null}
+                      {renderExtractionDebug(bundleUploadResult.reserve_study.debug_info)}
                     </div>
                   </div>
                   {bundleUploadResult.can_continue_with_budget_only && bundleUploadResult.draft ? (
@@ -1094,15 +1542,21 @@ export function BudgetScreen({
               <Link to="/workspace" className="rounded-lg p-2 transition-colors hover:bg-[#f5f5f5]">
                 <ArrowLeft className="h-5 w-5 text-[#525252]" />
               </Link>
-              <div>
-                <h1 className="text-xl font-semibold text-[#111111]">{hoa.name}</h1>
-                <div className="mt-1 flex items-center gap-3">
-                  <p className="text-sm text-[#737373]">Fiscal Year: {fiscalYearLabel}</p>
-                  <span className="text-[#d4d4d4]">•</span>
-                  <p className="text-xs text-[#737373]">Draft {draftId ?? 'Unavailable'}</p>
+                <div>
+                  <h1 className="text-xl font-semibold text-[#111111]">{hoa.name}</h1>
+                  <div className="mt-1 flex items-center gap-3">
+                    <p className="text-sm text-[#737373]">Fiscal Year: {fiscalYearLabel}</p>
+                    <span className="text-[#d4d4d4]">•</span>
+                    <p className="text-xs text-[#737373]">Draft {draftId ?? 'Unavailable'}</p>
+                    <span className="text-[#d4d4d4]">•</span>
+                    <p className="text-xs text-[#737373]">{budgetSourceModeLabel(activeDraft?.source_mode ?? budgetSourceMode)}</p>
+                    <span className="text-[#d4d4d4]">•</span>
+                    <p className="text-xs text-[#737373]">
+                      {assessmentModeLabel(activeDraft?.assessment_mode ?? assessmentMode)}
+                    </p>
+                  </div>
                 </div>
               </div>
-            </div>
             <div className="flex items-center gap-4">
               <div className="text-right">
                 <span className="text-xs text-[#a3a3a3]">Last Saved</span>
@@ -1148,6 +1602,16 @@ export function BudgetScreen({
                   className="border-[#d4d4d4] px-4 font-medium text-[#111111] hover:border-[#a3a3a3] hover:bg-[#f5f5f5]"
                 >
                   View Past Sync
+                </Button>
+              </Link>
+              <Link to={`/hoa/${hoaId}/disclosure`}>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="border-[#d4d4d4] px-4 font-medium text-[#111111] hover:border-[#a3a3a3] hover:bg-[#f5f5f5]"
+                >
+                  <PackageCheck className="mr-1.5 h-4 w-4" />
+                  Disclosure Package
                 </Button>
               </Link>
               <Link to={`/hoa/${hoaId}/settings`}>
@@ -1283,12 +1747,30 @@ export function BudgetScreen({
                 />
               </div>
             ) : null}
+            {draftId ? (
+              <div className="mb-8">
+                <GLMergeSuggestions
+                  suggestions={visibleGlMergeSuggestions}
+                  merges={glMerges}
+                  loading={glMergeSuggestionsLoading}
+                  error={glMergeSuggestionsError}
+                  actionLoading={glMergeActionLoading}
+                  unmergingApplicationId={unmergingApplicationId}
+                  onSuggest={() => void handleFetchGlMergeSuggestions()}
+                  onApplySuggestion={(suggestion) => void handleApplyMergeSuggestion(suggestion)}
+                  onModifySuggestion={handleModifyMergeSuggestion}
+                  onDismissSuggestion={handleDismissMergeSuggestion}
+                  onUnmerge={(merge) => void handleUnmergeMerge(merge)}
+                />
+              </div>
+            ) : null}
             <EnrichedView
               hoaId={hoaId}
               draftId={draftId}
               lineItems={lineItems}
               onPercentChange={handlePercentChange}
               onNoteSaved={handleNoteSaved}
+              onRequestMerge={handleRequestMerge}
               units={hoa.units}
               reserveInflationRate={activeReserveInflationRate}
             />
@@ -1330,6 +1812,100 @@ export function BudgetScreen({
           />
         )}
       </main>
+      <AlertDialog
+        open={glMergeDialog.primaryId !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            closeMergeDialog();
+          }
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Merge Similar Budget Rows</AlertDialogTitle>
+            <AlertDialogDescription>
+              Pick the secondary row to absorb into the surviving primary row. The primary label
+              stays the same and the active draft updates immediately.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="space-y-4">
+            <div className="rounded-lg border border-[#e5e5e5] bg-[#fafafa] p-4">
+              <p className="text-xs font-medium uppercase tracking-wide text-[#737373]">Primary row</p>
+              <p className="mt-1 text-sm font-semibold text-[#111111]">
+                {selectedMergePrimary?.name ?? 'Choose a row from the budget table'}
+              </p>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="merge-secondary">Merge with</Label>
+              <Select
+                value={glMergeDialog.secondaryId ?? undefined}
+                onValueChange={(value) =>
+                  setGlMergeDialog((current) => ({ ...current, secondaryId: value }))
+                }
+              >
+                <SelectTrigger id="merge-secondary" className="bg-white border-[#e5e5e5]">
+                  <SelectValue placeholder="Choose another row in the same section" />
+                </SelectTrigger>
+                <SelectContent>
+                  {mergeCandidates.map((candidate) => (
+                    <SelectItem key={candidate.id} value={candidate.id}>
+                      {candidate.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            {selectedMergePreview ? (
+              <div className="grid grid-cols-2 gap-3">
+                <div className="rounded-lg border border-[#e5e5e5] bg-white p-3">
+                  <p className="text-xs uppercase tracking-wide text-[#737373]">YTD total</p>
+                  <p className="mt-1 text-sm font-semibold text-[#111111]">
+                    {formatCurrency(selectedMergePreview.ytdActual)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-[#e5e5e5] bg-white p-3">
+                  <p className="text-xs uppercase tracking-wide text-[#737373]">Annual budget</p>
+                  <p className="mt-1 text-sm font-semibold text-[#111111]">
+                    {formatCurrency(selectedMergePreview.annualBudget)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-[#e5e5e5] bg-white p-3">
+                  <p className="text-xs uppercase tracking-wide text-[#737373]">Projection</p>
+                  <p className="mt-1 text-sm font-semibold text-[#111111]">
+                    {formatCurrency(selectedMergePreview.projection)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-[#e5e5e5] bg-white p-3">
+                  <p className="text-xs uppercase tracking-wide text-[#737373]">Current proposed total</p>
+                  <p className="mt-1 text-sm font-semibold text-[#111111]">
+                    {formatCurrency(selectedMergePreview.proposed)}
+                  </p>
+                </div>
+              </div>
+            ) : null}
+          </div>
+          <AlertDialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={closeMergeDialog}
+              className="border-[#d4d4d4] hover:bg-[#f5f5f5]"
+            >
+              Cancel
+            </Button>
+            <AlertDialogAction
+              onClick={(event) => {
+                event.preventDefault();
+                void handleCommitSelectedMerge();
+              }}
+              disabled={!selectedMergePrimary || !selectedMergeSecondary || glMergeActionLoading}
+              className="bg-[#111111] text-white hover:bg-[#262626]"
+            >
+              {glMergeActionLoading ? 'Merging...' : 'Commit Merge'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

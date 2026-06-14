@@ -42,6 +42,8 @@ logger = logging.getLogger(__name__)
 # under Gemini's per-image limits for a 6-page statement).
 _HYBRID_RENDER_DPI = 72
 _SCANNED_FALLBACK_RENDER_DPI = 200
+_PROFORMA_SOURCE_MODE = "proforma_final_budget"
+_BUDGET_VISION_TIMEOUT_SECONDS = 240.0
 
 
 class StatementPageCandidate(BaseModel):
@@ -94,6 +96,15 @@ A page SHOULD be selected when:
   - Reserve Fund Activity
   - Reserve Income and Expense to Budget
 
+A strong preference rule:
+- Prefer the detailed contiguous income statement block that appears to be the source statement for the period.
+- Prefer pages with detail rows over grouped or presentation-style summaries.
+- Account-code or GL-style rows are a strong signal that a page is a detailed source statement, but this is a preferred signal, not a hard requirement. Some valid source statements use descriptive line labels without account codes.
+- If both of these appear in the same PDF package, prefer the detailed source-statement block and reject the later restatement block:
+  - detailed source rows such as account-code, GL-style, or line-by-line operating/revenue/expense rows
+  - summarized restatement rows such as grouped client-style labels, accountant summary pages, disclosure-style summaries, forecasted statements, or pro forma presentations
+- Select the continuation pages of the chosen detailed block, including a reserve income/expense tail when it is clearly part of that same statement package.
+
 A page SHOULD NOT be selected when it is:
 - Cover letter, title page, table of contents, notes, assumptions, compilation report
 - Assessment schedule or assessments per unit/month
@@ -107,6 +118,7 @@ A page SHOULD NOT be selected when it is:
 - Bank statement
 - Any page with only totals and no detail line items
 - Any page whose main purpose is per-unit assessments rather than income/expense budget drafting
+- Later forecasted, pro forma, accountant summary, board summary, or disclosure summary pages that restate the same economics in grouped/client-style labels instead of source detail rows
 
 Important:
 - Do not select pages merely because they contain dollar amounts.
@@ -115,6 +127,8 @@ Important:
 - If there are multiple consecutive pages of the same operating or reserve statement, select all of them.
 - If a reserve income/expense statement appears separately, select it and classify it as reserve_statement.
 - Do not select reserve study component schedules; classify those as reserve_study_schedule and reject them.
+- Do not combine detailed source rows and summarized restatement rows into the same financial line-item list.
+- When duplicate economics appear in multiple formats within one package, choose one coherent page block: the most detailed contiguous source statement.
 
 Return JSON only:
 
@@ -138,6 +152,49 @@ Return JSON only:
     }
   ]
 }"""
+
+_PROFORMA_PAGE_SELECTION_SYSTEM_PROMPT = """You are classifying pages from an HOA pro forma / final budget PDF package.
+
+Goal:
+Find the page numbers that should be sent to a financial-statement extractor for pro forma / final budget drafting.
+
+Select pages ONLY if they are spreadsheet-export operating/cash-flow budget pages with detail rows. Prefer pages with:
+- Titles like OPERATING AND CASH FLOW STATEMENT, PRO FORMA OPERATING AND CASH FLOW STATEMENT, or similar
+- Jan-Dec month grids
+- Income: / Expense: sections
+- Annual columns such as Budget, Proposed, Final, Approved, or Annual Budget
+
+Reject pages that are:
+- Cover pages, notes, assumptions, reserve-study schedules, assessments-per-unit schedules, balance sheets
+- Summary-only pages without detail rows
+- Ratio or dashboard pages where most columns are percentages instead of money
+- Later presentation summaries that restate the same budget in grouped labels instead of detail rows
+
+When multiple candidate pages exist, choose the most detailed contiguous operating/cash-flow statement block.
+
+Return JSON only using the same schema as the default page-selection prompt."""
+
+
+def _is_proforma_mode(prompt_context: DocumentPromptContext) -> bool:
+    return (prompt_context.source_mode or "").strip().lower() == "proforma_final_budget"
+
+
+def _page_selection_prompt(prompt_context: DocumentPromptContext) -> str:
+    return (
+        _PROFORMA_PAGE_SELECTION_SYSTEM_PROMPT
+        if _is_proforma_mode(prompt_context)
+        else _PAGE_SELECTION_SYSTEM_PROMPT
+    )
+
+
+def _operating_prompt(prompt_context: DocumentPromptContext, is_reserve_page: bool) -> str:
+    if is_reserve_page:
+        return _PAGE_SYSTEM_PROMPT_RESERVE
+    return (
+        _PAGE_SYSTEM_PROMPT_PROFORMA_OPERATING
+        if _is_proforma_mode(prompt_context)
+        else _PAGE_SYSTEM_PROMPT_OPERATING
+    )
 
 
 def render_pdf_pages(
@@ -241,8 +298,168 @@ def render_pdf_pages_for_numbers(
     return rendered_pages
 
 
+def _parse_currency_text(value: str) -> Optional[float]:
+    text = value.strip().replace(",", "").replace("$", "")
+    if not text:
+        return None
+    negative = text.startswith("(") and text.endswith(")")
+    text = text.strip("()")
+    if text.endswith(")"):
+        text = text[:-1]
+    try:
+        parsed = float(text)
+    except ValueError:
+        return None
+    return -parsed if negative else parsed
+
+
 def _render_page_selection_images(pdf_path: str, max_pages: int) -> list[RenderedPage]:
     return render_pdf_pages(pdf_path, max_pages=max_pages, dpi=_HYBRID_RENDER_DPI)
+
+
+def _log_schema_validation_failure_sample(
+    raw_result: Any,
+    *,
+    path: str,
+    source_mode: str,
+    attempt: int,
+) -> None:
+    line_items = getattr(raw_result, "line_items", None)
+    if not isinstance(line_items, list):
+        return
+
+    sample_labels = [
+        getattr(item, "label", None)
+        for item in line_items[:5]
+        if getattr(item, "label", None)
+    ]
+    logger.info(
+        "PDF schema validation failed: file=%s source_mode=%s attempt=%d rows=%d sample_labels=%s",
+        Path(path).name,
+        source_mode,
+        attempt,
+        len(line_items),
+        sample_labels,
+    )
+
+
+def _normalize_visible_row_label(raw_label: str) -> str:
+    label = " ".join(str(raw_label or "").replace("\t", " ").split())
+    if " " not in label:
+        label = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", label)
+    return label.rstrip(":").strip()
+
+
+def _extract_visible_row_hints(
+    path: str,
+    *,
+    exclude_labels: list[str] | None = None,
+    limit: int = 6,
+) -> list[str]:
+    try:
+        pdf_text = _extract_pdf_text_table(path, max_pages=settings.DOCUMENT_VLM_MAX_PAGES)
+    except Exception:
+        return []
+
+    excluded = {
+        _normalize_visible_row_label(label).lower()
+        for label in (exclude_labels or [])
+        if _normalize_visible_row_label(label)
+    }
+    skip_prefixes = (
+        "total",
+        "subtotal",
+        "net ",
+        "cumulative",
+        "income",
+        "expense",
+        "operating and cash flow statement",
+        "one time special assessment",
+        "no increase in dues",
+        "old mill homeowners association",
+    )
+
+    hints: list[str] = []
+    seen: set[str] = set()
+    for raw_line in pdf_text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("--- Page "):
+            continue
+        if "$" not in line:
+            continue
+
+        label_source = line.split("\t", 1)[0]
+        label_source = label_source.split("$", 1)[0]
+        label = _normalize_visible_row_label(label_source)
+        if not label:
+            continue
+
+        label_lower = label.lower()
+        if label_lower in excluded or label_lower in seen:
+            continue
+        if any(label_lower.startswith(prefix) for prefix in skip_prefixes):
+            continue
+
+        seen.add(label_lower)
+        hints.append(label)
+        if len(hints) >= limit:
+            break
+
+    return hints
+
+
+def _build_schema_retry_note(
+    raw_result: Any,
+    exc: ValidationError,
+    *,
+    path: str | None = None,
+    source_mode: str | None = None,
+) -> str:
+    visible_hints: list[str] = []
+    if path and (source_mode or "").strip().lower() == _PROFORMA_SOURCE_MODE:
+        visible_hints = _extract_visible_row_hints(path, limit=6)
+    hint_text = ""
+    if visible_hints:
+        hint_text = (
+            " Visible labeled money rows include: "
+            + ", ".join(visible_hints)
+            + "."
+        )
+
+    if isinstance(raw_result, dict):
+        line_items = raw_result.get("line_items")
+    else:
+        line_items = getattr(raw_result, "line_items", None)
+    if isinstance(line_items, list) and len(line_items) == 1:
+        first_item = line_items[0]
+        if isinstance(first_item, dict):
+            first_label = first_item.get("label") or "unknown"
+        else:
+            first_label = getattr(first_item, "label", None) or "unknown"
+        if path and (source_mode or "").strip().lower() == _PROFORMA_SOURCE_MODE:
+            visible_hints = _extract_visible_row_hints(
+                path,
+                exclude_labels=[first_label],
+                limit=6,
+            )
+            if visible_hints:
+                hint_text = (
+                    " Visible labeled money rows include: "
+                    + ", ".join(visible_hints)
+                    + "."
+                )
+        return (
+            "Previous attempt returned only 1 line item "
+            f"({first_label}). This page has more visible labeled money rows. "
+            f"{hint_text}"
+            "Re-read the full page, scan both income and expense sections, and return every visible detail row. "
+            "section_kind must use only income, operating, reserve_income, reserve_expense, or null."
+        )
+    return (
+        f"Previous attempt failed schema validation: {exc}"
+        f"{hint_text}"
+        " Re-read the full page and return every visible detail row."
+    )
 
 
 async def _select_income_statement_pages(
@@ -282,7 +499,7 @@ async def _select_income_statement_pages(
 
     result = await call_llm_vision(
         [
-            {"role": "system", "content": _PAGE_SELECTION_SYSTEM_PROMPT},
+            {"role": "system", "content": _page_selection_prompt(prompt_context)},
             {"role": "user", "content": user_content_parts},
         ],
         StatementPageSelection,
@@ -480,6 +697,43 @@ _PAGE_SYSTEM_PROMPT_OPERATING = (
     "Return ONLY the JSON object. No markdown, no explanation."
 )
 
+_PAGE_SYSTEM_PROMPT_PROFORMA_OPERATING = (
+    "You are extracting line items from one HOA pro forma / final budget statement page.\n\n"
+    "Return JSON only using the provided schema. Extract every visible detail line from both income and expense sections.\n\n"
+    "RULES:\n"
+    "- If multiple labeled money rows are visible, return all of them.\n"
+    "- Do not collapse the table into one row.\n"
+    "- Do not collapse the table or page into one row. Do not stop after the first row.\n"
+    "- The minimum expected output is multiple detail rows whenever multiple labels with money values are visible.\n"
+    "- Returning only the first visible income row is invalid when more labeled money rows are visible.\n"
+    "- Scan both income and expense sections before finishing the page.\n"
+    "- Return one line_items object per visible detail row, not one object per section or per page.\n"
+    "- Skip totals, subtotals, net income rows, cumulative cash flow rows, and pure section headers.\n"
+    "- Do not require account codes. Descriptive labels without account codes are valid detail rows.\n"
+    "- If a label repeats on the right side before percent or annual columns, keep only the left or main label.\n"
+    "- Numbers in parentheses are negative. Dashes or blanks are null.\n\n"
+    "COLUMN RULES:\n"
+    "- Expect layout variation. Do not assume fixed column numbers; column positions vary by template.\n"
+    "- Use visible header meaning plus spatial alignment to identify annual budget.\n"
+    "- Annual budget synonyms include: Approved Budget, Board Approved, Final Budget, Adopted Budget, Proposed Budget, "
+    "2025 Budget, Next Year Budget, Annual Budget, Total Budget, Budget Total, Annualized Budget, Annualized, "
+    "Projection, Forecast, and FY Budget.\n"
+    "- Promote annual budget with this precedence:\n"
+    "  final/approved/adopted/board approved > proposed/forecast/projection > annual/total/FY budget fallback.\n"
+    "- If heading text is unclear but the page has Jan-Dec columns plus right-side annual-like money columns, use the "
+    "rightmost annual-like money column as annual_budget unless it is clearly a percent column.\n"
+    "- Record the promoted annual source in evidence.source_column using one of: final_budget, proposed_amount, annual_budget.\n"
+    "- Monthly Jan-Dec values are contextual. They can inform current_actual or ytd_actual, but they are NOT the promoted annual budget amount.\n\n"
+    "SECTION KIND RULES:\n"
+    "- section_kind must be exactly one of: income, operating, reserve_income, reserve_expense, or null.\n"
+    "- Never use revenue or expense as section_kind values.\n"
+    "- Revenue-like, assessment, dues, and income rows -> income.\n"
+    "- Normal operating expense rows -> operating.\n"
+    "- Reserve interest rows -> reserve_income.\n"
+    "- Reserve contribution, reserve transfer, transfer to reserve, allocation to reserve, and reserve funding rows -> reserve_expense.\n\n"
+    "Return ONLY the JSON object. No markdown, no explanation."
+)
+
 _PAGE_SYSTEM_PROMPT_RESERVE = (
     "You are a financial document parser. You receive the text content of ONE PAGE "
     "from a RESERVE FUND statement within an HOA financial PDF, plus an image of that page. "
@@ -631,6 +885,7 @@ async def _extract_single_page(
     is_reserve_page: bool,
     *,
     no_text_layer: bool = False,
+    response_schema: type[ExtractedFinancialStatementPage] = ExtractedFinancialStatementPage,
 ) -> Optional[ExtractedFinancialStatementPage]:
     """Extract line items from a single page via Gemini hybrid call.
 
@@ -643,7 +898,7 @@ async def _extract_single_page(
     import asyncio
     from ..ai_implementation.pipeline.llm_client import call_llm_vision
 
-    system_prompt = _PAGE_SYSTEM_PROMPT_RESERVE if is_reserve_page else _PAGE_SYSTEM_PROMPT_OPERATING
+    system_prompt = _operating_prompt(prompt_context, is_reserve_page)
     page_type = "Reserve statement" if is_reserve_page else "Operating statement"
     notes_line = " | ".join(prompt_context.notes) if prompt_context.notes else "none"
 
@@ -700,7 +955,12 @@ async def _extract_single_page(
         {"role": "user", "content": user_content_parts},
     ]
 
-    result = await call_llm_vision(messages, ExtractedFinancialStatementPage, temperature=0.0, timeout=120.0)
+    result = await call_llm_vision(
+        messages,
+        response_schema,
+        temperature=0.0,
+        timeout=_BUDGET_VISION_TIMEOUT_SECONDS,
+    )
 
     # Stamp page_number on all extracted items
     if result is not None and hasattr(result, "line_items"):
@@ -724,7 +984,7 @@ async def _extract_full_document(
     prompt_context: DocumentPromptContext,
     schema: type[ExtractedFinancialStatement],
     max_pages: int,
-) -> Optional[ExtractedFinancialStatement]:
+) -> Optional[ExtractedFinancialStatement | dict[str, Any]]:
     """Extract full document via parallel per-page Gemini calls.
 
     Fires one Gemini call per page concurrently, then merges results.
@@ -978,6 +1238,7 @@ async def extract_pdf_statement(
     provider: Optional[VisionStatementExtractor] = None,
     *,
     max_pages: Optional[int] = None,
+    source_mode: str = "income_statement",
 ) -> ExtractedFinancialStatement | DocumentExtractionFailure:
     """Extract a canonical financial statement from a PDF.
 
@@ -987,11 +1248,13 @@ async def extract_pdf_statement(
     prompt_context = DocumentPromptContext(
         filename=Path(path).name,
         route_family="pdf_visual_document",
+        source_mode=source_mode,
     )
 
     last_validation_issues: list[dict[str, Any]] = []
 
     for attempt in range(2):
+        raw_result: Any = None
         try:
             if provider is not None:
                 # Custom provider (tests) — use vision path
@@ -1016,9 +1279,22 @@ async def extract_pdf_statement(
                 else ExtractedFinancialStatement.model_validate(raw_result)
             )
         except ValidationError as exc:
+            _log_schema_validation_failure_sample(
+                raw_result,
+                path=path,
+                source_mode=source_mode,
+                attempt=attempt + 1,
+            )
             if attempt == 0:
                 prompt_context = deepcopy(prompt_context)
-                prompt_context.notes.append(f"Previous attempt failed schema validation: {exc}")
+                prompt_context.notes.append(
+                    _build_schema_retry_note(
+                        raw_result,
+                        exc,
+                        path=path,
+                        source_mode=source_mode,
+                    )
+                )
                 continue
             return DocumentExtractionFailure(
                 code="schema_validation_failed",

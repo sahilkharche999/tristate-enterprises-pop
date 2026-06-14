@@ -1,10 +1,13 @@
 """Protected HOA-scoped budget history endpoints."""
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
+from ..assessment_mode import AssessmentMode
 from ..ai_implementation.db import get_session
 from ..auth.dependencies import get_current_user
+from ..optimistic_lock import require_if_match
 from ..models.budget_history import (
     BudgetBundleUploadResponse,
     BudgetDraftCompareOptionsResponse,
@@ -19,6 +22,13 @@ from ..models.budget_history import (
     BudgetReserveStudySaveRequest,
     BudgetGenerateRequest,
     BudgetGenerateResponse,
+    BudgetSourceMode,
+    BudgetGlIdentityPayload,
+    BudgetGlMergeApplicationPayload,
+    BudgetGlMergeCommitRequest,
+    BudgetGlMergeCommitResponse,
+    BudgetGlMergeListItem,
+    BudgetGlMergeSuggestionPayload,
     BudgetHistoryResponse,
     BudgetNoteSaveRequest,
     BudgetNoteSaveResponse,
@@ -30,13 +40,134 @@ from ..models.budget_history import (
     BudgetVersionReopenResponse,
 )
 from ..services import budget_history_service
+from ..services.budget_line_merge_service import (
+    GLIdentity,
+    commit_merge,
+    list_merges,
+    suggest_merges,
+    unmerge_merge,
+)
 
 router = APIRouter(tags=["Budget History"])
+
+
+def _actor_name(user: dict) -> str:
+    return str(user.get("name") or user.get("email") or "Unknown User")
+
+
+def _raw_connection(session: Session):
+    raw_conn = session.connection().connection
+    return (
+        getattr(raw_conn, "driver_connection", None)
+        or getattr(raw_conn, "connection", None)
+        or raw_conn
+    )
+
+
+def _gl_identity(payload: BudgetGlIdentityPayload) -> GLIdentity:
+    return GLIdentity(
+        account_code=payload.account_code,
+        label=payload.label,
+        normalized_label=payload.normalized_label,
+        line_item_key=payload.line_item_key,
+        section=payload.section,
+        category=payload.category,
+        fund_type=payload.fund_type,
+    )
+
+
+def _application_payload(application) -> BudgetGlMergeApplicationPayload:
+    return BudgetGlMergeApplicationPayload(**application.model_dump())
+
+
+@router.get("/hoa/{hoa_id}/budget/merges", response_model=list[BudgetGlMergeListItem])
+def list_budget_gl_merges(
+    hoa_id: int,
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user),
+) -> list[BudgetGlMergeListItem]:
+    """List durable GL merge rules and latest draft application state."""
+    rows = list_merges(
+        property_id=hoa_id,
+        db_conn=_raw_connection(session),
+    )
+    return [BudgetGlMergeListItem(**row.model_dump()) for row in rows]
+
+
+@router.post("/hoa/{hoa_id}/budget/merges", response_model=BudgetGlMergeCommitResponse)
+def commit_budget_gl_merge(
+    hoa_id: int,
+    payload: BudgetGlMergeCommitRequest,
+    expected_version: int = Depends(require_if_match),
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user),
+) -> BudgetGlMergeCommitResponse:
+    """Commit a GL merge; returns 422 for invalid pairs, 409 for mapping conflicts, and 412/428 for stale/missing draft versions."""
+    result = commit_merge(
+        property_id=hoa_id,
+        primary=_gl_identity(payload.primary),
+        secondary=_gl_identity(payload.secondary),
+        source=payload.source,
+        actor=_actor_name(current_user),
+        expected_draft_version=expected_version,
+        db_conn=_raw_connection(session),
+    )
+    return BudgetGlMergeCommitResponse(
+        merge_id=result.merge_id,
+        application=_application_payload(result.application),
+        draft_version=result.draft_version,
+    )
+
+
+@router.post(
+    "/hoa/{hoa_id}/budget/merges/applications/{application_id}/unmerge",
+    response_model=BudgetGlMergeCommitResponse,
+)
+def unmerge_budget_gl_merge_application(
+    hoa_id: int,
+    application_id: int,
+    expected_version: int = Depends(require_if_match),
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user),
+) -> BudgetGlMergeCommitResponse:
+    """Un-merge an applied draft application; finalized applications return 409 and stale draft versions return 412."""
+    result = unmerge_merge(
+        application_id=application_id,
+        actor=_actor_name(current_user),
+        expected_draft_version=expected_version,
+        db_conn=_raw_connection(session),
+    )
+    if result.application.property_id != hoa_id:
+        raise HTTPException(status_code=404, detail="Merge application not found")
+    return BudgetGlMergeCommitResponse(
+        merge_id=result.application.merge_id,
+        application=_application_payload(result.application),
+        draft_version=result.draft_version,
+    )
+
+
+@router.post("/hoa/{hoa_id}/budget/merges/suggest", response_model=list[BudgetGlMergeSuggestionPayload])
+def suggest_budget_gl_merges(
+    hoa_id: int,
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user),
+) -> list[BudgetGlMergeSuggestionPayload]:
+    """Suggest GL merge candidates; Gemini failures fall back to local-only suggestions."""
+    suggestions = suggest_merges(
+        property_id=hoa_id,
+        db_conn=_raw_connection(session),
+    )
+    return [
+        BudgetGlMergeSuggestionPayload(**suggestion.model_dump())
+        for suggestion in suggestions
+    ]
 
 
 @router.post("/hoa/{hoa_id}/budget/upload", response_model=BudgetUploadResponse)
 async def upload_budget(
     hoa_id: int,
+    source_mode: BudgetSourceMode = Form("income_statement"),
+    assessment_mode: AssessmentMode = Form("variable"),
     file: UploadFile = File(...),
     session: Session = Depends(get_session),
     current_user: dict = Depends(get_current_user),
@@ -49,6 +180,8 @@ async def upload_budget(
             original_filename=file.filename or "upload.xlsx",
             content_type=file.content_type,
             file_bytes=await file.read(),
+            source_mode=source_mode,
+            assessment_mode=assessment_mode,
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
@@ -59,6 +192,8 @@ async def upload_budget(
 @router.post("/hoa/{hoa_id}/budget/upload-bundle", response_model=BudgetBundleUploadResponse)
 async def upload_budget_bundle(
     hoa_id: int,
+    source_mode: BudgetSourceMode = Form("income_statement"),
+    assessment_mode: AssessmentMode = Form("variable"),
     budget_file: UploadFile = File(...),
     reserve_study_file: UploadFile = File(...),
     session: Session = Depends(get_session),
@@ -75,6 +210,8 @@ async def upload_budget_bundle(
             reserve_filename=reserve_study_file.filename or "reserve-study.pdf",
             reserve_content_type=reserve_study_file.content_type,
             reserve_file_bytes=await reserve_study_file.read(),
+            source_mode=source_mode,
+            assessment_mode=assessment_mode,
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc))

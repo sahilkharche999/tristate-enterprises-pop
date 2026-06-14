@@ -431,6 +431,267 @@ def test_old_mill_fixed_flat_builds_summary_row() -> None:
     ]
 
 
+def test_db_builder_filters_non_regular_mapped_rows_from_final_basis() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE assessment_setups (
+            id INTEGER PRIMARY KEY,
+            property_id INTEGER,
+            setup_type TEXT,
+            status TEXT,
+            approved_at TEXT
+        );
+        CREATE TABLE dre_extraction_runs (
+            id INTEGER PRIMARY KEY,
+            property_id INTEGER,
+            promoted_setup_id INTEGER,
+            parsed_json TEXT
+        );
+        CREATE TABLE allocation_pools (
+            id INTEGER PRIMARY KEY,
+            assessment_setup_id INTEGER,
+            pool_key TEXT,
+            pool_name TEXT,
+            allocation_method TEXT,
+            recipient_scope TEXT,
+            denominator_value NUMERIC,
+            include_in_pdf INTEGER,
+            display_order INTEGER
+        );
+        CREATE TABLE budget_line_pool_mappings (
+            budget_line_normalized_label TEXT,
+            section TEXT,
+            category TEXT,
+            fund_type TEXT,
+            account_code TEXT,
+            pool_key TEXT,
+            active INTEGER,
+            property_id INTEGER,
+            assessment_setup_id INTEGER
+        );
+        CREATE TABLE assessment_unit_pool_allocations (
+            assessment_setup_id INTEGER,
+            assessment_unit_id INTEGER,
+            pool_key TEXT,
+            specified_monthly_amount NUMERIC
+        );
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO assessment_setups
+        (id, property_id, setup_type, status, approved_at)
+        VALUES (5, 22, 'fixed', 'approved', '2026-05-21T12:00:00+00:00')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO allocation_pools
+        (id, assessment_setup_id, pool_key, pool_name, allocation_method,
+         recipient_scope, denominator_value, include_in_pdf, display_order)
+        VALUES (11, 5, 'equal_costs', 'Equal Costs', 'equal',
+                'all_units', 4, 1, 1)
+        """
+    )
+    conn.executemany(
+        """
+        INSERT INTO budget_line_pool_mappings
+        (budget_line_normalized_label, section, category, fund_type,
+         account_code, pool_key, active, property_id, assessment_setup_id)
+        VALUES (?, ?, ?, ?, ?, 'equal_costs', 1, 22, 5)
+        """,
+        [
+            ("insurance", "operating", "operating", "operating", None),
+            (
+                "reserve allocation transfer",
+                "operating",
+                "operating",
+                "operating",
+                None,
+            ),
+        ],
+    )
+
+    matrix = build_matrix_from_approved_assessment_setup(
+        connection=conn,
+        property_id=22,
+        fiscal_year=2026,
+        budget_draft=SimpleNamespace(
+            line_items=[
+                SimpleNamespace(
+                    label="Insurance",
+                    amount=Decimal("1500"),
+                    is_revenue=False,
+                    is_reserve=False,
+                    category="operating",
+                    section="operating",
+                    account_code=None,
+                ),
+                SimpleNamespace(
+                    label="Reserve - Allocation/Transfer",
+                    amount=Decimal("400"),
+                    is_revenue=False,
+                    is_reserve=False,
+                    category="operating",
+                    section="operating",
+                    account_code=None,
+                ),
+            ]
+        ),
+        hoa_name="Filtered Basis HOA",
+        unit_count=4,
+        approved_assessment_revenue_annual=Decimal("1500"),
+    )
+
+    assert matrix.recipient_grain == "summary"
+    assert matrix.rows[0].annual_assessment_per_recipient == Decimal("375.00")
+    assert matrix.rows[0].total_annual_revenue == Decimal("1500.00")
+
+
+def test_db_builder_accepts_legacy_draft_line_item_shape_when_mappings_exist() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE assessment_setups (
+            id INTEGER PRIMARY KEY,
+            property_id INTEGER,
+            setup_type TEXT,
+            status TEXT,
+            approved_at TEXT
+        );
+        CREATE TABLE dre_extraction_runs (
+            id INTEGER PRIMARY KEY,
+            property_id INTEGER,
+            promoted_setup_id INTEGER,
+            parsed_json TEXT
+        );
+        CREATE TABLE allocation_pools (
+            id INTEGER PRIMARY KEY,
+            assessment_setup_id INTEGER,
+            pool_key TEXT,
+            pool_name TEXT,
+            allocation_method TEXT,
+            recipient_scope TEXT,
+            denominator_value NUMERIC,
+            include_in_pdf INTEGER,
+            display_order INTEGER
+        );
+        CREATE TABLE assessment_groups (
+            id INTEGER PRIMARY KEY,
+            assessment_setup_id INTEGER,
+            group_name TEXT,
+            unit_count INTEGER,
+            average_square_feet NUMERIC,
+            ownership_percent NUMERIC,
+            display_order INTEGER
+        );
+        CREATE TABLE assessment_units (
+            id INTEGER PRIMARY KEY,
+            assessment_setup_id INTEGER,
+            unit_number TEXT,
+            square_feet NUMERIC,
+            ownership_percent NUMERIC,
+            category TEXT,
+            parking_spaces INTEGER
+        );
+        CREATE TABLE budget_line_pool_mappings (
+            budget_line_normalized_label TEXT,
+            section TEXT,
+            category TEXT,
+            fund_type TEXT,
+            account_code TEXT,
+            pool_key TEXT,
+            active INTEGER,
+            property_id INTEGER,
+            assessment_setup_id INTEGER
+        );
+        CREATE TABLE assessment_unit_pool_allocations (
+            assessment_setup_id INTEGER,
+            assessment_unit_id INTEGER,
+            pool_key TEXT,
+            specified_monthly_amount NUMERIC
+        );
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO assessment_setups
+        (id, property_id, setup_type, status, approved_at)
+        VALUES (8, 20, 'grouped', 'approved', '2026-05-26T12:26:22+00:00')
+        """
+    )
+    conn.executemany(
+        """
+        INSERT INTO allocation_pools
+        (id, assessment_setup_id, pool_key, pool_name, allocation_method,
+         recipient_scope, denominator_value, include_in_pdf, display_order)
+        VALUES (?, 8, ?, ?, ?, 'all_units', ?, 1, ?)
+        """,
+        [
+            (1, "equal_costs", "Equal Costs", "equal", 20, 1),
+            (2, "variable_costs", "Variable Costs", "square_footage", 25462, 2),
+        ],
+    )
+    conn.executemany(
+        """
+        INSERT INTO assessment_groups
+        (id, assessment_setup_id, group_name, unit_count, average_square_feet,
+         ownership_percent, display_order)
+        VALUES (?, 8, ?, ?, ?, NULL, ?)
+        """,
+        [
+            (1, "725 sq. ft.", 1, 725, 0),
+            (2, "1293 sq. ft.", 2, 1293, 1),
+            (3, "1325 sq. ft.", 17, 1325, 2),
+        ],
+    )
+    conn.executemany(
+        """
+        INSERT INTO budget_line_pool_mappings
+        (budget_line_normalized_label, section, category, fund_type,
+         account_code, pool_key, active, property_id, assessment_setup_id)
+        VALUES (?, ?, ?, ?, ?, ?, 1, 20, 8)
+        """,
+        [
+            ("management service", "operating", "operating", "operating", "50050", "equal_costs"),
+            ("general insurance", "operating", "operating", "operating", "55000", "variable_costs"),
+        ],
+    )
+
+    matrix = build_matrix_from_approved_assessment_setup(
+        connection=conn,
+        property_id=20,
+        fiscal_year=2026,
+        budget_draft=SimpleNamespace(
+            line_items=[
+                {
+                    "label": "Management Service",
+                    "account_code": 50050,
+                    "category": "operating",
+                    "annual_budget": 14400.0,
+                    "projection": 14400.0,
+                    "raw": {"section": "operating"},
+                },
+                {
+                    "label": "General Insurance",
+                    "account_code": 55000,
+                    "category": "operating",
+                    "annual_budget": 15000.0,
+                    "projection": 23419.33,
+                    "raw": {"section": "operating"},
+                },
+            ]
+        ),
+        hoa_name="396 First Street",
+        unit_count=20,
+        approved_assessment_revenue_annual=Decimal("29400.00"),
+    )
+
+    assert matrix.recipient_grain == "group"
+    assert matrix.preflight_issues == []
+
+
 def test_ryland_grouped_rows_use_per_unit_and_group_budget_semantics() -> None:
     groups = [
         RecipientReference(ref_type="group", ref_id=1, label="Type A", unit_count=10, square_feet=Decimal("1000")),
@@ -929,6 +1190,66 @@ def test_preflight_covers_finalization_blockers() -> None:
     assert "assessment_schedule.budget_line_mappings" in paths
     assert "hoa_settings.special_assessments_json" in paths
     assert "assessment_schedule.unit_count" in paths
+
+
+def test_preflight_reports_mapping_review_blocker_categories() -> None:
+    matrix = build_universal_assessment_matrix(
+        _empty_result(),
+        setup_type="fixed",
+        hoa_name="Old Mill",
+        fiscal_year=2026,
+        evidence_refs=[
+            EvidenceRef(
+                field="recipient_grain",
+                source_type="operator_approval",
+                operator_approval_ref="approval-1",
+                approved_by_operator=True,
+            )
+        ],
+    )
+
+    errors = validate_assessment_matrix_finalization(
+        matrix,
+        mapping_review_blockers={
+            "unresolved_eligible_lines": ["Management"],
+            "conflicts": ["Water"],
+            "exemption_decisions": ["2792.16(c)"],
+            "stale_mappings": ["old insurance"],
+        },
+        reconciliation_failures=["mapped_pool_total_mismatch"],
+    )
+
+    messages = [error.message for error in errors]
+    assert any("unresolved_eligible_lines" in message and "Management" in message for message in messages)
+    assert any("conflicts" in message and "Water" in message for message in messages)
+    assert any("exemption_decisions" in message and "2792.16(c)" in message for message in messages)
+    assert any("stale_mappings" in message and "old insurance" in message for message in messages)
+    assert any("mapped_pool_total_mismatch" in message for message in messages)
+
+
+def test_preflight_does_not_block_when_only_non_eligible_lines_unmapped() -> None:
+    matrix = build_universal_assessment_matrix(
+        _empty_result(),
+        setup_type="fixed",
+        hoa_name="Old Mill",
+        fiscal_year=2026,
+        evidence_refs=[
+            EvidenceRef(
+                field="recipient_grain",
+                source_type="operator_approval",
+                operator_approval_ref="approval-1",
+                approved_by_operator=True,
+            )
+        ],
+    )
+
+    errors = validate_assessment_matrix_finalization(
+        matrix,
+        required_budget_lines_unmapped=False,
+        mapping_review_blockers={},
+    )
+
+    assert all(error.field_path != "assessment_schedule.budget_line_mappings" for error in errors)
 
 
 def test_special_assessment_events_map_outside_regular_matrix_totals() -> None:

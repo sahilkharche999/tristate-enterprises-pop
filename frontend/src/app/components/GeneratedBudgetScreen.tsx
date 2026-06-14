@@ -9,6 +9,7 @@ import type { HOARecord } from '../api/hoa';
 import { toNum, type SheetTable } from '../api/macros';
 import type { LineItem } from '../data/mockData';
 import { calcProposed, formatCurrency, formatTimestamp } from '../lib/budget';
+import { budgetSourceModeLabel, type BudgetSourceMode } from '../lib/budgetSourceMode';
 import { getErrorMessage } from '../lib/errors';
 import { formatFiscalYearRangeLabel } from '../lib/hoa';
 
@@ -65,6 +66,7 @@ interface GeneratedBudgetScreenProps {
   label?: string | null;
   createdAt: string;
   sourceUploadFilename?: string;
+  sourceMode?: BudgetSourceMode | null;
   onRegenerateSnapshot: () => Promise<void> | void;
   onBackToDraft: () => Promise<void> | void;
   budgetPreview?: SheetTable | null;
@@ -90,6 +92,7 @@ export function GeneratedBudgetScreen({
   label,
   createdAt,
   sourceUploadFilename,
+  sourceMode,
   onRegenerateSnapshot,
   onBackToDraft,
   budgetPreview,
@@ -227,6 +230,9 @@ export function GeneratedBudgetScreen({
               {label ? <p className="mt-2 text-sm text-[#525252]">Label: {label}</p> : null}
               {sourceUploadFilename ? (
                 <p className="mt-2 text-sm text-[#525252]">Source upload: {sourceUploadFilename}</p>
+              ) : null}
+              {sourceMode ? (
+                <p className="mt-2 text-sm text-[#525252]">Source mode: {budgetSourceModeLabel(sourceMode)}</p>
               ) : null}
               <p className="mt-2 text-sm text-[#525252]">
                 Reserve inflation: {formatReserveInflation(reserveInflationRate)}

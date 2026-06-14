@@ -31,7 +31,14 @@ from typing import Any, Literal, Optional
 
 from pydantic import BaseModel
 
-from app.dre_extraction.promotion import promote_extraction_to_setup
+from app.dre_extraction.promotion import (
+    parse_extraction_payload,
+    promote_extraction_to_setup,
+)
+from app.services.assessment_budget_mapping_rule_service import (
+    carry_forward_reusable_mapping_rules_across_setups,
+    derive_rules_from_dre_extraction,
+)
 from app.services.budget_line_mapping_service import (
     carry_forward_mappings_across_setups,
 )
@@ -227,6 +234,24 @@ def approve_extraction_run(
             property_id=property_id,
             old_setup_id=prior_setup_id,
             new_setup_id=new_setup_id,
+            connection=connection,
+            commit=False,
+        )
+        carry_forward_reusable_mapping_rules_across_setups(
+            property_id=property_id,
+            old_setup_id=prior_setup_id,
+            new_setup_id=new_setup_id,
+            connection=connection,
+            commit=False,
+        )
+
+    extraction = parse_extraction_payload(parsed_json_text)
+    if extraction is not None:
+        derive_rules_from_dre_extraction(
+            property_id=property_id,
+            assessment_setup_id=new_setup_id,
+            source_dre_extraction_run_id=extraction_run_id,
+            extraction=extraction,
             connection=connection,
             commit=False,
         )

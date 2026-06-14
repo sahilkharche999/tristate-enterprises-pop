@@ -11,6 +11,10 @@ from typing import Iterable
 
 from .config import settings
 from .db.session import engine
+from ..assessment_mode import (
+    ASSESSMENT_MODE_FIXED,
+    ASSESSMENT_MODE_VARIABLE,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,10 +45,13 @@ _PROPERTY_COLUMN_DEFINITIONS: dict[str, str] = {
     # callers prefer this over querying assessment_setups with
     # status='approved' so renames/migrations don't require re-querying.
     "default_assessment_setup_id": "INTEGER",
+    "assessment_mode": "TEXT NOT NULL DEFAULT 'variable'",
 }
 
 _BUDGET_UPLOAD_COLUMN_DEFINITIONS: dict[str, str] = {
     "document_role": "TEXT NOT NULL DEFAULT 'budget_source'",
+    "source_mode": "TEXT NOT NULL DEFAULT 'income_statement'",
+    "assessment_mode": "TEXT NOT NULL DEFAULT 'variable'",
 }
 
 _BUDGET_DRAFT_COLUMN_DEFINITIONS: dict[str, str] = {
@@ -55,11 +62,20 @@ _BUDGET_DRAFT_COLUMN_DEFINITIONS: dict[str, str] = {
     "reserve_study_status": "TEXT DEFAULT 'none'",
     "reserve_inflation_rate": "REAL DEFAULT 0",
     "reserve_inflation_note": "TEXT",
+    "version_int": "INTEGER NOT NULL DEFAULT 0",
+    "source_mode": "TEXT NOT NULL DEFAULT 'income_statement'",
+    "assessment_mode": "TEXT NOT NULL DEFAULT 'variable'",
 }
 
 _BUDGET_VERSION_COLUMN_DEFINITIONS: dict[str, str] = {
     "reserve_inflation_rate": "REAL DEFAULT 0",
     "reserve_inflation_note": "TEXT",
+    "source_mode": "TEXT NOT NULL DEFAULT 'income_statement'",
+    "assessment_mode": "TEXT NOT NULL DEFAULT 'variable'",
+}
+
+_ANNUAL_PACKAGE_COLUMN_DEFINITIONS: dict[str, str] = {
+    "assessment_mode": "TEXT NOT NULL DEFAULT 'variable'",
 }
 
 _HOA_SETTINGS_COLUMN_DEFINITIONS: dict[str, str] = {
@@ -69,6 +85,8 @@ _HOA_SETTINGS_COLUMN_DEFINITIONS: dict[str, str] = {
     "reserve_study_date": "TEXT",
     # Priority-A disclosure inputs (drifting-puzzling-grove).
     "approved_monthly_assessment_per_unit": "REAL",
+    "financial_packet_archetype": "TEXT DEFAULT 'dual-fund'",
+    "reserve_interest_income_override": "REAL",
     "income_tax_provision_override": "REAL",
     "reserve_funding_source": "TEXT DEFAULT 'reserve_study_provision'",
     "reserve_funding_manual_amount": "REAL",
@@ -111,7 +129,181 @@ _HOA_SETTINGS_COLUMN_DEFINITIONS: dict[str, str] = {
 }
 
 
+def _table_exists(raw_conn: sqlite3.Connection, table_name: str) -> bool:
+    return raw_conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table_name,),
+    ).fetchone() is not None
+
+
+def _table_has_column(
+    raw_conn: sqlite3.Connection,
+    table_name: str,
+    column_name: str,
+) -> bool:
+    if not _table_exists(raw_conn, table_name):
+        return False
+    return any(
+        str(row[1]) == column_name
+        for row in raw_conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    )
+
+
+def _legacy_property_assessment_mode(
+    raw_conn: sqlite3.Connection,
+    *,
+    property_id: int,
+) -> str:
+    if _table_exists(raw_conn, "assessment_setups"):
+        has_approved_setup = raw_conn.execute(
+            """
+            SELECT 1
+              FROM assessment_setups
+             WHERE property_id = ?
+               AND status = 'approved'
+             LIMIT 1
+            """,
+            (property_id,),
+        ).fetchone()
+        if has_approved_setup is not None:
+            return ASSESSMENT_MODE_VARIABLE
+    if _table_exists(raw_conn, "hoa_settings"):
+        fixed_hint = raw_conn.execute(
+            """
+            SELECT approved_monthly_assessment_per_unit
+              FROM hoa_settings
+             WHERE property_id = ?
+             LIMIT 1
+            """,
+            (property_id,),
+        ).fetchone()
+        if fixed_hint is not None and fixed_hint[0] not in (None, "", 0, 0.0):
+            return ASSESSMENT_MODE_FIXED
+    if _table_exists(raw_conn, "annual_packages"):
+        fixed_package_hint = raw_conn.execute(
+            """
+            SELECT 1
+              FROM annual_packages
+             WHERE property_id = ?
+               AND approved_assessment_revenue_annual IS NOT NULL
+             LIMIT 1
+            """,
+            (property_id,),
+        ).fetchone()
+        if fixed_package_hint is not None:
+            return ASSESSMENT_MODE_FIXED
+    return ASSESSMENT_MODE_VARIABLE
+
+
+def _backfill_property_assessment_mode(raw_conn: sqlite3.Connection) -> None:
+    _backfill_property_assessment_mode_with_force(raw_conn, force_overwrite=False)
+
+
+def _backfill_property_assessment_mode_with_force(
+    raw_conn: sqlite3.Connection,
+    *,
+    force_overwrite: bool,
+) -> None:
+    if not _table_exists(raw_conn, "properties"):
+        return
+    rows = raw_conn.execute("SELECT id FROM properties").fetchall()
+    for row in rows:
+        property_id = int(row[0])
+        mode = _legacy_property_assessment_mode(raw_conn, property_id=property_id)
+        if force_overwrite:
+            raw_conn.execute(
+                "UPDATE properties SET assessment_mode = ? WHERE id = ?",
+                (mode, property_id),
+            )
+        else:
+            raw_conn.execute(
+                """
+                UPDATE properties
+                   SET assessment_mode = ?
+                 WHERE id = ?
+                   AND (assessment_mode IS NULL OR TRIM(assessment_mode) = '')
+                """,
+                (mode, property_id),
+            )
+    raw_conn.execute(
+        """
+        UPDATE properties
+           SET assessment_mode = ?
+         WHERE assessment_mode IS NULL OR TRIM(assessment_mode) = ''
+        """,
+        (ASSESSMENT_MODE_VARIABLE,),
+    )
+
+
+def _backfill_budget_assessment_mode(
+    raw_conn: sqlite3.Connection,
+    *,
+    table_name: str,
+    id_column: str,
+    force_overwrite: bool = False,
+) -> None:
+    if not _table_exists(raw_conn, table_name):
+        return
+    if not _table_exists(raw_conn, "properties"):
+        raw_conn.execute(
+            f"""
+            UPDATE {table_name}
+               SET assessment_mode = ?
+             WHERE assessment_mode IS NULL OR TRIM(assessment_mode) = ''
+            """,
+            (ASSESSMENT_MODE_VARIABLE,),
+        )
+        return
+    property_has_assessment_mode = _table_has_column(
+        raw_conn,
+        "properties",
+        "assessment_mode",
+    )
+    rows = raw_conn.execute(
+        f"SELECT {id_column}, property_id FROM {table_name}"
+    ).fetchall()
+    for row_id, property_id in rows:
+        property_mode_row = (
+            raw_conn.execute(
+                "SELECT assessment_mode FROM properties WHERE id = ?",
+                (property_id,),
+            ).fetchone()
+            if property_has_assessment_mode
+            else None
+        )
+        mode = (
+            str(property_mode_row[0]).strip().lower()
+            if property_mode_row and property_mode_row[0]
+            else _legacy_property_assessment_mode(raw_conn, property_id=int(property_id))
+        )
+        if force_overwrite:
+            raw_conn.execute(
+                f"UPDATE {table_name} SET assessment_mode = ? WHERE {id_column} = ?",
+                (mode, row_id),
+            )
+        else:
+            raw_conn.execute(
+                f"""
+                UPDATE {table_name}
+                   SET assessment_mode = ?
+                 WHERE {id_column} = ?
+                   AND (assessment_mode IS NULL OR TRIM(assessment_mode) = '')
+                """,
+                (mode, row_id),
+            )
+    raw_conn.execute(
+        f"""
+        UPDATE {table_name}
+           SET assessment_mode = ?
+         WHERE assessment_mode IS NULL OR TRIM(assessment_mode) = ''
+        """,
+        (ASSESSMENT_MODE_VARIABLE,),
+    )
+
+
 def _iter_missing_property_columns(raw_conn: sqlite3.Connection) -> Iterable[tuple[str, str]]:
+    if not _table_exists(raw_conn, "properties"):
+        return
     existing_columns = {
         row[1]
         for row in raw_conn.execute("PRAGMA table_info(properties)").fetchall()
@@ -126,6 +318,9 @@ def ensure_property_columns() -> None:
     raw_conn = engine.raw_connection()
     try:
         missing_columns = list(_iter_missing_property_columns(raw_conn))
+        force_assessment_mode_backfill = any(
+            column_name == "assessment_mode" for column_name, _ in missing_columns
+        )
         for column_name, column_sql in missing_columns:
             logger.info("Adding missing properties.%s column", column_name)
             raw_conn.execute(f"ALTER TABLE properties ADD COLUMN {column_name} {column_sql}")
@@ -141,6 +336,11 @@ def ensure_property_columns() -> None:
                    workflow_status = COALESCE(NULLIF(TRIM(workflow_status), ''), 'Not Started')
             """
         )
+        if _table_exists(raw_conn, "properties"):
+            _backfill_property_assessment_mode_with_force(
+                raw_conn,
+                force_overwrite=force_assessment_mode_backfill,
+            )
         raw_conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_properties_hoa_code ON properties(hoa_code)")
         raw_conn.commit()
     finally:
@@ -148,6 +348,8 @@ def ensure_property_columns() -> None:
 
 
 def _iter_missing_budget_draft_columns(raw_conn: sqlite3.Connection) -> Iterable[tuple[str, str]]:
+    if not _table_exists(raw_conn, "budget_drafts"):
+        return
     existing_columns = {
         row[1]
         for row in raw_conn.execute("PRAGMA table_info(budget_drafts)").fetchall()
@@ -158,6 +360,8 @@ def _iter_missing_budget_draft_columns(raw_conn: sqlite3.Connection) -> Iterable
 
 
 def _iter_missing_budget_upload_columns(raw_conn: sqlite3.Connection) -> Iterable[tuple[str, str]]:
+    if not _table_exists(raw_conn, "budget_uploads"):
+        return
     existing_columns = {
         row[1]
         for row in raw_conn.execute("PRAGMA table_info(budget_uploads)").fetchall()
@@ -172,9 +376,26 @@ def ensure_budget_upload_columns() -> None:
     raw_conn = engine.raw_connection()
     try:
         missing_columns = list(_iter_missing_budget_upload_columns(raw_conn))
+        force_assessment_mode_backfill = any(
+            column_name == "assessment_mode" for column_name, _ in missing_columns
+        )
         for column_name, column_sql in missing_columns:
             logger.info("Adding missing budget_uploads.%s column", column_name)
             raw_conn.execute(f"ALTER TABLE budget_uploads ADD COLUMN {column_name} {column_sql}")
+        if _table_exists(raw_conn, "budget_uploads"):
+            raw_conn.execute(
+                """
+                UPDATE budget_uploads
+                   SET source_mode = 'income_statement'
+                 WHERE source_mode IS NULL OR TRIM(source_mode) = ''
+                """
+            )
+            _backfill_budget_assessment_mode(
+                raw_conn,
+                table_name="budget_uploads",
+                id_column="id",
+                force_overwrite=force_assessment_mode_backfill,
+            )
         raw_conn.commit()
     finally:
         raw_conn.close()
@@ -185,15 +406,34 @@ def ensure_budget_draft_columns() -> None:
     raw_conn = engine.raw_connection()
     try:
         missing_columns = list(_iter_missing_budget_draft_columns(raw_conn))
+        force_assessment_mode_backfill = any(
+            column_name == "assessment_mode" for column_name, _ in missing_columns
+        )
         for column_name, column_sql in missing_columns:
             logger.info("Adding missing budget_drafts.%s column", column_name)
             raw_conn.execute(f"ALTER TABLE budget_drafts ADD COLUMN {column_name} {column_sql}")
+        if _table_exists(raw_conn, "budget_drafts"):
+            raw_conn.execute(
+                """
+                UPDATE budget_drafts
+                   SET source_mode = 'income_statement'
+                 WHERE source_mode IS NULL OR TRIM(source_mode) = ''
+                """
+            )
+            _backfill_budget_assessment_mode(
+                raw_conn,
+                table_name="budget_drafts",
+                id_column="id",
+                force_overwrite=force_assessment_mode_backfill,
+            )
         raw_conn.commit()
     finally:
         raw_conn.close()
 
 
 def _iter_missing_budget_version_columns(raw_conn: sqlite3.Connection) -> Iterable[tuple[str, str]]:
+    if not _table_exists(raw_conn, "budget_versions"):
+        return
     existing_columns = {
         row[1]
         for row in raw_conn.execute("PRAGMA table_info(budget_versions)").fetchall()
@@ -208,15 +448,68 @@ def ensure_budget_version_columns() -> None:
     raw_conn = engine.raw_connection()
     try:
         missing_columns = list(_iter_missing_budget_version_columns(raw_conn))
+        force_assessment_mode_backfill = any(
+            column_name == "assessment_mode" for column_name, _ in missing_columns
+        )
         for column_name, column_sql in missing_columns:
             logger.info("Adding missing budget_versions.%s column", column_name)
             raw_conn.execute(f"ALTER TABLE budget_versions ADD COLUMN {column_name} {column_sql}")
+        if _table_exists(raw_conn, "budget_versions"):
+            raw_conn.execute(
+                """
+                UPDATE budget_versions
+                   SET source_mode = 'income_statement'
+                 WHERE source_mode IS NULL OR TRIM(source_mode) = ''
+                """
+            )
+            _backfill_budget_assessment_mode(
+                raw_conn,
+                table_name="budget_versions",
+                id_column="id",
+                force_overwrite=force_assessment_mode_backfill,
+            )
+        raw_conn.commit()
+    finally:
+        raw_conn.close()
+
+
+def _iter_missing_annual_package_columns(raw_conn: sqlite3.Connection) -> Iterable[tuple[str, str]]:
+    if not _table_exists(raw_conn, "annual_packages"):
+        return
+    existing_columns = {
+        row[1]
+        for row in raw_conn.execute("PRAGMA table_info(annual_packages)").fetchall()
+    }
+    for column_name, column_sql in _ANNUAL_PACKAGE_COLUMN_DEFINITIONS.items():
+        if column_name not in existing_columns:
+            yield column_name, column_sql
+
+
+def ensure_annual_package_columns() -> None:
+    raw_conn = engine.raw_connection()
+    try:
+        missing_columns = list(_iter_missing_annual_package_columns(raw_conn))
+        force_assessment_mode_backfill = any(
+            column_name == "assessment_mode" for column_name, _ in missing_columns
+        )
+        for column_name, column_sql in missing_columns:
+            logger.info("Adding missing annual_packages.%s column", column_name)
+            raw_conn.execute(f"ALTER TABLE annual_packages ADD COLUMN {column_name} {column_sql}")
+        if _table_exists(raw_conn, "annual_packages"):
+            _backfill_budget_assessment_mode(
+                raw_conn,
+                table_name="annual_packages",
+                id_column="id",
+                force_overwrite=force_assessment_mode_backfill,
+            )
         raw_conn.commit()
     finally:
         raw_conn.close()
 
 
 def _iter_missing_hoa_settings_columns(raw_conn: sqlite3.Connection) -> Iterable[tuple[str, str]]:
+    if not _table_exists(raw_conn, "hoa_settings"):
+        return
     existing_columns = {
         row[1]
         for row in raw_conn.execute("PRAGMA table_info(hoa_settings)").fetchall()
@@ -246,6 +539,10 @@ def ensure_hoa_settings_columns() -> None:
 # from hoa_settings to per-pool storage so AssessmentSetup is the source of
 # truth for the cash-flow forecast.
 _ALLOCATION_POOL_COLUMN_DEFINITIONS: dict[str, str] = {
+    "budget_line_derivation": "TEXT NOT NULL DEFAULT 'unknown'",
+    "residual_after_pool_keys_json": "TEXT NOT NULL DEFAULT '[]'",
+    "residual_exclusions_json": "TEXT NOT NULL DEFAULT '[]'",
+    "derivation_evidence_json": "TEXT",
     "escalation_schedule_json": "TEXT DEFAULT '[]'",
     "starting_monthly_per_unit": "REAL",
 }
@@ -264,6 +561,8 @@ def _iter_missing_allocation_pool_columns(
 
 
 _DRE_EXTRACTION_RUNS_COLUMN_DEFINITIONS: dict[str, str] = {
+    "job_status": "TEXT NOT NULL DEFAULT 'completed'",
+    "error_message": "TEXT NOT NULL DEFAULT ''",
     # Added by dre-extraction-structured-output: pairs with prompt_sha256
     # so audit can detect wire-schema drift independently of prompt drift.
     "wire_schema_sha256": "TEXT NOT NULL DEFAULT ''",
@@ -276,10 +575,216 @@ _DRE_EXTRACTION_RUNS_COLUMN_DEFINITIONS: dict[str, str] = {
     "output_tokens_used": "INTEGER NOT NULL DEFAULT 0",
 }
 
+_ASSESSMENT_BUDGET_MAPPING_RULE_COLUMN_DEFINITIONS: dict[str, str] = {
+    "source_parent_category": "TEXT",
+    "assessment_type": "TEXT NOT NULL DEFAULT 'unknown_needs_review'",
+    "review_required": "INTEGER NOT NULL DEFAULT 0",
+    "review_reason": "TEXT NOT NULL DEFAULT ''",
+    "source_evidence_text": "TEXT NOT NULL DEFAULT ''",
+}
+
+_BUDGET_LINE_POOL_MAPPING_COLUMN_DEFINITIONS: dict[str, str] = {
+    "source_rule_id": "INTEGER",
+    "mapping_source": "TEXT NOT NULL DEFAULT 'operator'",
+    "match_method": "TEXT",
+    "approval_status": "TEXT NOT NULL DEFAULT 'approved'",
+    "review_state": "TEXT NOT NULL DEFAULT 'ready'",
+    "budget_line_amount": "NUMERIC",
+    "approved_by": "TEXT",
+    "approved_at": "TEXT",
+    "active": "INTEGER NOT NULL DEFAULT 1",
+}
+
+
+def _iter_missing_budget_line_pool_mapping_columns(
+    raw_conn: sqlite3.Connection,
+) -> Iterable[tuple[str, str]]:
+    existing_columns = {
+        row[1]
+        for row in raw_conn.execute("PRAGMA table_info(budget_line_pool_mappings)").fetchall()
+    }
+    for column_name, column_sql in _BUDGET_LINE_POOL_MAPPING_COLUMN_DEFINITIONS.items():
+        if column_name not in existing_columns:
+            yield column_name, column_sql
+
+
+def ensure_budget_line_pool_mapping_columns() -> None:
+    """Brownfield migration path for generated mapping provenance columns."""
+    raw_conn = engine.raw_connection()
+    try:
+        missing_columns = list(_iter_missing_budget_line_pool_mapping_columns(raw_conn))
+        for column_name, column_sql in missing_columns:
+            logger.info("Adding missing budget_line_pool_mappings.%s column", column_name)
+            raw_conn.execute(
+                f"ALTER TABLE budget_line_pool_mappings ADD COLUMN {column_name} {column_sql}"
+            )
+        raw_conn.commit()
+    finally:
+        raw_conn.close()
+
+
+_BUDGET_LINE_MERGE_COLUMN_DEFINITIONS: dict[str, str] = {
+    "tenant_id": "INTEGER NOT NULL DEFAULT 1",
+    "property_id": "INTEGER",
+    "primary_account_code": "TEXT",
+    "primary_label": "TEXT",
+    "primary_normalized_label": "TEXT",
+    "secondary_account_code": "TEXT",
+    "secondary_label": "TEXT",
+    "secondary_normalized_label": "TEXT",
+    "status": "TEXT NOT NULL DEFAULT 'active'",
+    "decision_source": "TEXT NOT NULL DEFAULT 'manual'",
+    "actor": "TEXT NOT NULL DEFAULT 'system'",
+    "created_at": "TEXT NOT NULL DEFAULT (datetime('now'))",
+    "disabled_at": "TEXT",
+    "updated_at": "TEXT NOT NULL DEFAULT (datetime('now'))",
+}
+
+_BUDGET_LINE_MERGE_APPLICATION_COLUMN_DEFINITIONS: dict[str, str] = {
+    "tenant_id": "INTEGER NOT NULL DEFAULT 1",
+    "merge_id": "INTEGER",
+    "property_id": "INTEGER",
+    "budget_draft_id": "INTEGER",
+    "assessment_setup_id": "INTEGER",
+    "source": "TEXT NOT NULL DEFAULT 'manual'",
+    "status": "TEXT NOT NULL DEFAULT 'applied'",
+    "match_strategy": "TEXT",
+    "before_snapshot_json": "TEXT NOT NULL DEFAULT '{}'",
+    "after_snapshot_json": "TEXT NOT NULL DEFAULT '{}'",
+    "side_effect_snapshot_json": "TEXT NOT NULL DEFAULT '{}'",
+    "actor": "TEXT NOT NULL DEFAULT 'system'",
+    "created_at": "TEXT NOT NULL DEFAULT (datetime('now'))",
+    "unmerged_at": "TEXT",
+    "finalized_at": "TEXT",
+}
+
+
+def _iter_missing_columns(
+    raw_conn: sqlite3.Connection,
+    table_name: str,
+    column_definitions: dict[str, str],
+) -> Iterable[tuple[str, str]]:
+    existing_columns = {
+        row[1]
+        for row in raw_conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    }
+    for column_name, column_sql in column_definitions.items():
+        if column_name not in existing_columns:
+            yield column_name, column_sql
+
+
+def ensure_budget_line_merges_columns() -> None:
+    """Create or repair the durable GL merge-rule table."""
+    raw_conn = engine.raw_connection()
+    try:
+        raw_conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS budget_line_merges (
+                id                         INTEGER PRIMARY KEY AUTOINCREMENT,
+                tenant_id                  INTEGER NOT NULL DEFAULT 1,
+                property_id                INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+                primary_account_code       TEXT,
+                primary_label              TEXT NOT NULL,
+                primary_normalized_label   TEXT NOT NULL,
+                secondary_account_code     TEXT,
+                secondary_label            TEXT NOT NULL,
+                secondary_normalized_label TEXT NOT NULL,
+                status                     TEXT NOT NULL DEFAULT 'active'
+                                           CHECK(status IN ('active', 'disabled')),
+                decision_source            TEXT NOT NULL
+                                           CHECK(decision_source IN ('manual', 'gemini_suggestion', 'system')),
+                actor                      TEXT NOT NULL,
+                created_at                 TEXT NOT NULL DEFAULT (datetime('now')),
+                disabled_at                TEXT,
+                updated_at                 TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_budget_line_merges_active_rule
+                ON budget_line_merges(
+                    tenant_id, property_id,
+                    COALESCE(primary_account_code, ''), primary_normalized_label,
+                    COALESCE(secondary_account_code, ''), secondary_normalized_label
+                )
+                WHERE status = 'active';
+
+            CREATE INDEX IF NOT EXISTS idx_budget_line_merges_property_status
+                ON budget_line_merges(tenant_id, property_id, status);
+            """
+        )
+        for column_name, column_sql in _iter_missing_columns(
+            raw_conn,
+            "budget_line_merges",
+            _BUDGET_LINE_MERGE_COLUMN_DEFINITIONS,
+        ):
+            logger.info("Adding missing budget_line_merges.%s column", column_name)
+            raw_conn.execute(
+                f"ALTER TABLE budget_line_merges ADD COLUMN {column_name} {column_sql}"
+            )
+        raw_conn.commit()
+    finally:
+        raw_conn.close()
+
+
+def ensure_budget_line_merge_applications_columns() -> None:
+    """Create or repair per-draft GL merge application storage."""
+    raw_conn = engine.raw_connection()
+    try:
+        raw_conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS budget_line_merge_applications (
+                id                         INTEGER PRIMARY KEY AUTOINCREMENT,
+                tenant_id                  INTEGER NOT NULL DEFAULT 1,
+                merge_id                   INTEGER NOT NULL REFERENCES budget_line_merges(id) ON DELETE CASCADE,
+                property_id                INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+                budget_draft_id            INTEGER NOT NULL REFERENCES budget_drafts(id) ON DELETE CASCADE,
+                assessment_setup_id        INTEGER REFERENCES assessment_setups(id) ON DELETE SET NULL,
+                source                     TEXT NOT NULL
+                                           CHECK(source IN ('manual', 'gemini_suggestion', 'auto_applied')),
+                status                     TEXT NOT NULL DEFAULT 'applied'
+                                           CHECK(status IN ('applied', 'unmerged', 'finalized')),
+                match_strategy             TEXT,
+                before_snapshot_json       TEXT NOT NULL,
+                after_snapshot_json        TEXT NOT NULL,
+                side_effect_snapshot_json  TEXT NOT NULL,
+                actor                      TEXT NOT NULL,
+                created_at                 TEXT NOT NULL DEFAULT (datetime('now')),
+                unmerged_at                TEXT,
+                finalized_at               TEXT
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_budget_line_merge_applications_applied
+                ON budget_line_merge_applications(tenant_id, budget_draft_id, merge_id)
+                WHERE status = 'applied';
+
+            CREATE INDEX IF NOT EXISTS idx_budget_line_merge_applications_property_status
+                ON budget_line_merge_applications(tenant_id, property_id, status);
+
+            CREATE INDEX IF NOT EXISTS idx_budget_line_merge_applications_draft_status
+                ON budget_line_merge_applications(tenant_id, budget_draft_id, status);
+            """
+        )
+        for column_name, column_sql in _iter_missing_columns(
+            raw_conn,
+            "budget_line_merge_applications",
+            _BUDGET_LINE_MERGE_APPLICATION_COLUMN_DEFINITIONS,
+        ):
+            logger.info(
+                "Adding missing budget_line_merge_applications.%s column",
+                column_name,
+            )
+            raw_conn.execute(
+                f"ALTER TABLE budget_line_merge_applications ADD COLUMN {column_name} {column_sql}"
+            )
+        raw_conn.commit()
+    finally:
+        raw_conn.close()
+
 
 def _iter_missing_dre_extraction_runs_columns(
     raw_conn: sqlite3.Connection,
 ) -> Iterable[tuple[str, str]]:
+    if not _table_exists(raw_conn, "dre_extraction_runs"):
+        return
     existing_columns = {
         row[1]
         for row in raw_conn.execute("PRAGMA table_info(dre_extraction_runs)").fetchall()
@@ -300,6 +805,42 @@ def ensure_dre_extraction_runs_columns() -> None:
             )
             raw_conn.execute(
                 f"ALTER TABLE dre_extraction_runs ADD COLUMN {column_name} {column_sql}"
+            )
+        raw_conn.commit()
+    finally:
+        raw_conn.close()
+
+
+def _iter_missing_assessment_budget_mapping_rule_columns(
+    raw_conn: sqlite3.Connection,
+) -> Iterable[tuple[str, str]]:
+    existing_columns = {
+        row[1]
+        for row in raw_conn.execute(
+            "PRAGMA table_info(assessment_budget_mapping_rules)"
+        ).fetchall()
+    }
+    for column_name, column_sql in (
+        _ASSESSMENT_BUDGET_MAPPING_RULE_COLUMN_DEFINITIONS.items()
+    ):
+        if column_name not in existing_columns:
+            yield column_name, column_sql
+
+
+def ensure_assessment_budget_mapping_rule_columns() -> None:
+    """Brownfield migration path for DRE mapping evidence rule columns."""
+    raw_conn = engine.raw_connection()
+    try:
+        missing_columns = list(
+            _iter_missing_assessment_budget_mapping_rule_columns(raw_conn)
+        )
+        for column_name, column_sql in missing_columns:
+            logger.info(
+                "Adding missing assessment_budget_mapping_rules.%s column",
+                column_name,
+            )
+            raw_conn.execute(
+                f"ALTER TABLE assessment_budget_mapping_rules ADD COLUMN {column_name} {column_sql}"
             )
         raw_conn.commit()
     finally:
@@ -486,6 +1027,10 @@ def _seed_old_mill_assessment_setup() -> None:
 def init_db() -> None:
     """Execute schema.sql to create tables. Safe to call on existing DB."""
     logger.info("Initializing database from schema.sql...")
+    ensure_budget_upload_columns()
+    ensure_budget_draft_columns()
+    ensure_budget_version_columns()
+    ensure_dre_extraction_runs_columns()
     raw_conn = engine.raw_connection()
     try:
         raw_conn.executescript(_SCHEMA_PATH.read_text())
@@ -494,12 +1039,13 @@ def init_db() -> None:
     finally:
         raw_conn.close()
     ensure_property_columns()
-    ensure_budget_upload_columns()
-    ensure_budget_draft_columns()
-    ensure_budget_version_columns()
     ensure_hoa_settings_columns()
+    ensure_annual_package_columns()
     ensure_allocation_pool_columns()
-    ensure_dre_extraction_runs_columns()
+    ensure_assessment_budget_mapping_rule_columns()
+    ensure_budget_line_pool_mapping_columns()
+    ensure_budget_line_merges_columns()
+    ensure_budget_line_merge_applications_columns()
     _seed_tri_state_disclosure_defaults()
     _seed_old_mill_assessment_setup()
 

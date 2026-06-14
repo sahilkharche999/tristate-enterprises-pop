@@ -16,6 +16,11 @@ from typing import Any, Literal, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.assessment_mode import (
+    ASSESSMENT_MODE_FIXED,
+    AssessmentMode,
+    normalize_assessment_mode,
+)
 from app.assessment_engine import (
     BudgetLineInput,
     CalcInput,
@@ -28,6 +33,13 @@ from app.assessment_engine import (
 from app.assessment_engine.engine import run as run_assessment_engine
 from app.assessment_engine.errors import NeedsHumanReview
 from app.assessment_engine.schemas import BudgetLineMappingInput
+from app.services.assessment_budget_mapping_rule_service import (
+    build_assessment_mapping_review_blockers,
+    build_assessment_mapping_review_rows,
+    build_assessment_mapping_review_summary,
+    normalize_budget_label,
+    select_assessment_mapping_amount,
+)
 
 from .schemas import PreflightError
 
@@ -960,6 +972,8 @@ def validate_assessment_matrix_finalization(
     *,
     dre_setup_approved: bool = True,
     required_budget_lines_unmapped: bool = False,
+    mapping_review_blockers: dict[str, list[str]] | None = None,
+    reconciliation_failures: list[str] | None = None,
     special_assessment_settings_complete: bool = True,
     unit_count_mismatch_unresolved: bool = False,
 ) -> list[PreflightError]:
@@ -993,6 +1007,23 @@ def validate_assessment_matrix_finalization(
             message="Required budget lines are not mapped to assessment pools.",
             severity="blocking",
         ))
+    for category, details in (mapping_review_blockers or {}).items():
+        if not details:
+            continue
+        errors.append(PreflightError(
+            field_path=f"assessment_schedule.mapping_review.{category}",
+            message=(
+                f"Assessment mapping review blocker: {category}: "
+                f"{', '.join(str(detail) for detail in details)}"
+            ),
+            severity="blocking",
+        ))
+    for failure in reconciliation_failures or []:
+        errors.append(PreflightError(
+            field_path="assessment_schedule.reconciliation",
+            message=f"Assessment mapping reconciliation failed: {failure}",
+            severity="blocking",
+        ))
     if not special_assessment_settings_complete:
         errors.append(PreflightError(
             field_path="hoa_settings.special_assessments_json",
@@ -1018,6 +1049,7 @@ def validate_assessment_matrix_finalization(
 
 
 def _line_to_engine_input(line_id: int, line: Any) -> BudgetLineInput:
+    label = str(_get(line, "label"))
     raw_category = str(_get(line, "category", "") or "").strip()
     is_revenue = bool(_get(line, "is_revenue", False))
     is_reserve = bool(_get(line, "is_reserve", False))
@@ -1027,14 +1059,33 @@ def _line_to_engine_input(line_id: int, line: Any) -> BudgetLineInput:
         category = "reserve_income" if is_reserve else "income"
     else:
         category = "reserve_expense" if is_reserve else "operating"
+    amount, _source_column_used = select_assessment_mapping_amount(
+        {
+            "assessment_mapping_amount": _get(line, "assessment_mapping_amount"),
+            "source_column_used": _get(line, "source_column_used"),
+            "proposed_amount": _get(line, "proposed_amount"),
+            "proposedAmount": _get(line, "proposedAmount"),
+            "annual_budget": _get(line, "annual_budget"),
+            "projection": _get(line, "projection"),
+            "amount": _get(line, "amount"),
+        }
+    )
+    raw = _get(line, "raw", {}) or {}
+    section = (
+        _get(line, "section")
+        or (raw.get("section") if isinstance(raw, dict) else None)
+        or (raw.get("Section") if isinstance(raw, dict) else None)
+        or ("income" if category == "income" else "operating")
+    )
+    account_code = _get(line, "account_code")
     return BudgetLineInput(
         line_id=line_id,
-        normalized_label=str(_get(line, "label")),
-        section=str(_get(line, "section") or ("income" if category == "income" else "operating")),
+        normalized_label=normalize_budget_label(label),
+        section=str(section),
         category=category,  # type: ignore[arg-type]
         fund_type="reserve" if is_reserve else "operating",
-        account_code=_get(line, "account_code"),
-        amount=_money(_get(line, "amount")),
+        account_code=str(account_code) if account_code not in (None, "") else None,
+        amount=amount if amount is not None else _zero(),
     )
 
 
@@ -1064,6 +1115,194 @@ def _fallback_matrix_for_db_issue(
         internal_review_notes=[ReviewNote(message=reason, severity="blocking")],
         evidence_refs=evidence_refs,
         source_pages_visible=False,
+    )
+
+
+def _blocking_matrix_for_issue(
+    *,
+    hoa_name: str,
+    fiscal_year: int,
+    field_path: str,
+    reason: str,
+) -> AssessmentScheduleMatrix:
+    matrix = _fallback_matrix_for_db_issue(
+        hoa_name=hoa_name,
+        fiscal_year=fiscal_year,
+        reason=reason,
+    )
+    matrix.preflight_issues = [
+        PreflightError(
+            field_path=field_path,
+            message=reason,
+            severity="blocking",
+        )
+    ]
+    matrix.rows = [ManualReviewAssessmentRow(missing_basis_reason=reason)]
+    return matrix
+
+
+def _variable_mode_missing_setup_reason(
+    *,
+    connection: sqlite3.Connection,
+    property_id: int,
+) -> str:
+    has_dre_upload = connection.execute(
+        """
+        SELECT 1
+          FROM dre_documents
+         WHERE property_id = ?
+           AND status IN ('active', 'superseded')
+         LIMIT 1
+        """,
+        (property_id,),
+    ).fetchone()
+    if has_dre_upload is None:
+        return (
+            "No approved DRE assessment setup was found for this HOA. "
+            "Upload the DRE packet before final rendering."
+        )
+    return (
+        "A DRE packet exists, but no approved DRE assessment setup was found for this HOA. "
+        "Complete DRE review and approval before final rendering."
+    )
+
+
+def _build_matrix_for_fixed_mode(
+    *,
+    fiscal_year: int,
+    hoa_name: str,
+    unit_count: int,
+    approved_assessment_revenue_annual: Decimal,
+) -> AssessmentScheduleMatrix:
+    if int(unit_count or 0) <= 0:
+        return _blocking_matrix_for_issue(
+            hoa_name=hoa_name,
+            fiscal_year=fiscal_year,
+            field_path="hoa_metadata.units",
+            reason="Fixed assessment mode requires a valid HOA unit count before final rendering.",
+        )
+    if approved_assessment_revenue_annual <= Decimal("0"):
+        return _blocking_matrix_for_issue(
+            hoa_name=hoa_name,
+            fiscal_year=fiscal_year,
+            field_path="annual_package.approved_assessment_revenue_annual",
+            reason="Fixed assessment mode requires approved annual assessment revenue before final rendering.",
+        )
+
+    recipients = [
+        RecipientReference(ref_type="unit", ref_id=i, label=f"Unit {i}")
+        for i in range(1, int(unit_count) + 1)
+    ]
+    pools = [
+        PoolDefinition(
+            pool_id=0,
+            pool_key="equal_costs",
+            pool_name="Equal Costs",
+            allocation_method="equal",
+            recipient_scope="all_units",
+            include_in_pdf=True,
+            display_order=1,
+        )
+    ]
+    budget_lines = [
+        BudgetLineInput(
+            line_id=1,
+            normalized_label=normalize_budget_label("Assessment Income"),
+            section="income",
+            category="income",
+            fund_type="operating",
+            account_code="40000",
+            amount=approved_assessment_revenue_annual,
+        )
+    ]
+    mappings = [
+        BudgetLineMappingInput(
+            budget_line_normalized_label=normalize_budget_label("Assessment Income"),
+            section="income",
+            category="income",
+            fund_type="operating",
+            account_code="40000",
+            pool_key="equal_costs",
+            active=True,
+        )
+    ]
+    result = run_assessment_engine(
+        CalcInput(
+            setup_type="fixed",
+            pools=pools,
+            recipient_set=RecipientSet(recipients=recipients),
+            budget_lines=budget_lines,
+            mappings=mappings,
+            approved_assessment_revenue_annual=approved_assessment_revenue_annual,
+        )
+    )
+    return build_universal_assessment_matrix(
+        result,
+        setup_type="fixed",
+        hoa_name=hoa_name,
+        fiscal_year=fiscal_year,
+        pool_definitions=pools,
+        evidence_refs=[
+            EvidenceRef(
+                field="recipient_grain",
+                source_type="operator_approval",
+                operator_approval_ref="assessment_mode=fixed",
+                approved_by_operator=True,
+            ),
+        ],
+        homeowner_visible_notes=[
+            "All units are charged the same regular assessment amount in this HOA.",
+        ],
+    )
+
+
+def build_matrix_for_assessment_mode(
+    *,
+    connection: sqlite3.Connection,
+    property_id: int,
+    fiscal_year: int,
+    budget_draft: Any,
+    hoa_name: str,
+    unit_count: int,
+    approved_assessment_revenue_annual: Decimal,
+    assessment_mode: AssessmentMode,
+) -> AssessmentScheduleMatrix:
+    if normalize_assessment_mode(assessment_mode) == ASSESSMENT_MODE_FIXED:
+        return _build_matrix_for_fixed_mode(
+            fiscal_year=fiscal_year,
+            hoa_name=hoa_name,
+            unit_count=unit_count,
+            approved_assessment_revenue_annual=approved_assessment_revenue_annual,
+        )
+
+    setup_row = connection.execute(
+        """
+        SELECT id
+          FROM assessment_setups
+         WHERE property_id = ? AND status = 'approved'
+         ORDER BY id DESC LIMIT 1
+        """,
+        (property_id,),
+    ).fetchone()
+    if setup_row is None:
+        return _blocking_matrix_for_issue(
+            hoa_name=hoa_name,
+            fiscal_year=fiscal_year,
+            field_path="assessment_setup.status",
+            reason=_variable_mode_missing_setup_reason(
+                connection=connection,
+                property_id=property_id,
+            ),
+        )
+
+    return build_matrix_from_approved_assessment_setup(
+        connection=connection,
+        property_id=property_id,
+        fiscal_year=fiscal_year,
+        budget_draft=budget_draft,
+        hoa_name=hoa_name,
+        unit_count=unit_count,
+        approved_assessment_revenue_annual=approved_assessment_revenue_annual,
     )
 
 
@@ -1238,6 +1477,64 @@ def _generated_revenue_split_by_dre_pool_proportions(
     return budget_lines, mappings
 
 
+def _assessment_mapping_category(raw_category: object) -> str:
+    category = str(raw_category or "").lower()
+    if category == "income":
+        return "income"
+    if category == "reserve_income":
+        return "reserve_income"
+    if category in {"reserve", "reserve_expense"}:
+        return "reserve_expense"
+    return "operating"
+
+
+def _assessment_mapping_fund_type(category: str) -> str:
+    return "reserve" if category in {"reserve_income", "reserve_expense"} else "operating"
+
+
+def _line_item_to_review_budget_line(item: Any) -> dict[str, Any]:
+    label = str(_get(item, "label", "") or "")
+    category = _assessment_mapping_category(_get(item, "category", None))
+    account_code = _get(item, "account_code", None)
+    amount, source_column_used = select_assessment_mapping_amount(
+        {
+            "assessment_mapping_amount": _get(item, "assessment_mapping_amount"),
+            "source_column_used": _get(item, "source_column_used"),
+            "proposed_amount": _get(item, "proposed_amount"),
+            "proposedAmount": _get(item, "proposedAmount"),
+            "annual_budget": _get(item, "annual_budget"),
+            "projection": _get(item, "projection"),
+            "amount": _get(item, "amount"),
+        }
+    )
+    raw = _get(item, "raw", {}) or {}
+    return {
+        "label": label,
+        "normalized_label": normalize_budget_label(label),
+        "section": str(
+            _get(item, "section", None)
+            or (raw.get("section") if isinstance(raw, dict) else None)
+            or (raw.get("Section") if isinstance(raw, dict) else None)
+            or category
+        ),
+        "category": category,
+        "fund_type": _assessment_mapping_fund_type(category),
+        "account_code": str(account_code) if account_code not in (None, "") else None,
+        "amount": float(amount) if amount is not None else None,
+        "annual_budget": _get(item, "annual_budget", None),
+        "proposed_amount": (
+            _get(item, "proposed_amount", None)
+            if _get(item, "proposed_amount", None) is not None
+            else _get(item, "proposedAmount", None)
+        ),
+        "projection": _get(item, "projection", None),
+        "assessment_mapping_amount": float(amount) if amount is not None else None,
+        "source_column_used": source_column_used,
+        "reserve_group": _get(item, "reserve_group", None) or _get(item, "reserveGroup", None),
+        "active": not bool(_get(item, "inactive", False)),
+    }
+
+
 def build_matrix_from_approved_assessment_setup(
     *,
     connection: sqlite3.Connection,
@@ -1254,6 +1551,9 @@ def build_matrix_from_approved_assessment_setup(
     matrix instead of raising for missing setup/mapping data so the generated
     package makes the missing assessment basis visible during preview.
     """
+    import logging as _logging
+    _log = _logging.getLogger(__name__)
+    _log.warning("DEBUG build_matrix: property_id=%s fiscal_year=%s revenue=%s", property_id, fiscal_year, approved_assessment_revenue_annual)
     setup = connection.execute(
         """
         SELECT id, setup_type, approved_at
@@ -1264,6 +1564,7 @@ def build_matrix_from_approved_assessment_setup(
         (property_id,),
     ).fetchone()
     if setup is None:
+        _log.warning("DEBUG build_matrix: FALLBACK no approved setup")
         return _fallback_matrix_for_db_issue(
             hoa_name=hoa_name,
             fiscal_year=fiscal_year,
@@ -1384,6 +1685,35 @@ def build_matrix_from_approved_assessment_setup(
         """,
         (property_id, setup_id),
     ).fetchall()
+    review_budget_lines = [
+        _line_item_to_review_budget_line(line)
+        for line in (_get(budget_draft, "line_items", []) or [])
+    ]
+    review_rows = build_assessment_mapping_review_rows(
+        property_id=property_id,
+        assessment_setup_id=setup_id,
+        budget_lines=review_budget_lines,
+        budget_year=fiscal_year,
+        connection=connection,
+    )
+    review_summary = build_assessment_mapping_review_summary(review_rows)
+    review_blockers = build_assessment_mapping_review_blockers(
+        property_id=property_id,
+        assessment_setup_id=setup_id,
+        review_rows=review_rows,
+        connection=connection,
+    )
+    regular_review_keys = {
+        (
+            str(row["normalized_label"]),
+            str(row["section"]),
+            str(row["category"]),
+            str(row["fund_type"]),
+            row["account_code"],
+        )
+        for row in review_rows
+        if bool(row["included_in_regular_basis"])
+    }
     mappings = [
         BudgetLineMappingInput(
             budget_line_normalized_label=row[0],
@@ -1395,12 +1725,67 @@ def build_matrix_from_approved_assessment_setup(
             active=bool(row[6]),
         )
         for row in mapping_rows
+        if (
+            str(row[0]),
+            str(row[1]),
+            str(row[2]),
+            str(row[3]),
+            row[4],
+        ) in regular_review_keys
     ]
+    if review_summary["final_render_blocked"] or review_summary["reconciliation_failures"] or review_blockers:
+        _log.warning("DEBUG build_matrix: FALLBACK review_blocked=%s reconciliation_failures=%s review_blockers=%s unresolved=%s diff=%s",
+            review_summary["final_render_blocked"],
+            review_summary["reconciliation_failures"],
+            review_blockers,
+            review_summary["unresolved_required_rows"],
+            review_summary["difference"],
+        )
+        blocker_messages: list[str] = []
+        if review_summary["unresolved_required_rows"]:
+            blocker_messages.append(
+                "Unresolved required rows: "
+                + ", ".join(str(item) for item in review_summary["unresolved_required_rows"])
+            )
+        if review_summary["pending_split_total"]:
+            blocker_messages.append(
+                f"Pending split total: {review_summary['pending_split_total']}"
+            )
+        if review_summary["reconciliation_failures"]:
+            blocker_messages.append(
+                "Reconciliation failures: "
+                + ", ".join(str(item) for item in review_summary["reconciliation_failures"])
+            )
+        for category, details in review_blockers.items():
+            if details:
+                blocker_messages.append(
+                    f"{category}: {', '.join(str(detail) for detail in details)}"
+                )
+        return _fallback_matrix_for_db_issue(
+            hoa_name=hoa_name,
+            fiscal_year=fiscal_year,
+            reason=(
+                "Assessment mapping review required before final rendering. "
+                + " ".join(blocker_messages)
+            ).strip(),
+            approved_at=approved_at,
+        )
 
     internal_review_notes: list[ReviewNote] = []
     budget_lines = [
         _line_to_engine_input(idx, line)
         for idx, line in enumerate(_get(budget_draft, "line_items", []) or [], start=1)
+    ]
+    budget_lines = [
+        line
+        for line in budget_lines
+        if (
+            normalize_budget_label(str(line.normalized_label)),
+            str(line.section),
+            str(line.category),
+            str(line.fund_type),
+            line.account_code,
+        ) in regular_review_keys
     ]
     if not mappings:
         generated_revenue_split = _generated_revenue_split_by_dre_pool_proportions(

@@ -4,6 +4,8 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import fitz
+
 from app.ai_implementation.pipeline.document_extraction_provider import (
     DocumentPromptContext,
     RenderedPage,
@@ -15,9 +17,13 @@ from app.models.financial_document_extraction import (
 )
 from app.services.financial_statement_validation import validate_extracted_statement
 from app.services.pdf_vlm_extractor import (
+    _PAGE_SELECTION_SYSTEM_PROMPT,
+    _PAGE_SYSTEM_PROMPT_PROFORMA_OPERATING,
+    _extract_single_page,
     _extract_full_document,
     _is_reserve_statement_page,
     _is_scanned_pdf_error,
+    _page_selection_prompt,
     StatementPageCandidate,
     StatementPageSelection,
     extract_pdf_statement,
@@ -97,6 +103,145 @@ def _all_zero_statement():
     }
 
 
+def _write_old_mill_style_budget_pdf(path):
+    doc = fitz.open()
+    try:
+        page = doc.new_page(width=792, height=612)
+        rows = [
+            (42, ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec", "Total", "Budget"]),
+            (58, ["Income:"]),
+            (74, ["Assessments", "$100)", "$100)", "$100)", "$100)", "$100)", "$100)", "$100)", "$100)", "$100)", "$100)", "$100)", "$100)", "Assessments", "90.00%", "$1,200.00)"]),
+            (90, ["Parking Garage Assessment Income", "$50)", "$50)", "$50)", "$50)", "$50)", "$50)", "$50)", "$50)", "$50)", "$50)", "$50)", "$50)", "Parking Garage Assessment Income", "10.00%", "$600.00)"]),
+            (106, ["TOTAL OPERATING INCOME", "$150)", "$150)", "$150)", "$150)", "$150)", "$150)", "$150)", "$150)", "$150)", "$150)", "$150)", "$150)", "TOTAL OPERATING INCOME", "100.00%", "$1,800.00)"]),
+            (130, ["Expense:"]),
+            (146, ["Management Service", "$25)", "$25)", "$25)", "$25)", "$25)", "$25)", "$25)", "$25)", "$25)", "$25)", "$25)", "$25)", "Management Service", "50.00%", "$300.00)"]),
+            (162, ["Legal & Accounting", "$10)", "$10)", "$10)", "$10)", "$10)", "$10)", "$10)", "$10)", "$10)", "$10)", "$10)", "$10)", "Legal & Accounting", "50.00%", "$120.00)"]),
+        ]
+        x_positions = [14, 144, 181, 217, 253, 286, 326, 359, 396, 428, 465, 499, 533, 570, 706, 740]
+        for y, values in rows:
+            for x, value in zip(x_positions, values):
+                page.insert_text((x, y), value, fontsize=7)
+        doc.save(path)
+    finally:
+        doc.close()
+
+
+def test_page_selection_prompt_prefers_detailed_block_without_requiring_account_codes():
+    prompt = _PAGE_SELECTION_SYSTEM_PROMPT.lower()
+
+    assert "prefer the detailed contiguous income statement block" in prompt
+    assert "account-code or gl-style" in prompt
+    assert "preferred signal, not a hard requirement" in prompt
+    assert "forecasted, pro forma, accountant summary, board summary, or disclosure summary" in prompt
+    assert "do not combine detailed source rows and summarized restatement rows" in prompt
+
+
+def test_page_selection_prompt_switches_for_proforma_mode():
+    default_prompt = _page_selection_prompt(
+        DocumentPromptContext(filename="statement.pdf", route_family="pdf_visual_document")
+    ).lower()
+    proforma_prompt = _page_selection_prompt(
+        DocumentPromptContext(
+            filename="statement.pdf",
+            route_family="pdf_visual_document",
+            source_mode="proforma_final_budget",
+        )
+    ).lower()
+
+    assert "pro forma / final budget pdf package" in proforma_prompt
+    assert proforma_prompt != default_prompt
+
+
+def test_extract_single_page_uses_proforma_prompt_family_only_in_proforma_mode(monkeypatch):
+    captured_system_prompts: list[str] = []
+    captured_timeouts: list[float] = []
+
+    async def _fake_call_llm_vision(messages, schema, temperature=0.0, timeout=120.0):
+        captured_system_prompts.append(str(messages[0]["content"]))
+        captured_timeouts.append(timeout)
+        return ExtractedFinancialStatementPage.model_validate(
+            {
+                "document_family": "pdf_visual_document",
+                "report_type": "income_statement",
+                "line_items": [
+                    {
+                        "label": "Assessments",
+                        "section_kind": "income",
+                        "annual_budget": 100.0,
+                        "page_number": 1,
+                    }
+                ],
+                "totals": [],
+                "validation_issues": [],
+                "confidence": 0.0,
+            }
+        )
+
+    monkeypatch.setattr(
+        "app.ai_implementation.pipeline.llm_client.call_llm_vision",
+        _fake_call_llm_vision,
+    )
+
+    proforma_context = DocumentPromptContext(
+        filename="budget.pdf",
+        route_family="pdf_visual_document",
+        source_mode="proforma_final_budget",
+    )
+    income_context = DocumentPromptContext(
+        filename="budget.pdf",
+        route_family="pdf_visual_document",
+        source_mode="income_statement",
+    )
+
+    asyncio.run(
+        _extract_single_page(
+            1,
+            "Income:\nAssessments\nExpense:\nInsurance",
+            None,
+            proforma_context,
+            False,
+        )
+    )
+    asyncio.run(
+        _extract_single_page(
+            1,
+            "Operating Income\nAssessment Income\nOperating Expenses\nInsurance",
+            None,
+            income_context,
+            False,
+        )
+    )
+
+    assert len(captured_system_prompts) == 2
+    assert "pro forma / final budget" in captured_system_prompts[0].lower()
+    assert "pro forma / final budget" not in captured_system_prompts[1].lower()
+    assert captured_timeouts == [240.0, 240.0]
+
+
+def test_proforma_prompt_handles_variable_headings_and_column_positions():
+    prompt = _PAGE_SYSTEM_PROMPT_PROFORMA_OPERATING.lower()
+
+    assert "do not assume fixed column numbers" in prompt
+    assert "column positions vary by template" in prompt
+    assert "approved budget" in prompt
+    assert "board approved" in prompt
+    assert "2025 budget" in prompt
+    assert "next year budget" in prompt
+    assert "annualized" in prompt
+    assert "rightmost annual-like money column" in prompt
+    assert "do not collapse the table into one row" in prompt
+    assert "minimum expected output is multiple detail rows" in prompt
+    assert "returning only the first visible income row is invalid" in prompt
+    assert "scan both income and expense sections before finishing" in prompt
+
+
+def test_proforma_prompt_avoids_first_row_single_item_anchor():
+    prompt = _PAGE_SYSTEM_PROMPT_PROFORMA_OPERATING.lower()
+
+    assert '"label":' not in prompt
+    assert "never use revenue or expense as section_kind values" in prompt
+
+
 def test_extract_pdf_renders_pages_before_provider_call(monkeypatch, tmp_path):
     provider = StubProvider([_valid_statement()])
     pages = [RenderedPage(page_number=1, image_path=str(tmp_path / "page-1.png"))]
@@ -140,6 +285,150 @@ def test_extract_pdf_uses_canonical_schema_validation(monkeypatch, tmp_path):
 
     assert isinstance(result, DocumentExtractionFailure)
     assert result.code == "schema_validation_failed"
+
+
+def test_extract_pdf_proforma_mode_returns_failure_when_gemini_returns_one_row(monkeypatch, tmp_path):
+    pdf_path = tmp_path / "old-mill-budget.pdf"
+    _write_old_mill_style_budget_pdf(pdf_path)
+
+    async def _bad_single_row(*args, **kwargs):
+        return ExtractedFinancialStatementPage.model_validate(
+            {
+                "document_family": "pdf_visual_document",
+                "report_type": "income_statement",
+                "line_items": [
+                    {
+                        "label": "Assessments",
+                        "section_kind": "income",
+                        "annual_budget": 1200.0,
+                        "page_number": 1,
+                    }
+                ],
+                "totals": [],
+                "validation_issues": [],
+                "confidence": 0.0,
+            }
+        )
+
+    monkeypatch.setattr(
+        "app.ai_implementation.pipeline.llm_client.call_llm_vision",
+        _bad_single_row,
+    )
+
+    result = asyncio.run(
+        extract_pdf_statement(str(pdf_path), source_mode="proforma_final_budget")
+    )
+
+    assert isinstance(result, DocumentExtractionFailure)
+    assert result.code == "schema_validation_failed"
+
+
+def test_extract_pdf_proforma_schema_retry_note_calls_out_single_row(monkeypatch, tmp_path):
+    provider = StubProvider(
+        [
+            {
+                "document_family": "pdf_visual_document",
+                "report_type": "income_statement",
+                "line_items": [
+                    {
+                        "label": "Assessments",
+                        "section_kind": "income",
+                        "annual_budget": 1200.0,
+                        "page_number": 1,
+                    }
+                ],
+                "totals": [],
+                "validation_issues": [],
+                "confidence": 0.0,
+            },
+            _valid_statement(),
+        ]
+    )
+    monkeypatch.setattr(
+        "app.services.pdf_vlm_extractor.render_pdf_pages",
+        lambda path, max_pages=None: [RenderedPage(page_number=1, image_path=str(tmp_path / "page-1.png"))],
+    )
+
+    result = asyncio.run(
+        extract_pdf_statement(
+            str(tmp_path / "statement.pdf"),
+            provider=provider,
+            source_mode="proforma_final_budget",
+        )
+    )
+
+    assert isinstance(result, ExtractedFinancialStatement)
+    assert len(provider.calls) == 2
+    assert provider.calls[1]["prompt_context"].notes
+    assert "returned only 1 line item" in provider.calls[1]["prompt_context"].notes[-1].lower()
+    assert "assessments" in provider.calls[1]["prompt_context"].notes[-1].lower()
+
+
+def test_extract_pdf_proforma_retry_note_includes_visible_row_hints(monkeypatch, tmp_path):
+    pdf_path = tmp_path / "old-mill-budget.pdf"
+    _write_old_mill_style_budget_pdf(pdf_path)
+
+    captured_user_prompts: list[str] = []
+
+    async def _fake_call_llm_vision(messages, schema, temperature=0.0, timeout=120.0):
+        captured_user_prompts.append(str(messages[1]["content"][0]["text"]))
+        if len(captured_user_prompts) == 1:
+            return ExtractedFinancialStatementPage.model_validate(
+                {
+                    "document_family": "pdf_visual_document",
+                    "report_type": "income_statement",
+                    "line_items": [
+                        {
+                            "label": "Assessments",
+                            "section_kind": "income",
+                            "annual_budget": 1200.0,
+                            "page_number": 1,
+                        }
+                    ],
+                    "totals": [],
+                    "validation_issues": [],
+                    "confidence": 0.0,
+                }
+            )
+
+        return ExtractedFinancialStatementPage.model_validate(
+            {
+                "document_family": "pdf_visual_document",
+                "report_type": "income_statement",
+                "line_items": [
+                    {
+                        "label": "Assessments",
+                        "section_kind": "income",
+                        "annual_budget": 1200.0,
+                        "page_number": 1,
+                    },
+                    {
+                        "label": "Management Service",
+                        "section_kind": "operating",
+                        "annual_budget": 300.0,
+                        "page_number": 1,
+                    },
+                ],
+                "totals": [],
+                "validation_issues": [],
+                "confidence": 0.0,
+            }
+        )
+
+    monkeypatch.setattr(
+        "app.ai_implementation.pipeline.llm_client.call_llm_vision",
+        _fake_call_llm_vision,
+    )
+
+    result = asyncio.run(
+        extract_pdf_statement(str(pdf_path), source_mode="proforma_final_budget")
+    )
+
+    assert isinstance(result, ExtractedFinancialStatement)
+    assert len(captured_user_prompts) == 2
+    assert "visible labeled money rows include" in captured_user_prompts[1].lower()
+    assert "Parking Garage Assessment Income" in captured_user_prompts[1]
+    assert "Management Service" in captured_user_prompts[1]
 
 
 def test_extract_pdf_retries_once_after_validation_feedback(monkeypatch, tmp_path):

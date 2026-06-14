@@ -9,7 +9,9 @@ can assert on the merge-order math without rendering pages.
 """
 from __future__ import annotations
 
+from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -63,6 +65,82 @@ def test_run_render_job_resolves_manifest_paths(monkeypatch, tmp_path):
     assert "extra_appendix_paths=manifest_paths" in src, (
         "run_render_job should forward the resolved paths"
     )
+
+
+def test_run_render_job_materializes_assessment_mappings_before_matrix_build():
+    """Disclosure rendering should refresh annual assessment mappings.
+
+    Budget save/generate already materializes reusable DRE mapping rules into
+    current-year ``budget_line_pool_mappings``. The disclosure render path also
+    needs that step before it builds the assessment schedule, otherwise a
+    package can render the "Assessment Schedule Pending Review" placeholder
+    even after the operator has approved setup/mapping rules.
+    """
+    from app.disclosure_package import service as dp_service
+
+    src = Path(dp_service.__file__).read_text()
+    assert "materialize_budget_line_pool_mappings" in src
+    assert "assessment_mapping_counts" in src
+    assert "build_matrix_for_assessment_mode" in src
+    assert src.index("materialize_budget_line_pool_mappings") < src.index(
+        "build_matrix_for_assessment_mode"
+    )
+
+
+def test_compile_error_status_message_includes_field_paths():
+    """A failed background job should tell operators which preflight field failed."""
+    from app.disclosure_package.compiler import CompileError
+    from app.disclosure_package.service import _compile_error_status_message
+
+    error = CompileError(
+        "Preflight blocked compilation: 1 error(s)",
+        field_paths=["hoa_settings.reserve_study_date"],
+    )
+
+    assert _compile_error_status_message(error) == (
+        "Preflight blocked compilation: 1 error(s): hoa_settings.reserve_study_date"
+    )
+
+
+def test_compile_error_status_message_guides_operator_when_units_missing():
+    """Units blocker should tell the operator exactly where to fix it."""
+    from app.disclosure_package.compiler import CompileError
+    from app.disclosure_package.service import _compile_error_status_message
+
+    error = CompileError(
+        "Preflight blocked compilation: 1 error(s)",
+        field_paths=["hoa_metadata.units"],
+    )
+
+    assert _compile_error_status_message(error) == (
+        "Preflight blocked compilation: HOA unit count is missing or invalid. "
+        "Go to Settings and enter a positive unit count for this HOA."
+    )
+
+
+def test_assessment_revenue_uses_legacy_draft_line_item_shape():
+    from app.disclosure_package.service import _assessment_revenue_for_budget_draft
+
+    draft = SimpleNamespace(
+        line_items=[
+            {
+                "label": "Assessment Income",
+                "category": "income",
+                "annual_budget": 147813.84,
+                "projection": 147813.84,
+                "raw": {"Section": "income", "section": "income"},
+            },
+            {
+                "label": "Late Fees & Interest",
+                "category": "income",
+                "annual_budget": 400.0,
+                "projection": 409.97,
+                "raw": {"Section": "income", "section": "income"},
+            },
+        ]
+    )
+
+    assert _assessment_revenue_for_budget_draft(draft) == Decimal("147813.84")
 
 
 def test_extra_appendix_paths_dedup_by_filename():

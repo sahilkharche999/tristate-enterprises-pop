@@ -34,6 +34,7 @@ from typing import Any, Optional
 from .schemas import (
     AllocationPoolBlock,
     AssessmentSetupBlock,
+    BudgetLineMappingEvidence,
     DRESetupExtraction,
     DocumentMetadata,
     FormulaBlock,
@@ -177,6 +178,9 @@ def _pool(wire: ws.WireAllocationPoolBlock) -> AllocationPoolBlock:
         denominator_source=wire.denominator_source,
         included_budget_lines=_list(wire.included_budget_lines),
         excluded_budget_lines=_list(wire.excluded_budget_lines),
+        budget_line_derivation=wire.budget_line_derivation,
+        residual_after_pool_keys=_list(wire.residual_after_pool_keys),
+        residual_exclusions=_list(wire.residual_exclusions),
         source_pages=_list(wire.source_pages),
         confidence=_confidence(wire.confidence),
     )
@@ -201,6 +205,23 @@ def _reserve_setup(wire: ws.WireReserveSetupBlock) -> ReserveSetupBlock:
         allocation_method=_text(wire.allocation_method),
         source_pages=_list(wire.source_pages),
         confidence=_confidence(wire.confidence),
+    )
+
+
+def _mapping_evidence(
+    wire: ws.WireBudgetLineMappingEvidence,
+) -> BudgetLineMappingEvidence:
+    return BudgetLineMappingEvidence(
+        account_code=wire.account_code,
+        source_label=_text(wire.source_label),
+        parent_category=_text(wire.parent_category),
+        assessment_pool_key=_text(wire.assessment_pool_key),
+        assessment_type=wire.assessment_type,
+        match_confidence=_confidence(wire.match_confidence),
+        review_required=bool(wire.review_required),
+        review_reason=_text(wire.review_reason),
+        source_page=wire.source_page,
+        source_evidence_text=_text(wire.source_evidence_text),
     )
 
 
@@ -244,6 +265,10 @@ def to_domain(wire: ws.WireDRESetupExtraction) -> DRESetupExtraction:
         reserve_setup=(
             _reserve_setup(wire.reserve_setup) if wire.reserve_setup else None
         ),
+        budget_line_mapping_evidence=[
+            _mapping_evidence(item)
+            for item in _list(wire.budget_line_mapping_evidence)
+        ],
         validation_checks=[_check(c) for c in _list(wire.validation_checks)],
         human_review_questions=[
             _question(q) for q in _list(wire.human_review_questions)
@@ -256,4 +281,38 @@ def to_domain(wire: ws.WireDRESetupExtraction) -> DRESetupExtraction:
     )
 
 
-__all__ = ["to_domain"]
+def _normalized_budget_label(line: dict[str, Any]) -> str:
+    label = str(line.get("normalized_label") or line.get("label") or "")
+    return " ".join(label.lower().split())
+
+
+def to_merge_suggestions(
+    wire: ws.WireMergeSuggestionList,
+    *,
+    lines_by_account_code: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Convert Gemini GL-merge suggestions to service-friendly dicts."""
+    suggestions: list[dict[str, Any]] = []
+    for item in _list(wire.suggestions):
+        primary_code = _text(item.primary_account_code)
+        secondary_code = _text(item.secondary_account_code)
+        primary_line = lines_by_account_code.get(primary_code)
+        secondary_line = lines_by_account_code.get(secondary_code)
+        if primary_line is None or secondary_line is None:
+            continue
+        suggestions.append(
+            {
+                "primary_account_code": primary_code or None,
+                "secondary_account_code": secondary_code or None,
+                "primary_label": _text(primary_line.get("label")),
+                "secondary_label": _text(secondary_line.get("label")),
+                "primary_normalized_label": _normalized_budget_label(primary_line),
+                "secondary_normalized_label": _normalized_budget_label(secondary_line),
+                "confidence": _confidence(item.confidence),
+                "reason": _text(item.reason),
+            }
+        )
+    return suggestions
+
+
+__all__ = ["to_domain", "to_merge_suggestions"]

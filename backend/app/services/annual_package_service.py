@@ -25,6 +25,13 @@ from typing import Any, Literal, Optional
 
 from pydantic import BaseModel
 
+from app.assessment_mode import (
+    ASSESSMENT_MODE_VARIABLE,
+    AssessmentMode,
+    PackageImpact,
+    normalize_assessment_mode,
+    package_impact_for_mode_drift,
+)
 from app.disclosure_package.snapshots import freeze_package_snapshots
 
 
@@ -48,6 +55,10 @@ class AnnualPackageResponse(BaseModel):
     finalized_at: Optional[str]
     regen_of_package_id: Optional[int]
     version_int: int
+    assessment_mode: AssessmentMode = ASSESSMENT_MODE_VARIABLE
+    live_assessment_mode: AssessmentMode = ASSESSMENT_MODE_VARIABLE
+    package_impact: PackageImpact = "none"
+    package_impact_reason: Optional[str] = None
 
 
 class AnnualPackageNotFound(LookupError):
@@ -97,18 +108,68 @@ def _now_iso() -> str:
 _SELECT_FIELDS = (
     "id, property_id, assessment_setup_id, budget_year, fiscal_year, "
     "status, approved_assessment_revenue_annual, approved_by, "
-    "approved_at, finalized_at, regen_of_package_id, version_int"
+    "approved_at, finalized_at, regen_of_package_id, version_int, assessment_mode"
 )
 
 
-def _row_to_response(row: tuple) -> AnnualPackageResponse:
+def _property_assessment_mode(
+    *,
+    property_id: int,
+    connection: sqlite3.Connection,
+) -> AssessmentMode:
+    row = connection.execute(
+        "SELECT assessment_mode FROM properties WHERE id = ?",
+        (property_id,),
+    ).fetchone()
+    return normalize_assessment_mode(row[0] if row else None)
+
+
+def _is_latest_for_fiscal_year(
+    *,
+    property_id: int,
+    package_id: int,
+    fiscal_year: int,
+    connection: sqlite3.Connection,
+) -> bool:
+    latest_row = connection.execute(
+        """
+        SELECT id
+          FROM annual_packages
+         WHERE property_id = ? AND fiscal_year = ?
+         ORDER BY id DESC
+         LIMIT 1
+        """,
+        (property_id, fiscal_year),
+    ).fetchone()
+    return latest_row is not None and int(latest_row[0]) == package_id
+
+
+def _row_to_response(row: tuple, *, connection: sqlite3.Connection) -> AnnualPackageResponse:
     approved_revenue = row[6]
+    property_id = int(row[1])
+    fiscal_year = int(row[4])
+    assessment_mode = normalize_assessment_mode(row[12] if len(row) > 12 else None)
+    live_assessment_mode = _property_assessment_mode(
+        property_id=property_id,
+        connection=connection,
+    )
+    package_impact, package_impact_reason = package_impact_for_mode_drift(
+        status=str(row[5]),
+        package_assessment_mode=assessment_mode,
+        live_assessment_mode=live_assessment_mode,
+        is_latest_for_fiscal_year=_is_latest_for_fiscal_year(
+            property_id=property_id,
+            package_id=int(row[0]),
+            fiscal_year=fiscal_year,
+            connection=connection,
+        ),
+    )
     return AnnualPackageResponse(
         package_id=row[0],
-        property_id=row[1],
+        property_id=property_id,
         assessment_setup_id=row[2],
         budget_year=row[3],
-        fiscal_year=row[4],
+        fiscal_year=fiscal_year,
         status=row[5],
         approved_assessment_revenue_annual=(
             Decimal(str(approved_revenue)) if approved_revenue is not None else None
@@ -118,6 +179,10 @@ def _row_to_response(row: tuple) -> AnnualPackageResponse:
         finalized_at=row[9],
         regen_of_package_id=row[10],
         version_int=row[11],
+        assessment_mode=assessment_mode,
+        live_assessment_mode=live_assessment_mode,
+        package_impact=package_impact,
+        package_impact_reason=package_impact_reason,
     )
 
 
@@ -133,7 +198,7 @@ def _fetch_package(
         raise AnnualPackageNotFound(
             f"package_id={package_id} not found for property_id={property_id}"
         )
-    return _row_to_response(row)
+    return _row_to_response(row, connection=connection)
 
 
 def create_annual_package(
@@ -151,16 +216,20 @@ def create_annual_package(
     the new row gets its own preflight/approval/finalize cycle. Pass
     ``None`` for the first-time draft of a (property, fiscal_year).
     """
+    assessment_mode = _property_assessment_mode(
+        property_id=property_id,
+        connection=connection,
+    )
     cur = connection.execute(
         """
         INSERT INTO annual_packages (
             property_id, budget_year, fiscal_year,
-            assessment_setup_id, regen_of_package_id, status
-        ) VALUES (?, ?, ?, ?, ?, 'draft')
+            assessment_setup_id, regen_of_package_id, assessment_mode, status
+        ) VALUES (?, ?, ?, ?, ?, ?, 'draft')
         """,
         (
             property_id, budget_year, fiscal_year,
-            assessment_setup_id, regen_of_package_id,
+            assessment_setup_id, regen_of_package_id, assessment_mode,
         ),
     )
     package_id = cur.lastrowid
@@ -203,17 +272,28 @@ def approve_annual_package(
             f"Cannot approve package_id={package_id} from status={current.status!r}; "
             "approve requires draft or preflight_failed."
         )
+    live_assessment_mode = _property_assessment_mode(
+        property_id=property_id,
+        connection=connection,
+    )
     connection.execute(
         """
         UPDATE annual_packages
            SET status = 'approved',
+               assessment_mode = ?,
                approved_assessment_revenue_annual = ?,
                approved_by = ?,
                approved_at = ?,
                version_int = version_int + 1
          WHERE id = ?
         """,
-        (str(approved_assessment_revenue_annual), approved_by, _now_iso(), package_id),
+        (
+            live_assessment_mode,
+            str(approved_assessment_revenue_annual),
+            approved_by,
+            _now_iso(),
+            package_id,
+        ),
     )
     connection.commit()
     return _fetch_package(
@@ -257,12 +337,26 @@ def finalize_annual_package(
             "finalize requires approved or rendered."
         )
 
+    live_assessment_mode = _property_assessment_mode(
+        property_id=property_id,
+        connection=connection,
+    )
+    connection.execute(
+        """
+        UPDATE annual_packages
+           SET assessment_mode = ?
+         WHERE id = ?
+        """,
+        (live_assessment_mode, package_id),
+    )
+
     freeze_package_snapshots(
         package_id=package_id,
         assessment_setup=assessment_setup,
         budget=budget,
         reserve=reserve,
         appendix_manifest=appendix_manifest,
+        assessment_mode=live_assessment_mode,
         connection=connection,
     )
     return _fetch_package(
@@ -282,7 +376,7 @@ def list_annual_packages(
         "ORDER BY fiscal_year DESC, id DESC",
         (property_id,),
     ).fetchall()
-    return [_row_to_response(r) for r in rows]
+    return [_row_to_response(r, connection=connection) for r in rows]
 
 
 def get_annual_package(

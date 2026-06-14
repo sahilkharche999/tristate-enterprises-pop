@@ -105,4 +105,3 @@ class DocumentExtractionFailure(BaseModel):
     code: str = Field(min_length=1)
     message: str = Field(min_length=1)
     details: dict[str, Any] = Field(default_factory=dict)
-

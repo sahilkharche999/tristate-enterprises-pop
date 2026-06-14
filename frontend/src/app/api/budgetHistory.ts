@@ -1,6 +1,12 @@
-import { BASE_URL } from './config';
-import { authHeaders, handleBlobResponse, handleResponse } from './http';
-import type { LineItem } from '../data/mockData';
+import { BASE_URL } from './config.ts';
+import { authHeaders, handleBlobResponse, handleResponse } from './http.ts';
+import type { LineItem } from '../data/mockData.ts';
+import {
+  createBudgetBundleFormData,
+  createBudgetSourceFormData,
+  type BudgetSourceMode,
+} from '../lib/budgetSourceMode.ts';
+import type { AssessmentMode } from '../lib/assessmentMode.ts';
 
 type JsonValue = string | number | boolean | null | JsonObject | JsonValue[];
 type JsonObject = Record<string, JsonValue>;
@@ -40,6 +46,8 @@ export interface BudgetVersionSummary {
   source_draft_id?: number | null;
   output_storage_key?: string | null;
   source_upload_filename?: string | null;
+  source_mode?: BudgetSourceMode | null;
+  assessment_mode?: AssessmentMode | null;
 }
 
 export interface BudgetVersionDetail extends BudgetVersionSummary {
@@ -81,9 +89,12 @@ export interface BudgetDraftPayload {
   growth_factor_note?: string | null;
   reserve_inflation_rate: number;
   reserve_inflation_note?: string | null;
+  version_int: number;
   updated_at?: string | null;
   upload_filename?: string | null;
   enriched_file_available?: boolean | null;
+  source_mode?: BudgetSourceMode | null;
+  assessment_mode?: AssessmentMode | null;
 }
 
 export interface BudgetDraftSummary {
@@ -96,10 +107,13 @@ export interface BudgetDraftSummary {
   reopened_from_version_code?: string | null;
   reserve_inflation_rate: number;
   reserve_inflation_note?: string | null;
+  version_int: number;
   reserve_study_status?: string;
   updated_at?: string | null;
   actor_name: string;
   enriched_file_available?: boolean | null;
+  source_mode?: BudgetSourceMode | null;
+  assessment_mode?: AssessmentMode | null;
 }
 
 export interface BudgetHistoryResponse {
@@ -110,11 +124,78 @@ export interface BudgetHistoryResponse {
   notes: BudgetNoteRecord[];
 }
 
+export interface BudgetGlIdentityPayload {
+  account_code?: string | null;
+  label: string;
+  normalized_label?: string | null;
+  line_item_key?: string | null;
+  section: string;
+  category: string;
+  fund_type: string;
+}
+
+export interface BudgetGlMergeCommitRequest {
+  primary: BudgetGlIdentityPayload;
+  secondary: BudgetGlIdentityPayload;
+  source: 'manual' | 'gemini_suggestion';
+}
+
+export interface BudgetGlMergeApplicationPayload {
+  id: number;
+  merge_id: number;
+  property_id: number;
+  budget_draft_id: number;
+  assessment_setup_id?: number | null;
+  source: string;
+  status: string;
+  match_strategy?: string | null;
+}
+
+export interface BudgetGlMergeCommitResponse {
+  merge_id: number;
+  application: BudgetGlMergeApplicationPayload;
+  draft_version: number;
+}
+
+export interface BudgetGlMergeListItem {
+  id: number;
+  property_id: number;
+  primary_account_code?: string | null;
+  primary_label: string;
+  primary_normalized_label: string;
+  secondary_account_code?: string | null;
+  secondary_label: string;
+  secondary_normalized_label: string;
+  status: string;
+  application_id?: number | null;
+  application_status?: string | null;
+  source?: string | null;
+}
+
+export interface BudgetGlMergeSuggestionPayload {
+  primary_account_code?: string | null;
+  secondary_account_code?: string | null;
+  primary_label: string;
+  secondary_label: string;
+  primary_normalized_label: string;
+  secondary_normalized_label: string;
+  confidence: number;
+  reason: string;
+  local_only: boolean;
+  wire_schema_sha256: string;
+}
+
 export interface ExtractionQualityWarning {
   code: string;
   title: string;
   body: string;
   severity: 'warning' | 'info';
+}
+
+export interface ExtractionDebugInfo {
+  code: string;
+  message: string;
+  details: JsonObject;
 }
 
 export interface BudgetUploadResponse {
@@ -127,6 +208,7 @@ export interface BudgetUploadResponse {
   warnings?: string[];
   review_required?: boolean;
   review_reason?: string | null;
+  debug_info?: ExtractionDebugInfo | null;
   // Set when the extractor took a degraded path (e.g. scanned-PDF
   // vision-only fallback). The frontend should render this as a one-shot
   // dismissible dialog so the user knows to double-check the numbers.
@@ -155,6 +237,7 @@ export interface BundleFileStatus {
   status: 'completed' | 'review_required' | 'failed' | 'pending';
   warnings: string[];
   review_reason?: string | null;
+  debug_info?: ExtractionDebugInfo | null;
 }
 
 export interface BudgetBundleUploadResponse {
@@ -316,6 +399,8 @@ export interface BudgetVersionCompareCard {
   statement_month?: number | null;
   fiscal_year_start_month: number;
   fiscal_year_end_month: number;
+  source_mode?: BudgetSourceMode | null;
+  assessment_mode?: AssessmentMode | null;
 }
 
 export interface BudgetVersionCompareResponse {
@@ -415,6 +500,8 @@ export function budgetHistoryLineItemToEditorItem(record: JsonObject, index: num
   const annualBudget = toNumber(record.annualBudget ?? record.annual_budget ?? raw['Annual Budget']);
   const projection = toNumber(record.projection ?? raw.Projection);
   const ytdActual = toNumber(record.ytdActual ?? record.ytd_actual ?? raw['YTD Actual']);
+  const currentPeriod = toNumber(record.currentPeriod ?? record.current_period ?? raw['Current Period']);
+  const variance = toNumber(record.variance ?? raw.Variance);
   const proposedAmount = toNumber(record.proposedAmount ?? record.proposed_amount);
   const percentChangeValue = record.percentChange ?? record.percent_change;
   const percentChange =
@@ -432,15 +519,42 @@ export function budgetHistoryLineItemToEditorItem(record: JsonObject, index: num
     annualBudget,
     percentChange,
     projection,
+    currentPeriod,
+    variance,
     readOnly: Boolean(record.readOnly ?? record.read_only),
     accountCode,
     label,
+    lineItemKey: pickString(record.line_item_key) ?? null,
+    normalizedLabel: pickString(record.normalized_label) ?? null,
+    fundType: pickString(record.fund_type, raw.fund_type) ?? null,
+    mergedCount: toNumber(record.merged_count) || 0,
+    mergedGls: Array.isArray(record.merged_gls)
+      ? record.merged_gls.map((entry) => {
+          const mergeRecord = readRecord(entry as JsonValue);
+          const contributions = readRecord(mergeRecord.contributions);
+          return {
+            accountCode: pickString(mergeRecord.account_code) ?? null,
+            label: pickString(mergeRecord.label) ?? null,
+            lineItemKey: pickString(mergeRecord.line_item_key) ?? null,
+            normalizedLabel: pickString(mergeRecord.normalized_label) ?? null,
+            contributions: {
+              current_period: toNumber(contributions.current_period),
+              ytd: toNumber(contributions.ytd),
+              annual_budget: toNumber(contributions.annual_budget),
+              projection: toNumber(contributions.projection),
+              variance: toNumber(contributions.variance),
+            },
+          };
+        })
+      : [],
     reserveGroup: pickString(record.reserve_group, record.reserveGroup) as
       | 'component'
       | 'income'
       | 'transfer'
       | undefined,
     rawSection: pickString(readRecord(record.raw).section, record.section),
+    sourceColumn: pickString(record.source_column, record.sourceColumn) ?? null,
+    sourcePageOrCell: pickString(record.source_page_or_cell, record.sourcePageOrCell) ?? null,
     note:
       record.note && typeof record.note === 'object' && !Array.isArray(record.note)
         ? {
@@ -461,19 +575,33 @@ export function mapEditorLineItemsToBudgetHistory(lineItems: LineItem[]): JsonOb
     category: item.category,
     name: item.name,
     label: item.label ?? item.name,
-    line_item_key: String(item.accountCode ?? item.label ?? item.name),
+    line_item_key: item.lineItemKey ?? String(item.accountCode ?? item.label ?? item.name),
+    normalized_label: item.normalizedLabel ?? null,
     account_code: item.accountCode ?? null,
     ytdActual: item.ytdActual,
     ytd_actual: item.ytdActual,
+    current_period: item.currentPeriod ?? null,
     annualBudget: item.annualBudget,
     annual_budget: item.annualBudget,
     percentChange: item.percentChange,
     percent_change: item.percentChange,
     projection: item.projection ?? null,
+    variance: item.variance ?? null,
     readOnly: item.readOnly ?? false,
     read_only: item.readOnly ?? false,
     reserve_group: item.reserveGroup ?? null,
     section: item.rawSection ?? null,
+    fund_type: item.fundType ?? null,
+    merged_count: item.mergedCount ?? item.mergedGls?.length ?? 0,
+    merged_gls: (item.mergedGls ?? []).map((merged) => ({
+      account_code: merged.accountCode ?? null,
+      label: merged.label ?? null,
+      line_item_key: merged.lineItemKey ?? null,
+      normalized_label: merged.normalizedLabel ?? null,
+      contributions: merged.contributions ?? {},
+    })),
+    source_column: item.sourceColumn ?? null,
+    source_page_or_cell: item.sourcePageOrCell ?? null,
     raw: {
       section: item.rawSection ?? null,
       label: item.label ?? item.name,
@@ -517,9 +645,13 @@ export async function downloadBudgetDraftEnriched(
   return handleBlobResponse(res);
 }
 
-export async function uploadBudgetSource(hoaId: number | string, file: File): Promise<BudgetUploadResponse> {
-  const formData = new FormData();
-  formData.append('file', file);
+export async function uploadBudgetSource(
+  hoaId: number | string,
+  file: File,
+  sourceMode: BudgetSourceMode,
+  assessmentMode: AssessmentMode,
+): Promise<BudgetUploadResponse> {
+  const formData = createBudgetSourceFormData(file, sourceMode, assessmentMode);
   const res = await fetch(`${BASE_URL}/hoa/${hoaId}/budget/upload`, {
     method: 'POST',
     headers: authHeaders(),
@@ -532,10 +664,15 @@ export async function uploadBudgetBundle(
   hoaId: number | string,
   budgetFile: File,
   reserveStudyFile: File,
+  sourceMode: BudgetSourceMode,
+  assessmentMode: AssessmentMode,
 ): Promise<BudgetBundleUploadResponse> {
-  const formData = new FormData();
-  formData.append('budget_file', budgetFile);
-  formData.append('reserve_study_file', reserveStudyFile);
+  const formData = createBudgetBundleFormData(
+    budgetFile,
+    reserveStudyFile,
+    sourceMode,
+    assessmentMode,
+  );
   const res = await fetch(`${BASE_URL}/hoa/${hoaId}/budget/upload-bundle`, {
     method: 'POST',
     headers: authHeaders(),
@@ -557,6 +694,64 @@ export async function saveBudgetDraft(
     body: JSON.stringify(payload),
   });
   return handleResponse<SaveBudgetDraftResponse>(res);
+}
+
+function ifMatchHeader(version: number | undefined): HeadersInit {
+  return version != null ? { 'If-Match': String(version) } : {};
+}
+
+export async function listBudgetGlMerges(
+  hoaId: number | string,
+): Promise<BudgetGlMergeListItem[]> {
+  const res = await fetch(`${BASE_URL}/hoa/${hoaId}/budget/merges`, {
+    headers: authHeaders(),
+  });
+  return handleResponse<BudgetGlMergeListItem[]>(res);
+}
+
+export async function fetchBudgetGlMergeSuggestions(
+  hoaId: number | string,
+): Promise<BudgetGlMergeSuggestionPayload[]> {
+  const res = await fetch(`${BASE_URL}/hoa/${hoaId}/budget/merges/suggest`, {
+    method: 'POST',
+    headers: authHeaders(),
+  });
+  return handleResponse<BudgetGlMergeSuggestionPayload[]>(res);
+}
+
+export async function commitBudgetGlMerge(
+  hoaId: number | string,
+  payload: BudgetGlMergeCommitRequest,
+  expectedVersion: number,
+): Promise<BudgetGlMergeCommitResponse> {
+  const res = await fetch(`${BASE_URL}/hoa/${hoaId}/budget/merges`, {
+    method: 'POST',
+    headers: {
+      ...authHeaders(),
+      ...ifMatchHeader(expectedVersion),
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+  return handleResponse<BudgetGlMergeCommitResponse>(res);
+}
+
+export async function unmergeBudgetGlMergeApplication(
+  hoaId: number | string,
+  applicationId: number | string,
+  expectedVersion: number,
+): Promise<BudgetGlMergeCommitResponse> {
+  const res = await fetch(
+    `${BASE_URL}/hoa/${hoaId}/budget/merges/applications/${applicationId}/unmerge`,
+    {
+      method: 'POST',
+      headers: {
+        ...authHeaders(),
+        ...ifMatchHeader(expectedVersion),
+      },
+    },
+  );
+  return handleResponse<BudgetGlMergeCommitResponse>(res);
 }
 
 export async function saveReserveStudyRows(

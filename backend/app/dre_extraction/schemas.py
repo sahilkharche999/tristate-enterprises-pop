@@ -59,6 +59,26 @@ PromptAllocationMethod = Literal[
     "unknown",
 ]
 
+PromptBudgetLineDerivation = Literal[
+    "explicit_lines",
+    "residual_default",
+    "formula_only",
+    "unknown",
+]
+
+PromptBudgetLineAssessmentType = Literal[
+    "equal_base",
+    "prorated_variable",
+    "square_footage",
+    "ownership_percent",
+    "exemption_credit",
+    "subsidy_credit",
+    "pass_through",
+    "reserve_component",
+    "excluded_or_informational",
+    "unknown_needs_review",
+]
+
 
 class DocumentMetadata(BaseModel):
     model_config = _PROMPT_VOCAB_CONFIG
@@ -162,6 +182,9 @@ class AllocationPoolBlock(BaseModel):
     denominator_source: Literal["dre_shown", "calculated", "unknown"] = "unknown"
     included_budget_lines: list[str] = Field(default_factory=list)
     excluded_budget_lines: list[str] = Field(default_factory=list)
+    budget_line_derivation: PromptBudgetLineDerivation = "unknown"
+    residual_after_pool_keys: list[str] = Field(default_factory=list)
+    residual_exclusions: list[str] = Field(default_factory=list)
     source_pages: list[int] = Field(default_factory=list)
     confidence: float = 0.0
 
@@ -186,6 +209,21 @@ class ReserveSetupBlock(BaseModel):
     allocation_method: str = ""
     source_pages: list[int] = Field(default_factory=list)
     confidence: float = 0.0
+
+
+class BudgetLineMappingEvidence(BaseModel):
+    model_config = _PROMPT_VOCAB_CONFIG
+
+    account_code: Optional[str] = None
+    source_label: str = ""
+    parent_category: str = ""
+    assessment_pool_key: str = ""
+    assessment_type: PromptBudgetLineAssessmentType = "unknown_needs_review"
+    match_confidence: float = 0.0
+    review_required: bool = False
+    review_reason: str = ""
+    source_page: Optional[int] = None
+    source_evidence_text: str = ""
 
 
 class ValidationCheck(BaseModel):
@@ -258,6 +296,9 @@ class DRESetupExtraction(BaseModel):
     allocation_pools: list[AllocationPoolBlock] = Field(default_factory=list)
     formulas: list[FormulaBlock] = Field(default_factory=list)
     reserve_setup: Optional[ReserveSetupBlock] = None
+    budget_line_mapping_evidence: list[BudgetLineMappingEvidence] = Field(
+        default_factory=list
+    )
     validation_checks: list[ValidationCheck] = Field(default_factory=list)
     human_review_questions: list[HumanReviewQuestion] = Field(default_factory=list)
     recommended_saved_setup: Optional[RecommendedSavedSetup] = None

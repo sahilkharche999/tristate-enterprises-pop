@@ -3,6 +3,8 @@
 {% block content %}
 
 <h2>Note 6 &mdash; Funding Plan</h2>
+{% set reserve_funding = computed.reserve_funding_facts if computed.reserve_funding_facts is defined else none %}
+{% set reserve_liability = computed.reserve_liability_facts if computed.reserve_liability_facts is defined else none %}
 
 <p class="legal-block">In accordance with California Civil Code &sect; 5550,
 the Board has reviewed the reserve study prepared by
@@ -13,15 +15,16 @@ over the 30-year forecast horizon.</p>
 
 <p class="legal-block">For fiscal year {{ fiscal_year }} the base monthly
 contribution to the Replacement Fund is approximately
-<span class="bold">${{ '{:,.2f}'.format(computed.monthly_replacement_contribution_total) }}</span>
+<span class="bold">${{ '{:,.2f}'.format(reserve_funding.monthly_total if reserve_funding else computed.monthly_replacement_contribution_total) }}</span>
 for the Association as a whole, equivalent to
-<span class="bold">${{ '{:,.2f}'.format(computed.monthly_replacement_contribution_per_unit_2026) }}</span>
-per ownership interest per month. Total estimated liability for major
+<span class="bold">${{ '{:,.2f}'.format(reserve_funding.monthly_per_unit if reserve_funding else computed.monthly_replacement_contribution_per_unit_2026) }}</span>
+per ownership interest per month, based on {{ reserve_funding.source_label if reserve_funding else computed.reserve_funding_source_label }}.
+Total estimated liability for major
 component replacement (Civil Code &sect; 5565) is
-<span class="bold">${{ '{:,.0f}'.format(computed.total_estimated_liability) }}</span>;
+<span class="bold">${{ '{:,.0f}'.format(reserve_liability.total_estimated_liability if reserve_liability else computed.total_estimated_liability) }}</span>;
 projected reserve cash at end of prior fiscal year is
-<span class="bold">${{ '{:,.0f}'.format(hoa_settings.reserve_cash_balance_eoy_prior) }}</span>;
-percent funded is <span class="bold">{{ computed.percent_funded }}%</span>.</p>
+<span class="bold">${{ '{:,.0f}'.format(reserve_liability.cash_reserve_balance_eoy_prior if reserve_liability else hoa_settings.reserve_cash_balance_eoy_prior) }}</span>;
+percent funded is <span class="bold">{{ reserve_liability.percent_funded if reserve_liability else computed.percent_funded }}%</span>.</p>
 
 <p class="legal-block">The funding plan applies a piecewise schedule of
 contribution adjustments over the next three decades:</p>

@@ -14,15 +14,23 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
+from pydantic import ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from ..assessment_mode import (
+    ASSESSMENT_MODE_VARIABLE,
+    AssessmentMode,
+    normalize_assessment_mode,
+    package_impact_for_mode_drift,
+)
 from ..config import settings
 from ..generate_budget import infer_growth_factor_from_input
 from ..generate_budget_pipeline import BudgetPipeline
 from ..models.financial_document_extraction import (
     DocumentExtractionFailure,
     ExtractedFinancialStatement,
+    ExtractedFinancialStatementPage,
     ExtractedStatementLineItem,
 )
 from ..models.reserve_study_extraction import ExtractedReserveStudyDocument
@@ -36,6 +44,12 @@ from ..services.income_statement_parser import (
     READ_ONLY_SECTIONS,
 )
 from ..services.financial_document_router import choose_financial_document_route
+from ..services.assessment_budget_mapping_rule_service import (
+    materialize_budget_line_pool_mappings,
+    select_assessment_mapping_amount,
+)
+from ..services.budget_line_merge_service import auto_apply_merges_on_upload
+from ..services.budget_line_merge_service import finalize_applied_merges
 from ..services.financial_statement_validation import (
     has_blocking_validation_issues,
     validate_extracted_statement,
@@ -72,6 +86,7 @@ from ..models.budget_history import (
     BudgetNoteSaveResponse,
     BudgetTimelineEvent,
     BudgetUploadResponse,
+    ExtractionDebugInfo,
     ExtractionQualityWarning,
     BudgetVersionCompareCard,
     BudgetVersionCompareResponse,
@@ -81,6 +96,15 @@ from ..models.budget_history import (
     BudgetVersionReopenResponse,
     BudgetVersionSummary,
 )
+
+
+def _raw_sqlite_connection(session: Session):
+    raw_conn = session.connection().connection
+    return (
+        getattr(raw_conn, "driver_connection", None)
+        or getattr(raw_conn, "connection", None)
+        or raw_conn
+    )
 from ..services import app_settings_service, macros_service
 from ..ai_implementation.db.models import (
     BUDGET_DRAFT_ACTIVE,
@@ -117,6 +141,427 @@ _EXPECTED_INCOME_STATEMENT_GUIDANCE = [
     ),
 ]
 
+SOURCE_MODE_INCOME_STATEMENT = "income_statement"
+SOURCE_MODE_PROFORMA_FINAL_BUDGET = "proforma_final_budget"
+_PROFORMA_GROWTH_FACTOR = 1.0
+_PROFORMA_GROWTH_FACTOR_NOTE = "pro forma / final budget annual basis"
+_PROFORMA_EXCEL_GEMINI_TIMEOUT_SECONDS = 240.0
+_MONTH_HEADER_ALIASES = {
+    "jan", "january",
+    "feb", "february",
+    "mar", "march",
+    "apr", "april",
+    "may",
+    "jun", "june",
+    "jul", "july",
+    "aug", "august",
+    "sep", "sept", "september",
+    "oct", "october",
+    "nov", "november",
+    "dec", "december",
+}
+
+
+def _normalize_source_mode(source_mode: Optional[str]) -> str:
+    normalized = str(source_mode or SOURCE_MODE_INCOME_STATEMENT).strip().lower()
+    if normalized == SOURCE_MODE_PROFORMA_FINAL_BUDGET:
+        return SOURCE_MODE_PROFORMA_FINAL_BUDGET
+    return SOURCE_MODE_INCOME_STATEMENT
+
+
+def _is_proforma_source_mode(source_mode: Optional[str]) -> bool:
+    return _normalize_source_mode(source_mode) == SOURCE_MODE_PROFORMA_FINAL_BUDGET
+
+
+def _assessment_mode_package_impacts(
+    session: Session,
+    *,
+    hoa_id: int,
+    live_assessment_mode: AssessmentMode,
+) -> list[dict[str, Any]]:
+    raw_conn = _raw_sqlite_connection(session)
+    rows = raw_conn.execute(
+        """
+        SELECT id, fiscal_year, status, assessment_mode
+          FROM annual_packages
+         WHERE property_id = ?
+         ORDER BY fiscal_year DESC, id DESC
+        """,
+        (hoa_id,),
+    ).fetchall()
+    if not rows:
+        return []
+
+    impacts: list[dict[str, Any]] = []
+    latest_by_year: set[int] = set()
+    for row in rows:
+        package_id, fiscal_year, status, stored_mode = row
+        is_latest_for_year = int(fiscal_year) not in latest_by_year
+        latest_by_year.add(int(fiscal_year))
+        impact, reason = package_impact_for_mode_drift(
+            status=str(status),
+            package_assessment_mode=stored_mode,
+            live_assessment_mode=live_assessment_mode,
+            is_latest_for_fiscal_year=is_latest_for_year,
+        )
+        if impact == "none":
+            continue
+        impacts.append(
+            {
+                "package_id": int(package_id),
+                "fiscal_year": int(fiscal_year),
+                "status": str(status),
+                "impact": impact,
+                "reason": reason,
+            }
+        )
+    return impacts
+
+
+def _update_property_assessment_mode(
+    session: Session,
+    *,
+    hoa: Property,
+    actor: dict[str, Any],
+    requested_assessment_mode: Optional[str],
+) -> AssessmentMode:
+    next_mode = normalize_assessment_mode(
+        requested_assessment_mode or getattr(hoa, "assessment_mode", None)
+    )
+    current_mode = normalize_assessment_mode(getattr(hoa, "assessment_mode", None))
+    if current_mode == next_mode:
+        hoa.assessment_mode = next_mode
+        return next_mode
+
+    hoa.assessment_mode = next_mode
+    package_impacts = _assessment_mode_package_impacts(
+        session,
+        hoa_id=hoa.id,
+        live_assessment_mode=next_mode,
+    )
+    _create_audit_event(
+        session,
+        hoa_id=hoa.id,
+        actor=actor,
+        event_type="assessment_mode_changed",
+        summary=f"Assessment mode changed to {next_mode}",
+        payload={
+            "from_assessment_mode": current_mode,
+            "to_assessment_mode": next_mode,
+            "package_impacts": package_impacts,
+        },
+    )
+    return next_mode
+
+
+def _normalize_header_text(value: Any) -> str:
+    return " ".join(str(value or "").strip().lower().replace("_", " ").split())
+
+
+def _try_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text or text in {"-", "—"}:
+            return None
+        text = text.replace(",", "").replace("$", "")
+        if text.startswith("(") and text.endswith(")"):
+            text = f"-{text[1:-1]}"
+        try:
+            return float(text)
+        except ValueError:
+            return None
+    return None
+
+
+_PROFORMA_EXCEL_SYSTEM_PROMPT = """You are extracting an HOA pro forma / final budget from an Excel workbook.
+
+Return JSON only using the provided schema.
+
+Extraction rules:
+- Extract every visible detail budget line item from operating income, operating expense, reserve income, reserve contributions, and reserve expense sections.
+- Use workbook cell positions, nearby headers, indentation, section labels, and account codes to infer each row.
+- Map final/approved/proposed/annual/total budget synonyms to annual_budget. Prefer final or approved budget columns over proposed columns when both exist.
+- If the workbook has Jan-Dec/monthly columns and an annual total/final budget column, use the annual total/final budget value for annual_budget, not one monthly value.
+- Preserve account codes when visible.
+- Set section_kind to income, operating, reserve_income, or reserve_expense.
+- Skip subtotal, total, grand total, blank, comment, formula-check, and header-only rows.
+- Do not collapse the workbook into one summary row. Return all detail rows.
+- Use evidence.source_column to name the source column header you used, such as final_budget, approved_budget, proposed_budget, annual_budget, or total_budget.
+"""
+
+
+def _format_excel_cell_for_prompt(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, datetime):
+        return value.date().isoformat() if value.time().isoformat() == "00:00:00" else value.isoformat()
+    if isinstance(value, float):
+        return str(int(value)) if value.is_integer() else f"{value:.10g}"
+    return " ".join(str(value).replace("\r", " ").replace("\n", " ").split()).strip()
+
+
+def _extract_excel_workbook_prompt_text(
+    path: str,
+    *,
+    max_rows_per_sheet: int = 250,
+    max_cols_per_sheet: int = 80,
+    max_chars: int = 120_000,
+) -> str:
+    """Serialize workbook cells for Gemini without doing semantic extraction."""
+    from openpyxl import load_workbook
+
+    workbook = load_workbook(path, data_only=True, read_only=True)
+    lines: list[str] = []
+    char_count = 0
+    try:
+        for worksheet in workbook.worksheets:
+            sheet_header = f"Sheet: {worksheet.title}"
+            lines.append(sheet_header)
+            char_count += len(sheet_header) + 1
+            max_row = min(int(worksheet.max_row or 0), max_rows_per_sheet)
+            max_col = min(int(worksheet.max_column or 0), max_cols_per_sheet)
+            if max_row <= 0 or max_col <= 0:
+                lines.append("(empty)")
+                char_count += len("(empty)") + 1
+                continue
+
+            included_rows = 0
+            for row in worksheet.iter_rows(min_row=1, max_row=max_row, max_col=max_col):
+                cells: list[str] = []
+                row_number = 0
+                for cell in row:
+                    row_number = int(getattr(cell, "row", row_number) or row_number)
+                    text = _format_excel_cell_for_prompt(getattr(cell, "value", None))
+                    if text:
+                        cells.append(f"{cell.coordinate}={text}")
+                if not cells:
+                    continue
+                included_rows += 1
+                row_line = f"R{row_number:03d}: " + " | ".join(cells)
+                lines.append(row_line)
+                char_count += len(row_line) + 1
+                if char_count >= max_chars:
+                    lines.append("[Workbook text truncated for Gemini prompt]")
+                    break
+            if included_rows == 0:
+                empty_note = "(no populated cells in scanned range)"
+                lines.append(empty_note)
+                char_count += len(empty_note) + 1
+            if lines and lines[-1] == "[Workbook text truncated for Gemini prompt]":
+                break
+    finally:
+        workbook.close()
+
+    prompt_text = "\n".join(lines).strip()
+    if not prompt_text:
+        raise ValueError("Workbook did not contain readable cells for Gemini extraction.")
+    return prompt_text
+
+
+def _infer_proforma_category(
+    *,
+    current_section: str,
+    label: str,
+    account_code: Optional[int],
+) -> tuple[str, Optional[str]]:
+    lowered_label = _normalize_compare_text(label)
+    if "reserve interest" in lowered_label:
+        return "reserve_income", "income"
+    if (
+        "contribution to reserve" in lowered_label
+        or "reserve contribution" in lowered_label
+        or "transfer to reserve" in lowered_label
+        or "allocation to reserve" in lowered_label
+    ):
+        return "reserve_expense", "transfer"
+    if account_code is not None and account_code >= 90000:
+        return "reserve_expense", "component"
+    if current_section == "income":
+        return "income", None
+    return "operating", None
+
+
+def _parse_proforma_excel_source(path: str) -> list[dict[str, Any]]:
+    from openpyxl import load_workbook
+
+    workbook = load_workbook(path, data_only=True)
+    try:
+        selected_sheet = None
+        header_row_idx = None
+        month_columns: list[int] = []
+        for sheet_name in workbook.sheetnames:
+            worksheet = workbook[sheet_name]
+            for row_idx in range(1, min(worksheet.max_row, 40) + 1):
+                row_values = [worksheet.cell(row_idx, col).value for col in range(1, worksheet.max_column + 1)]
+                found_months = [
+                    col_idx
+                    for col_idx, cell_value in enumerate(row_values, start=1)
+                    if _normalize_header_text(cell_value) in _MONTH_HEADER_ALIASES
+                ]
+                if len(found_months) >= 6:
+                    selected_sheet = worksheet
+                    header_row_idx = row_idx
+                    month_columns = found_months
+                    break
+            if selected_sheet is not None:
+                break
+
+        if selected_sheet is None or header_row_idx is None or not month_columns:
+            raise ValueError("Could not find a Jan-Dec style month grid in this workbook.")
+
+        first_month_col = min(month_columns)
+        last_month_col = max(month_columns)
+
+        account_code_col = 1 if first_month_col > 1 else None
+        label_col = 2 if first_month_col > 2 else max(1, first_month_col - 1)
+        if account_code_col is not None and label_col == account_code_col:
+            label_col = account_code_col + 1
+
+        candidate_columns: list[tuple[int, int, str]] = []
+        for col_idx in range(last_month_col + 1, selected_sheet.max_column + 1):
+            header_text = _normalize_header_text(selected_sheet.cell(header_row_idx, col_idx).value)
+            if not header_text:
+                continue
+            if "final" in header_text or "approved" in header_text:
+                priority = 4
+                source_column = "final_budget"
+            elif "proposed" in header_text:
+                priority = 3
+                source_column = "proposed_amount"
+            elif "budget" in header_text:
+                priority = 2
+                source_column = "annual_budget"
+            elif "total" in header_text:
+                priority = 1
+                source_column = "annual_budget"
+            else:
+                continue
+
+            numeric_values = []
+            for row_idx in range(header_row_idx + 1, min(selected_sheet.max_row, header_row_idx + 80) + 1):
+                numeric_value = _try_float(selected_sheet.cell(row_idx, col_idx).value)
+                if numeric_value is not None:
+                    numeric_values.append(numeric_value)
+            if len(numeric_values) < 3:
+                continue
+            tiny_ratio = sum(1 for value in numeric_values if abs(value) <= 1.5) / max(len(numeric_values), 1)
+            if tiny_ratio > 0.7:
+                continue
+            candidate_columns.append((priority, col_idx, source_column))
+
+        if not candidate_columns:
+            raise ValueError("Could not find an annual final/proposed/budget column in this workbook.")
+
+        candidate_columns.sort(key=lambda item: (-item[0], item[1]))
+        best_priority = candidate_columns[0][0]
+        top_candidates = [candidate for candidate in candidate_columns if candidate[0] == best_priority]
+        if len(top_candidates) > 1:
+            raise ValueError("Multiple annual-like columns conflict without a safe precedence rule.")
+
+        _priority, annual_col_idx, annual_source_column = top_candidates[0]
+        annual_col_letter = selected_sheet.cell(header_row_idx, annual_col_idx).column_letter
+
+        line_items: list[dict[str, Any]] = []
+        current_section = "operating"
+        current_section_label = "Expense"
+
+        for row_idx in range(header_row_idx + 1, selected_sheet.max_row + 1):
+            label_raw = selected_sheet.cell(row_idx, label_col).value
+            account_raw = selected_sheet.cell(row_idx, account_code_col).value if account_code_col is not None else None
+            annual_value = _try_float(selected_sheet.cell(row_idx, annual_col_idx).value)
+            month_values = [
+                _try_float(selected_sheet.cell(row_idx, month_col).value)
+                for month_col in month_columns
+            ]
+            non_empty_month_values = [value for value in month_values if value is not None]
+            has_numeric_context = annual_value is not None or bool(non_empty_month_values)
+            label_text = str(label_raw).strip() if label_raw is not None else ""
+            account_text = str(account_raw).strip() if account_raw is not None else ""
+            lowered_label = _normalize_compare_text(label_text)
+
+            if not label_text and not account_text and not has_numeric_context:
+                continue
+
+            if (
+                label_text
+                and not has_numeric_context
+                and not account_text
+            ):
+                if "income" in lowered_label:
+                    current_section = "income"
+                    current_section_label = label_text
+                elif "expense" in lowered_label or "operating" in lowered_label or "maintenance" in lowered_label:
+                    current_section = "operating"
+                    current_section_label = label_text
+                elif "reserve" in lowered_label and "income" in lowered_label:
+                    current_section = "reserve_income"
+                    current_section_label = label_text
+                elif "reserve" in lowered_label:
+                    current_section = "reserve_expense"
+                    current_section_label = label_text
+                continue
+
+            if lowered_label.startswith("total ") or lowered_label.startswith("net ") or lowered_label.startswith("subtotal"):
+                continue
+            if "cash flow" in lowered_label or lowered_label.startswith("cumulative "):
+                continue
+
+            account_code = None
+            if account_text:
+                account_digits = "".join(character for character in account_text if character.isdigit())
+                if account_digits:
+                    try:
+                        account_code = int(account_digits)
+                    except ValueError:
+                        account_code = None
+
+            label = label_text or account_text
+            if not label:
+                continue
+
+            category, reserve_group = _infer_proforma_category(
+                current_section=current_section,
+                label=label,
+                account_code=account_code,
+            )
+
+            item: dict[str, Any] = {
+                "line_item_key": str(account_code) if account_code is not None else label,
+                "account_code": account_code,
+                "label": label,
+                "name": label,
+                "category": category,
+                "current_actual": non_empty_month_values[-1] if non_empty_month_values else None,
+                "ytd_actual": sum(non_empty_month_values) if non_empty_month_values else None,
+                "annual_budget": annual_value,
+                "projection": annual_value,
+                "percent_change": 0.0,
+                "read_only": category in READ_ONLY_SECTIONS,
+                "reserve_group": reserve_group,
+                "source_column": annual_source_column,
+                "source_page_or_cell": f"{selected_sheet.title}!{annual_col_letter}{row_idx}",
+                "raw": {
+                    "section": current_section_label,
+                    "sheet": selected_sheet.title,
+                },
+            }
+            line_items.append(item)
+
+        if len(line_items) < 2:
+            raise ValueError("Not enough pro-forma line items were extracted from this workbook.")
+
+        return line_items
+    finally:
+        workbook.close()
+
+
+def _default_proforma_statement_month(hoa: Property) -> int:
+    return int(hoa.fiscal_year_end_month or 12)
+
 
 def _now_text() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -136,6 +581,91 @@ def _json_loads(value: Optional[str], default: Any) -> Any:
     if not value:
         return default
     return json.loads(value)
+
+
+def _assessment_mapping_category(raw_category: object) -> str:
+    category = str(raw_category or "").lower()
+    if category == "income":
+        return "income"
+    if category == "reserve_income":
+        return "reserve_income"
+    if category in {"reserve", "reserve_expense"}:
+        return "reserve_expense"
+    return "operating"
+
+
+def _assessment_mapping_fund_type(category: str) -> str:
+    return "reserve" if category in {"reserve_income", "reserve_expense"} else "operating"
+
+
+def _line_item_to_assessment_mapping_line(item: dict[str, Any]) -> dict[str, Any]:
+    label = str(item.get("label") or item.get("line_item_key") or "")
+    normalized_label = " ".join(label.lower().split())
+    category = _assessment_mapping_category(item.get("category"))
+    account_code = item.get("account_code")
+    amount, source_column_used = select_assessment_mapping_amount(item)
+    return {
+        "label": label,
+        "normalized_label": normalized_label,
+        "section": str((item.get("raw") or {}).get("section") or category),
+        "category": category,
+        "fund_type": _assessment_mapping_fund_type(category),
+        "account_code": str(account_code) if account_code not in (None, "") else None,
+        "annual_budget": item.get("annual_budget"),
+        "proposed_amount": (
+            item.get("proposed_amount")
+            if item.get("proposed_amount") is not None
+            else item.get("proposedAmount")
+        ),
+        "projection": item.get("projection"),
+        "assessment_mapping_amount": float(amount) if amount is not None else None,
+        "source_column_used": source_column_used,
+        "amount": float(amount) if amount is not None else None,
+        "reserve_group": item.get("reserve_group") or item.get("reserveGroup"),
+        "active": not bool(item.get("inactive")),
+    }
+
+
+def _materialize_assessment_mappings_for_line_items(
+    session: Session,
+    *,
+    hoa_id: int,
+    line_items: list[dict[str, Any]],
+) -> dict[str, int]:
+    raw_conn = session.connection().connection
+    property_row = raw_conn.execute(
+        "SELECT default_assessment_setup_id FROM properties WHERE id = ?",
+        (hoa_id,),
+    ).fetchone()
+    setup_id = property_row[0] if property_row else None
+    if not setup_id:
+        setup_row = raw_conn.execute(
+            """
+            SELECT id
+              FROM assessment_setups
+             WHERE property_id = ?
+               AND status = 'approved'
+             ORDER BY id DESC
+             LIMIT 1
+            """,
+            (hoa_id,),
+        ).fetchone()
+        setup_id = setup_row[0] if setup_row else None
+    if not setup_id:
+        return {"auto_approved": 0, "manual_preserved": 0, "suggested": 0, "conflict": 0, "unmatched": 0}
+
+    budget_lines = [
+        _line_item_to_assessment_mapping_line(item)
+        for item in line_items
+        if isinstance(item, dict)
+    ]
+    return materialize_budget_line_pool_mappings(
+        property_id=hoa_id,
+        assessment_setup_id=int(setup_id),
+        budget_lines=budget_lines,
+        connection=session.connection().connection,
+        commit=False,
+    )
 
 
 def _write_atomic_bytes(destination: Path, payload: bytes) -> None:
@@ -259,8 +789,10 @@ def _build_review_required_response(
     reason: str,
     code: str,
     warnings: Optional[list[str]] = None,
+    details: Optional[dict[str, Any]] = None,
 ) -> BudgetUploadResponse:
     upload.enrichment_status = "failed"
+    debug_info = ExtractionDebugInfo(code=code, message=reason, details=details or {})
     review_event = _create_audit_event(
         session,
         hoa_id=hoa_id,
@@ -268,7 +800,7 @@ def _build_review_required_response(
         event_type="enrichment_review_required",
         summary=f"Review required for {original_filename}",
         upload_id=upload.id,
-        payload={"code": code, "reason": reason},
+        payload={"code": code, "reason": reason, "details": debug_info.details},
     )
     session.commit()
     return BudgetUploadResponse(
@@ -278,6 +810,7 @@ def _build_review_required_response(
         warnings=warnings or [],
         review_required=True,
         review_reason=reason,
+        debug_info=debug_info,
     )
 
 
@@ -323,7 +856,44 @@ def _build_income_statement_validation_feedback(
     return reason, warnings
 
 
-def _extract_pdf_statement_sync(path: str) -> ExtractedFinancialStatement | DocumentExtractionFailure:
+def _build_proforma_validation_feedback(
+    *,
+    original_filename: str,
+    issues: list[dict[str, Any]],
+) -> tuple[str, list[str]]:
+    primary_issue = issues[0] if issues else {}
+    primary_message = str(
+        primary_issue.get("message")
+        or "The workbook did not provide enough final annual budget coverage."
+    )
+    reason = (
+        f"{original_filename} was not accepted as a pro forma / final budget source. "
+        f"{primary_message}"
+    )
+    warnings = [
+        "Expected a spreadsheet-export operating/cash-flow budget with Jan-Dec columns plus one annual final, proposed, or budget column.",
+        "The annual final/proposed/budget column must contain enough populated values to build a safe draft.",
+    ]
+    for issue in issues:
+        message = str(issue.get("message") or "").strip()
+        if message:
+            warnings.append(message)
+    return reason, warnings
+
+
+def _extract_pdf_statement_sync(
+    path: str,
+    *,
+    source_mode: str = SOURCE_MODE_INCOME_STATEMENT,
+) -> ExtractedFinancialStatement | DocumentExtractionFailure:
+    def _extract_coro():
+        try:
+            return extract_pdf_statement(path, source_mode=source_mode)
+        except TypeError as exc:
+            if "source_mode" not in str(exc):
+                raise
+            return extract_pdf_statement(path)
+
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
@@ -333,9 +903,98 @@ def _extract_pdf_statement_sync(path: str) -> ExtractedFinancialStatement | Docu
         import concurrent.futures
 
         with concurrent.futures.ThreadPoolExecutor() as pool:
-            return pool.submit(asyncio.run, extract_pdf_statement(path)).result()
+            return pool.submit(asyncio.run, _extract_coro()).result()
 
-    return asyncio.run(extract_pdf_statement(path))
+    return asyncio.run(_extract_coro())
+
+
+async def _extract_proforma_excel_statement(
+    path: str,
+    *,
+    original_filename: Optional[str] = None,
+) -> ExtractedFinancialStatement | DocumentExtractionFailure:
+    """Use Gemini for semantic extraction from a serialized workbook grid."""
+    from ..ai_implementation.pipeline.llm_client import call_llm
+
+    try:
+        workbook_text = _extract_excel_workbook_prompt_text(path)
+    except Exception as exc:
+        return DocumentExtractionFailure(
+            code="provider_error",
+            message=f"The Excel workbook could not be prepared for Gemini extraction: {exc}",
+            details={"error": str(exc)},
+        )
+
+    filename = original_filename or Path(path).name
+    messages = [
+        {"role": "system", "content": _PROFORMA_EXCEL_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": (
+                f"Filename: {filename}\n"
+                "Workbook cell dump with A1 coordinates. Blank cells are omitted.\n\n"
+                f"{workbook_text}\n\n"
+                "Extract the pro forma / final budget line items from this workbook."
+            ),
+        },
+    ]
+
+    try:
+        raw_result = await call_llm(
+            messages,
+            ExtractedFinancialStatementPage,
+            temperature=0.0,
+            timeout=_PROFORMA_EXCEL_GEMINI_TIMEOUT_SECONDS,
+        )
+        if raw_result is None:
+            raise RuntimeError("Gemini extraction returned no structured result.")
+        return ExtractedFinancialStatement(
+            document_family="excel_budget_workbook",
+            report_type="income_statement",
+            statement_period=raw_result.statement_period,
+            line_items=raw_result.line_items,
+            totals=raw_result.totals,
+            validation_issues=raw_result.validation_issues,
+            confidence=raw_result.confidence,
+            extraction_metadata={"extractor": "gemini_excel_text"},
+        )
+    except ValidationError as exc:
+        return DocumentExtractionFailure(
+            code="schema_validation_failed",
+            message="Structured Excel extraction could not satisfy the canonical schema.",
+            details={"error": str(exc)},
+        )
+    except Exception as exc:
+        return DocumentExtractionFailure(
+            code="provider_error",
+            message=f"The Gemini Excel extraction provider failed: {exc}",
+            details={"error": str(exc)},
+        )
+
+
+def _extract_proforma_excel_statement_sync(
+    path: str,
+    *,
+    original_filename: Optional[str] = None,
+) -> ExtractedFinancialStatement | DocumentExtractionFailure:
+    async def _extract_coro():
+        return await _extract_proforma_excel_statement(
+            path,
+            original_filename=original_filename,
+        )
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        import concurrent.futures
+
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            return pool.submit(asyncio.run, _extract_coro()).result()
+
+    return asyncio.run(_extract_coro())
 
 
 def _extract_reserve_study_sync(path: str) -> ExtractedReserveStudyDocument | DocumentExtractionFailure:
@@ -368,6 +1027,60 @@ def _parse_float(value: Any) -> float:
         except ValueError:
             return 0.0
     return 0.0
+
+
+def _statement_to_budget_line_items(
+    statement: ExtractedFinancialStatement,
+    *,
+    source_mode: str,
+) -> list[dict[str, Any]]:
+    line_items: list[dict[str, Any]] = []
+    for item in statement.line_items:
+        category = item.section_kind or "operating"
+        evidence = item.evidence or {}
+        source_column = evidence.get("source_column")
+        if not isinstance(source_column, str) or not source_column.strip():
+            source_column = (
+                "final_budget"
+                if _is_proforma_source_mode(source_mode)
+                else "annual_budget"
+            )
+        reserve_group = None
+        if category == "reserve_income":
+            reserve_group = "income"
+        elif category == "reserve_expense":
+            reserve_group = "component"
+
+        account_code = _normalize_optional_text(item.account_code_text)
+        line_items.append(
+            {
+                "line_item_key": account_code or item.label,
+                "account_code": int(account_code) if account_code and account_code.isdigit() else account_code,
+                "label": item.label,
+                "name": item.label,
+                "category": category,
+                "current_actual": item.current_actual,
+                "current_budget": item.current_budget,
+                "current_variance": item.current_variance,
+                "ytd_actual": item.ytd_actual,
+                "ytd_budget": item.ytd_budget,
+                "ytd_variance": item.ytd_variance,
+                "annual_budget": item.annual_budget,
+                "projection": item.annual_budget,
+                "percent_change": 0.0,
+                "read_only": category in READ_ONLY_SECTIONS,
+                "reserve_group": reserve_group,
+                "source_column": source_column,
+                "source_page_or_cell": (
+                    f"page {item.page_number}" if item.page_number is not None else None
+                ),
+                "raw": {
+                    "section": item.section_label or category,
+                    "page_number": item.page_number,
+                },
+            }
+        )
+    return line_items
 
 
 def _normalize_optional_text(value: Any) -> Optional[str]:
@@ -766,9 +1479,20 @@ def _serialize_draft(draft: BudgetDraft, upload: Optional[BudgetUpload] = None) 
         growth_factor_note=draft.growth_factor_note,
         reserve_inflation_rate=draft.reserve_inflation_rate,
         reserve_inflation_note=draft.reserve_inflation_note,
+        version_int=draft.version_int,
         updated_at=draft.updated_at,
         upload_filename=upload.original_filename if upload else None,
         enriched_file_available=_storage_file_available(draft.enriched_storage_key),
+        source_mode=str(
+            draft.source_mode
+            or (upload.source_mode if upload else None)
+            or SOURCE_MODE_INCOME_STATEMENT
+        ),
+        assessment_mode=normalize_assessment_mode(
+            getattr(draft, "assessment_mode", None)
+            or (getattr(upload, "assessment_mode", None) if upload else None)
+            or ASSESSMENT_MODE_VARIABLE
+        ),
     )
 
 
@@ -788,10 +1512,21 @@ def _serialize_draft_summary(
         reopened_from_version_code=reopened_from_version.version_code if reopened_from_version else None,
         reserve_inflation_rate=draft.reserve_inflation_rate,
         reserve_inflation_note=draft.reserve_inflation_note,
+        version_int=draft.version_int,
         reserve_study_status=draft.reserve_study_status or "none",
         updated_at=draft.updated_at,
         actor_name=draft.actor_name,
         enriched_file_available=_storage_file_available(draft.enriched_storage_key),
+        source_mode=str(
+            draft.source_mode
+            or (upload.source_mode if upload else None)
+            or SOURCE_MODE_INCOME_STATEMENT
+        ),
+        assessment_mode=normalize_assessment_mode(
+            getattr(draft, "assessment_mode", None)
+            or (getattr(upload, "assessment_mode", None) if upload else None)
+            or ASSESSMENT_MODE_VARIABLE
+        ),
     )
 
 
@@ -834,6 +1569,16 @@ def _serialize_version_summary(
         source_draft_id=version.source_draft_id,
         output_storage_key=version.output_storage_key,
         source_upload_filename=upload.original_filename if upload else None,
+        source_mode=str(
+            version.source_mode
+            or (upload.source_mode if upload else None)
+            or SOURCE_MODE_INCOME_STATEMENT
+        ),
+        assessment_mode=normalize_assessment_mode(
+            getattr(version, "assessment_mode", None)
+            or (getattr(upload, "assessment_mode", None) if upload else None)
+            or ASSESSMENT_MODE_VARIABLE
+        ),
     )
 
 
@@ -873,6 +1618,16 @@ def _serialize_version_compare_card(
         statement_month=version.statement_month,
         fiscal_year_start_month=version.fiscal_year_start_month,
         fiscal_year_end_month=version.fiscal_year_end_month,
+        source_mode=str(
+            version.source_mode
+            or (upload.source_mode if upload else None)
+            or SOURCE_MODE_INCOME_STATEMENT
+        ),
+        assessment_mode=normalize_assessment_mode(
+            getattr(version, "assessment_mode", None)
+            or (getattr(upload, "assessment_mode", None) if upload else None)
+            or ASSESSMENT_MODE_VARIABLE
+        ),
     )
 
 
@@ -964,11 +1719,15 @@ def _create_upload_record(
     timestamp: str,
     document_role: str,
     enrichment_status: str,
+    source_mode: str = SOURCE_MODE_INCOME_STATEMENT,
+    assessment_mode: str = ASSESSMENT_MODE_VARIABLE,
 ) -> BudgetUpload:
     sha256 = hashlib.sha256(file_bytes).hexdigest()
     upload = BudgetUpload(
         property_id=hoa_id,
         document_role=document_role,
+        source_mode=source_mode,
+        assessment_mode=normalize_assessment_mode(assessment_mode),
         original_filename=original_filename,
         storage_key="pending",
         content_type=content_type,
@@ -1001,6 +1760,7 @@ def _bundle_status_from_budget_response(
         status=status,
         warnings=response.warnings,
         review_reason=response.review_reason,
+        debug_info=response.debug_info,
     )
 
 
@@ -1068,10 +1828,14 @@ def _render_draft_snapshot_from_upload(
         raise LookupError("Source upload file not found")
 
     route = choose_financial_document_route(upload.original_filename, upload.content_type)
-    if route.path == "pdf_vlm":
+    use_normalized_input = (
+        route.path == "pdf_vlm"
+        or _is_proforma_source_mode(upload.source_mode)
+    )
+    if use_normalized_input:
         canonical_statement = _canonical_statement_from_line_items(
             line_items,
-            family="pdf_visual_document",
+            family=route.family or "pdf_visual_document",
         )
         temp_input_path = build_normalized_statement_workbook(canonical_statement)
     else:
@@ -1083,10 +1847,7 @@ def _render_draft_snapshot_from_upload(
     try:
         temp_input_path = _ensure_xlsx(temp_input_path)
 
-        pdf_known_columns = (
-            {"ytd_actual": 6, "annual_budget": 9}
-            if route.path == "pdf_vlm" else None
-        )
+        pdf_known_columns = {"ytd_actual": 6, "annual_budget": 9} if use_normalized_input else None
         macros_service.write_percent_changes_by_label(
             temp_input_path,
             "Income Statement",
@@ -1175,10 +1936,20 @@ def create_upload(
     original_filename: str,
     content_type: Optional[str],
     file_bytes: bytes,
+    source_mode: str = SOURCE_MODE_INCOME_STATEMENT,
+    assessment_mode: str = ASSESSMENT_MODE_VARIABLE,
 ) -> BudgetUploadResponse:
+    source_mode = _normalize_source_mode(source_mode)
     hoa = _get_property(session, hoa_id)
+    assessment_mode = _update_property_assessment_mode(
+        session,
+        hoa=hoa,
+        actor=actor,
+        requested_assessment_mode=assessment_mode,
+    )
     timestamp = _now_text()
     sha256 = hashlib.sha256(file_bytes).hexdigest()
+    pdf_result: ExtractedFinancialStatement | DocumentExtractionFailure | None = None
     upload = _create_upload_record(
         session,
         hoa_id=hoa_id,
@@ -1189,6 +1960,8 @@ def create_upload(
         timestamp=timestamp,
         document_role="budget_source",
         enrichment_status="failed",
+        source_mode=source_mode,
+        assessment_mode=assessment_mode,
     )
 
     upload_received_event = _create_audit_event(
@@ -1198,7 +1971,12 @@ def create_upload(
         event_type="upload_received",
         summary=f"Uploaded {original_filename}",
         upload_id=upload.id,
-        payload={"filename": original_filename, "sha256": sha256},
+        payload={
+            "filename": original_filename,
+            "sha256": sha256,
+            "source_mode": source_mode,
+            "assessment_mode": assessment_mode,
+        },
     )
 
     route = choose_financial_document_route(original_filename, content_type)
@@ -1206,10 +1984,171 @@ def create_upload(
     cleanup_paths = {temp_input_path}
     temp_output_dir = Path(tempfile.mkdtemp(prefix="budget_history_"))
     try:
+        if _is_proforma_source_mode(source_mode):
+            parse_warnings: list[str] = []
+            if route.path == "pdf_vlm":
+                pdf_result = _extract_pdf_statement_sync(temp_input_path, source_mode=source_mode)
+                if isinstance(pdf_result, DocumentExtractionFailure):
+                    return _build_review_required_response(
+                        session,
+                        hoa_id=hoa_id,
+                        actor=actor,
+                        upload=upload,
+                        original_filename=original_filename,
+                        reason=pdf_result.message,
+                        code=pdf_result.code,
+                        warnings=[pdf_result.message],
+                        details=pdf_result.details,
+                    )
+                line_items = _statement_to_budget_line_items(pdf_result, source_mode=source_mode)
+                canonical_statement = pdf_result
+            else:
+                normalized_path = _ensure_xlsx(temp_input_path)
+                cleanup_paths.add(normalized_path)
+                temp_input_path = normalized_path
+                excel_result = _extract_proforma_excel_statement_sync(
+                    temp_input_path,
+                    original_filename=original_filename,
+                )
+                if isinstance(excel_result, DocumentExtractionFailure):
+                    return _build_review_required_response(
+                        session,
+                        hoa_id=hoa_id,
+                        actor=actor,
+                        upload=upload,
+                        original_filename=original_filename,
+                        reason=excel_result.message,
+                        code=excel_result.code,
+                        warnings=[excel_result.message],
+                        details=excel_result.details,
+                    )
+                line_items = _statement_to_budget_line_items(excel_result, source_mode=source_mode)
+                canonical_statement = excel_result
+
+            canonical_issues = validate_extracted_statement(canonical_statement)
+            if has_blocking_validation_issues(canonical_issues):
+                review_reason, validation_warnings = _build_proforma_validation_feedback(
+                    original_filename=original_filename,
+                    issues=canonical_issues,
+                )
+                return _build_review_required_response(
+                    session,
+                    hoa_id=hoa_id,
+                    actor=actor,
+                    upload=upload,
+                    original_filename=original_filename,
+                    reason=review_reason,
+                    code="validation_failed",
+                    warnings=parse_warnings + validation_warnings,
+                    details={"validation_issues": canonical_issues, "source_mode": source_mode},
+                )
+
+            statement_month = _default_proforma_statement_month(hoa)
+            growth_factor = _PROFORMA_GROWTH_FACTOR
+            growth_factor_note = _PROFORMA_GROWTH_FACTOR_NOTE
+
+            _replace_active_draft(session, hoa_id, timestamp)
+            draft = BudgetDraft(
+                property_id=hoa_id,
+                source_upload_id=upload.id,
+                reserve_study_upload_id=None,
+                reopened_from_version_id=None,
+                source_mode=source_mode,
+                assessment_mode=assessment_mode,
+                status=BUDGET_DRAFT_ACTIVE,
+                line_items_json=_json_dumps(line_items),
+                reserve_study_rows_json=_json_dumps([]),
+                reserve_study_warnings_json=_json_dumps([]),
+                reserve_study_status="none",
+                global_note=None,
+                statement_month=statement_month,
+                growth_factor=growth_factor,
+                growth_factor_note=growth_factor_note,
+                reserve_inflation_rate=app_settings_service.get_global_reserve_inflation_rate(session),
+                reserve_inflation_note=None,
+                budget_preview_json=_json_dumps(None),
+                created_by_user_id=actor["id"],
+                updated_by_user_id=actor["id"],
+                actor_name=_actor_name(actor),
+                created_at=timestamp,
+                updated_at=timestamp,
+            )
+            session.add(draft)
+            session.flush()
+
+            auto_applied_merge_count = auto_apply_merges_on_upload(
+                property_id=hoa_id,
+                budget_draft_id=draft.id,
+                new_draft_line_items=line_items,
+                db_conn=_raw_sqlite_connection(session),
+            )
+            if auto_applied_merge_count:
+                session.expire(draft, ["line_items_json", "version_int"])
+                line_items = _json_loads(draft.line_items_json, line_items)
+
+            preview = _refresh_draft_snapshot_from_upload(session, draft, upload)
+            mapping_counts = _materialize_assessment_mappings_for_line_items(
+                session,
+                hoa_id=hoa_id,
+                line_items=line_items,
+            )
+
+            upload.enrichment_status = "completed"
+            upload.line_items_json = _json_dumps(line_items)
+            upload.budget_preview_json = _json_dumps(preview)
+            upload.statement_month = statement_month
+            upload.growth_factor = growth_factor
+            upload.growth_factor_note = growth_factor_note
+            upload.source_mode = source_mode
+            upload.assessment_mode = assessment_mode
+
+            _create_audit_event(
+                session,
+                hoa_id=hoa_id,
+                actor=actor,
+                event_type="enrichment_completed",
+                summary=f"Enriched upload for {hoa.name}",
+                upload_id=upload.id,
+                draft_id=draft.id,
+                payload={
+                    "statement_month": statement_month,
+                    "growth_factor": growth_factor,
+                    "source_mode": source_mode,
+                    "assessment_mode": assessment_mode,
+                    "assessment_mapping_counts": mapping_counts,
+                    "auto_applied_merge_count": auto_applied_merge_count,
+                },
+            )
+            session.commit()
+
+            quality_warning: Optional[ExtractionQualityWarning] = None
+            if route.path == "pdf_vlm" and isinstance(pdf_result, ExtractedFinancialStatement):
+                metadata = pdf_result.extraction_metadata or {}
+                if metadata.get("used_vision_only_fallback"):
+                    quality_warning = ExtractionQualityWarning(
+                        code="scanned_pdf_vision_only",
+                        title="Please double-check the numbers below",
+                        body=(
+                            "This file was a scanned image, so we had to read every "
+                            "number from the page picture instead of the file's text. "
+                            "That's usually accurate, but not always — please review "
+                            "every line item carefully before saving."
+                        ),
+                        severity="warning",
+                    )
+
+            return BudgetUploadResponse(
+                upload_id=upload.id,
+                draft=_serialize_draft(draft, upload),
+                timeline_event=_serialize_timeline_event(upload_received_event),
+                warnings=parse_warnings,
+                extraction_quality_warning=quality_warning,
+            )
+
         statement_period_hint: str | None = None
         if route.path == "pdf_vlm":
             pdf_source_path = temp_input_path
-            pdf_result = _extract_pdf_statement_sync(temp_input_path)
+            pdf_result = _extract_pdf_statement_sync(temp_input_path, source_mode=source_mode)
             if isinstance(pdf_result, DocumentExtractionFailure):
                 return _build_review_required_response(
                     session,
@@ -1220,6 +2159,7 @@ def create_upload(
                     reason=pdf_result.message,
                     code=pdf_result.code,
                     warnings=[pdf_result.message],
+                    details=pdf_result.details,
                 )
 
             # Diagnostic: log a sample of what Gemini returned BEFORE the
@@ -1340,6 +2280,7 @@ def create_upload(
                 reason=review_reason,
                 code="validation_failed",
                 warnings=parse_warnings + validation_warnings,
+                details={"validation_issues": canonical_issues, "source_mode": source_mode},
             )
 
         _replace_active_draft(session, hoa_id, timestamp)
@@ -1348,6 +2289,8 @@ def create_upload(
             source_upload_id=upload.id,
             reserve_study_upload_id=None,
             reopened_from_version_id=None,
+            source_mode=source_mode,
+            assessment_mode=assessment_mode,
             status=BUDGET_DRAFT_ACTIVE,
             line_items_json=_json_dumps(line_items),
             reserve_study_rows_json=_json_dumps([]),
@@ -1368,9 +2311,25 @@ def create_upload(
         )
         session.add(draft)
         session.flush()
-        _persist_draft_enriched_workbook(
-            draft,
-            enriched_bytes=Path(intermediate_path).read_bytes(),
+        auto_applied_merge_count = auto_apply_merges_on_upload(
+            property_id=hoa_id,
+            budget_draft_id=draft.id,
+            new_draft_line_items=line_items,
+            db_conn=_raw_sqlite_connection(session),
+        )
+        if auto_applied_merge_count:
+            session.expire(draft, ["line_items_json", "version_int"])
+            line_items = _json_loads(draft.line_items_json, line_items)
+            preview = _refresh_draft_snapshot_from_upload(session, draft, upload)
+        else:
+            _persist_draft_enriched_workbook(
+                draft,
+                enriched_bytes=Path(intermediate_path).read_bytes(),
+            )
+        mapping_counts = _materialize_assessment_mappings_for_line_items(
+            session,
+            hoa_id=hoa_id,
+            line_items=line_items,
         )
 
         upload.enrichment_status = "completed"
@@ -1379,6 +2338,8 @@ def create_upload(
         upload.statement_month = statement_month
         upload.growth_factor = growth_factor
         upload.growth_factor_note = growth_factor_note
+        upload.source_mode = source_mode
+        upload.assessment_mode = assessment_mode
 
         _create_audit_event(
             session,
@@ -1388,7 +2349,14 @@ def create_upload(
             summary=f"Enriched upload for {hoa.name}",
             upload_id=upload.id,
             draft_id=draft.id,
-            payload={"statement_month": statement_month, "growth_factor": growth_factor},
+            payload={
+                "statement_month": statement_month,
+                "growth_factor": growth_factor,
+                "source_mode": source_mode,
+                "assessment_mode": assessment_mode,
+                "assessment_mapping_counts": mapping_counts,
+                "auto_applied_merge_count": auto_applied_merge_count,
+            },
         )
         session.commit()
         # If the extractor took a degraded path (e.g. scanned-PDF vision-only
@@ -1450,8 +2418,17 @@ def create_upload_bundle(
     reserve_filename: str,
     reserve_content_type: Optional[str],
     reserve_file_bytes: bytes,
+    source_mode: str = SOURCE_MODE_INCOME_STATEMENT,
+    assessment_mode: str = ASSESSMENT_MODE_VARIABLE,
 ) -> BudgetBundleUploadResponse:
-    _get_property(session, hoa_id)
+    source_mode = _normalize_source_mode(source_mode)
+    hoa = _get_property(session, hoa_id)
+    assessment_mode = _update_property_assessment_mode(
+        session,
+        hoa=hoa,
+        actor=actor,
+        requested_assessment_mode=assessment_mode,
+    )
 
     budget_route = choose_financial_document_route(budget_filename, budget_content_type)
     if budget_route.is_supported:
@@ -1462,15 +2439,27 @@ def create_upload_bundle(
             original_filename=budget_filename,
             content_type=budget_content_type,
             file_bytes=budget_file_bytes,
+            source_mode=source_mode,
+            assessment_mode=assessment_mode,
         )
         draft = budget_response.draft
         budget_status = _bundle_status_from_budget_response(budget_response, filename=budget_filename)
     else:
+        unsupported_reason = (
+            "Unsupported budget file type. Upload an Excel workbook or PDF pro forma / final budget."
+            if _is_proforma_source_mode(source_mode)
+            else "Unsupported budget file type. Upload an Excel workbook or PDF income statement."
+        )
         draft = None
         budget_status = BundleFileStatus(
             filename=budget_filename,
             status="failed",
-            review_reason="Unsupported budget file type. Upload an Excel workbook or PDF income statement.",
+            review_reason=unsupported_reason,
+            debug_info=ExtractionDebugInfo(
+                code="unsupported_file_type",
+                message=unsupported_reason,
+                details={"content_type": budget_content_type, "source_mode": source_mode},
+            ),
         )
 
     reserve_route = choose_financial_document_route(reserve_filename, reserve_content_type)
@@ -1488,6 +2477,8 @@ def create_upload_bundle(
             timestamp=timestamp,
             document_role="reserve_study",
             enrichment_status="completed",
+            source_mode=source_mode,
+            assessment_mode=assessment_mode,
         )
         reserve_status = BundleFileStatus(
             upload_id=reserve_upload.id,
@@ -1511,6 +2502,11 @@ def create_upload_bundle(
                 status="review_required",
                 warnings=[reserve_result.message],
                 review_reason=reserve_result.message,
+                debug_info=ExtractionDebugInfo(
+                    code=reserve_result.code,
+                    message=reserve_result.message,
+                    details=reserve_result.details,
+                ),
             )
             if draft is not None:
                 draft_row = _get_editable_draft(session, hoa_id, draft.id)
@@ -1558,10 +2554,16 @@ def create_upload_bundle(
                 session.commit()
                 draft = _serialize_draft(draft_row, _get_upload(session, draft_row.source_upload_id))
     else:
+        unsupported_reserve_reason = "Unsupported reserve study file type. Upload a reserve study PDF."
         reserve_status = BundleFileStatus(
             filename=reserve_filename,
             status="failed",
-            review_reason="Unsupported reserve study file type. Upload a reserve study PDF.",
+            review_reason=unsupported_reserve_reason,
+            debug_info=ExtractionDebugInfo(
+                code="unsupported_file_type",
+                message=unsupported_reserve_reason,
+                details={"content_type": reserve_content_type},
+            ),
         )
 
     if draft is not None and reserve_upload is not None and reserve_status.status == "pending":
@@ -1709,6 +2711,11 @@ def save_draft(
     draft.actor_name = _actor_name(actor)
     draft.updated_at = _now_text()
     _refresh_draft_snapshot_from_upload(session, draft, upload)
+    _materialize_assessment_mappings_for_line_items(
+        session,
+        hoa_id=hoa_id,
+        line_items=_json_loads(draft.line_items_json, payload.line_items),
+    )
     session.flush()
 
     timeline_event = None
@@ -1781,6 +2788,11 @@ def apply_reserve_study_to_budget(
     ]
     applied_line_items = [_reserve_study_row_to_budget_line_item(row) for row in due_rows]
     draft.line_items_json = _json_dumps([*preserved_line_items, *applied_line_items])
+    _materialize_assessment_mappings_for_line_items(
+        session,
+        hoa_id=hoa_id,
+        line_items=[*preserved_line_items, *applied_line_items],
+    )
     draft.updated_by_user_id = actor["id"]
     draft.actor_name = _actor_name(actor)
     draft.updated_at = _now_text()
@@ -2068,9 +3080,14 @@ def create_budget_version(
     timestamp = _now_text()
     line_items = payload.line_items or _json_loads(draft.line_items_json, [])
     global_note = payload.global_note if payload.global_note is not None else draft.global_note
+    mapping_counts = _materialize_assessment_mappings_for_line_items(
+        session,
+        hoa_id=hoa_id,
+        line_items=line_items,
+    )
 
     route = choose_financial_document_route(upload.original_filename, upload.content_type)
-    if route.path == "pdf_vlm":
+    if route.path == "pdf_vlm" or _is_proforma_source_mode(upload.source_mode):
         source_path = _ensure_draft_enriched_workbook(session, draft)
         temp_input_path = _write_temp_workbook(source_path.read_bytes(), "enriched-income-statement.xlsx")
     else:
@@ -2082,7 +3099,8 @@ def create_budget_version(
 
         pdf_known_columns = (
             {"ytd_actual": 6, "annual_budget": 9}
-            if route.path == "pdf_vlm" else None
+            if route.path == "pdf_vlm" or _is_proforma_source_mode(upload.source_mode)
+            else None
         )
         macros_service.write_percent_changes_by_label(
             temp_input_path,
@@ -2119,6 +3137,12 @@ def create_budget_version(
             source_upload_id=upload.id,
             source_draft_id=draft.id,
             reopened_from_version_id=draft.reopened_from_version_id,
+            source_mode=str(draft.source_mode or upload.source_mode or SOURCE_MODE_INCOME_STATEMENT),
+            assessment_mode=normalize_assessment_mode(
+                getattr(draft, "assessment_mode", None)
+                or getattr(upload, "assessment_mode", None)
+                or ASSESSMENT_MODE_VARIABLE
+            ),
             storage_key=None,
             output_storage_key=None,
             version_number=next_version_number,
@@ -2167,9 +3191,19 @@ def create_budget_version(
             summary=f"Generated {version.version_code}",
             upload_id=upload.id,
             draft_id=draft.id,
-            version_id=version.id,
-            payload={"stage": version.stage, "version_code": version.version_code},
-        )
+        version_id=version.id,
+        payload={
+            "stage": version.stage,
+            "version_code": version.version_code,
+            "source_mode": str(version.source_mode or upload.source_mode or SOURCE_MODE_INCOME_STATEMENT),
+            "assessment_mode": normalize_assessment_mode(
+                getattr(version, "assessment_mode", None)
+                or getattr(upload, "assessment_mode", None)
+                or ASSESSMENT_MODE_VARIABLE
+            ),
+            "assessment_mapping_counts": mapping_counts,
+        },
+    )
         session.commit()
         return BudgetGenerateResponse(
             draft=_serialize_draft(draft, upload),
@@ -2282,6 +3316,12 @@ def reopen_version_as_draft(
         source_upload_id=version.source_upload_id,
         reserve_study_upload_id=source_draft.reserve_study_upload_id if source_draft else None,
         reopened_from_version_id=version.id,
+        source_mode=str(version.source_mode or upload.source_mode or SOURCE_MODE_INCOME_STATEMENT),
+        assessment_mode=normalize_assessment_mode(
+            getattr(version, "assessment_mode", None)
+            or getattr(upload, "assessment_mode", None)
+            or ASSESSMENT_MODE_VARIABLE
+        ),
         status=BUDGET_DRAFT_ACTIVE,
         line_items_json=version.line_items_json,
         reserve_study_rows_json=source_draft.reserve_study_rows_json if source_draft else _json_dumps([]),
@@ -2317,6 +3357,11 @@ def reopen_version_as_draft(
 
     if not copied_enriched_snapshot:
         _refresh_draft_snapshot_from_upload(session, draft, upload)
+    _materialize_assessment_mappings_for_line_items(
+        session,
+        hoa_id=hoa_id,
+        line_items=_json_loads(draft.line_items_json, []),
+    )
 
     event = _create_audit_event(
         session,
@@ -2330,6 +3375,12 @@ def reopen_version_as_draft(
         payload={
             "source_version_id": version.id,
             "source_version_code": version.version_code,
+            "source_mode": str(version.source_mode or upload.source_mode or SOURCE_MODE_INCOME_STATEMENT),
+            "assessment_mode": normalize_assessment_mode(
+                getattr(version, "assessment_mode", None)
+                or getattr(upload, "assessment_mode", None)
+                or ASSESSMENT_MODE_VARIABLE
+            ),
             "old_draft_id": previous_active_draft_id,
             "new_draft_id": draft.id,
         },
@@ -2378,6 +3429,13 @@ def update_version_metadata(
         timeline_events.append(_serialize_timeline_event(metadata_event))
 
     if current_stage != BUDGET_VERSION_STAGE_FINAL and version.stage == BUDGET_VERSION_STAGE_FINAL:
+        finalized_merge_count = 0
+        if version.source_draft_id is not None:
+            finalized_merge_count = finalize_applied_merges(
+                property_id=hoa_id,
+                budget_draft_id=version.source_draft_id,
+                db_conn=_raw_sqlite_connection(session),
+            )
         final_event = _create_audit_event(
             session,
             hoa_id=hoa_id,
@@ -2386,7 +3444,10 @@ def update_version_metadata(
             summary=f"Marked {version.version_code} as Final",
             upload_id=version.source_upload_id,
             version_id=version.id,
-            payload={"version_code": version.version_code},
+            payload={
+                "version_code": version.version_code,
+                "finalized_merge_count": finalized_merge_count,
+            },
         )
         timeline_events.append(_serialize_timeline_event(final_event))
 

@@ -358,6 +358,41 @@ For each pool, derive:
 - included_budget_lines / excluded_budget_lines: the budget-line
   labels (verbatim) that this pool funds.
 
+- budget_line_derivation: describe HOW the DRE identifies this
+  pool's budget-line membership. Pick exactly one:
+  * explicit_lines: the DRE visibly lists the budget lines or
+    categories included in this pool. Preserve those visible labels
+    in included_budget_lines.
+  * residual_default: the DRE visibly derives this pool as the
+    remaining/base/equal/fixed costs after other explicit component
+    pools are removed from a total. Generic visual signals include
+    formulas or tables such as "total budget minus variable costs
+    equals base costs", "total less prorated costs", "remaining
+    assessable costs", "balance allocated equally", or other
+    regular costs after named special/prorated/exempt components.
+    When using residual_default, do NOT invent explicit line labels
+    for this pool. Leave included_budget_lines empty unless the DRE
+    separately lists real lines for it.
+  * formula_only: the DRE shows an amount or formula for the pool,
+    but does not show enough budget-line evidence to map current-year
+    budget lines safely.
+  * unknown: the DRE does not visibly explain the budget-line basis.
+
+  For residual_default pools, populate residual_after_pool_keys with
+  the pool_key values that must claim their explicit/special lines
+  before this residual pool receives remaining eligible lines. Use
+  residual_exclusions for generic categories that should not be swept
+  into the residual pool without review, such as income_only,
+  pass_through, reimbursement, special_assessment, inactive,
+  zero_amount, or already_mapped.
+
+  Empty included_budget_lines alone is NOT evidence that a pool is
+  residual_default. If included_budget_lines is empty without residual
+  evidence visible on the page images, use formula_only or unknown and
+  add a human_review_question. Do not use HOA-specific, file-specific,
+  page-specific, title-specific, or amount-specific rules for this
+  decision.
+
   PASS-THROUGH DETECTION: within each budget section, flag any
   line item whose label contains pass-through signal words —
   "reimbursement", "pass-through", "individually billed",
@@ -397,6 +432,51 @@ For each pool, derive:
   a separate one-time / disclosure-only item.
 
 - source_pages: at least one page where this pool is documented.
+
+STEP 5e: Extract DRE budget-line-to-assessment-type mapping evidence
+When the DRE shows individual budget lines, account codes, parent
+budget categories, or component labels that explain which costs
+belong to which assessment pool, extract them as
+budget_line_mapping_evidence entries.
+
+For each visible budget line or category that can be tied to an
+assessment pool, emit:
+- account_code, if visible
+- source_label exactly as printed
+- parent_category exactly as printed, if visible
+- assessment_pool_key
+- assessment_type:
+  equal_base
+  prorated_variable
+  square_footage
+  ownership_percent
+  exemption_credit
+  subsidy_credit
+  pass_through
+  reserve_component
+  excluded_or_informational
+  unknown_needs_review
+- match_confidence
+- review_required true/false
+- review_reason when needed
+- source_page
+- source_evidence_text
+
+Important:
+- Only extract mapping evidence visible in THIS DRE.
+- Do not use these old DRE dollar amounts as current-year budget amounts.
+- If a DRE line/category is explicitly listed in a variable /
+  prorated computation, map it to that pool's
+  assessment_pool_key.
+- If a pool is calculated as total budget minus listed components,
+  mark the equal/base pool as residual_default elsewhere in the
+  pool derivation fields instead of inventing individual equal
+  lines here.
+- If a line relates to exemption, subsidy, developer credit,
+  unaccepted common area, or 2792.16(c), mark it as
+  review_required for current-year applicability.
+- If a line/category is ambiguous, use
+  assessment_type=unknown_needs_review instead of guessing.
 
 STEP 6: Extract formulas
 For every formula the DRE shows or implies, record formula_name,

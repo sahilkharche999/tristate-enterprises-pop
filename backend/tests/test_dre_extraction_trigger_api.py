@@ -43,7 +43,8 @@ def test_trigger_extraction_returns_202_and_schedules_task(
 
     captured: dict = {}
 
-    def fake_run_extraction_job(*, property_id, dre_document_id, file_id):
+    def fake_run_extraction_job(*, run_id, property_id, dre_document_id, file_id):
+        captured["run_id"] = run_id
         captured["property_id"] = property_id
         captured["dre_document_id"] = dre_document_id
         captured["file_id"] = file_id
@@ -57,11 +58,52 @@ def test_trigger_extraction_returns_202_and_schedules_task(
     body = response.json()
     assert body["document_id"] == document_id
     assert body["status"] == "scheduled"
+    assert isinstance(body["extraction_run_id"], int)
+    assert body["job_status"] == "queued"
 
     # TestClient runs BackgroundTasks synchronously after the response.
+    assert captured["run_id"] == body["extraction_run_id"]
     assert captured["property_id"] == hoa_id
     assert captured["dre_document_id"] == document_id
     assert captured["file_id"]  # non-empty
+
+    raw_conn = db_session.connection().connection
+    row = raw_conn.execute(
+        "SELECT dre_document_id, job_status, completed_at "
+        "FROM dre_extraction_runs WHERE id = ?",
+        (body["extraction_run_id"],),
+    ).fetchone()
+    assert row[0] == document_id
+    assert row[1] == "queued"
+    assert row[2] is None
+
+
+def test_trigger_extraction_reuses_existing_active_run(
+    client, db_session, monkeypatch,
+):
+    from app.routers import dre as dre_router
+
+    hoa_id = _seeded_property_id(db_session)
+    document_id = _upload_dre(client, hoa_id)
+    scheduled_run_ids: list[int] = []
+
+    def fake_run_extraction_job(*, run_id, property_id, dre_document_id, file_id):
+        scheduled_run_ids.append(run_id)
+
+    monkeypatch.setattr(dre_router, "run_extraction_job", fake_run_extraction_job)
+
+    first = client.post(f"/hoa/{hoa_id}/dre/documents/{document_id}/extract")
+    second = client.post(f"/hoa/{hoa_id}/dre/documents/{document_id}/extract")
+
+    assert first.status_code == 202, first.text
+    assert second.status_code == 202, second.text
+    first_body = first.json()
+    second_body = second.json()
+    assert first_body["status"] == "scheduled"
+    assert second_body["status"] == "already_running"
+    assert second_body["job_status"] == "queued"
+    assert second_body["extraction_run_id"] == first_body["extraction_run_id"]
+    assert scheduled_run_ids == [first_body["extraction_run_id"]]
 
 
 def test_trigger_extraction_404_when_document_missing(client, db_session):

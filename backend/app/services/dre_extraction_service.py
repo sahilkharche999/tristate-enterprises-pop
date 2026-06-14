@@ -2,26 +2,16 @@
 
 The router schedules ``run_extraction_job`` as a FastAPI BackgroundTask
 when the operator clicks "Run extraction" on an uploaded DRE document.
-The job:
-
-1. Loads the stored PDF bytes from BUDGET_STORAGE_ROOT/dre/...
-2. Renders each page to a PNG via ``render_dre_pages``
-3. Builds real Gemini callbacks via ``gemini_callbacks`` (same code path
-   the live tests exercise)
-4. Calls ``run_dre_extraction`` to produce a ``DREExtractionRunRecord``
-5. Persists the run via ``save_extraction_run``
-6. Logs success/failure; never raises out of a BackgroundTask
-
-The router returns 202 immediately; the UI polls
-``GET /hoa/{id}/dre/extraction-runs`` to discover the new row.
+Unlike the original version, this service now persists a placeholder
+``dre_extraction_runs`` row immediately so the UI can rediscover the run
+after navigation or refresh.
 """
 
 from __future__ import annotations
 
 import logging
 import sqlite3
-from pathlib import Path
-from typing import Optional
+from typing import NamedTuple, Optional
 
 from ..dre_extraction.gemini_callbacks import (
     build_classify_callback,
@@ -31,16 +21,33 @@ from ..dre_extraction.gemini_callbacks import (
     gemini_client_from_env,
 )
 from ..dre_extraction.page_rendering import render_dre_pages
-from ..dre_extraction.persistence import save_extraction_run
-from ..dre_extraction.wire_schemas import WIRE_SCHEMA_SHA256
+from ..dre_extraction.persistence import (
+    create_placeholder_extraction_run,
+    finalize_extraction_run,
+    find_active_extraction_run,
+    get_requested_model_name,
+    mark_extraction_run_failed,
+    mark_extraction_run_running,
+)
 from ..dre_extraction.pipeline import run_dre_extraction
+from ..dre_extraction.prompts import (
+    DRE_SETUP_EXTRACTOR_PROMPT_SHA256,
+    DRE_SETUP_EXTRACTOR_PROMPT_VERSION,
+)
 from ..dre_extraction.storage import dre_file_exists, dre_file_path
+from ..dre_extraction.wire_schemas import WIRE_SCHEMA_SHA256
 
 logger = logging.getLogger(__name__)
 
 
 class DREExtractionPreconditionError(Exception):
-    """Raised by the router-side validation: document missing, file missing, etc."""
+    """Raised by router-side validation: document missing, file missing, etc."""
+
+
+class ScheduledDREExtractionResult(NamedTuple):
+    extraction_run_id: int
+    job_status: str
+    status: str
 
 
 def lookup_dre_document(
@@ -49,11 +56,7 @@ def lookup_dre_document(
     dre_document_id: int,
     connection: sqlite3.Connection,
 ) -> tuple[str, str]:
-    """Return ``(file_id, file_name)`` for an extractable DRE document.
-
-    Raises ``DREExtractionPreconditionError`` if the row doesn't exist,
-    doesn't belong to ``property_id``, or its file_id isn't on disk.
-    """
+    """Return ``(file_id, file_name)`` for an extractable DRE document."""
     row = connection.execute(
         "SELECT file_id, file_name, property_id "
         "FROM dre_documents WHERE id = ?",
@@ -75,26 +78,81 @@ def lookup_dre_document(
     return file_id, file_name
 
 
+def schedule_extraction_run(
+    *,
+    property_id: int,
+    dre_document_id: int,
+    connection: sqlite3.Connection,
+) -> ScheduledDREExtractionResult:
+    """Create placeholder row unless one active run already exists."""
+    active = find_active_extraction_run(
+        dre_document_id=dre_document_id,
+        connection=connection,
+    )
+    if active is not None:
+        return ScheduledDREExtractionResult(
+            extraction_run_id=active[0],
+            job_status=active[1],
+            status="already_running",
+        )
+
+    model_name = default_model_name()
+    try:
+        run_id = create_placeholder_extraction_run(
+            property_id=property_id,
+            dre_document_id=dre_document_id,
+            model_name=model_name,
+            prompt_version=DRE_SETUP_EXTRACTOR_PROMPT_VERSION,
+            prompt_sha256=DRE_SETUP_EXTRACTOR_PROMPT_SHA256,
+            wire_schema_sha256=WIRE_SCHEMA_SHA256,
+            connection=connection,
+        )
+        connection.commit()
+        return ScheduledDREExtractionResult(
+            extraction_run_id=run_id,
+            job_status="queued",
+            status="scheduled",
+        )
+    except sqlite3.IntegrityError:
+        connection.rollback()
+        active = find_active_extraction_run(
+            dre_document_id=dre_document_id,
+            connection=connection,
+        )
+        if active is None:
+            raise
+        return ScheduledDREExtractionResult(
+            extraction_run_id=active[0],
+            job_status=active[1],
+            status="already_running",
+        )
+
+
 def run_extraction_job(
     *,
+    run_id: int,
     property_id: int,
     dre_document_id: int,
     file_id: str,
     max_pages: Optional[int] = None,
     db_path: Optional[str] = None,
 ) -> None:
-    """BackgroundTask entry point. Renders + extracts + persists.
-
-    Never raises — exceptions are logged. The router has already
-    validated preconditions before scheduling this.
-
-    ``db_path`` lets tests inject an explicit SQLite file; production
-    pulls the SQLAlchemy engine's raw connection (via the local
-    import so this module stays import-cycle-safe).
-    """
+    """BackgroundTask entry point. Renders + extracts + updates existing run."""
+    connection = _resolve_connection(db_path)
     try:
+        mark_extraction_run_running(
+            extraction_run_id=run_id,
+            connection=connection,
+        )
+        connection.commit()
+
         client = gemini_client_from_env()
         if client is None:
+            _persist_failed_job(
+                connection=connection,
+                run_id=run_id,
+                message="DRE extraction skipped: GEMINI_API_KEY not set",
+            )
             logger.error(
                 "DRE extraction skipped: GEMINI_API_KEY not set "
                 "(property=%s document=%s)",
@@ -102,9 +160,20 @@ def run_extraction_job(
             )
             return
 
-        model = default_model_name()
+        model = (
+            get_requested_model_name(
+                extraction_run_id=run_id,
+                connection=connection,
+            )
+            or default_model_name()
+        )
         pdf_path = dre_file_path(file_id)
         if not pdf_path.exists():
+            _persist_failed_job(
+                connection=connection,
+                run_id=run_id,
+                message=f"DRE extraction aborted: file missing {pdf_path}",
+            )
             logger.error(
                 "DRE extraction aborted: file missing %s "
                 "(property=%s document=%s)",
@@ -133,28 +202,50 @@ def run_extraction_job(
             model_name=model,
         )
 
-        connection = _resolve_connection(db_path)
-        try:
-            run_id = save_extraction_run(
-                record,
-                property_id=property_id,
-                dre_document_id=dre_document_id,
-                connection=connection,
-                wire_schema_sha256=WIRE_SCHEMA_SHA256,
-            )
-            connection.commit()
-        finally:
-            connection.close()
+        finalize_extraction_run(
+            record,
+            extraction_run_id=run_id,
+            connection=connection,
+            wire_schema_sha256=WIRE_SCHEMA_SHA256,
+        )
+        connection.commit()
 
         logger.info(
             "DRE extraction complete: property=%s document=%s run_id=%s status=%s",
             property_id, dre_document_id, run_id, record.status,
         )
-    except Exception:  # noqa: BLE001 — BackgroundTask must never raise
+    except Exception as exc:  # noqa: BLE001 — BackgroundTask must never raise
+        try:
+            _persist_failed_job(
+                connection=connection,
+                run_id=run_id,
+                message=str(exc),
+            )
+        except Exception:
+            logger.exception(
+                "Failed to persist DRE extraction failure: property=%s document=%s run_id=%s",
+                property_id, dre_document_id, run_id,
+            )
         logger.exception(
-            "DRE extraction crashed: property=%s document=%s",
-            property_id, dre_document_id,
+            "DRE extraction crashed: property=%s document=%s run_id=%s",
+            property_id, dre_document_id, run_id,
         )
+    finally:
+        connection.close()
+
+
+def _persist_failed_job(
+    *,
+    connection: sqlite3.Connection,
+    run_id: int,
+    message: str,
+) -> None:
+    mark_extraction_run_failed(
+        extraction_run_id=run_id,
+        error_message=message,
+        connection=connection,
+    )
+    connection.commit()
 
 
 def _resolve_connection(db_path: Optional[str]) -> sqlite3.Connection:
@@ -166,6 +257,8 @@ def _resolve_connection(db_path: Optional[str]) -> sqlite3.Connection:
 
 __all__ = [
     "DREExtractionPreconditionError",
+    "ScheduledDREExtractionResult",
     "lookup_dre_document",
     "run_extraction_job",
+    "schedule_extraction_run",
 ]

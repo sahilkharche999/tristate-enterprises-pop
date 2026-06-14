@@ -1,3 +1,17 @@
+export interface MergedBudgetLine {
+  accountCode?: string | null;
+  label?: string | null;
+  lineItemKey?: string | null;
+  normalizedLabel?: string | null;
+  contributions?: {
+    current_period?: number | null;
+    ytd?: number | null;
+    annual_budget?: number | null;
+    projection?: number | null;
+    variance?: number | null;
+  } | null;
+}
+
 export interface LineItem {
   id: string;
   category: 'income' | 'operating' | 'reserve' | 'reserve_income' | 'reserve_expense';
@@ -6,11 +20,20 @@ export interface LineItem {
   annualBudget: number;
   percentChange: number; // display %, user-editable
   projection?: number;   // backend col AL: YTD × growth factor
+  currentPeriod?: number | null;
+  variance?: number | null;
   readOnly?: boolean;    // true = excluded from board-adjustable flow (reserve-study rows)
   accountCode?: number;  // 60000 — parsed from "60000 - Electricity & Gas"
   label?: string;        // "60000 - Electricity & Gas" — full string from col B
+  lineItemKey?: string | null;
+  normalizedLabel?: string | null;
+  fundType?: string | null;
+  mergedCount?: number;
+  mergedGls?: MergedBudgetLine[];
   reserveGroup?: 'component' | 'income' | 'transfer' | null;
   rawSection?: string | null;
+  sourceColumn?: string | null;
+  sourcePageOrCell?: string | null;
   note?: {
     title: string;
     body: string;

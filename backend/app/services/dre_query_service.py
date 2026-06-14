@@ -33,6 +33,8 @@ class DREExtractionRunListItem(BaseModel):
     extraction_run_id: int
     dre_document_id: int
     property_id: int
+    started_at: str
+    job_status: str
     status: str
     review_status: str
     promoted_setup_id: Optional[int]
@@ -41,12 +43,15 @@ class DREExtractionRunListItem(BaseModel):
     model_name: Optional[str]
     prompt_version: Optional[str]
     repair_attempt_count: int
+    error_message: str
 
 
 class DREExtractionRunDetail(BaseModel):
     extraction_run_id: int
     dre_document_id: int
     property_id: int
+    started_at: str
+    job_status: str
     status: str
     review_status: str
     promoted_setup_id: Optional[int]
@@ -61,6 +66,7 @@ class DREExtractionRunDetail(BaseModel):
     low_confidence_flags: Optional[list]
     validation_warnings: Optional[list]
     schema_validation_errors: Optional[list]
+    error_message: str
 
 
 class DREExtractionRunNotFound(LookupError):
@@ -95,21 +101,24 @@ def list_extraction_runs(
 ) -> list[DREExtractionRunListItem]:
     rows = connection.execute(
         """
-        SELECT id, dre_document_id, property_id, status, review_status,
-               promoted_setup_id, promoted_at, completed_at,
-               model_name, prompt_version, repair_attempt_count
+        SELECT id, dre_document_id, property_id, started_at, job_status,
+               status, review_status, promoted_setup_id, promoted_at, completed_at,
+               model_name, prompt_version, repair_attempt_count, error_message
           FROM dre_extraction_runs
          WHERE property_id = ?
-         ORDER BY completed_at DESC
+         ORDER BY CASE WHEN job_status IN ('queued', 'running') THEN 0 ELSE 1 END,
+                  COALESCE(completed_at, started_at) DESC,
+                  id DESC
         """,
         (property_id,),
     ).fetchall()
     return [
         DREExtractionRunListItem(
             extraction_run_id=r[0], dre_document_id=r[1], property_id=r[2],
-            status=r[3], review_status=r[4],
-            promoted_setup_id=r[5], promoted_at=r[6], completed_at=r[7],
-            model_name=r[8], prompt_version=r[9], repair_attempt_count=r[10],
+            started_at=r[3], job_status=r[4], status=r[5], review_status=r[6],
+            promoted_setup_id=r[7], promoted_at=r[8], completed_at=r[9],
+            model_name=r[10], prompt_version=r[11], repair_attempt_count=r[12],
+            error_message=r[13] or "",
         )
         for r in rows
     ]
@@ -130,12 +139,12 @@ def get_extraction_run(
 ) -> DREExtractionRunDetail:
     row = connection.execute(
         """
-        SELECT id, dre_document_id, property_id, status, review_status,
-               promoted_setup_id, promoted_at, completed_at,
+        SELECT id, dre_document_id, property_id, started_at, job_status,
+               status, review_status, promoted_setup_id, promoted_at, completed_at,
                model_name, prompt_version, prompt_sha256,
                repair_attempt_count, parsed_json,
                citation_audit_json, low_confidence_flags_json,
-               validation_warnings_json, schema_validation_errors
+               validation_warnings_json, schema_validation_errors, error_message
           FROM dre_extraction_runs
          WHERE id = ? AND property_id = ?
         """,
@@ -150,20 +159,23 @@ def get_extraction_run(
         extraction_run_id=row[0],
         dre_document_id=row[1],
         property_id=row[2],
-        status=row[3],
-        review_status=row[4],
-        promoted_setup_id=row[5],
-        promoted_at=row[6],
-        completed_at=row[7],
-        model_name=row[8],
-        prompt_version=row[9],
-        prompt_sha256=row[10],
-        repair_attempt_count=row[11],
-        parsed_json=_safe_json(row[12]),
-        citation_audit=_safe_json(row[13]),
-        low_confidence_flags=_safe_json(row[14]),
-        validation_warnings=_safe_json(row[15]),
-        schema_validation_errors=_safe_json(row[16]),
+        started_at=row[3],
+        job_status=row[4],
+        status=row[5],
+        review_status=row[6],
+        promoted_setup_id=row[7],
+        promoted_at=row[8],
+        completed_at=row[9],
+        model_name=row[10],
+        prompt_version=row[11],
+        prompt_sha256=row[12],
+        repair_attempt_count=row[13],
+        parsed_json=_safe_json(row[14]),
+        citation_audit=_safe_json(row[15]),
+        low_confidence_flags=_safe_json(row[16]),
+        validation_warnings=_safe_json(row[17]),
+        schema_validation_errors=_safe_json(row[18]),
+        error_message=row[19] or "",
     )
 
 

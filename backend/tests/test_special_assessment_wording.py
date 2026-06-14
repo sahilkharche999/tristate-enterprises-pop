@@ -55,6 +55,7 @@ def _base_context(special_assessments: list[dict[str, Any]]) -> dict[str, Any]:
         },
         "today": "March 1, 2026",
         "today_iso": "2026-03-01",
+        "matrix": type("Matrix", (), {"recipient_grain": "summary"})(),
         "computed": {
             "monthly_replacement_contribution_per_unit_2026": Decimal("200.98"),
             "monthly_replacement_revenue_total": Decimal("672886"),
@@ -171,7 +172,6 @@ class TestCoverLetterWording:
         # the cover letter may still show $0.00 for unrelated totals.)
         # Instead, check the disclosure-language paragraph is present.
         assert "2026 roof replacement" in text
-
 
 class TestDisclosureSummaryWording:
     def test_none_renders_none_scheduled_row(self):

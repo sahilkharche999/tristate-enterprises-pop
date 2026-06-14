@@ -14,6 +14,7 @@
 
 import { BASE_URL } from './config';
 import { authHeaders, handleResponse } from './http';
+import type { AssessmentMode } from '../lib/assessmentMode';
 
 export type PackageStatus =
   | 'draft'
@@ -35,6 +36,10 @@ export interface AnnualPackage {
   finalized_at: string | null;
   regen_of_package_id: number | null;
   version_int: number;
+  assessment_mode: AssessmentMode;
+  live_assessment_mode: AssessmentMode;
+  package_impact: 'none' | 'recheck_required' | 'regeneration_required';
+  package_impact_reason: string | null;
 }
 
 export interface CreatePackageRequest {

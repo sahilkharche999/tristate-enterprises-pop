@@ -34,6 +34,14 @@ from .schemas import (
     PreflightError,
     ReserveStudySnapshot,
 )
+from .formulas import total_year_replacement_provision
+from .reconciliation import (
+    normalize_packet_archetype,
+    parse_optional_decimal_setting,
+    resolve_assessment_facts,
+    resolve_reserve_funding_facts,
+    resolve_reserve_interest_tax_facts,
+)
 
 
 # Accepted reserve-study-date formats. ISO + US numeric are most common;
@@ -62,6 +70,30 @@ def _parse_reserve_study_date(value: str) -> Optional[date]:
         except ValueError:
             continue
     return None
+
+
+def _reserve_funding_row_issue_details(warning: str) -> tuple[str, str]:
+    if "implies" in warning and "reserve-study units" in warning:
+        return (
+            "unit_count_conflict",
+            "Confirm whether the reserve study unit count or HOA assessment unit count should drive disclosures.",
+        )
+    return (
+        "reserve_funding_row_math_mismatch",
+        "Review the extracted reserve funding plan row against the source reserve study.",
+    )
+
+
+def _reserve_funding_issue_details(warning: str) -> tuple[str, str]:
+    if "component annual provision" in warning:
+        return (
+            "reserve_funding_component_fallback",
+            "Enter a manual reserve funding amount or upload a budget/reserve study funding row.",
+        )
+    return (
+        "reserve_funding_conflict",
+        "Choose the board-approved reserve funding source.",
+    )
 
 
 def check_reserve_study_age(
@@ -181,6 +213,9 @@ def validate_inputs(
 
     overrides = hoa_settings_overrides or {}
     errors: list[PreflightError] = []
+    packet_archetype = normalize_packet_archetype(
+        overrides.get("financial_packet_archetype")
+    )
 
     # 1. Budget line items present (REQ-D11-005)
     if not budget_draft.line_items:
@@ -217,9 +252,11 @@ def validate_inputs(
     #    only a sentinel default. Preflight checks the *effective* value
     #    (override if present, else spec.static_data) so a missing setting
     #    surfaces as a data_gap downstream rather than blocking compile.
-    override_cash = overrides.get("reserve_cash_balance_eoy_prior")
+    override_cash = parse_optional_decimal_setting(
+        overrides.get("reserve_cash_balance_eoy_prior")
+    )
     effective_cash = (
-        Decimal(str(override_cash))
+        override_cash
         if override_cash is not None
         else spec.static_data.reserve_cash_balance_eoy_prior
     )
@@ -238,6 +275,132 @@ def validate_inputs(
             package_fiscal_year=spec.fiscal_year,
         )
     )
+    if (
+        1900 <= spec.fiscal_year <= 3000
+        and reserve_snapshot.funding_plan_rows
+        and not any(
+            row.year == spec.fiscal_year for row in reserve_snapshot.funding_plan_rows
+        )
+    ):
+        errors.append(PreflightError(
+            field_path="reserve_study_snapshot.funding_plan_rows",
+            message=(
+                "No reserve-study funding plan row was found for fiscal year "
+                f"{spec.fiscal_year}; reserve funding may be pulled from a "
+                "different year or fallback source."
+            ),
+            severity="warning",
+            code="fiscal_year_source_mismatch",
+            affected_value={"package_fiscal_year": spec.fiscal_year},
+            suggested_fix=(
+                "Upload a reserve-study funding plan for the package year or "
+                "choose a manual/budget reserve funding source."
+            ),
+        ))
+    for row in reserve_snapshot.funding_plan_rows:
+        for warning in row.consistency_warnings(units=hoa_metadata.units):
+            code, suggested_fix = _reserve_funding_row_issue_details(warning)
+            errors.append(PreflightError(
+                field_path="reserve_study_snapshot.funding_plan_rows",
+                message=warning,
+                severity="warning",
+                code=code,
+                affected_value={"row_year": row.year, "hoa_units": hoa_metadata.units},
+                suggested_fix=suggested_fix,
+            ))
+
+    # 6. Reconciliation warnings. These do not block generation by default,
+    # but they make source-of-truth conflicts visible before the PDF renders.
+    reserve_funding_facts = resolve_reserve_funding_facts(
+        funding_source=overrides.get("reserve_funding_source"),
+        manual_annual_amount=overrides.get("reserve_funding_manual_amount"),
+        budget_line_items=budget_draft.line_items,
+        reserve_funding_plan_rows=reserve_snapshot.funding_plan_rows,
+        component_annual_provision=total_year_replacement_provision(
+            components=reserve_snapshot.components
+        ),
+        units=hoa_metadata.units,
+        fiscal_year=spec.fiscal_year,
+    )
+    if packet_archetype == "dual-fund" and reserve_funding_facts.source == "missing":
+        errors.append(PreflightError(
+            field_path="reserve_funding.source",
+            message=(
+                "Reserve funding could not be resolved for a dual-fund packet. "
+                "Choose a reserve funding source or provide the missing amount."
+            ),
+            severity="blocking",
+            code="reserve_funding_missing",
+            affected_value=reserve_funding_facts.model_dump(mode="json"),
+            suggested_fix=(
+                "Set a manual reserve funding amount, upload a reserve-funding line, "
+                "or supply a reserve-study funding-plan row for the package year."
+            ),
+        ))
+    for warning in reserve_funding_facts.warnings:
+        code, suggested_fix = _reserve_funding_issue_details(warning)
+        errors.append(PreflightError(
+            field_path="reserve_funding.source",
+            message=warning,
+            severity="warning",
+            code=code,
+            affected_value=reserve_funding_facts.model_dump(mode="json"),
+            suggested_fix=suggested_fix,
+        ))
+
+    assessment_facts = resolve_assessment_facts(
+        budget_line_items=[
+            item for item in budget_draft.line_items if not item.is_reserve
+        ],
+        approved_monthly_assessment_per_unit=overrides.get(
+            "approved_monthly_assessment_per_unit"
+        ),
+        units=hoa_metadata.units,
+    )
+    for warning in assessment_facts.warnings:
+        errors.append(PreflightError(
+            field_path="assessment.annual_revenue",
+            message=warning,
+            severity="warning",
+            code="assessment_override_revenue_mismatch",
+            affected_value=assessment_facts.model_dump(mode="json"),
+            suggested_fix=(
+                "Update the budget assessment revenue or confirm the approved "
+                "monthly override."
+            ),
+        ))
+
+    reserve_interest_tax_facts = resolve_reserve_interest_tax_facts(
+        reserve_interest_income_override=overrides.get("reserve_interest_income_override"),
+        income_tax_provision_override=overrides.get("income_tax_provision_override"),
+        budget_line_items=budget_draft.line_items,
+        reserve_funding_plan_rows=reserve_snapshot.funding_plan_rows,
+        fiscal_year=spec.fiscal_year,
+    )
+    should_validate_interest_tax = (
+        overrides.get("reserve_interest_income_override") not in (None, "")
+        or overrides.get("income_tax_provision_override") not in (None, "")
+        or any(
+            item.is_revenue and item.label and "interest" in item.label.lower()
+            for item in budget_draft.line_items
+        )
+        or any(
+            row.year == spec.fiscal_year and row.interest_income is not None
+            for row in reserve_snapshot.funding_plan_rows
+        )
+    )
+    if should_validate_interest_tax:
+        for warning in reserve_interest_tax_facts.warnings:
+            errors.append(PreflightError(
+                field_path="reserve_interest_income",
+                message=warning,
+                severity="warning",
+                code="reserve_interest_or_tax_missing",
+                affected_value=reserve_interest_tax_facts.model_dump(mode="json"),
+                suggested_fix=(
+                    "Provide a reserve interest income override or confirm the reserve-study / budget source rows."
+                ),
+            ))
 
     return errors
 

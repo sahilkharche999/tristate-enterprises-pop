@@ -1,6 +1,19 @@
 import { useEffect, useState } from 'react';
-import { useParams, Link } from 'react-router';
-import { ArrowLeft, Download, FolderOpen, Eye, Database } from 'lucide-react';
+import { useParams, Link, useSearchParams } from 'react-router';
+import {
+  ArrowLeft,
+  Archive,
+  BookOpen,
+  Database,
+  Download,
+  Eye,
+  FileArchive,
+  FileText,
+  FolderOpen,
+  Landmark,
+  PackageCheck,
+  Settings as SettingsIcon,
+} from 'lucide-react';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
@@ -30,6 +43,90 @@ interface SettingsFormState {
 
 type ValidationField = 'name' | 'units' | 'fiscalYearStart';
 type ValidationErrors = Partial<Record<ValidationField, string>>;
+type SettingsSection = 'database' | 'disclosure' | 'appendices' | 'dre' | 'packages' | 'knowledge' | 'data';
+
+const SETTINGS_SECTIONS: SettingsSection[] = [
+  'database',
+  'disclosure',
+  'appendices',
+  'dre',
+  'packages',
+  'knowledge',
+  'data',
+];
+
+const SETTINGS_NAV_GROUPS: Array<{
+  label: string;
+  items: Array<{
+    value: SettingsSection;
+    label: string;
+    helper: string;
+    icon: typeof Database;
+  }>;
+}> = [
+  {
+    label: 'HOA Setup',
+    items: [
+      {
+        value: 'database',
+        label: 'HOA Database',
+        helper: 'Identity, fiscal year, units',
+        icon: Database,
+      },
+      {
+        value: 'disclosure',
+        label: 'Disclosure Defaults',
+        helper: 'Package language and contacts',
+        icon: FileText,
+      },
+    ],
+  },
+  {
+    label: 'Documents',
+    items: [
+      {
+        value: 'appendices',
+        label: 'Appendices',
+        helper: 'Static package attachments',
+        icon: FileArchive,
+      },
+      {
+        value: 'dre',
+        label: 'DRE & Review',
+        helper: 'Assessment setup review',
+        icon: Landmark,
+      },
+    ],
+  },
+  {
+    label: 'Lifecycle',
+    items: [
+      {
+        value: 'packages',
+        label: 'Annual Packages',
+        helper: 'Create, approve, finalize',
+        icon: PackageCheck,
+      },
+    ],
+  },
+  {
+    label: 'Tools',
+    items: [
+      {
+        value: 'knowledge',
+        label: 'Knowledge Base',
+        helper: 'Reference documents',
+        icon: BookOpen,
+      },
+      {
+        value: 'data',
+        label: 'Data Export',
+        helper: 'Download system data',
+        icon: Archive,
+      },
+    ],
+  },
+];
 
 const DEFAULT_FORM: SettingsFormState = {
   name: '',
@@ -75,6 +172,7 @@ function validateForm(form: SettingsFormState): ValidationErrors {
 
 export function SettingsScreen() {
   const { id } = useParams<{ id: string }>();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [hoa, setHoa] = useState<HOARecord | null>(null);
   const [hoaConfig, setHoaConfig] = useState<SettingsFormState>(DEFAULT_FORM);
   const [validationErrors, setValidationErrors] = useState<ValidationErrors>({});
@@ -82,6 +180,10 @@ export function SettingsScreen() {
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const requestedSection = searchParams.get('section');
+  const selectedSection = SETTINGS_SECTIONS.includes(requestedSection as SettingsSection)
+    ? (requestedSection as SettingsSection)
+    : 'database';
 
   useEffect(() => {
     let cancelled = false;
@@ -119,6 +221,21 @@ export function SettingsScreen() {
   }, [id]);
 
   const knowledgeBaseFolders = id ? getKnowledgeBaseFolders(id) : [];
+
+  const handleSectionChange = (value: string) => {
+    const nextSection = SETTINGS_SECTIONS.includes(value as SettingsSection)
+      ? (value as SettingsSection)
+      : 'database';
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      if (nextSection === 'database') {
+        next.delete('section');
+      } else {
+        next.set('section', nextSection);
+      }
+      return next;
+    });
+  };
 
   const handleFieldChange = (field: keyof SettingsFormState, value: string) => {
     setHoaConfig((current) => ({ ...current, [field]: value }));
@@ -202,32 +319,46 @@ export function SettingsScreen() {
         </div>
       </header>
 
-      <main className="max-w-6xl mx-auto px-8 py-8">
-        <Tabs defaultValue="database" className="space-y-8">
-          <TabsList className="bg-[#F7F7F7] border border-[#E5E5E5]">
-            <TabsTrigger value="database" className="data-[state=active]:bg-white">
-              HOA Database Configuration
-            </TabsTrigger>
-            <TabsTrigger value="knowledge" className="data-[state=active]:bg-white">
-              Knowledge Base
-            </TabsTrigger>
-            <TabsTrigger value="data" className="data-[state=active]:bg-white">
-              Data Export
-            </TabsTrigger>
-            <TabsTrigger value="disclosure" className="data-[state=active]:bg-white">
-              Disclosure Package
-            </TabsTrigger>
-            <TabsTrigger value="appendices" className="data-[state=active]:bg-white">
-              Appendices
-            </TabsTrigger>
-            <TabsTrigger value="packages" className="data-[state=active]:bg-white">
-              Annual Packages
-            </TabsTrigger>
-            <TabsTrigger value="dre" className="data-[state=active]:bg-white">
-              DRE & Review
-            </TabsTrigger>
-          </TabsList>
+      <main className="mx-auto max-w-7xl px-5 py-8 md:px-8">
+        <Tabs value={selectedSection} onValueChange={handleSectionChange} className="gap-0">
+          <div className="grid gap-8 lg:grid-cols-[280px_minmax(0,1fr)]">
+            <aside className="rounded-lg border border-[#E5E5E5] bg-white p-3 shadow-sm lg:sticky lg:top-28 lg:self-start">
+              <TabsList className="flex h-auto w-full flex-col items-stretch justify-start gap-4 rounded-none border-0 bg-transparent p-0">
+                {SETTINGS_NAV_GROUPS.map((group) => (
+                  <div key={group.label} className="space-y-2">
+                    <p className="px-2 text-xs font-semibold uppercase tracking-[0.12em] text-[#737373]">
+                      {group.label}
+                    </p>
+                    <div className="grid gap-1">
+                      {group.items.map((item) => {
+                        const Icon = item.icon;
+                        return (
+                          <TabsTrigger
+                            key={item.value}
+                            value={item.value}
+                            className="h-auto w-full cursor-pointer justify-start rounded-lg border border-transparent px-3 py-3 text-left transition-colors hover:border-[#e5e5e5] hover:bg-[#f7f7f7] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#111111] data-[state=active]:border-[#111111] data-[state=active]:bg-[#f7f7f7] data-[state=active]:shadow-none"
+                          >
+                            <span className="flex w-full min-w-0 items-start gap-3">
+                              <Icon className="mt-0.5 h-4 w-4 shrink-0 text-[#525252]" />
+                              <span className="min-w-0">
+                                <span className="block text-sm font-semibold text-[#111111]">
+                                  {item.label}
+                                </span>
+                                <span className="hidden text-xs font-normal leading-5 text-[#737373] lg:block">
+                                  {item.helper}
+                                </span>
+                              </span>
+                            </span>
+                          </TabsTrigger>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
+              </TabsList>
+            </aside>
 
+            <div className="min-w-0">
           <TabsContent value="database" className="space-y-6">
             <div className="rounded-lg border border-[#E5E5E5] bg-white p-6 shadow-sm">
               <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
@@ -255,7 +386,7 @@ export function SettingsScreen() {
             </div>
 
             <div className="bg-[#F7F7F7] border border-[#E5E5E5] rounded-lg p-8 space-y-6">
-              <div className="grid grid-cols-2 gap-6">
+              <div className="grid gap-6 md:grid-cols-2">
                 <div className="space-y-2">
                   <Label htmlFor="hoaName">HOA Name</Label>
                   <Input
@@ -279,7 +410,7 @@ export function SettingsScreen() {
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-6">
+              <div className="grid gap-6 md:grid-cols-2">
                 <div className="space-y-2">
                   <Label htmlFor="fiscalStart">Fiscal Year Start</Label>
                   <Select
@@ -303,7 +434,7 @@ export function SettingsScreen() {
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-6">
+              <div className="grid gap-6 md:grid-cols-2">
                 <div className="space-y-2">
                   <Label htmlFor="taxId">Tax ID</Label>
                   <Input
@@ -328,7 +459,7 @@ export function SettingsScreen() {
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-6">
+              <div className="grid gap-6 md:grid-cols-2">
                 <div className="space-y-2">
                   <Label htmlFor="city">City</Label>
                   <Input
@@ -359,7 +490,7 @@ export function SettingsScreen() {
               </div>
 
               <div className="bg-white border border-[#E5E5E5] rounded-lg p-6 space-y-4">
-                <div className="grid grid-cols-2 gap-4 text-sm">
+                <div className="grid gap-4 text-sm sm:grid-cols-2">
                   <div className="text-[#666666]">Format</div>
                   <div className="text-[#111111] font-medium">JSON</div>
                   <div className="text-[#666666]">Includes</div>
@@ -415,8 +546,8 @@ export function SettingsScreen() {
           </TabsContent>
 
           <TabsContent value="knowledge" className="space-y-6">
-            <div className="grid grid-cols-4 gap-6">
-              <div className="col-span-1 bg-[#F7F7F7] border border-[#E5E5E5] rounded-lg p-4">
+            <div className="grid gap-6 xl:grid-cols-4">
+              <div className="bg-[#F7F7F7] border border-[#E5E5E5] rounded-lg p-4 xl:col-span-1">
                 <h3 className="text-sm font-medium text-[#111111] mb-4">Folders</h3>
                 <div className="space-y-2">
                   {knowledgeBaseFolders.map((folder) => (
@@ -438,9 +569,9 @@ export function SettingsScreen() {
                 </div>
               </div>
 
-              <div className="col-span-3">
+              <div className="min-w-0 xl:col-span-3">
                 {selectedFolder ? (
-                  <div className="bg-[#F7F7F7] border border-[#E5E5E5] rounded-lg overflow-hidden">
+                  <div className="overflow-x-auto rounded-lg border border-[#E5E5E5] bg-[#F7F7F7]">
                     <div className="px-6 py-4 border-b border-[#E5E5E5] bg-white">
                       <h3 className="text-lg font-medium text-[#111111]">
                         {knowledgeBaseFolders.find((folder) => folder.id === selectedFolder)?.name}
@@ -486,6 +617,8 @@ export function SettingsScreen() {
               </div>
             </div>
           </TabsContent>
+            </div>
+          </div>
         </Tabs>
       </main>
     </div>

@@ -3,7 +3,7 @@
 // upload form for new DRE PDFs, a "Run extraction" button per uploaded
 // document, and a "Review →" link to each run's Review Workbench page.
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   type DREDocument,
   type DREExtractionRunListItem,
@@ -18,15 +18,38 @@ type Props = {
   hoaId: number;
 };
 
-const EXTRACTION_POLL_MS = 8000;
-const EXTRACTION_POLL_TIMEOUT_MS = 5 * 60 * 1000;
+const EXTRACTION_POLL_MS = 2000;
+const MAX_POLL_FAILURES = 3;
+const ACTIVE_JOB_STATUSES = new Set(['queued', 'running']);
 
 const REVIEW_STATUS_COLORS: Record<string, string> = {
   pending: 'bg-gray-100 text-gray-700',
-  in_review: 'bg-blue-100 text-blue-800',
+  approved: 'bg-blue-100 text-blue-800',
   promoted: 'bg-green-100 text-green-800',
   rejected: 'bg-red-100 text-red-800',
 };
+
+function isActiveRun(run: DREExtractionRunListItem): boolean {
+  return ACTIVE_JOB_STATUSES.has(run.job_status);
+}
+
+function lifecycleLabel(run: DREExtractionRunListItem): string {
+  if (run.job_status === 'queued') return 'Queued';
+  if (run.job_status === 'running') return 'Running';
+  if (run.job_status === 'failed') return 'Job failed';
+  if (run.status === 'succeeded') return 'Succeeded';
+  if (run.status === 'extraction_partial') return 'Partial';
+  return 'Failed';
+}
+
+function lifecycleTone(run: DREExtractionRunListItem): string {
+  if (run.job_status === 'queued') return 'bg-amber-100 text-amber-800';
+  if (run.job_status === 'running') return 'bg-blue-100 text-blue-800';
+  if (run.job_status === 'failed') return 'bg-rose-100 text-rose-800';
+  if (run.status === 'succeeded') return 'bg-emerald-100 text-emerald-800';
+  if (run.status === 'extraction_partial') return 'bg-amber-100 text-amber-800';
+  return 'bg-rose-100 text-rose-800';
+}
 
 export function DREPanel({ hoaId }: Props) {
   const [docs, setDocs] = useState<DREDocument[]>([]);
@@ -36,21 +59,23 @@ export function DREPanel({ hoaId }: Props) {
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
   const [selectedRunId, setSelectedRunId] = useState<number | null>(null);
-  // Documents the operator just scheduled an extraction for; we show
-  // an "Extracting…" badge on these rows and poll the runs list until
-  // a new run appears or the timeout expires.
-  const [extractingDocIds, setExtractingDocIds] = useState<Set<number>>(new Set());
   const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pollFailureCount = useRef(0);
+
+  const fetchState = useCallback(async () => {
+    return Promise.all([
+      listDREDocuments(hoaId),
+      listExtractionRuns(hoaId),
+    ]);
+  }, [hoaId]);
 
   const refresh = useCallback(async () => {
     try {
-      const [d, r] = await Promise.all([
-        listDREDocuments(hoaId),
-        listExtractionRuns(hoaId),
-      ]);
+      const [d, r] = await fetchState();
       setDocs(d);
       setRuns(r);
       setError(null);
+      pollFailureCount.current = 0;
       return r;
     } catch (exc) {
       setError(String(exc));
@@ -58,20 +83,67 @@ export function DREPanel({ hoaId }: Props) {
     } finally {
       setLoading(false);
     }
-  }, [hoaId]);
+  }, [fetchState]);
 
   useEffect(() => {
     setLoading(true);
-    refresh();
+    void refresh();
   }, [refresh]);
 
-  // Stop polling when no extractions are in-flight.
+  const activeRunByDocumentId = useMemo(() => {
+    const byDocumentId = new Map<number, DREExtractionRunListItem>();
+    runs.forEach((run) => {
+      if (isActiveRun(run) && !byDocumentId.has(run.dre_document_id)) {
+        byDocumentId.set(run.dre_document_id, run);
+      }
+    });
+    return byDocumentId;
+  }, [runs]);
+
+  const shouldPoll = selectedRunId === null && runs.some(isActiveRun);
+
   useEffect(() => {
-    if (extractingDocIds.size === 0 && pollTimer.current) {
+    if (pollTimer.current) {
       clearTimeout(pollTimer.current);
       pollTimer.current = null;
     }
-  }, [extractingDocIds]);
+    if (!shouldPoll) return;
+
+    let cancelled = false;
+
+    const tick = async () => {
+      try {
+        const [d, r] = await fetchState();
+        if (cancelled) return;
+        setDocs(d);
+        setRuns(r);
+        setError(null);
+        pollFailureCount.current = 0;
+        if (!r.some(isActiveRun)) {
+          pollTimer.current = null;
+          return;
+        }
+      } catch {
+        if (cancelled) return;
+        pollFailureCount.current += 1;
+        if (pollFailureCount.current >= MAX_POLL_FAILURES) {
+          setError('Lost connection to extraction status. Refresh the page to check current state.');
+          pollTimer.current = null;
+          return;
+        }
+      }
+      pollTimer.current = setTimeout(tick, EXTRACTION_POLL_MS);
+    };
+
+    pollTimer.current = setTimeout(tick, EXTRACTION_POLL_MS);
+    return () => {
+      cancelled = true;
+      if (pollTimer.current) {
+        clearTimeout(pollTimer.current);
+        pollTimer.current = null;
+      }
+    };
+  }, [fetchState, shouldPoll]);
 
   async function onUpload(event: React.FormEvent) {
     event.preventDefault();
@@ -83,7 +155,7 @@ export function DREPanel({ hoaId }: Props) {
     try {
       await uploadDRE(hoaId, uploadFile);
       setUploadFile(null);
-      refresh();
+      await refresh();
     } catch (exc) {
       setError(String(exc));
     } finally {
@@ -93,53 +165,12 @@ export function DREPanel({ hoaId }: Props) {
 
   async function onRunExtraction(documentId: number) {
     setError(null);
-    setExtractingDocIds((prev) => new Set(prev).add(documentId));
-    const scheduledAt = Date.now();
     try {
       await triggerDREExtraction(hoaId, documentId);
+      await refresh();
     } catch (exc) {
       setError(String(exc));
-      setExtractingDocIds((prev) => {
-        const next = new Set(prev);
-        next.delete(documentId);
-        return next;
-      });
-      return;
     }
-    // Poll the runs list until we see a new run for this document,
-    // or the timeout expires.
-    const baseline = new Set(
-      runs.filter((r) => r.dre_document_id === documentId).map((r) => r.extraction_run_id),
-    );
-
-    const tick = async () => {
-      if (Date.now() - scheduledAt > EXTRACTION_POLL_TIMEOUT_MS) {
-        setExtractingDocIds((prev) => {
-          const next = new Set(prev);
-          next.delete(documentId);
-          return next;
-        });
-        setError(
-          `Extraction for document ${documentId} timed out after 5 minutes. ` +
-            'Check backend logs.',
-        );
-        return;
-      }
-      const latest = await refresh();
-      const newRun = (latest || []).find(
-        (r) => r.dre_document_id === documentId && !baseline.has(r.extraction_run_id),
-      );
-      if (newRun) {
-        setExtractingDocIds((prev) => {
-          const next = new Set(prev);
-          next.delete(documentId);
-          return next;
-        });
-        return;
-      }
-      pollTimer.current = setTimeout(tick, EXTRACTION_POLL_MS);
-    };
-    pollTimer.current = setTimeout(tick, EXTRACTION_POLL_MS);
   }
 
   if (selectedRunId !== null) {
@@ -147,7 +178,10 @@ export function DREPanel({ hoaId }: Props) {
       <div className="space-y-2">
         <button
           type="button"
-          onClick={() => setSelectedRunId(null)}
+          onClick={() => {
+            setSelectedRunId(null);
+            void refresh();
+          }}
           className="rounded border px-2 py-1 text-sm hover:bg-gray-50"
         >
           ← Back to DRE list
@@ -195,7 +229,14 @@ export function DREPanel({ hoaId }: Props) {
             </thead>
             <tbody>
               {docs.map((d) => {
-                const extracting = extractingDocIds.has(d.document_id);
+                const activeRun = activeRunByDocumentId.get(d.document_id);
+                const busy = Boolean(activeRun);
+                const buttonLabel =
+                  activeRun?.job_status === 'queued'
+                    ? 'Queued…'
+                    : activeRun?.job_status === 'running'
+                      ? 'Running…'
+                      : 'Run extraction';
                 return (
                   <tr key={d.document_id} className="border-b">
                     <td>{d.document_id}</td>
@@ -211,11 +252,11 @@ export function DREPanel({ hoaId }: Props) {
                     <td>
                       <button
                         type="button"
-                        disabled={extracting || d.status !== 'active'}
+                        disabled={busy || d.status !== 'active'}
                         onClick={() => onRunExtraction(d.document_id)}
                         className="rounded border border-blue-400 px-2 py-0.5 text-xs text-blue-700 hover:bg-blue-50 disabled:opacity-50"
                       >
-                        {extracting ? 'Extracting…' : 'Run extraction'}
+                        {buttonLabel}
                       </button>
                     </td>
                   </tr>
@@ -231,8 +272,7 @@ export function DREPanel({ hoaId }: Props) {
         {runs.length === 0 ? (
           <p className="text-sm text-gray-500">
             No extractions yet. Click <strong>Run extraction</strong> on an
-            uploaded DRE row above to kick off a Gemini Vision extraction
-            (typically ~30–90 seconds).
+            uploaded DRE row above to kick off a Gemini Vision extraction.
           </p>
         ) : (
           <table className="min-w-full text-sm">
@@ -243,41 +283,58 @@ export function DREPanel({ hoaId }: Props) {
                 <th>Status</th>
                 <th>Review</th>
                 <th>Promoted setup</th>
-                <th>Completed</th>
+                <th>Started</th>
                 <th>Action</th>
               </tr>
             </thead>
             <tbody>
-              {runs.map((r) => (
-                <tr key={r.extraction_run_id} className="border-b">
-                  <td>{r.extraction_run_id}</td>
-                  <td>{r.dre_document_id}</td>
-                  <td className="font-mono text-xs">{r.status}</td>
-                  <td>
-                    <span
-                      className={`inline-block rounded px-2 py-0.5 text-xs ${
-                        REVIEW_STATUS_COLORS[r.review_status] ||
-                        'bg-gray-100 text-gray-700'
-                      }`}
-                    >
-                      {r.review_status}
-                    </span>
-                  </td>
-                  <td>{r.promoted_setup_id ?? '—'}</td>
-                  <td className="text-gray-500">
-                    {r.completed_at?.slice(0, 10) || '—'}
-                  </td>
-                  <td>
-                    <button
-                      type="button"
-                      onClick={() => setSelectedRunId(r.extraction_run_id)}
-                      className="rounded border px-2 py-0.5 text-xs hover:bg-gray-50"
-                    >
-                      Review →
-                    </button>
-                  </td>
-                </tr>
-              ))}
+              {runs.map((r) => {
+                const active = isActiveRun(r);
+                return (
+                  <tr key={r.extraction_run_id} className="border-b">
+                    <td>{r.extraction_run_id}</td>
+                    <td>{r.dre_document_id}</td>
+                    <td>
+                      <div className="space-y-1">
+                        <span
+                          className={`inline-block rounded px-2 py-0.5 text-xs ${lifecycleTone(r)}`}
+                        >
+                          {lifecycleLabel(r)}
+                        </span>
+                        {r.error_message ? (
+                          <div className="max-w-[320px] text-xs text-rose-700">
+                            {r.error_message}
+                          </div>
+                        ) : null}
+                      </div>
+                    </td>
+                    <td>
+                      <span
+                        className={`inline-block rounded px-2 py-0.5 text-xs ${
+                          REVIEW_STATUS_COLORS[r.review_status] ||
+                          'bg-gray-100 text-gray-700'
+                        }`}
+                      >
+                        {r.review_status}
+                      </span>
+                    </td>
+                    <td>{r.promoted_setup_id ?? '—'}</td>
+                    <td className="text-gray-500">
+                      {(r.started_at || '').slice(0, 19).replace('T', ' ') || '—'}
+                    </td>
+                    <td>
+                      <button
+                        type="button"
+                        disabled={active}
+                        onClick={() => setSelectedRunId(r.extraction_run_id)}
+                        className="rounded border px-2 py-0.5 text-xs hover:bg-gray-50 disabled:opacity-50"
+                      >
+                        {active ? 'Waiting…' : 'Review →'}
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         )}

@@ -5,6 +5,7 @@ import { Input } from './ui/input';
 import { Button } from './ui/button';
 import { saveBudgetNote } from '../api/budgetHistory';
 import { type LineItem } from '../data/mockData';
+import { mergedBadgeLabel, mergedBadgeTooltip } from '../lib/glMerge.ts';
 import {
   formatCurrency,
   getCategoryLabel,
@@ -25,6 +26,7 @@ interface EnrichedViewProps {
   lineItems: LineItem[];
   onPercentChange: (itemId: string, newPercent: number) => void;
   onNoteSaved: (itemId: string, title: string, body: string) => void;
+  onRequestMerge: (itemId: string) => void;
   units: number;
   reserveInflationRate: number;
 }
@@ -35,6 +37,7 @@ export function EnrichedView({
   lineItems,
   onPercentChange,
   onNoteSaved,
+  onRequestMerge,
   units,
   reserveInflationRate,
 }: EnrichedViewProps) {
@@ -140,19 +143,22 @@ export function EnrichedView({
                 <th className="text-right px-6 py-4 text-xs font-semibold text-[#525252] uppercase tracking-wider">Proposed Change</th>
                 <th className="text-right px-6 py-4 text-xs font-semibold text-[#525252] uppercase tracking-wider">Monthly</th>
                 <th className="text-center px-6 py-4 text-xs font-semibold text-[#525252] uppercase tracking-wider">Notes</th>
+                <th className="text-right px-6 py-4 text-xs font-semibold text-[#525252] uppercase tracking-wider">Actions</th>
               </tr>
             </thead>
             <tbody>
               {Object.entries(groupedItems).flatMap(([category, items]) => [
                 // Category Header
                 <tr key={`${category}-header`} className="bg-[#f5f5f5] border-b border-[#e5e5e5]">
-                  <td colSpan={9} className="px-6 py-3.5 text-xs font-bold text-[#111111] uppercase tracking-wide">
+                  <td colSpan={10} className="px-6 py-3.5 text-xs font-bold text-[#111111] uppercase tracking-wide">
                     {getCategoryLabel(category)}
                   </td>
                 </tr>,
                 // Line Items
                 ...items.flatMap((item) => {
                   const isNoteExpanded = expandedNote === item.id;
+                  const mergedLabel = mergedBadgeLabel(item);
+                  const mergedTooltip = mergedBadgeTooltip(item) ?? undefined;
 
                   // ── Read-only row (reserve-study / reserve-labeled, excluded from budget flow) ──
                   if (item.readOnly) {
@@ -162,7 +168,19 @@ export function EnrichedView({
                       const settingsPercent = calcSettingsDerivedReservePercent(item, reserveInflationRate);
                       return [
                         <tr key={item.id} className="border-b border-[#e5e5e5] bg-[#fcfcfc]">
-                          <td className="px-6 py-4 text-sm text-[#525252] italic">{item.name}</td>
+                          <td className="px-6 py-4 text-sm text-[#525252] italic">
+                            <div className="flex flex-col gap-1">
+                              <span>{item.name}</span>
+                              {mergedLabel ? (
+                                <span
+                                  title={mergedTooltip}
+                                  className="inline-flex w-fit rounded-full border border-[#d4d4d4] bg-[#fafafa] px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-[#525252]"
+                                >
+                                  {mergedLabel}
+                                </span>
+                              ) : null}
+                            </div>
+                          </td>
                           <td className="px-6 py-4 text-sm text-[#737373] text-right font-mono">{formatCurrency(item.ytdActual)}</td>
                           <td className="px-6 py-4 text-sm text-[#737373] text-right font-mono">{formatCurrency(item.annualBudget)}</td>
                           <td className="px-6 py-4 text-sm text-[#a3a3a3] text-right">—</td>
@@ -181,12 +199,35 @@ export function EnrichedView({
                               <MessageSquare className="w-4 h-4" />
                             </button>
                           </td>
+                          <td className="px-6 py-4 text-right">
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              disabled
+                              className="border-[#e5e5e5] text-[#a3a3a3]"
+                            >
+                              Merge with...
+                            </Button>
+                          </td>
                         </tr>,
                       ];
                     }
                     return [
                       <tr key={item.id} className="border-b border-[#e5e5e5] opacity-60">
-                        <td className="px-6 py-4 text-sm text-[#525252] italic">{item.name}</td>
+                        <td className="px-6 py-4 text-sm text-[#525252] italic">
+                          <div className="flex flex-col gap-1">
+                            <span>{item.name}</span>
+                            {mergedLabel ? (
+                              <span
+                                title={mergedTooltip}
+                                className="inline-flex w-fit rounded-full border border-[#d4d4d4] bg-[#fafafa] px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-[#525252]"
+                              >
+                                {mergedLabel}
+                              </span>
+                            ) : null}
+                          </div>
+                        </td>
                         <td className="px-6 py-4 text-sm text-[#737373] text-right font-mono">{formatCurrency(item.ytdActual)}</td>
                         <td className="px-6 py-4 text-sm text-[#737373] text-right font-mono">{formatCurrency(item.annualBudget)}</td>
                         <td className="px-6 py-4 text-sm text-[#a3a3a3] text-right">—</td>
@@ -199,6 +240,17 @@ export function EnrichedView({
                             <MessageSquare className="w-4 h-4" />
                           </button>
                         </td>
+                        <td className="px-6 py-4 text-right">
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            disabled
+                            className="border-[#e5e5e5] text-[#a3a3a3]"
+                          >
+                            Merge with...
+                          </Button>
+                        </td>
                       </tr>,
                     ];
                   }
@@ -210,7 +262,19 @@ export function EnrichedView({
 
                   return [
                     <tr key={item.id} className="border-b border-[#e5e5e5] hover:bg-[#fafafa] transition-colors">
-                      <td className="px-6 py-4 text-sm text-[#111111] font-medium">{item.name}</td>
+                      <td className="px-6 py-4 text-sm text-[#111111] font-medium">
+                        <div className="flex flex-col gap-1">
+                          <span>{item.name}</span>
+                          {mergedLabel ? (
+                            <span
+                              title={mergedTooltip}
+                              className="inline-flex w-fit rounded-full border border-[#d4d4d4] bg-[#fafafa] px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-[#525252]"
+                            >
+                              {mergedLabel}
+                            </span>
+                          ) : null}
+                        </div>
+                      </td>
                       <td className="px-6 py-4 text-sm text-[#525252] text-right font-mono">
                         {formatCurrency(item.ytdActual)}
                       </td>
@@ -282,11 +346,22 @@ export function EnrichedView({
                           />
                         </button>
                       </td>
+                      <td className="px-6 py-4 text-right">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => onRequestMerge(item.id)}
+                          className="border-[#d4d4d4] text-[#111111] hover:border-[#a3a3a3] hover:bg-[#f5f5f5]"
+                        >
+                          Merge with...
+                        </Button>
+                      </td>
                     </tr>,
                     // Note Expansion
                     ...(isNoteExpanded ? [
                       <tr key={`${item.id}-note`}>
-                        <td colSpan={9} className="bg-[#fafafa] px-6 py-6 border-b border-[#e5e5e5]">
+                        <td colSpan={10} className="bg-[#fafafa] px-6 py-6 border-b border-[#e5e5e5]">
                           <div className="space-y-3 max-w-4xl">
                             <Input
                               placeholder="Note Title"
@@ -357,6 +432,7 @@ export function EnrichedView({
                   <td className="px-6 py-4 text-sm text-[#737373] text-right font-mono">
                     {formatCurrency(calcDisplayCategoryTotal(items, 'monthly', reserveInflationRate, true))}
                   </td>
+                  <td className="px-6 py-4"></td>
                   <td className="px-6 py-4"></td>
                 </tr>
               ])}

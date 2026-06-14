@@ -15,6 +15,8 @@ _ALLOWED_FIELDS = {
     "letter_signed_by",
     # Priority-A disclosure inputs (drifting-puzzling-grove)
     "approved_monthly_assessment_per_unit",
+    "financial_packet_archetype",
+    "reserve_interest_income_override",
     "income_tax_provision_override",
     "reserve_funding_source",
     "reserve_funding_manual_amount",

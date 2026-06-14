@@ -59,6 +59,8 @@ export type ReserveFundingSource =
   | 'budget_allocation_line'
   | 'manual';
 
+export type FinancialPacketArchetype = 'dual-fund' | 'reserve-only';
+
 export interface HOADisclosureSettings {
   property_id: number;
   management_company: string | null;
@@ -79,6 +81,8 @@ export interface HOADisclosureSettings {
   letter_signed_by: string | null;
   // Priority-A disclosure inputs (drifting-puzzling-grove)
   approved_monthly_assessment_per_unit: number | null;
+  financial_packet_archetype: FinancialPacketArchetype;
+  reserve_interest_income_override: number | null;
   income_tax_provision_override: number | null;
   reserve_funding_source: ReserveFundingSource;
   reserve_funding_manual_amount: number | null;

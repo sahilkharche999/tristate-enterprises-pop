@@ -67,6 +67,36 @@ def test_reserve_study_snapshot_components_are_typed():
     assert empty.components == []
 
 
+def test_reserve_funding_plan_row_reports_consistency_warnings():
+    from app.disclosure_package.schemas import ReserveFundingPlanRow
+
+    row = ReserveFundingPlanRow(
+        year=2026,
+        annual_contribution=Decimal("1200"),
+        monthly_per_unit=Decimal("51"),
+    )
+
+    warnings = row.consistency_warnings(units=2)
+
+    assert warnings == [
+        "Reserve funding row 2026 monthly per-unit amount does not match annual contribution divided by units and 12."
+    ]
+
+
+def test_reserve_funding_plan_row_reports_implied_unit_count_conflict():
+    from app.disclosure_package.schemas import ReserveFundingPlanRow
+
+    row = ReserveFundingPlanRow(
+        year=2026,
+        annual_contribution=Decimal("850998"),
+        monthly_per_unit=Decimal("241.21"),
+    )
+
+    warnings = row.consistency_warnings(units=279)
+
+    assert any("implies 294 reserve-study units" in warning for warning in warnings)
+
+
 # ── Test 3: Currency fields coerce str/int → Decimal, never float ─────────────
 def test_decimal_coercion_currency_fields():
     from app.disclosure_package.schemas import HOAStaticData
@@ -164,6 +194,18 @@ def test_preflight_error_shape():
     assert err.field_path == "budget_draft.line_items"
     assert err.message == "empty"
     assert err.severity == "blocking"
+
+    structured = PreflightError(
+        field_path="reserve_funding.source",
+        message="Reserve funding sources disagree.",
+        severity="warning",
+        code="reserve_funding_conflict",
+        affected_value={"budget": "824414", "study": "850998"},
+        suggested_fix="Choose the board-approved reserve funding source.",
+    )
+    assert structured.code == "reserve_funding_conflict"
+    assert structured.affected_value == {"budget": "824414", "study": "850998"}
+    assert structured.suggested_fix.startswith("Choose")
 
 
 # ── Test 7: Old Mill 2026 input fixture validates ─────────────────────────────

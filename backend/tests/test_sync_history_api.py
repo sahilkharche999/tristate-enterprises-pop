@@ -3,13 +3,57 @@ import json
 from pathlib import Path
 
 from app.ai_implementation.db import BUDGET_DRAFT_ACTIVE, BudgetDraft, BudgetUpload
+from app.models.financial_document_extraction import ExtractedFinancialStatement
 from app.services import macros_service
 from app.services.budget_history_service import _table_to_line_items
 
 
-def _upload_income_statement(client):
+def _seed_assessment_rule_for_history(db_session) -> int:
+    raw = db_session.connection().connection
+    raw.execute(
+        """
+        INSERT INTO assessment_setups
+            (property_id, setup_type, display_mode, status, approved_at)
+        VALUES
+            (1, 'grouped', 'grouped', 'approved', datetime('now'))
+        """
+    )
+    setup_id = raw.execute("SELECT last_insert_rowid()").fetchone()[0]
+    raw.execute(
+        """
+        INSERT INTO allocation_pools
+            (assessment_setup_id, pool_key, pool_name, allocation_method,
+             recipient_scope)
+        VALUES
+            (?, 'total_budget_prorated', 'Prorated', 'square_footage',
+             'all_units')
+        """,
+        (setup_id,),
+    )
+    raw.execute(
+        """
+        INSERT INTO assessment_budget_mapping_rules
+            (property_id, assessment_setup_id, pool_key, match_label,
+             normalized_label, account_code, match_type, rule_source,
+             approval_status, review_state)
+        VALUES
+            (1, ?, 'total_budget_prorated', 'Insurance', 'insurance',
+             '6100', 'account_code', 'operator', 'approved', 'ready')
+        """,
+        (setup_id,),
+    )
+    raw.execute(
+        "UPDATE properties SET default_assessment_setup_id = ? WHERE id = 1",
+        (setup_id,),
+    )
+    db_session.commit()
+    return setup_id
+
+
+def _upload_income_statement(client, *, source_mode: str = "income_statement"):
     return client.post(
         "/hoa/1/budget/upload",
+        data={"source_mode": source_mode},
         files={
             "file": (
                 "income-statement.xlsx",
@@ -29,6 +73,33 @@ def _generate_version(client, draft, *, global_note="Generated for test"):
             "global_note": global_note,
         },
     )
+
+
+def _raw_and_short_label_duplicates() -> list[dict[str, object]]:
+    return [
+        {
+            "line_item_key": "55000",
+            "account_code": 55000,
+            "category": "operating",
+            "label": "55000 - General Insurance",
+            "annual_budget": 15000.0,
+            "projection": 15000.0,
+            "percent_change": 0.0,
+            "read_only": False,
+            "raw": {"section": "Operating Expenses"},
+        },
+        {
+            "line_item_key": "Insurance",
+            "account_code": None,
+            "category": "operating",
+            "label": "Insurance",
+            "annual_budget": 15000.0,
+            "projection": 15000.0,
+            "percent_change": 0.0,
+            "read_only": False,
+            "raw": {"section": "Operating Expenses"},
+        },
+    ]
 
 
 def test_write_percent_changes_matches_normalized_pdf_label_column(tmp_path):
@@ -180,6 +251,75 @@ def test_upload_creates_history(client, budget_history_test_harness):
     assert any(path.is_file() for path in retained_files)
 
 
+def test_proforma_source_mode_persists_through_history_version_and_reopen(
+    client,
+    budget_history_test_harness,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "app.services.budget_history_service._extract_proforma_excel_statement_sync",
+        lambda *args, **kwargs: ExtractedFinancialStatement.model_validate(
+            {
+                "document_family": "excel_budget_workbook",
+                "report_type": "income_statement",
+                "line_items": [
+                    {
+                        "account_code_text": "40000",
+                        "label": "Assessments",
+                        "section_kind": "income",
+                        "annual_budget": 1148083.2,
+                        "evidence": {"source_column": "annual_budget"},
+                    },
+                    {
+                        "account_code_text": "50050",
+                        "label": "Management Service Contract",
+                        "section_kind": "operating",
+                        "annual_budget": 61740.0,
+                        "evidence": {"source_column": "annual_budget"},
+                    },
+                ],
+                "confidence": 0.9,
+            }
+        ),
+        raising=False,
+    )
+
+    upload_response = client.post(
+        "/hoa/1/budget/upload",
+        data={"source_mode": "proforma_final_budget"},
+        files={
+            "file": (
+                "401 Esprit Park 2025 Budget.xlsx",
+                b"placeholder workbook bytes",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+    assert upload_response.status_code == 200, upload_response.text
+    upload_payload = upload_response.json()
+    assert upload_payload["draft"]["source_mode"] == "proforma_final_budget"
+
+    history_response = client.get("/hoa/1/history")
+    assert history_response.status_code == 200
+    history_payload = history_response.json()
+    assert history_payload["active_draft"]["source_mode"] == "proforma_final_budget"
+    assert history_payload["drafts"][0]["source_mode"] == "proforma_final_budget"
+
+    draft = upload_payload["draft"]
+    generate_response = _generate_version(client, draft, global_note="Pro forma mode version")
+    assert generate_response.status_code == 200, generate_response.text
+    version_payload = generate_response.json()["version"]
+    assert version_payload["source_mode"] == "proforma_final_budget"
+
+    version_detail_response = client.get(f"/hoa/1/versions/{version_payload['id']}")
+    assert version_detail_response.status_code == 200
+    assert version_detail_response.json()["source_mode"] == "proforma_final_budget"
+
+    reopen_response = client.post(f"/hoa/1/versions/{version_payload['id']}/reopen")
+    assert reopen_response.status_code == 200
+    assert reopen_response.json()["draft"]["source_mode"] == "proforma_final_budget"
+
+
 def test_generate_creates_version_snapshot(client, budget_history_test_harness):
     upload_response = _upload_income_statement(client)
     assert upload_response.status_code == 200
@@ -212,6 +352,37 @@ def test_generate_creates_version_snapshot(client, budget_history_test_harness):
     history_payload = history_response.json()
     assert history_payload["versions"][0]["version_code"] == "V1"
     assert {event["event_type"] for event in history_payload["timeline"]} >= {"budget_generated"}
+
+
+def test_generate_materializes_assessment_mappings_before_version_snapshot(
+    client,
+    budget_history_test_harness,
+    db_session,
+):
+    setup_id = _seed_assessment_rule_for_history(db_session)
+    upload_response = _upload_income_statement(client)
+    assert upload_response.status_code == 200
+    draft = upload_response.json()["draft"]
+    # Simulate a stale draft state where the annual mapping was removed
+    # before generation. Generation should re-materialize synchronously.
+    db_session.connection().connection.execute(
+        "DELETE FROM budget_line_pool_mappings WHERE assessment_setup_id = ?",
+        (setup_id,),
+    )
+    db_session.commit()
+
+    generate_response = _generate_version(client, draft)
+
+    assert generate_response.status_code == 200, generate_response.text
+    rows = db_session.connection().connection.execute(
+        """
+        SELECT budget_line_normalized_label, pool_key, mapping_source
+          FROM budget_line_pool_mappings
+         WHERE assessment_setup_id = ?
+        """,
+        (setup_id,),
+    ).fetchall()
+    assert rows == [("insurance", "total_budget_prorated", "account_code")]
 
 
 def test_note_save_and_manual_override_audit(client, budget_history_test_harness):

@@ -6,9 +6,58 @@ from app.models.financial_document_extraction import DocumentExtractionFailure, 
 from app.models.reserve_study_extraction import ExtractedReserveStudyDocument, ExtractedReserveStudyRow
 
 
-def _upload_document(client, filename: str, content_type: str):
+def _seed_approved_assessment_rule(db_session, *, label: str = "Insurance", account_code: str = "6100") -> int:
+    raw = db_session.connection().connection
+    raw.execute(
+        """
+        INSERT INTO assessment_setups
+            (property_id, setup_type, display_mode, status, approved_at)
+        VALUES
+            (1, 'grouped', 'grouped', 'approved', datetime('now'))
+        """
+    )
+    setup_id = raw.execute("SELECT last_insert_rowid()").fetchone()[0]
+    raw.execute(
+        """
+        INSERT INTO allocation_pools
+            (assessment_setup_id, pool_key, pool_name, allocation_method,
+             recipient_scope)
+        VALUES
+            (?, 'total_budget_prorated', 'Prorated', 'square_footage',
+             'all_units')
+        """,
+        (setup_id,),
+    )
+    raw.execute(
+        """
+        INSERT INTO assessment_budget_mapping_rules
+            (property_id, assessment_setup_id, pool_key, match_label,
+             normalized_label, account_code, match_type, rule_source,
+             approval_status, review_state)
+        VALUES
+            (1, ?, 'total_budget_prorated', ?, ?, ?, 'account_code',
+             'operator', 'approved', 'ready')
+        """,
+        (setup_id, label, label.lower(), account_code),
+    )
+    raw.execute(
+        "UPDATE properties SET default_assessment_setup_id = ? WHERE id = 1",
+        (setup_id,),
+    )
+    db_session.commit()
+    return setup_id
+
+
+def _upload_document(
+    client,
+    filename: str,
+    content_type: str,
+    *,
+    source_mode: str = "income_statement",
+):
     return client.post(
         "/hoa/1/budget/upload",
+        data={"source_mode": source_mode},
         files={"file": (filename, b"placeholder bytes", content_type)},
     )
 
@@ -20,9 +69,11 @@ def _upload_bundle(
     budget_content_type: str,
     reserve_filename: str,
     reserve_content_type: str,
+    source_mode: str = "income_statement",
 ):
     return client.post(
         "/hoa/1/budget/upload-bundle",
+        data={"source_mode": source_mode},
         files={
             "budget_file": (budget_filename, b"budget placeholder bytes", budget_content_type),
             "reserve_study_file": (reserve_filename, b"reserve placeholder bytes", reserve_content_type),
@@ -73,11 +124,37 @@ def test_upload_known_clean_excel_stays_deterministic(client, budget_history_tes
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
-    assert response.status_code == 200
+    assert response.status_code == 200, response.text
     payload = response.json()
     assert payload["review_required"] is False
     assert payload["draft"]["status"] == "active"
+    assert payload["draft"]["source_mode"] == "income_statement"
     assert called["pdf"] == 0
+
+
+def test_excel_upload_materializes_approved_assessment_mapping(
+    client,
+    budget_history_test_harness,
+    db_session,
+):
+    setup_id = _seed_approved_assessment_rule(db_session)
+
+    response = _upload_document(
+        client,
+        "income-statement.xlsx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+    assert response.status_code == 200, response.text
+    rows = db_session.connection().connection.execute(
+        """
+        SELECT budget_line_normalized_label, pool_key, mapping_source
+          FROM budget_line_pool_mappings
+         WHERE property_id = 1 AND assessment_setup_id = ?
+        """,
+        (setup_id,),
+    ).fetchall()
+    assert rows == [("insurance", "total_budget_prorated", "account_code")]
 
 
 def test_upload_pdf_uses_vlm_extractor_before_pipeline(client, budget_history_test_harness, monkeypatch, tmp_path):
@@ -102,8 +179,154 @@ def test_upload_pdf_uses_vlm_extractor_before_pipeline(client, budget_history_te
     payload = response.json()
     assert payload["review_required"] is False
     assert payload["draft"]["status"] == "active"
+    assert payload["draft"]["source_mode"] == "income_statement"
     assert called["pdf"] == 1
     assert called["normalize"] == 1
+
+
+def test_upload_proforma_excel_uses_gemini_statement_extraction(
+    client,
+    budget_history_test_harness,
+    monkeypatch,
+):
+    called = {"gemini_excel": 0, "proforma_parser": 0}
+
+    def _fake_gemini_excel(*args, **kwargs):
+        called["gemini_excel"] += 1
+        return ExtractedFinancialStatement.model_validate(
+            {
+                "document_family": "excel_budget_workbook",
+                "report_type": "income_statement",
+                "line_items": [
+                    {
+                        "account_code_text": "40000",
+                        "label": "Assessments",
+                        "section_kind": "income",
+                        "annual_budget": 1148083.2,
+                        "evidence": {"source_column": "final_budget"},
+                    },
+                    {
+                        "account_code_text": "50050",
+                        "label": "Management Service Contract",
+                        "section_kind": "operating",
+                        "annual_budget": 61740.0,
+                        "evidence": {"source_column": "final_budget"},
+                    },
+                ],
+                "confidence": 0.9,
+            }
+        )
+
+    def _unexpected_proforma_parser(*args, **kwargs):
+        called["proforma_parser"] += 1
+        raise AssertionError("Deterministic pro-forma parser should not run for pro-forma Excel")
+
+    monkeypatch.setattr(
+        "app.services.budget_history_service._extract_proforma_excel_statement_sync",
+        _fake_gemini_excel,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "app.services.budget_history_service._parse_proforma_excel_source",
+        _unexpected_proforma_parser,
+    )
+
+    response = _upload_document(
+        client,
+        "401 Esprit Park 2025 Budget.xlsx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        source_mode="proforma_final_budget",
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["review_required"] is False
+    assert payload["draft"]["status"] == "active"
+    assert payload["draft"]["source_mode"] == "proforma_final_budget"
+    assert called["gemini_excel"] == 1
+    assert called["proforma_parser"] == 0
+
+
+def test_bundle_upload_proforma_mode_carries_source_mode_to_draft(
+    client,
+    budget_history_test_harness,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "app.services.budget_history_service._extract_proforma_excel_statement_sync",
+        lambda *args, **kwargs: ExtractedFinancialStatement.model_validate(
+            {
+                "document_family": "excel_budget_workbook",
+                "report_type": "income_statement",
+                "line_items": [
+                    {
+                        "account_code_text": "40000",
+                        "label": "Assessments",
+                        "section_kind": "income",
+                        "annual_budget": 1148083.2,
+                        "evidence": {"source_column": "final_budget"},
+                    },
+                    {
+                        "account_code_text": "50050",
+                        "label": "Management Service Contract",
+                        "section_kind": "operating",
+                        "annual_budget": 61740.0,
+                        "evidence": {"source_column": "final_budget"},
+                    },
+                ],
+                "confidence": 0.9,
+            }
+        ),
+        raising=False,
+    )
+
+    response = _upload_bundle(
+        client,
+        budget_filename="401 Esprit Park 2025 Budget.xlsx",
+        budget_content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        reserve_filename="reserve-study.pdf",
+        reserve_content_type="application/pdf",
+        source_mode="proforma_final_budget",
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["draft"]["source_mode"] == "proforma_final_budget"
+    assert payload["budget_source"]["status"] == "completed"
+
+
+def test_pdf_upload_materializes_approved_assessment_mapping(
+    client,
+    budget_history_test_harness,
+    monkeypatch,
+    tmp_path,
+    db_session,
+):
+    setup_id = _seed_approved_assessment_rule(db_session)
+
+    async def _fake_extract(path: str):
+        return _valid_pdf_statement()
+
+    def _fake_normalize(statement):
+        output_path = tmp_path / "normalized.pdf.xlsx"
+        output_path.write_bytes(b"normalized workbook")
+        return str(output_path)
+
+    monkeypatch.setattr("app.services.budget_history_service.extract_pdf_statement", _fake_extract)
+    monkeypatch.setattr("app.services.budget_history_service.build_normalized_statement_workbook", _fake_normalize)
+
+    response = _upload_document(client, "income-statement.pdf", "application/pdf")
+
+    assert response.status_code == 200
+    rows = db_session.connection().connection.execute(
+        """
+        SELECT budget_line_normalized_label, pool_key, mapping_source
+          FROM budget_line_pool_mappings
+         WHERE property_id = 1 AND assessment_setup_id = ?
+        """,
+        (setup_id,),
+    ).fetchall()
+    assert rows == [("insurance", "total_budget_prorated", "account_code")]
 
 
 def test_upload_pdf_uses_pdf_header_hint_when_vlm_omits_statement_period(
@@ -171,7 +394,14 @@ def test_upload_pdf_validation_failure_returns_review_required(client, budget_hi
         return DocumentExtractionFailure(
             code="validation_failed",
             message="Structured PDF extraction failed deterministic validation checks.",
-            details={},
+            details={
+                "validation_issues": [
+                    {
+                        "code": "missing_annual_budget_coverage",
+                        "message": "No usable annual budget column.",
+                    }
+                ]
+            },
         )
 
     monkeypatch.setattr("app.services.budget_history_service.extract_pdf_statement", _failed_extract)
@@ -183,6 +413,8 @@ def test_upload_pdf_validation_failure_returns_review_required(client, budget_hi
     assert payload["review_required"] is True
     assert payload["draft"] is None
     assert "failed deterministic validation" in payload["review_reason"].lower()
+    assert payload["debug_info"]["code"] == "validation_failed"
+    assert payload["debug_info"]["details"]["validation_issues"][0]["code"] == "missing_annual_budget_coverage"
 
 
 def test_variant_excel_low_confidence_returns_review_required(client, budget_history_test_harness, monkeypatch):
@@ -306,6 +538,7 @@ def test_bundle_upload_budget_review_required_explains_expected_income_statement
     payload = response.json()
     assert payload["budget_source"]["status"] == "review_required"
     assert "was not accepted as an income statement" in payload["budget_source"]["review_reason"]
+    assert payload["budget_source"]["debug_info"]["code"] == "validation_failed"
     assert any("Expected budget source format" in warning for warning in payload["budget_source"]["warnings"])
     assert any("Income Statement Esprit Park Aug 2025.xlsx" in warning for warning in payload["budget_source"]["warnings"])
 

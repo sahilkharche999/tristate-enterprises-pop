@@ -1,6 +1,6 @@
 // Shared authenticated HTTP helpers used across frontend API modules.
 
-import { BASE_URL } from './config';
+import { BASE_URL } from './config.ts';
 
 let getAccessToken: (() => string | null) | null = null;
 let setAccessTokenFn: ((token: string) => void) | null = null;

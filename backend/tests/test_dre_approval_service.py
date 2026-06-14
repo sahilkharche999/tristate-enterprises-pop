@@ -1,6 +1,7 @@
 """DRE approval service tests (Phase 4.2 + 5.9)."""
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -49,6 +50,72 @@ def _ids(db: sqlite3.Connection) -> tuple[int, int]:
     pid = db.execute("SELECT id FROM properties LIMIT 1").fetchone()[0]
     rid = db.execute("SELECT id FROM dre_extraction_runs LIMIT 1").fetchone()[0]
     return pid, rid
+
+
+def _parsed_json_with_pool_hints() -> str:
+    return json.dumps(
+        {
+            "document_metadata": {
+                "association_name": "Test",
+                "total_units": 20,
+                "source_pages": [1],
+            },
+            "assessment_setup": {
+                "setup_type": "grouped_category",
+                "display_mode": "grouped",
+                "source_pages": [6],
+            },
+            "unit_structure": {
+                "unit_count": 20,
+                "group_count": 0,
+                "groups": [],
+                "units": [],
+            },
+            "allocation_pools": [
+                {
+                    "pool_key": "total_budget_prorated",
+                    "parent_pool_key": "total_budget",
+                    "pool_name": "Prorated",
+                    "annual_amount": "24642",
+                    "monthly_amount": "2054",
+                    "allocation_method": "square_footage",
+                    "recipient_scope": "all_units",
+                    "denominator_label": "Total livable square footage",
+                    "denominator_value": "25462",
+                    "denominator_source": "dre_shown",
+                    "included_budget_lines": ["Insurance", "Domestic Water"],
+                    "excluded_budget_lines": [],
+                    "budget_line_derivation": "explicit_lines",
+                    "residual_after_pool_keys": [],
+                    "residual_exclusions": [],
+                    "source_pages": [6],
+                    "confidence": 0.95,
+                },
+                {
+                    "pool_key": "total_budget_equal",
+                    "parent_pool_key": "total_budget",
+                    "pool_name": "Equal",
+                    "annual_amount": "102451",
+                    "monthly_amount": "8538",
+                    "allocation_method": "equal",
+                    "recipient_scope": "all_units",
+                    "denominator_label": "units",
+                    "denominator_value": "20",
+                    "denominator_source": "dre_shown",
+                    "included_budget_lines": [],
+                    "excluded_budget_lines": [],
+                    "budget_line_derivation": "residual_default",
+                    "residual_after_pool_keys": ["total_budget_prorated"],
+                    "residual_exclusions": ["income_only"],
+                    "source_pages": [6],
+                    "confidence": 0.95,
+                },
+            ],
+            "formulas": [],
+            "validation_checks": [],
+            "human_review_questions": [],
+        }
+    )
 
 
 class TestApproveSuccess:
@@ -157,6 +224,89 @@ class TestApproveSuccess:
             (pid, resp.promoted_setup_id),
         ).fetchall()
         assert rows == [("insurance", "variable_costs")]
+
+    def test_approval_creates_reusable_mapping_rules_from_parsed_json(
+        self, db: sqlite3.Connection
+    ) -> None:
+        pid, rid = _ids(db)
+        db.execute(
+            "UPDATE dre_extraction_runs SET parsed_json = ? WHERE id = ?",
+            (_parsed_json_with_pool_hints(), rid),
+        )
+        db.commit()
+
+        resp = approve_extraction_run(
+            property_id=pid,
+            extraction_run_id=rid,
+            setup_type="grouped",
+            reviewed_by="ops@example.com",
+            connection=db,
+        )
+
+        rows = db.execute(
+            """
+            SELECT pool_key, match_label, match_type, rule_source,
+                   budget_line_derivation, residual_after_pool_keys_json
+              FROM assessment_budget_mapping_rules
+             WHERE assessment_setup_id = ?
+             ORDER BY pool_key, match_label
+            """,
+            (resp.promoted_setup_id,),
+        ).fetchall()
+        assert rows[0][:5] == (
+            "total_budget_equal",
+            None,
+            "remainder",
+            "system_remainder",
+            "residual_default",
+        )
+        assert json.loads(rows[0][5]) == ["total_budget_prorated"]
+        assert rows[1][:5] == (
+            "total_budget_prorated",
+            "Domestic Water",
+            "exact_label",
+            "dre_included_budget_line",
+            "explicit_lines",
+        )
+        assert rows[2][:5] == (
+            "total_budget_prorated",
+            "Insurance",
+            "exact_label",
+            "dre_included_budget_line",
+            "explicit_lines",
+        )
+
+    def test_approval_preserves_residual_derivation_on_live_pools(
+        self, db: sqlite3.Connection
+    ) -> None:
+        pid, rid = _ids(db)
+        db.execute(
+            "UPDATE dre_extraction_runs SET parsed_json = ? WHERE id = ?",
+            (_parsed_json_with_pool_hints(), rid),
+        )
+        db.commit()
+
+        resp = approve_extraction_run(
+            property_id=pid,
+            extraction_run_id=rid,
+            setup_type="grouped",
+            reviewed_by="ops@example.com",
+            connection=db,
+        )
+
+        row = db.execute(
+            """
+            SELECT budget_line_derivation, residual_after_pool_keys_json,
+                   residual_exclusions_json
+              FROM allocation_pools
+             WHERE assessment_setup_id = ?
+               AND pool_key = 'total_budget_equal'
+            """,
+            (resp.promoted_setup_id,),
+        ).fetchone()
+        assert row[0] == "residual_default"
+        assert json.loads(row[1]) == ["total_budget_prorated"]
+        assert json.loads(row[2]) == ["income_only"]
 
 
 class TestConcurrentApproveProtection:

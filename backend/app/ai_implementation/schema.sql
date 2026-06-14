@@ -14,6 +14,8 @@ CREATE TABLE IF NOT EXISTS properties (
     workflow_status         TEXT DEFAULT 'Not Started',
     tenant_id               INTEGER NOT NULL DEFAULT 1,
     default_assessment_setup_id INTEGER,
+    assessment_mode         TEXT NOT NULL DEFAULT 'variable'
+                            CHECK(assessment_mode IN ('fixed', 'variable')),
     state                   TEXT DEFAULT 'CA',
     entity_type             TEXT,
     incorporation_year      INTEGER,
@@ -103,6 +105,10 @@ CREATE TABLE IF NOT EXISTS budget_uploads (
     property_id         INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
     document_role       TEXT NOT NULL DEFAULT 'budget_source'
                         CHECK(document_role IN ('budget_source', 'reserve_study')),
+    source_mode         TEXT NOT NULL DEFAULT 'income_statement'
+                        CHECK(source_mode IN ('income_statement', 'proforma_final_budget')),
+    assessment_mode     TEXT NOT NULL DEFAULT 'variable'
+                        CHECK(assessment_mode IN ('fixed', 'variable')),
     original_filename   TEXT NOT NULL,
     storage_key         TEXT NOT NULL UNIQUE,
     content_type        TEXT,
@@ -125,6 +131,10 @@ CREATE TABLE IF NOT EXISTS budget_drafts (
     source_upload_id         INTEGER REFERENCES budget_uploads(id) ON DELETE SET NULL,
     reserve_study_upload_id  INTEGER REFERENCES budget_uploads(id) ON DELETE SET NULL,
     reopened_from_version_id INTEGER REFERENCES budget_versions(id) ON DELETE SET NULL,
+    source_mode              TEXT NOT NULL DEFAULT 'income_statement'
+                             CHECK(source_mode IN ('income_statement', 'proforma_final_budget')),
+    assessment_mode          TEXT NOT NULL DEFAULT 'variable'
+                             CHECK(assessment_mode IN ('fixed', 'variable')),
     status                   TEXT NOT NULL CHECK(status IN ('active', 'superseded', 'generated')),
     line_items_json          TEXT NOT NULL,
     reserve_study_rows_json  TEXT,
@@ -139,6 +149,7 @@ CREATE TABLE IF NOT EXISTS budget_drafts (
     reserve_inflation_note   TEXT,
     budget_preview_json      TEXT,
     enriched_storage_key     TEXT,
+    version_int              INTEGER NOT NULL DEFAULT 0,
     created_by_user_id       INTEGER REFERENCES users(id),
     updated_by_user_id       INTEGER REFERENCES users(id),
     actor_name               TEXT NOT NULL,
@@ -152,6 +163,10 @@ CREATE TABLE IF NOT EXISTS budget_versions (
     source_upload_id         INTEGER REFERENCES budget_uploads(id) ON DELETE SET NULL,
     source_draft_id          INTEGER REFERENCES budget_drafts(id) ON DELETE SET NULL,
     reopened_from_version_id INTEGER REFERENCES budget_versions(id) ON DELETE SET NULL,
+    source_mode              TEXT NOT NULL DEFAULT 'income_statement'
+                             CHECK(source_mode IN ('income_statement', 'proforma_final_budget')),
+    assessment_mode          TEXT NOT NULL DEFAULT 'variable'
+                             CHECK(assessment_mode IN ('fixed', 'variable')),
     storage_key              TEXT,
     output_storage_key       TEXT,
     version_number           INTEGER NOT NULL,
@@ -210,6 +225,68 @@ CREATE TABLE IF NOT EXISTS budget_audit_events (
     created_at         TEXT DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS budget_line_merges (
+    id                         INTEGER PRIMARY KEY AUTOINCREMENT,
+    tenant_id                  INTEGER NOT NULL DEFAULT 1,
+    property_id                INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+    primary_account_code       TEXT,
+    primary_label              TEXT NOT NULL,
+    primary_normalized_label   TEXT NOT NULL,
+    secondary_account_code     TEXT,
+    secondary_label            TEXT NOT NULL,
+    secondary_normalized_label TEXT NOT NULL,
+    status                     TEXT NOT NULL DEFAULT 'active'
+                               CHECK(status IN ('active', 'disabled')),
+    decision_source            TEXT NOT NULL
+                               CHECK(decision_source IN ('manual', 'gemini_suggestion', 'system')),
+    actor                      TEXT NOT NULL,
+    created_at                 TEXT NOT NULL DEFAULT (datetime('now')),
+    disabled_at                TEXT,
+    updated_at                 TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_budget_line_merges_active_rule
+    ON budget_line_merges(
+        tenant_id, property_id,
+        COALESCE(primary_account_code, ''), primary_normalized_label,
+        COALESCE(secondary_account_code, ''), secondary_normalized_label
+    )
+    WHERE status = 'active';
+
+CREATE INDEX IF NOT EXISTS idx_budget_line_merges_property_status
+    ON budget_line_merges(tenant_id, property_id, status);
+
+CREATE TABLE IF NOT EXISTS budget_line_merge_applications (
+    id                         INTEGER PRIMARY KEY AUTOINCREMENT,
+    tenant_id                  INTEGER NOT NULL DEFAULT 1,
+    merge_id                   INTEGER NOT NULL REFERENCES budget_line_merges(id) ON DELETE CASCADE,
+    property_id                INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+    budget_draft_id            INTEGER NOT NULL REFERENCES budget_drafts(id) ON DELETE CASCADE,
+    assessment_setup_id        INTEGER REFERENCES assessment_setups(id) ON DELETE SET NULL,
+    source                     TEXT NOT NULL
+                               CHECK(source IN ('manual', 'gemini_suggestion', 'auto_applied')),
+    status                     TEXT NOT NULL DEFAULT 'applied'
+                               CHECK(status IN ('applied', 'unmerged', 'finalized')),
+    match_strategy             TEXT,
+    before_snapshot_json       TEXT NOT NULL,
+    after_snapshot_json        TEXT NOT NULL,
+    side_effect_snapshot_json  TEXT NOT NULL,
+    actor                      TEXT NOT NULL,
+    created_at                 TEXT NOT NULL DEFAULT (datetime('now')),
+    unmerged_at                TEXT,
+    finalized_at               TEXT
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_budget_line_merge_applications_applied
+    ON budget_line_merge_applications(tenant_id, budget_draft_id, merge_id)
+    WHERE status = 'applied';
+
+CREATE INDEX IF NOT EXISTS idx_budget_line_merge_applications_property_status
+    ON budget_line_merge_applications(tenant_id, property_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_budget_line_merge_applications_draft_status
+    ON budget_line_merge_applications(tenant_id, budget_draft_id, status);
+
 CREATE TABLE IF NOT EXISTS disclosure_package_jobs (
     id              TEXT PRIMARY KEY,
     property_id     INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
@@ -241,6 +318,8 @@ CREATE TABLE IF NOT EXISTS hoa_settings (
     reserve_study_expert_name           TEXT,
     reserve_study_date                  TEXT,
     approved_monthly_assessment_per_unit REAL,
+    financial_packet_archetype          TEXT DEFAULT 'dual-fund',
+    reserve_interest_income_override    REAL,
     income_tax_provision_override       REAL,
     reserve_funding_source              TEXT DEFAULT 'reserve_study_provision',
     reserve_funding_manual_amount       REAL,
@@ -334,6 +413,13 @@ CREATE TABLE IF NOT EXISTS allocation_pools (
     variable_flag        INTEGER NOT NULL DEFAULT 0,
     display_order        INTEGER NOT NULL DEFAULT 0,
     include_in_pdf       INTEGER NOT NULL DEFAULT 1,
+    budget_line_derivation TEXT NOT NULL DEFAULT 'unknown'
+                         CHECK (budget_line_derivation IN (
+                             'explicit_lines','residual_default','formula_only','unknown'
+                         )),
+    residual_after_pool_keys_json TEXT NOT NULL DEFAULT '[]',
+    residual_exclusions_json      TEXT NOT NULL DEFAULT '[]',
+    derivation_evidence_json      TEXT,
     -- 30-year forecast inputs migrated from hoa_settings (Task #185 of
     -- dre-driven-assessment-engine). When set on a pool, these supersede
     -- the deprecated hoa_settings columns of the same purpose.
@@ -427,6 +513,26 @@ CREATE TABLE IF NOT EXISTS budget_line_pool_mappings (
     account_code                  TEXT,
     pool_key                      TEXT NOT NULL,
     pool_id                       INTEGER REFERENCES allocation_pools(id) ON DELETE SET NULL,
+    source_rule_id                INTEGER REFERENCES assessment_budget_mapping_rules(id) ON DELETE SET NULL,
+    mapping_source                TEXT NOT NULL DEFAULT 'operator'
+                                  CHECK (mapping_source IN (
+                                      'operator','account_code',
+                                      'normalized_label','dre_included_label',
+                                      'remainder','residual_default',
+                                      'alias'
+                                  )),
+    match_method                  TEXT,
+    approval_status               TEXT NOT NULL DEFAULT 'approved'
+                                  CHECK (approval_status IN (
+                                      'auto_approved','suggested','approved',
+                                      'rejected','disabled'
+                                  )),
+    review_state                  TEXT NOT NULL DEFAULT 'ready'
+                                  CHECK (review_state IN (
+                                      'ready','pending_review','conflict',
+                                      'disabled','rejected','stale'
+                                  )),
+    budget_line_amount            NUMERIC,
     approved_by                   TEXT,
     approved_at                   TEXT,
     active                        INTEGER NOT NULL DEFAULT 1
@@ -443,6 +549,37 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_budget_line_pool_mappings_disambig
 
 CREATE INDEX IF NOT EXISTS idx_budget_line_pool_mappings_setup
     ON budget_line_pool_mappings(assessment_setup_id, active);
+
+CREATE TABLE IF NOT EXISTS assessment_mapping_aliases (
+    id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+    property_id               INTEGER NOT NULL
+                              REFERENCES properties(id) ON DELETE CASCADE,
+    assessment_setup_id       INTEGER NOT NULL
+                              REFERENCES assessment_setups(id) ON DELETE CASCADE,
+    pool_key                  TEXT NOT NULL,
+    dre_label                 TEXT NOT NULL,
+    normalized_dre_label      TEXT NOT NULL,
+    budget_label              TEXT NOT NULL,
+    normalized_budget_label   TEXT NOT NULL,
+    account_code              TEXT,
+    approval_status           TEXT NOT NULL DEFAULT 'approved'
+                              CHECK (approval_status IN (
+                                  'approved','revoked','disabled'
+                              )),
+    active                    INTEGER NOT NULL DEFAULT 1,
+    decided_by                TEXT NOT NULL,
+    decided_at                TEXT NOT NULL DEFAULT (datetime('now')),
+    note                      TEXT,
+    created_at                TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at                TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_assessment_mapping_aliases_scope
+    ON assessment_mapping_aliases(
+        property_id, assessment_setup_id, pool_key,
+        normalized_dre_label, normalized_budget_label,
+        COALESCE(account_code, '')
+    );
 
 -- ── DRE document vault (Phase 3.1) ──
 -- One row per uploaded DRE PDF; new uploads supersede prior ones via
@@ -488,6 +625,8 @@ CREATE TABLE IF NOT EXISTS dre_extraction_runs (
     citation_audit_json        TEXT NOT NULL DEFAULT '[]',
     low_confidence_flags_json  TEXT NOT NULL DEFAULT '[]',
     validation_warnings_json   TEXT NOT NULL DEFAULT '[]',
+    job_status                 TEXT NOT NULL DEFAULT 'completed'
+                               CHECK (job_status IN ('queued','running','completed','failed')),
     status                     TEXT NOT NULL DEFAULT 'failed'
                                CHECK (status IN ('succeeded','extraction_partial','failed')),
     review_status              TEXT NOT NULL DEFAULT 'pending'
@@ -495,6 +634,7 @@ CREATE TABLE IF NOT EXISTS dre_extraction_runs (
     promoted_setup_id          INTEGER REFERENCES assessment_setups(id) ON DELETE SET NULL,
     promoted_at                TEXT,
     reviewed_by                TEXT,
+    error_message              TEXT NOT NULL DEFAULT '',
     -- SHA-256 of WireDRESetupExtraction.model_json_schema() at the time
     -- of this extraction run. Surfaces wire-schema drift independently of
     -- prompt drift; empty string means a pre-structured-output run.
@@ -514,6 +654,180 @@ CREATE INDEX IF NOT EXISTS idx_dre_extraction_runs_doc
     ON dre_extraction_runs(dre_document_id);
 CREATE INDEX IF NOT EXISTS idx_dre_extraction_runs_property
     ON dre_extraction_runs(property_id, review_status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_dre_extraction_runs_active_doc
+    ON dre_extraction_runs(dre_document_id)
+    WHERE job_status IN ('queued', 'running');
+
+-- Reusable rules derived from approved DRE setup evidence. These are
+-- stable, setup-level rules; annual budget_line_pool_mappings are
+-- materialized from them for each budget draft/year.
+CREATE TABLE IF NOT EXISTS assessment_budget_mapping_rules (
+    id                            INTEGER PRIMARY KEY AUTOINCREMENT,
+    property_id                   INTEGER NOT NULL
+                                  REFERENCES properties(id) ON DELETE CASCADE,
+    assessment_setup_id           INTEGER NOT NULL
+                                  REFERENCES assessment_setups(id) ON DELETE CASCADE,
+    pool_key                      TEXT NOT NULL,
+    pool_id                       INTEGER REFERENCES allocation_pools(id) ON DELETE SET NULL,
+    match_label                   TEXT,
+    normalized_label              TEXT,
+    account_code                  TEXT,
+    match_type                    TEXT NOT NULL CHECK (match_type IN (
+                                      'exact_label','normalized_label',
+                                      'account_code','category','remainder'
+                                  )),
+    rule_source                   TEXT NOT NULL CHECK (rule_source IN (
+                                      'dre_included_budget_line','operator',
+                                      'carried_forward','system_remainder',
+                                      'dre_mapping_evidence'
+                                  )),
+    approval_status               TEXT NOT NULL DEFAULT 'suggested'
+                                  CHECK (approval_status IN (
+                                      'auto_approved','suggested','approved',
+                                      'rejected','disabled'
+                                  )),
+    review_state                  TEXT NOT NULL DEFAULT 'pending_review'
+                                  CHECK (review_state IN (
+                                      'ready','pending_review','conflict',
+                                      'disabled','rejected'
+                                  )),
+    active                        INTEGER NOT NULL DEFAULT 1,
+    source_dre_extraction_run_id  INTEGER REFERENCES dre_extraction_runs(id) ON DELETE SET NULL,
+    source_pages_json             TEXT NOT NULL DEFAULT '[]',
+    confidence                    NUMERIC,
+    source_parent_category        TEXT,
+    assessment_type               TEXT NOT NULL DEFAULT 'unknown_needs_review'
+                                  CHECK (assessment_type IN (
+                                      'equal_base','prorated_variable',
+                                      'square_footage','ownership_percent',
+                                      'exemption_credit','subsidy_credit',
+                                      'pass_through','reserve_component',
+                                      'excluded_or_informational',
+                                      'unknown_needs_review'
+                                  )),
+    review_required               INTEGER NOT NULL DEFAULT 0,
+    review_reason                 TEXT NOT NULL DEFAULT '',
+    source_evidence_text          TEXT NOT NULL DEFAULT '',
+    budget_line_derivation        TEXT NOT NULL DEFAULT 'unknown'
+                                  CHECK (budget_line_derivation IN (
+                                      'explicit_lines','residual_default',
+                                      'formula_only','unknown'
+                                  )),
+    residual_after_pool_keys_json TEXT NOT NULL DEFAULT '[]',
+    residual_exclusions_json      TEXT NOT NULL DEFAULT '[]',
+    structural_signature          TEXT,
+    created_at                    TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at                    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_assessment_budget_mapping_rules_setup
+    ON assessment_budget_mapping_rules(assessment_setup_id, active, approval_status);
+
+CREATE INDEX IF NOT EXISTS idx_assessment_budget_mapping_rules_property
+    ON assessment_budget_mapping_rules(property_id, active);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_assessment_budget_mapping_rules_identity
+    ON assessment_budget_mapping_rules(
+        property_id, assessment_setup_id, pool_key, match_type,
+        COALESCE(normalized_label, ''), COALESCE(account_code, '')
+    );
+
+-- Current-year applicability for temporary or condition-based DRE
+-- exemptions such as Civil Code / DRE Regulation 2792.16(c).
+CREATE TABLE IF NOT EXISTS assessment_exemption_decisions (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    property_id           INTEGER NOT NULL
+                          REFERENCES properties(id) ON DELETE CASCADE,
+    assessment_setup_id   INTEGER NOT NULL
+                          REFERENCES assessment_setups(id) ON DELETE CASCADE,
+    budget_year           INTEGER,
+    budget_draft_id       INTEGER REFERENCES budget_drafts(id) ON DELETE CASCADE,
+    pool_key              TEXT NOT NULL,
+    exemption_state       TEXT NOT NULL DEFAULT 'pending_review'
+                          CHECK (exemption_state IN (
+                              'pending_review','active','inactive'
+                          )),
+    operator_decision     TEXT,
+    decided_by            TEXT,
+    decided_at            TEXT,
+    notes                 TEXT,
+    evidence_ref_json     TEXT NOT NULL DEFAULT '[]',
+    created_at            TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at            TEXT NOT NULL DEFAULT (datetime('now')),
+    CHECK (budget_year IS NOT NULL OR budget_draft_id IS NOT NULL)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_assessment_exemption_decisions_scope
+    ON assessment_exemption_decisions(
+        property_id, assessment_setup_id, pool_key,
+        COALESCE(budget_year, -1), COALESCE(budget_draft_id, -1)
+    );
+
+CREATE INDEX IF NOT EXISTS idx_assessment_exemption_decisions_setup
+    ON assessment_exemption_decisions(assessment_setup_id, exemption_state);
+
+CREATE TABLE IF NOT EXISTS assessment_review_row_dispositions (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    property_id           INTEGER NOT NULL
+                          REFERENCES properties(id) ON DELETE CASCADE,
+    assessment_setup_id   INTEGER NOT NULL
+                          REFERENCES assessment_setups(id) ON DELETE CASCADE,
+    budget_year           INTEGER,
+    budget_draft_id       INTEGER REFERENCES budget_drafts(id) ON DELETE CASCADE,
+    review_line_key       TEXT NOT NULL,
+    normalized_label      TEXT NOT NULL DEFAULT '',
+    line_label            TEXT NOT NULL DEFAULT '',
+    row_role              TEXT NOT NULL DEFAULT 'unknown_needs_review',
+    disposition_state     TEXT NOT NULL DEFAULT 'clear'
+                          CHECK (disposition_state IN (
+                              'excluded_non_regular','reserve_detail',
+                              'pending_split','clear'
+                          )),
+    decided_by            TEXT,
+    decided_at            TEXT,
+    notes                 TEXT,
+    created_at            TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at            TEXT NOT NULL DEFAULT (datetime('now')),
+    CHECK (budget_year IS NOT NULL OR budget_draft_id IS NOT NULL)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_assessment_review_row_dispositions_scope
+    ON assessment_review_row_dispositions(
+        property_id, assessment_setup_id, review_line_key,
+        COALESCE(budget_year, -1), COALESCE(budget_draft_id, -1)
+    );
+
+CREATE INDEX IF NOT EXISTS idx_assessment_review_row_dispositions_setup
+    ON assessment_review_row_dispositions(
+        assessment_setup_id, disposition_state
+    );
+
+CREATE TABLE IF NOT EXISTS assessment_review_row_audit_events (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    property_id           INTEGER NOT NULL
+                          REFERENCES properties(id) ON DELETE CASCADE,
+    assessment_setup_id   INTEGER NOT NULL
+                          REFERENCES assessment_setups(id) ON DELETE CASCADE,
+    budget_year           INTEGER,
+    budget_draft_id       INTEGER REFERENCES budget_drafts(id) ON DELETE CASCADE,
+    review_line_key       TEXT NOT NULL,
+    normalized_label      TEXT NOT NULL DEFAULT '',
+    line_label            TEXT NOT NULL DEFAULT '',
+    change_type           TEXT NOT NULL
+                          CHECK (change_type IN ('assignment','disposition')),
+    previous_value        TEXT,
+    new_value             TEXT,
+    pool_key              TEXT,
+    actor                 TEXT NOT NULL,
+    reason                TEXT,
+    source                TEXT NOT NULL DEFAULT 'operator',
+    created_at            TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_assessment_review_row_audit_events_scope
+    ON assessment_review_row_audit_events(
+        assessment_setup_id, review_line_key, created_at
+    );
 
 -- ── Assessment override (Phase 4.5) ──
 -- Operator-applied adjustments that win over engine-calculated math.
@@ -599,6 +913,8 @@ CREATE TABLE IF NOT EXISTS annual_packages (
     property_id                     INTEGER NOT NULL
                                     REFERENCES properties(id) ON DELETE CASCADE,
     assessment_setup_id             INTEGER REFERENCES assessment_setups(id) ON DELETE SET NULL,
+    assessment_mode                 TEXT NOT NULL DEFAULT 'variable'
+                                    CHECK (assessment_mode IN ('fixed', 'variable')),
     budget_year                     INTEGER NOT NULL,
     fiscal_year                     INTEGER NOT NULL,
     letter_date                     TEXT,

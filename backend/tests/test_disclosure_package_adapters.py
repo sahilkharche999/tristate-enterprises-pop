@@ -203,6 +203,39 @@ def test_from_reserve_study_extraction_allows_income_statement_only_draft():
     assert snap.components == []
 
 
+def test_from_reserve_study_extraction_passes_funding_plan_rows():
+    from app.disclosure_package.adapters import from_reserve_study_extraction
+
+    doc = SimpleNamespace(
+        study_date="October 9, 2024",
+        rows=[],
+        funding_plan_rows=[
+            SimpleNamespace(
+                year=2026,
+                beginning_balance=2171012,
+                annual_contribution=850998,
+                monthly_per_unit=241.21,
+                interest_income=20663,
+                reserve_expenditures=104674,
+                ending_balance=2938000,
+                fully_funded_balance=4331740,
+                percent_funded=68,
+                source_page=8,
+            )
+        ],
+    )
+
+    snap = from_reserve_study_extraction(doc)
+
+    assert len(snap.funding_plan_rows) == 1
+    row = snap.funding_plan_rows[0]
+    assert row.year == 2026
+    assert row.annual_contribution == Decimal("850998")
+    assert row.beginning_balance == Decimal("2171012")
+    assert row.monthly_per_unit == Decimal("241.21")
+    assert row.source_page == 8
+
+
 # ── Test 7: Property ORM row → HOAMetadata (units >= 1, fiscal months 1-12) ──
 def test_from_hoa_record_converts_property_row():
     from app.disclosure_package.adapters import from_hoa_record

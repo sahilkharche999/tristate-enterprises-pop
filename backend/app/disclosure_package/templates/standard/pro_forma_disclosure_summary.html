@@ -26,9 +26,13 @@
 
 <ol class="form-5570-list">
 
+  {% set presentation = computed.presentation_facts if computed.presentation_facts is defined else none %}
+  {% set matrix_says_vary = matrix.recipient_grain == 'group' or matrix.recipient_grain == 'unit' %}
+  {% set assessments_vary = matrix_says_vary or (presentation.assessments_vary if presentation else false) %}
+
   <li>
     <div class="form-5570-item">
-      {% if matrix.recipient_grain == 'group' or matrix.recipient_grain == 'unit' %}
+      {% if assessments_vary %}
       The regular assessment per ownership interest varies as shown in the
       attached assessment schedule.
       {% else %}

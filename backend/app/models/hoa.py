@@ -3,6 +3,8 @@ from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..assessment_mode import AssessmentMode, ASSESSMENT_MODE_VARIABLE
+
 
 class HOAListItem(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -18,6 +20,7 @@ class HOAListItem(BaseModel):
     city: str = ""
     portfolio_year: Optional[int] = None
     workflow_status: str = "Not Started"
+    assessment_mode: AssessmentMode = ASSESSMENT_MODE_VARIABLE
 
 
 class HOADetail(HOAListItem):
@@ -35,6 +38,7 @@ class HOACreateRequest(BaseModel):
     fiscal_year_start_month: int = Field(ge=1, le=12)
     fiscal_year_end_month: Optional[int] = Field(default=None, ge=1, le=12)
     city: Optional[str] = Field(default=None, max_length=255)
+    assessment_mode: AssessmentMode = ASSESSMENT_MODE_VARIABLE
 
 
 class HOAUpdateRequest(BaseModel):
@@ -46,3 +50,4 @@ class HOAUpdateRequest(BaseModel):
     fiscal_year_end_month: Optional[int] = Field(default=None, ge=1, le=12)
     city: Optional[str] = Field(default=None, max_length=255)
     reserve_inflation_rate: Optional[float] = Field(default=None, ge=0, le=1)
+    assessment_mode: Optional[AssessmentMode] = None

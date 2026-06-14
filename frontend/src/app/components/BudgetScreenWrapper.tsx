@@ -4,7 +4,6 @@ import { toast } from 'sonner';
 
 import { BudgetScreen } from './BudgetScreen';
 import { GeneratedBudgetScreen } from './GeneratedBudgetScreen';
-import { DisclosurePackagePanel } from './disclosure/DisclosurePackagePanel';
 import {
   reopenBudgetVersion,
   generateBudgetVersion,
@@ -262,6 +261,7 @@ export function BudgetScreenWrapper() {
         sourceUploadFilename={
           generatedVersion.source_upload_filename ?? activeDraft?.upload_filename ?? undefined
         }
+        sourceMode={generatedVersion.source_mode ?? activeDraft?.source_mode ?? null}
         onRegenerateSnapshot={handleRegenerateSnapshot}
         onBackToDraft={handleBackToDraft}
         budgetPreview={
@@ -278,42 +278,22 @@ export function BudgetScreenWrapper() {
     );
   }
 
-  // UI-SPEC §5.1: the disclosure-package panel lives inside the BudgetScreenWrapper
-  // shell as a new sibling section below the budget workspace.
-  // UI-SPEC OQ-7 / BudgetScreen.tsx:810 precedent: fiscal year is sourced from
-  // hoa.portfolio_year, falling back to the current calendar year.
-  const disclosureFiscalYear = hoa.portfolio_year ?? new Date().getFullYear();
-  // Universal unlock per DRE-driven architecture: every HOA can attempt
-  // generation. Backend preflight rejects with a structured error if a
-  // promoted assessment_setup or a finalized AnnualPackage is missing.
-  const isSupportedHoa = true;
-
   return (
-    <>
-      <BudgetScreen
-        hoa={hoa}
-        hoaId={id}
-        lineItems={lineItems}
-        onLineItemsUpdate={setLineItems}
-        onGenerateBudget={handleGenerateBudget}
-        onDraftChange={handleDraftChange}
-        onDraftDeleted={handleDraftDeleted}
-        budgetGenerated={Boolean(generatedVersion)}
-        isGenerating={isGenerating}
-        initialView={initialView}
-        savedAiResponse={aiResponse}
-        onAiResponseChange={setAiResponse}
-        activeDraft={activeDraft}
-        key={reopenedFromVersionId ? `reopened-${reopenedFromVersionId}-${activeDraft?.id ?? 'none'}` : 'active-draft'}
-      />
-      <div className="mx-auto max-w-7xl px-8 pb-12">
-        <DisclosurePackagePanel
-          hoaId={hoa.id}
-          fiscalYear={disclosureFiscalYear}
-          hoaName={hoa.name}
-          isSupportedHoa={isSupportedHoa}
-        />
-      </div>
-    </>
+    <BudgetScreen
+      hoa={hoa}
+      hoaId={id}
+      lineItems={lineItems}
+      onLineItemsUpdate={setLineItems}
+      onGenerateBudget={handleGenerateBudget}
+      onDraftChange={handleDraftChange}
+      onDraftDeleted={handleDraftDeleted}
+      budgetGenerated={Boolean(generatedVersion)}
+      isGenerating={isGenerating}
+      initialView={initialView}
+      savedAiResponse={aiResponse}
+      onAiResponseChange={setAiResponse}
+      activeDraft={activeDraft}
+      key={reopenedFromVersionId ? `reopened-${reopenedFromVersionId}-${activeDraft?.id ?? 'none'}` : 'active-draft'}
+    />
   );
 }

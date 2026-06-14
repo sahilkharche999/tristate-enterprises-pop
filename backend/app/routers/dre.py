@@ -24,6 +24,7 @@ from ..services.dre_extraction_service import (
     DREExtractionPreconditionError,
     lookup_dre_document,
     run_extraction_job,
+    schedule_extraction_run,
 )
 from ..services.dre_upload_service import (
     DREUploadResponse,
@@ -37,6 +38,8 @@ router = APIRouter(tags=["DRE"])
 
 class DREExtractionScheduledResponse(BaseModel):
     document_id: int
+    extraction_run_id: int
+    job_status: str
     status: str = "scheduled"
 
 
@@ -104,10 +107,22 @@ def trigger_dre_extraction(
     except DREExtractionPreconditionError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    background_tasks.add_task(
-        run_extraction_job,
+    scheduled = schedule_extraction_run(
         property_id=hoa_id,
         dre_document_id=document_id,
-        file_id=file_id,
+        connection=raw_conn,
     )
-    return DREExtractionScheduledResponse(document_id=document_id)
+    if scheduled.status == "scheduled":
+        background_tasks.add_task(
+            run_extraction_job,
+            run_id=scheduled.extraction_run_id,
+            property_id=hoa_id,
+            dre_document_id=document_id,
+            file_id=file_id,
+        )
+    return DREExtractionScheduledResponse(
+        document_id=document_id,
+        extraction_run_id=scheduled.extraction_run_id,
+        job_status=scheduled.job_status,
+        status=scheduled.status,
+    )

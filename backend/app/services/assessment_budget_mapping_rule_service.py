@@ -1,0 +1,2289 @@
+"""Reusable DRE-derived budget mapping rules.
+
+This service persists stable setup-level hints from an approved DRE
+extraction. Annual ``budget_line_pool_mappings`` are still the concrete
+current-year rows; these rules are the reusable evidence used to create
+or suggest those rows later.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import sqlite3
+from dataclasses import dataclass
+from decimal import Decimal
+from typing import Iterable, Optional
+
+from app.dre_extraction.schemas import DRESetupExtraction
+
+
+_LABEL_TOKEN_RE = re.compile(r"[^a-z0-9]+")
+_ACCOUNT_PREFIX_RE = re.compile(r"^\s*\d{3,}(?:-\d+)?\s*[-–:]\s*")
+_GENERIC_LABEL_TOKENS = {
+    "general",
+    "service",
+    "services",
+    "fee",
+    "fees",
+    "maint",
+    "maintenance",
+    "repairs",
+}
+
+BudgetLineEligibility = str
+_NON_BLOCKING_ELIGIBILITIES = {
+    "assessment_revenue_tieout",
+    "pass_through",
+    "reimbursement",
+    "interest_income",
+    "late_fee_income",
+    "zero_or_blank",
+    "inactive",
+    "duplicate_raw_or_normalized",
+    "outside_assessment_scope",
+}
+_BLOCKED_REGULAR_MAPPING_ASSESSMENT_TYPES = {
+    "exemption_credit",
+    "subsidy_credit",
+    "pass_through",
+    "reserve_component",
+    "excluded_or_informational",
+}
+_RULE_SOURCE_RANK = {
+    "dre_mapping_evidence": 0,
+    "dre_included_budget_line": 1,
+    "carried_forward": 2,
+}
+_REGULAR_REVIEW_ROW_ROLE = "current_year_operating_budget_line"
+_REVIEWABLE_ROW_ROLES = {
+    _REGULAR_REVIEW_ROW_ROLE,
+    "current_year_reserve_contribution_line",
+    "reserve_component_detail",
+    "reserve_cashflow_detail",
+    "pass_through_or_reimbursement",
+    "unknown_needs_review",
+}
+_REVIEW_ROW_ROLE_REASONS = {
+    _REGULAR_REVIEW_ROW_ROLE: "eligible current-year operating budget line",
+    "current_year_reserve_contribution_line": "current-year reserve contribution line",
+    "reserve_component_detail": "reserve component detail line",
+    "reserve_cashflow_detail": "reserve cashflow detail line",
+    "pass_through_or_reimbursement": "pass-through or reimbursement line",
+    "unknown_needs_review": "row needs operator review",
+}
+
+
+@dataclass(frozen=True)
+class BudgetLineClassification:
+    line_key: tuple[str, str, str, str, Optional[str]]
+    line_label: str
+    amount: Optional[Decimal]
+    eligibility: BudgetLineEligibility
+    requires_mapping: bool
+    reason: str
+    canonical: bool = True
+
+
+@dataclass(frozen=True)
+class DuplicateBudgetLineConflict:
+    normalized_label: str
+    line_labels: list[str]
+    amounts: list[Decimal]
+
+
+@dataclass(frozen=True)
+class BudgetLineClassificationResult:
+    classifications: list[BudgetLineClassification]
+    duplicate_conflicts: list[DuplicateBudgetLineConflict]
+
+
+@dataclass(frozen=True)
+class MappingReconciliation:
+    mapped_pool_total: Decimal
+    assessment_target: Decimal
+    selected_budget_source_total: Decimal
+    excluded_total: Decimal
+    offset_total: Decimal
+    schedule_annual_total: Decimal
+    tolerance: Decimal
+    passed: bool
+    failures: list[str]
+
+
+@dataclass(frozen=True)
+class LineReviewCandidate:
+    rule_id: int
+    pool_key: str
+    pool_name: str
+    score: float
+    match_reason: str
+    decision_level: str
+    source_pages: list[int]
+    source_evidence_text: str
+    review_reason: str
+    match_label: str
+    rule_source: str
+    budget_line_derivation: str
+
+
+@dataclass(frozen=True)
+class LineReviewItem:
+    line_label: str
+    normalized_label: str
+    section: str
+    category: str
+    fund_type: str
+    account_code: Optional[str]
+    amount: Optional[Decimal]
+    eligibility: BudgetLineEligibility
+    reason: str
+    status: str
+    pool_key: Optional[str]
+    candidates: list[LineReviewCandidate]
+
+
+def normalize_budget_label(label: str) -> str:
+    """Normalize a budget-line label for stable matching."""
+    normalized = _LABEL_TOKEN_RE.sub(" ", str(label or "").lower())
+    return " ".join(normalized.split())
+
+
+def _label_without_account_prefix(label: str) -> str:
+    return _ACCOUNT_PREFIX_RE.sub("", str(label or "")).strip()
+
+
+def _semantic_label_tokens(label: str) -> frozenset[str]:
+    text = normalize_budget_label(_label_without_account_prefix(label))
+    return frozenset(
+        token for token in text.split()
+        if token and token not in _GENERIC_LABEL_TOKENS
+    )
+
+
+def _canonical_display_score(line: dict) -> tuple[int, int]:
+    label = str(line.get("label") or line.get("normalized_label") or "")
+    has_account_prefix = 1 if _ACCOUNT_PREFIX_RE.match(label) else 0
+    has_account_code = 1 if line.get("account_code") not in (None, "") else 0
+    return (has_account_prefix, has_account_code)
+
+
+def canonicalize_budget_lines_for_mapping(budget_lines: list[dict]) -> list[dict]:
+    """Collapse raw + client-style versions of the same economic row.
+
+    Example: ``55000 - General Insurance`` and ``Insurance`` with the same
+    amount are one budget item. Keep the display-friendly label while
+    preserving account code/source metadata from the raw row.
+    """
+    grouped: dict[tuple[frozenset[str], Optional[Decimal], str, str], list[dict]] = {}
+    passthrough: list[dict] = []
+    for line in budget_lines:
+        label = str(line.get("label") or line.get("normalized_label") or "")
+        tokens = _semantic_label_tokens(label)
+        amount = _decimal_or_none(line.get("amount"))
+        category = str(line.get("category") or "")
+        fund_type = str(line.get("fund_type") or "")
+        if not tokens:
+            passthrough.append(line)
+            continue
+        grouped.setdefault((tokens, amount, category, fund_type), []).append(line)
+
+    canonicalized: list[dict] = []
+    for lines in grouped.values():
+        if len(lines) == 1:
+            canonicalized.append(lines[0])
+            continue
+        normalized_labels = {
+            normalize_budget_label(str(line.get("label") or line.get("normalized_label") or ""))
+            for line in lines
+        }
+        if len(normalized_labels) == 1:
+            canonicalized.extend(lines)
+            continue
+        canonical = dict(sorted(lines, key=_canonical_display_score)[0])
+        for source in lines:
+            if canonical.get("account_code") in (None, "") and source.get("account_code") not in (None, ""):
+                canonical["account_code"] = source.get("account_code")
+            if "source_label" not in canonical:
+                source_label = str(source.get("label") or "")
+                if source_label and source_label != canonical.get("label"):
+                    canonical["source_label"] = source_label
+        canonicalized.append(canonical)
+    return [*canonicalized, *passthrough]
+
+
+def _decimal_or_none(value: object) -> Optional[Decimal]:
+    if value in (None, ""):
+        return None
+    try:
+        return Decimal(str(value))
+    except Exception:
+        return None
+
+
+def select_assessment_mapping_amount(
+    line: dict,
+) -> tuple[Optional[Decimal], str]:
+    """Pick one canonical current-year amount for assessment mapping review."""
+    explicit_amount = _decimal_or_none(line.get("assessment_mapping_amount"))
+    if explicit_amount is not None:
+        return explicit_amount, str(line.get("source_column_used") or "assessment_mapping_amount")
+
+    for field, source in (
+        ("proposed_amount", "proposed_amount"),
+        ("proposedAmount", "proposed_amount"),
+        ("annual_budget", "annual_budget"),
+        ("projection", "projection"),
+        ("amount", "amount"),
+    ):
+        amount = _decimal_or_none(line.get(field))
+        if amount is not None:
+            return amount, source
+
+    return None, "none"
+
+
+def classify_assessment_mapping_review_row_role(line: dict) -> str:
+    label = str(line.get("label") or line.get("normalized_label") or "")
+    normalized = normalize_budget_label(label)
+    section = normalize_budget_label(str(line.get("section") or ""))
+    category = str(line.get("category") or "").lower()
+    fund_type = str(line.get("fund_type") or "").lower()
+    reserve_group = str(
+        line.get("reserve_group")
+        or line.get("reserveGroup")
+        or ""
+    ).lower()
+    amount, _source_column_used = select_assessment_mapping_amount(line)
+
+    if line.get("active") is False:
+        return "inactive"
+    if not normalized:
+        return "unknown_needs_review"
+    if amount is None or amount == 0:
+        return "zero_or_blank"
+    if (
+        normalized.startswith("total ")
+        or normalized.startswith("subtotal ")
+        or normalized.endswith(" total")
+        or " subtotal " in normalized
+    ):
+        return "subtotal_or_total"
+    if (
+        "pass through" in normalized
+        or "pass-through" in label.lower()
+        or "reimburs" in normalized
+    ):
+        return "pass_through_or_reimbursement"
+    if category in {"income", "reserve_income"}:
+        if "interest" in normalized:
+            return "interest_income"
+        if "assessment" in normalized or "dues" in normalized:
+            return "assessment_revenue_tieout"
+        return "other_income"
+    if (
+        "reserve" in normalized
+        and any(
+            marker in normalized
+            for marker in ("allocation", "transfer", "contribution", "funding")
+        )
+    ):
+        return "current_year_reserve_contribution_line"
+    if reserve_group in {"component", "transfer"} or category in {"reserve", "reserve_expense"} or fund_type == "reserve":
+        if reserve_group == "transfer" or any(
+            marker in normalized
+            for marker in ("allocation", "transfer", "contribution", "funding")
+        ):
+            return "current_year_reserve_contribution_line"
+        if "cash flow" in normalized or "cashflow" in normalized:
+            return "reserve_cashflow_detail"
+        return "reserve_component_detail"
+    if category in {"operating", "expense"} or fund_type == "operating":
+        return _REGULAR_REVIEW_ROW_ROLE
+    return "unknown_needs_review"
+
+
+def build_assessment_mapping_review_line_key(
+    line: dict,
+    *,
+    row_role: str,
+    source_column_used: str,
+) -> str:
+    normalized, section, category, fund_type, account_code = _line_key(line)
+    return "|".join(
+        [
+            normalized,
+            normalize_budget_label(section),
+            category,
+            fund_type,
+            account_code or "",
+            row_role,
+            source_column_used,
+        ]
+    )
+
+
+def _with_assessment_mapping_amounts(budget_lines: list[dict]) -> list[dict]:
+    enriched: list[dict] = []
+    for line in budget_lines:
+        enriched_line = dict(line)
+        amount, source_column_used = select_assessment_mapping_amount(enriched_line)
+        if enriched_line.get("assessment_mapping_amount") in (None, ""):
+            enriched_line["assessment_mapping_amount"] = (
+                float(amount) if amount is not None else None
+            )
+        if not enriched_line.get("source_column_used"):
+            enriched_line["source_column_used"] = source_column_used
+        if enriched_line.get("amount") in (None, ""):
+            enriched_line["amount"] = float(amount) if amount is not None else None
+        enriched.append(enriched_line)
+    return canonicalize_budget_lines_for_mapping(enriched)
+
+
+def _sqlite_table_exists(connection: sqlite3.Connection, table_name: str) -> bool:
+    row = connection.execute(
+        """
+        SELECT 1
+          FROM sqlite_master
+         WHERE type = 'table'
+           AND name = ?
+         LIMIT 1
+        """,
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+def _table_columns(connection: sqlite3.Connection, table_name: str) -> set[str]:
+    if not _sqlite_table_exists(connection, table_name):
+        return set()
+    return {
+        str(row[1])
+        for row in connection.execute(
+            f"PRAGMA table_info({table_name})"
+        ).fetchall()
+    }
+
+
+def _review_scope(
+    *,
+    property_id: int,
+    connection: sqlite3.Connection,
+    budget_year: Optional[int] = None,
+    budget_draft_id: Optional[int] = None,
+) -> tuple[Optional[int], Optional[int]]:
+    resolved_budget_year = budget_year
+    resolved_budget_draft_id = budget_draft_id
+    if resolved_budget_year is None and _sqlite_table_exists(connection, "properties"):
+        property_row = connection.execute(
+            "SELECT portfolio_year FROM properties WHERE id = ?",
+            (property_id,),
+        ).fetchone()
+        if property_row is not None and property_row[0] is not None:
+            resolved_budget_year = int(property_row[0])
+    if resolved_budget_draft_id is None and _sqlite_table_exists(connection, "budget_drafts"):
+        draft_row = connection.execute(
+            """
+            SELECT id
+              FROM budget_drafts
+             WHERE property_id = ?
+               AND status = 'active'
+             ORDER BY updated_at DESC, id DESC
+             LIMIT 1
+            """,
+            (property_id,),
+        ).fetchone()
+        if draft_row is not None:
+            resolved_budget_draft_id = int(draft_row[0])
+    return resolved_budget_year, resolved_budget_draft_id
+
+
+def _review_row_dispositions_by_line_key(
+    *,
+    property_id: int,
+    assessment_setup_id: int,
+    budget_year: Optional[int],
+    budget_draft_id: Optional[int],
+    connection: sqlite3.Connection,
+) -> dict[str, dict[str, object]]:
+    if not _sqlite_table_exists(connection, "assessment_review_row_dispositions"):
+        return {}
+    rows = connection.execute(
+        """
+        SELECT review_line_key, disposition_state, notes, decided_by, decided_at
+          FROM assessment_review_row_dispositions
+         WHERE property_id = ?
+           AND assessment_setup_id = ?
+           AND COALESCE(budget_year, -1) = COALESCE(?, -1)
+           AND COALESCE(budget_draft_id, -1) = COALESCE(?, -1)
+        """,
+        (
+            property_id,
+            assessment_setup_id,
+            budget_year,
+            budget_draft_id,
+        ),
+    ).fetchall()
+    return {
+        str(row[0]): {
+            "disposition_state": str(row[1] or "clear"),
+            "notes": str(row[2] or ""),
+            "decided_by": str(row[3] or ""),
+            "decided_at": row[4],
+        }
+        for row in rows
+    }
+
+
+def _insert_review_row_audit_event(
+    *,
+    property_id: int,
+    assessment_setup_id: int,
+    budget_year: Optional[int],
+    budget_draft_id: Optional[int],
+    line_key: str,
+    normalized_label: str,
+    line_label: str,
+    change_type: str,
+    previous_value: Optional[str],
+    new_value: Optional[str],
+    pool_key: Optional[str],
+    actor: str,
+    reason: str,
+    source: str,
+    connection: sqlite3.Connection,
+) -> None:
+    if not _sqlite_table_exists(connection, "assessment_review_row_audit_events"):
+        return
+    connection.execute(
+        """
+        INSERT INTO assessment_review_row_audit_events (
+            property_id, assessment_setup_id, budget_year, budget_draft_id,
+            review_line_key, normalized_label, line_label, change_type,
+            previous_value, new_value, pool_key, actor, reason, source
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            property_id,
+            assessment_setup_id,
+            budget_year,
+            budget_draft_id,
+            line_key,
+            normalized_label,
+            line_label,
+            change_type,
+            previous_value,
+            new_value,
+            pool_key,
+            actor,
+            reason,
+            source,
+        ),
+    )
+
+
+def _deactivate_mapping_for_line(
+    *,
+    property_id: int,
+    assessment_setup_id: int,
+    row: dict[str, object],
+    connection: sqlite3.Connection,
+) -> int:
+    cur = connection.execute(
+        """
+        UPDATE budget_line_pool_mappings
+           SET active = 0,
+               review_state = 'stale'
+         WHERE property_id = ?
+           AND assessment_setup_id = ?
+           AND budget_line_normalized_label = ?
+           AND section = ?
+           AND category = ?
+           AND fund_type = ?
+           AND COALESCE(account_code, '') = COALESCE(?, '')
+           AND active = 1
+        """,
+        (
+            property_id,
+            assessment_setup_id,
+            str(row["normalized_label"]),
+            str(row["section"]),
+            str(row["category"]),
+            str(row["fund_type"]),
+            row["account_code"],
+        ),
+    )
+    return cur.rowcount
+
+
+def _is_zero_or_blank_amount(value: object) -> bool:
+    amount = _decimal_or_none(value)
+    return amount is None or amount == 0
+
+
+def _line_eligibility(line: dict) -> tuple[BudgetLineEligibility, str]:
+    if line.get("active") is False:
+        return "inactive", "inactive budget row"
+    label = str(line.get("label") or line.get("normalized_label") or "")
+    normalized = normalize_budget_label(label)
+    if not normalized:
+        return "unknown", "missing label"
+    if _is_zero_or_blank_amount(line.get("amount")):
+        return "zero_or_blank", "zero or blank amount"
+
+    category = str(line.get("category") or "").lower()
+    lowered = label.lower()
+    if category in {"income", "reserve_income"}:
+        if "interest" in lowered:
+            return "interest_income", "interest income"
+        if "late fee" in lowered or "late fees" in lowered:
+            return "late_fee_income", "late fee income"
+        if "assessment" in lowered or "dues" in lowered:
+            return "assessment_revenue_tieout", "assessment revenue tie-out"
+        return "assessment_revenue_tieout", "revenue tie-out"
+    if "pass through" in lowered or "pass-through" in lowered:
+        return "pass_through", "pass-through line"
+    if "reimbursement" in lowered or "reimburs" in lowered:
+        return "reimbursement", "reimbursement/offset line"
+    if "outside scope" in lowered or "non-assessment" in lowered:
+        return "outside_assessment_scope", "outside assessment scope"
+    if category in {"operating", "reserve_expense", "expense", "reserve"}:
+        return "assessable_expense", "assessable expense"
+    return "unknown", "classification unknown"
+
+
+def classify_budget_lines_for_mapping(
+    budget_lines: list[dict],
+) -> BudgetLineClassificationResult:
+    """Classify current-year lines before unresolved mapping checks."""
+    budget_lines = canonicalize_budget_lines_for_mapping(budget_lines)
+    raw: list[tuple[dict, tuple[str, str, str, str, Optional[str]], Optional[Decimal]]] = []
+    for line in budget_lines:
+        raw.append((line, _line_key(line), _decimal_or_none(line.get("amount"))))
+
+    by_duplicate_key: dict[tuple[str, str, str, str, Optional[str]], list[int]] = {}
+    for idx, (_, key, _) in enumerate(raw):
+        by_duplicate_key.setdefault(key, []).append(idx)
+
+    duplicate_noncanonical: set[int] = set()
+    duplicate_conflict_indexes: set[int] = set()
+    conflicts: list[DuplicateBudgetLineConflict] = []
+    for key, indexes in by_duplicate_key.items():
+        if len(indexes) < 2 or not key[0]:
+            continue
+        amounts = [raw[idx][2] for idx in indexes]
+        distinct_amounts = {amount for amount in amounts if amount is not None}
+        if len(distinct_amounts) > 1:
+            duplicate_conflict_indexes.update(indexes)
+            conflicts.append(
+                DuplicateBudgetLineConflict(
+                    normalized_label=key[0],
+                    line_labels=[
+                        str(raw[idx][0].get("label") or raw[idx][0].get("normalized_label") or "")
+                        for idx in indexes
+                    ],
+                    amounts=sorted(distinct_amounts),
+                )
+            )
+        else:
+            duplicate_noncanonical.update(indexes[1:])
+
+    classifications: list[BudgetLineClassification] = []
+    for idx, (line, key, amount) in enumerate(raw):
+        label = str(line.get("label") or line.get("normalized_label") or "")
+        if idx in duplicate_conflict_indexes:
+            eligibility, reason, requires_mapping, canonical = (
+                "unknown",
+                "duplicate amount conflict",
+                True,
+                True,
+            )
+        elif idx in duplicate_noncanonical:
+            eligibility, reason, requires_mapping, canonical = (
+                "duplicate_raw_or_normalized",
+                "duplicate of canonical row",
+                False,
+                False,
+            )
+        else:
+            eligibility, reason = _line_eligibility(line)
+            requires_mapping = eligibility in {"assessable_expense", "unknown"}
+            canonical = True
+        classifications.append(
+            BudgetLineClassification(
+                line_key=key,
+                line_label=label,
+                amount=amount,
+                eligibility=eligibility,
+                requires_mapping=requires_mapping,
+                reason=reason,
+                canonical=canonical,
+            )
+        )
+    return BudgetLineClassificationResult(
+        classifications=classifications,
+        duplicate_conflicts=conflicts,
+    )
+
+
+def _pool_id_by_key(
+    *,
+    assessment_setup_id: int,
+    connection: sqlite3.Connection,
+) -> dict[str, int]:
+    rows = connection.execute(
+        """
+        SELECT pool_key, id
+          FROM allocation_pools
+         WHERE assessment_setup_id = ?
+        """,
+        (assessment_setup_id,),
+    ).fetchall()
+    return {str(row[0]): int(row[1]) for row in rows}
+
+
+def _pool_signature_by_key(
+    *,
+    assessment_setup_id: int,
+    connection: sqlite3.Connection,
+) -> dict[str, str]:
+    rows = connection.execute(
+        """
+        SELECT pool_key, allocation_method, recipient_scope,
+               denominator_source, budget_line_derivation
+          FROM allocation_pools
+         WHERE assessment_setup_id = ?
+        """,
+        (assessment_setup_id,),
+    ).fetchall()
+    return {
+        str(row[0]): "|".join(str(part or "") for part in row[1:])
+        for row in rows
+    }
+
+
+def _included_line_rules(
+    extraction: DRESetupExtraction,
+) -> Iterable[tuple[str, str, list[int], float, str]]:
+    for pool in extraction.allocation_pools:
+        for label in pool.included_budget_lines:
+            normalized = normalize_budget_label(label)
+            if not normalized:
+                continue
+            yield (
+                pool.pool_key,
+                label,
+                pool.source_pages,
+                pool.confidence,
+                pool.budget_line_derivation,
+            )
+
+
+def _mapping_evidence_rules(
+    extraction: DRESetupExtraction,
+) -> Iterable[dict[str, object]]:
+    for item in extraction.budget_line_mapping_evidence:
+        normalized = normalize_budget_label(item.source_label)
+        if not normalized or not item.assessment_pool_key:
+            continue
+        yield {
+            "pool_key": item.assessment_pool_key,
+            "match_label": item.source_label,
+            "normalized_label": normalized,
+            "account_code": item.account_code or None,
+            "source_pages": [item.source_page] if item.source_page is not None else [],
+            "confidence": item.match_confidence,
+            "source_parent_category": item.parent_category or None,
+            "assessment_type": item.assessment_type,
+            "review_required": item.review_required,
+            "review_reason": item.review_reason,
+            "source_evidence_text": item.source_evidence_text,
+        }
+
+
+def _is_exemption_pool(pool_key: str, pool_name: str) -> bool:
+    text = f"{pool_key} {pool_name}".lower()
+    return "exempt" in text or "2792.16" in text
+
+
+def is_remainder_eligible_budget_line(
+    line: dict,
+    *,
+    already_mapped_normalized_labels: set[str],
+) -> bool:
+    """Return whether a current-year line may be swept into a residual pool."""
+    if line.get("active") is False:
+        return False
+    label = str(line.get("label") or line.get("normalized_label") or "")
+    normalized = normalize_budget_label(label)
+    if normalized in already_mapped_normalized_labels:
+        return False
+    if classify_assessment_mapping_review_row_role(line) != _REGULAR_REVIEW_ROW_ROLE:
+        return False
+    amount = line.get("amount")
+    if amount in (None, "", 0, 0.0):
+        return False
+    category = str(line.get("category") or "").lower()
+    if category in {"income", "reserve_income"}:
+        return False
+    unsafe_label_markers = (
+        "pass through",
+        "pass-through",
+        "reimbursement",
+        "individually billed",
+        "sub-metered",
+        "third-party billed",
+        "surcharge",
+        "special assessment",
+    )
+    lowered_label = label.lower()
+    return not any(marker in lowered_label for marker in unsafe_label_markers)
+
+
+def derive_rules_from_dre_extraction(
+    *,
+    property_id: int,
+    assessment_setup_id: int,
+    source_dre_extraction_run_id: Optional[int],
+    extraction: DRESetupExtraction,
+    connection: sqlite3.Connection,
+    commit: bool = True,
+) -> int:
+    """Persist reusable rules from DRE ``included_budget_lines``.
+
+    Returns the number of newly inserted rows. Existing rules are left in
+    place so the function can safely run during retries/backfills.
+    """
+    pool_ids = _pool_id_by_key(
+        assessment_setup_id=assessment_setup_id,
+        connection=connection,
+    )
+    inserted = 0
+    for (
+        pool_key,
+        match_label,
+        source_pages,
+        confidence,
+        derivation,
+    ) in _included_line_rules(extraction):
+        cur = connection.execute(
+            """
+            INSERT OR IGNORE INTO assessment_budget_mapping_rules (
+                property_id, assessment_setup_id, pool_key, pool_id,
+                match_label, normalized_label, match_type, rule_source,
+                approval_status, review_state,
+                source_dre_extraction_run_id, source_pages_json,
+                confidence, budget_line_derivation
+            ) VALUES (?, ?, ?, ?, ?, ?, 'exact_label',
+                      'dre_included_budget_line', 'suggested',
+                      'pending_review', ?, ?, ?, ?)
+            """,
+            (
+                property_id,
+                assessment_setup_id,
+                pool_key,
+                pool_ids.get(pool_key),
+                match_label,
+                normalize_budget_label(match_label),
+                source_dre_extraction_run_id,
+                json.dumps(source_pages),
+                confidence,
+                derivation,
+            ),
+        )
+        inserted += cur.rowcount
+    for evidence in _mapping_evidence_rules(extraction):
+        cur = connection.execute(
+            """
+            INSERT OR IGNORE INTO assessment_budget_mapping_rules (
+                property_id, assessment_setup_id, pool_key, pool_id,
+                match_label, normalized_label, account_code, match_type,
+                rule_source, approval_status, review_state,
+                source_dre_extraction_run_id, source_pages_json,
+                confidence, source_parent_category, assessment_type,
+                review_required, review_reason, source_evidence_text,
+                budget_line_derivation
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'normalized_label',
+                      'dre_mapping_evidence', 'suggested',
+                      'pending_review', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                property_id,
+                assessment_setup_id,
+                str(evidence["pool_key"]),
+                pool_ids.get(str(evidence["pool_key"])),
+                str(evidence["match_label"]),
+                str(evidence["normalized_label"]),
+                evidence["account_code"],
+                source_dre_extraction_run_id,
+                json.dumps(evidence["source_pages"]),
+                float(evidence["confidence"] or 0.0),
+                evidence["source_parent_category"],
+                str(evidence["assessment_type"]),
+                1 if bool(evidence["review_required"]) else 0,
+                str(evidence["review_reason"] or ""),
+                str(evidence["source_evidence_text"] or ""),
+                "explicit_lines",
+            ),
+        )
+        inserted += cur.rowcount
+    for pool in extraction.allocation_pools:
+        if pool.budget_line_derivation != "residual_default":
+            continue
+        cur = connection.execute(
+            """
+            INSERT OR IGNORE INTO assessment_budget_mapping_rules (
+                property_id, assessment_setup_id, pool_key, pool_id,
+                match_type, rule_source, approval_status, review_state,
+                source_dre_extraction_run_id, source_pages_json,
+                confidence, budget_line_derivation,
+                residual_after_pool_keys_json, residual_exclusions_json
+            ) VALUES (?, ?, ?, ?, 'remainder', 'system_remainder',
+                      'suggested', 'pending_review', ?, ?, ?, ?,
+                      ?, ?)
+            """,
+            (
+                property_id,
+                assessment_setup_id,
+                pool.pool_key,
+                pool_ids.get(pool.pool_key),
+                source_dre_extraction_run_id,
+                json.dumps(pool.source_pages),
+                pool.confidence,
+                pool.budget_line_derivation,
+                json.dumps(pool.residual_after_pool_keys),
+                json.dumps(pool.residual_exclusions),
+            ),
+        )
+        inserted += cur.rowcount
+    if commit:
+        connection.commit()
+    return inserted
+
+
+def ensure_exemption_decisions_from_dre_extraction(
+    *,
+    property_id: int,
+    assessment_setup_id: int,
+    budget_year: Optional[int],
+    budget_draft_id: Optional[int],
+    extraction: DRESetupExtraction,
+    connection: sqlite3.Connection,
+    commit: bool = True,
+) -> int:
+    """Create pending current-year exemption decisions for exemption pools."""
+    inserted = 0
+    for pool in extraction.allocation_pools:
+        if not _is_exemption_pool(pool.pool_key, pool.pool_name):
+            continue
+        cur = connection.execute(
+            """
+            INSERT OR IGNORE INTO assessment_exemption_decisions (
+                property_id, assessment_setup_id, budget_year,
+                budget_draft_id, pool_key, exemption_state,
+                evidence_ref_json
+            ) VALUES (?, ?, ?, ?, ?, 'pending_review', ?)
+            """,
+            (
+                property_id,
+                assessment_setup_id,
+                budget_year,
+                budget_draft_id,
+                pool.pool_key,
+                json.dumps({"source_pages": pool.source_pages}),
+            ),
+        )
+        inserted += cur.rowcount
+    if commit:
+        connection.commit()
+    return inserted
+
+
+def set_exemption_decision_state(
+    *,
+    property_id: int,
+    assessment_setup_id: int,
+    budget_year: Optional[int],
+    budget_draft_id: Optional[int],
+    pool_key: str,
+    exemption_state: str,
+    decided_by: str,
+    notes: str = "",
+    connection: sqlite3.Connection,
+    commit: bool = True,
+) -> int:
+    """Set the current-year exemption state for an existing decision row."""
+    cur = connection.execute(
+        """
+        UPDATE assessment_exemption_decisions
+           SET exemption_state = ?,
+               decided_by = ?,
+               decided_at = datetime('now'),
+               notes = ?,
+               updated_at = datetime('now')
+         WHERE property_id = ?
+           AND assessment_setup_id = ?
+           AND pool_key = ?
+           AND COALESCE(budget_year, -1) = COALESCE(?, -1)
+           AND COALESCE(budget_draft_id, -1) = COALESCE(?, -1)
+        """,
+        (
+            exemption_state,
+            decided_by,
+            notes,
+            property_id,
+            assessment_setup_id,
+            pool_key,
+            budget_year,
+            budget_draft_id,
+        ),
+    )
+    if commit:
+        connection.commit()
+    return cur.rowcount
+
+
+def record_scoped_alias(
+    *,
+    property_id: int,
+    assessment_setup_id: int,
+    pool_key: str,
+    dre_label: str,
+    budget_label: str,
+    account_code: Optional[str],
+    actor: str,
+    note: str,
+    connection: sqlite3.Connection,
+    commit: bool = True,
+) -> int:
+    """Persist one approved HOA/setup/pool-scoped alias."""
+    normalized_dre_label = normalize_budget_label(dre_label)
+    normalized_budget_label = normalize_budget_label(budget_label)
+    cur = connection.execute(
+        """
+        INSERT INTO assessment_mapping_aliases (
+            property_id, assessment_setup_id, pool_key,
+            dre_label, normalized_dre_label,
+            budget_label, normalized_budget_label,
+            account_code, decided_by, note
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(property_id, assessment_setup_id, pool_key,
+                    normalized_dre_label, normalized_budget_label,
+                    COALESCE(account_code, ''))
+        DO UPDATE SET approval_status = 'approved',
+                      active = 1,
+                      decided_by = excluded.decided_by,
+                      decided_at = datetime('now'),
+                      note = excluded.note,
+                      updated_at = datetime('now')
+        """,
+        (
+            property_id,
+            assessment_setup_id,
+            pool_key,
+            dre_label,
+            normalized_dre_label,
+            budget_label,
+            normalized_budget_label,
+            account_code,
+            actor,
+            note,
+        ),
+    )
+    if commit:
+        connection.commit()
+    return cur.lastrowid or 0
+
+
+def _approved_aliases(
+    *,
+    property_id: int,
+    assessment_setup_id: int,
+    connection: sqlite3.Connection,
+) -> list[sqlite3.Row]:
+    if not _sqlite_table_exists(connection, "assessment_mapping_aliases"):
+        return []
+    return connection.execute(
+        """
+        SELECT id, pool_key, normalized_budget_label, account_code
+          FROM assessment_mapping_aliases
+         WHERE property_id = ?
+           AND assessment_setup_id = ?
+           AND active = 1
+           AND approval_status = 'approved'
+        """,
+        (property_id, assessment_setup_id),
+    ).fetchall()
+
+
+def _active_rule_rows(
+    *,
+    property_id: int,
+    assessment_setup_id: int,
+    connection: sqlite3.Connection,
+) -> list[sqlite3.Row]:
+    if not _sqlite_table_exists(connection, "assessment_budget_mapping_rules"):
+        return []
+    return connection.execute(
+        """
+        SELECT id, pool_key, match_label, normalized_label, account_code,
+               match_type, rule_source, approval_status, review_state,
+               confidence, budget_line_derivation, source_pages_json,
+               source_parent_category, assessment_type, review_required,
+               review_reason, source_evidence_text
+          FROM assessment_budget_mapping_rules
+         WHERE property_id = ?
+           AND assessment_setup_id = ?
+           AND active = 1
+           AND approval_status != 'disabled'
+           AND review_state != 'disabled'
+        """,
+        (property_id, assessment_setup_id),
+    ).fetchall()
+
+
+def _pool_name_by_key(
+    *,
+    assessment_setup_id: int,
+    connection: sqlite3.Connection,
+) -> dict[str, str]:
+    rows = connection.execute(
+        """
+        SELECT pool_key, pool_name
+          FROM allocation_pools
+         WHERE assessment_setup_id = ?
+        """,
+        (assessment_setup_id,),
+    ).fetchall()
+    return {str(row[0]): str(row[1] or row[0]) for row in rows}
+
+
+def _json_list(value: object) -> list[int]:
+    if not value:
+        return []
+    try:
+        decoded = json.loads(str(value))
+    except Exception:
+        return []
+    if not isinstance(decoded, list):
+        return []
+    out: list[int] = []
+    for item in decoded:
+        try:
+            out.append(int(item))
+        except Exception:
+            continue
+    return out
+
+
+def _token_overlap_score(
+    left: frozenset[str],
+    right: frozenset[str],
+) -> float:
+    if not left or not right:
+        return 0.0
+    overlap = len(left & right)
+    return overlap / max(len(left), len(right))
+
+
+def _rank_line_review_candidates(
+    *,
+    line: dict,
+    classification: BudgetLineClassification,
+    rules: list[sqlite3.Row],
+    pool_names: dict[str, str],
+) -> list[LineReviewCandidate]:
+    if classification.eligibility != "assessable_expense":
+        return []
+    if str(line.get("fund_type") or "") != "operating":
+        return []
+
+    normalized, _section, _category, _fund_type, account_code = _line_key(line)
+    line_tokens = _semantic_label_tokens(
+        str(line.get("label") or line.get("normalized_label") or "")
+    )
+    candidates: list[LineReviewCandidate] = []
+
+    for rule in rules:
+        budget_line_derivation = str(rule[10] or "unknown")
+        if str(rule[5]) == "remainder" or budget_line_derivation == "residual_default":
+            candidates.append(
+                LineReviewCandidate(
+                    rule_id=int(rule[0]),
+                    pool_key=str(rule[1]),
+                    pool_name=pool_names.get(str(rule[1]), str(rule[1])),
+                    score=0.25,
+                    match_reason="residual/base pool candidate",
+                    decision_level="review_required_suggestion",
+                    source_pages=_json_list(rule[11]),
+                    source_evidence_text=str(rule[16] or ""),
+                    review_reason=str(rule[15] or "Operator must confirm residual/base assignment per row."),
+                    match_label=str(rule[2] or rule[3] or ""),
+                    rule_source=str(rule[6]),
+                    budget_line_derivation=budget_line_derivation,
+                )
+            )
+            continue
+        if str(rule[6]) not in {
+            "dre_mapping_evidence",
+            "dre_included_budget_line",
+            "carried_forward",
+        }:
+            continue
+
+        assessment_type = str(rule[13] or "unknown_needs_review")
+        if assessment_type in _BLOCKED_REGULAR_MAPPING_ASSESSMENT_TYPES:
+            continue
+
+        match_label = str(rule[2] or rule[3] or "")
+        rule_normalized = str(rule[3] or "")
+        rule_account_code = (
+            str(rule[4]) if rule[4] not in (None, "") else None
+        )
+        reasons: list[str] = []
+        score = 0.0
+
+        if account_code and rule_account_code and str(account_code) == rule_account_code:
+            score = 1.0
+            reasons.append("exact account code")
+        else:
+            if normalized and rule_normalized:
+                if normalized == rule_normalized:
+                    score = max(score, 0.95)
+                    reasons.append("exact normalized label")
+                else:
+                    overlap = _token_overlap_score(
+                        line_tokens,
+                        _semantic_label_tokens(match_label or rule_normalized),
+                    )
+                    if overlap > 0:
+                        score = max(score, 0.5 + overlap * 0.35)
+                        reasons.append("semantic label overlap")
+                    if rule_normalized in normalized or normalized in rule_normalized:
+                        score = max(score, 0.8)
+                        reasons.append("label contains DRE term")
+
+        parent_category = normalize_budget_label(str(rule[12] or ""))
+        if parent_category:
+            parent_tokens = _semantic_label_tokens(parent_category)
+            if line_tokens & parent_tokens:
+                score = min(1.0, score + 0.1)
+                reasons.append("parent category aligns")
+
+        review_required = bool(rule[14]) or assessment_type == "unknown_needs_review"
+        threshold = 0.3 if review_required else 0.55
+        if score < threshold:
+            continue
+
+        candidates.append(
+            LineReviewCandidate(
+                rule_id=int(rule[0]),
+                pool_key=str(rule[1]),
+                pool_name=pool_names.get(str(rule[1]), str(rule[1])),
+                score=round(score, 3),
+                match_reason=", ".join(dict.fromkeys(reasons)) or "DRE mapping evidence",
+                decision_level=(
+                    "review_required_suggestion"
+                    if review_required
+                    else "safe_suggestion"
+                ),
+                source_pages=_json_list(rule[11]),
+                source_evidence_text=str(rule[16] or ""),
+                review_reason=str(rule[15] or ""),
+                match_label=match_label,
+                rule_source=str(rule[6]),
+                budget_line_derivation=budget_line_derivation,
+            )
+        )
+
+    candidates.sort(
+        key=lambda item: (
+            -item.score,
+            _RULE_SOURCE_RANK.get(item.rule_source, 99),
+            item.pool_key,
+            item.rule_id,
+        )
+    )
+    return candidates
+
+
+def build_assessment_mapping_review_rows(
+    *,
+    property_id: int,
+    assessment_setup_id: int,
+    budget_lines: list[dict],
+    connection: sqlite3.Connection,
+    budget_year: Optional[int] = None,
+    budget_draft_id: Optional[int] = None,
+) -> list[dict[str, object]]:
+    budget_lines = _with_assessment_mapping_amounts(budget_lines)
+    budget_year, budget_draft_id = _review_scope(
+        property_id=property_id,
+        connection=connection,
+        budget_year=budget_year,
+        budget_draft_id=budget_draft_id,
+    )
+    classification_result = classify_budget_lines_for_mapping(budget_lines)
+    rules = _active_rule_rows(
+        property_id=property_id,
+        assessment_setup_id=assessment_setup_id,
+        connection=connection,
+    )
+    pool_names = _pool_name_by_key(
+        assessment_setup_id=assessment_setup_id,
+        connection=connection,
+    )
+    pool_rows = connection.execute(
+        """
+        SELECT pool_key, pool_name
+          FROM allocation_pools
+         WHERE assessment_setup_id = ?
+         ORDER BY display_order, id
+        """,
+        (assessment_setup_id,),
+    ).fetchall()
+    mapping_columns = _table_columns(connection, "budget_line_pool_mappings")
+    mapping_source_sql = "mapping_source" if "mapping_source" in mapping_columns else "'operator'"
+    review_state_sql = "review_state" if "review_state" in mapping_columns else "'ready'"
+    mapped_rows = connection.execute(
+        f"""
+        SELECT budget_line_normalized_label, section, category, fund_type,
+               account_code, pool_key, {mapping_source_sql}, {review_state_sql}
+          FROM budget_line_pool_mappings
+         WHERE property_id = ?
+           AND assessment_setup_id = ?
+           AND active = 1
+        """,
+        (property_id, assessment_setup_id),
+    ).fetchall()
+    mapped_by_key = {
+        (str(row[0]), str(row[1]), str(row[2]), str(row[3]), row[4]): row
+        for row in mapped_rows
+    }
+    dispositions_by_key = _review_row_dispositions_by_line_key(
+        property_id=property_id,
+        assessment_setup_id=assessment_setup_id,
+        budget_year=budget_year,
+        budget_draft_id=budget_draft_id,
+        connection=connection,
+    )
+    valid_pool_options = [
+        {"pool_key": str(row[0]), "pool_name": str(row[1])}
+        for row in pool_rows
+    ]
+
+    rows: list[dict[str, object]] = []
+    for idx, line in enumerate(budget_lines):
+        classification = classification_result.classifications[idx]
+        if not classification.canonical:
+            continue
+
+        row_role = classify_assessment_mapping_review_row_role(line)
+        if row_role not in _REVIEWABLE_ROW_ROLES:
+            continue
+
+        amount, source_column_used = select_assessment_mapping_amount(line)
+        line_key = build_assessment_mapping_review_line_key(
+            line,
+            row_role=row_role,
+            source_column_used=source_column_used,
+        )
+        normalized, section, category, fund_type, account_code = _line_key(line)
+        key = (normalized, section, category, fund_type, account_code)
+        mapped = mapped_by_key.get(key)
+        disposition = dispositions_by_key.get(line_key, {})
+        disposition_state = str(disposition.get("disposition_state") or "clear")
+        included_in_regular_basis = (
+            row_role == _REGULAR_REVIEW_ROW_ROLE
+            and disposition_state == "clear"
+        )
+        candidates: list[LineReviewCandidate] = []
+        status = "mapped" if mapped else "needs_disposition"
+        if disposition_state == "pending_split":
+            status = "pending_split"
+        elif disposition_state == "excluded_non_regular":
+            status = "excluded_non_regular"
+        elif disposition_state == "reserve_detail":
+            status = "reserve_detail"
+        elif included_in_regular_basis and not mapped:
+            candidates = _rank_line_review_candidates(
+                line=line,
+                classification=classification,
+                rules=rules,
+                pool_names=pool_names,
+            )
+            status = "suggested" if candidates else "unresolved"
+
+        rows.append(
+            {
+                "line_key": line_key,
+                "line_label": classification.line_label,
+                "normalized_label": normalized,
+                "section": section,
+                "category": category,
+                "fund_type": fund_type,
+                "account_code": account_code,
+                "assessment_mapping_amount": float(amount) if amount is not None else None,
+                "source_column_used": source_column_used,
+                "amount": float(amount) if amount is not None else None,
+                "row_role": row_role,
+                "eligibility": classification.eligibility,
+                "included_in_regular_basis": included_in_regular_basis,
+                "reason": _REVIEW_ROW_ROLE_REASONS.get(row_role, classification.reason),
+                "status": status,
+                "current_status": status,
+                "disposition_state": disposition_state,
+                "disposition_note": str(disposition.get("notes") or ""),
+                "pool_key": str(mapped[5]) if mapped else None,
+                "current_pool_key": str(mapped[5]) if mapped else None,
+                "mapping_source": str(mapped[6] or "") if mapped else None,
+                "review_state": str(mapped[7] or "") if mapped else None,
+                "valid_pool_options": valid_pool_options,
+                "recommended_pool_key": candidates[0].pool_key if candidates else None,
+                "candidates": [
+                    {
+                        "rule_id": candidate.rule_id,
+                        "pool_key": candidate.pool_key,
+                        "pool_name": candidate.pool_name,
+                        "score": candidate.score,
+                        "match_reason": candidate.match_reason,
+                        "decision_level": candidate.decision_level,
+                        "source_pages": candidate.source_pages,
+                        "source_evidence_text": candidate.source_evidence_text,
+                        "review_reason": candidate.review_reason,
+                        "match_label": candidate.match_label,
+                        "rule_source": candidate.rule_source,
+                        "budget_line_derivation": candidate.budget_line_derivation,
+                    }
+                    for candidate in candidates
+                ],
+            }
+        )
+    return rows
+
+
+def build_line_review_items(
+    *,
+    property_id: int,
+    assessment_setup_id: int,
+    budget_lines: list[dict],
+    connection: sqlite3.Connection,
+) -> list[dict[str, object]]:
+    rows = build_assessment_mapping_review_rows(
+        property_id=property_id,
+        assessment_setup_id=assessment_setup_id,
+        budget_lines=budget_lines,
+        connection=connection,
+    )
+    return [
+        {
+            "line_key": row["line_key"],
+            "line_label": row["line_label"],
+            "normalized_label": row["normalized_label"],
+            "section": row["section"],
+            "category": row["category"],
+            "fund_type": row["fund_type"],
+            "account_code": row["account_code"],
+            "amount": row["assessment_mapping_amount"],
+            "assessment_mapping_amount": row["assessment_mapping_amount"],
+            "source_column_used": row["source_column_used"],
+            "row_role": row["row_role"],
+            "eligibility": row["eligibility"],
+            "included_in_regular_basis": row["included_in_regular_basis"],
+            "reason": row["reason"],
+            "status": row["status"],
+            "pool_key": row["pool_key"],
+            "candidates": row["candidates"],
+        }
+        for row in rows
+        if row["row_role"] == _REGULAR_REVIEW_ROW_ROLE
+    ]
+
+
+def build_assessment_mapping_review_summary(
+    review_rows: list[dict[str, object]],
+    *,
+    tolerance: object = "0.01",
+) -> dict[str, object]:
+    allowed_delta = Decimal(str(tolerance or "0.01"))
+    mapped_regular_total = Decimal("0")
+    pending_split_total = Decimal("0")
+    excluded_non_regular_total = Decimal("0")
+    target_regular_assessment_basis = Decimal("0")
+    unresolved_required_rows: list[str] = []
+
+    for row in review_rows:
+        amount = Decimal(str(row.get("assessment_mapping_amount") or 0))
+        disposition_state = str(row.get("disposition_state") or "clear")
+        included_in_regular_basis = bool(row.get("included_in_regular_basis"))
+        current_pool_key = row.get("current_pool_key")
+
+        if included_in_regular_basis:
+            target_regular_assessment_basis += amount
+            if current_pool_key:
+                mapped_regular_total += amount
+            else:
+                unresolved_required_rows.append(str(row.get("line_label") or ""))
+        elif disposition_state == "pending_split":
+            pending_split_total += amount
+        else:
+            excluded_non_regular_total += amount
+
+    difference = target_regular_assessment_basis - mapped_regular_total
+    reconciliation_failures: list[str] = []
+    if abs(difference) > allowed_delta:
+        reconciliation_failures.append("mapped_pool_total_mismatch")
+    final_render_blocked = bool(
+        unresolved_required_rows or pending_split_total or reconciliation_failures
+    )
+    return {
+        "mapped_regular_total": float(mapped_regular_total),
+        "pending_split_total": float(pending_split_total),
+        "excluded_non_regular_total": float(excluded_non_regular_total),
+        "target_regular_assessment_basis": float(target_regular_assessment_basis),
+        "difference": float(difference),
+        "reconciliation_failures": reconciliation_failures,
+        "unresolved_required_rows": unresolved_required_rows,
+        "final_render_blocked": final_render_blocked,
+    }
+
+
+def build_assessment_mapping_review_blockers(
+    *,
+    property_id: int,
+    assessment_setup_id: int,
+    review_rows: list[dict[str, object]],
+    connection: sqlite3.Connection,
+) -> dict[str, list[str]]:
+    blockers: dict[str, list[str]] = {}
+    unresolved_regular_rows = [
+        str(row["line_label"])
+        for row in review_rows
+        if bool(row["included_in_regular_basis"]) and not row.get("current_pool_key")
+    ]
+    if unresolved_regular_rows:
+        blockers["unresolved_eligible_lines"] = unresolved_regular_rows
+
+    pending_split_rows = [
+        str(row["line_label"])
+        for row in review_rows
+        if str(row.get("disposition_state") or "") == "pending_split"
+    ]
+    if pending_split_rows:
+        blockers["pending_split"] = pending_split_rows
+
+    return blockers
+
+
+def set_assessment_review_row_disposition(
+    *,
+    property_id: int,
+    assessment_setup_id: int,
+    budget_year: Optional[int],
+    budget_draft_id: Optional[int],
+    row: dict[str, object],
+    disposition_state: str,
+    actor: str,
+    note: str,
+    connection: sqlite3.Connection,
+    commit: bool = True,
+) -> dict[str, object]:
+    previous_rows = _review_row_dispositions_by_line_key(
+        property_id=property_id,
+        assessment_setup_id=assessment_setup_id,
+        budget_year=budget_year,
+        budget_draft_id=budget_draft_id,
+        connection=connection,
+    )
+    previous_state = str(
+        previous_rows.get(str(row["line_key"]), {}).get("disposition_state") or "clear"
+    )
+    connection.execute(
+        """
+        INSERT INTO assessment_review_row_dispositions (
+            property_id, assessment_setup_id, budget_year, budget_draft_id,
+            review_line_key, normalized_label, line_label, row_role,
+            disposition_state, decided_by, decided_at, notes, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, datetime('now'))
+        ON CONFLICT(property_id, assessment_setup_id, review_line_key,
+                    COALESCE(budget_year, -1), COALESCE(budget_draft_id, -1))
+        DO UPDATE SET disposition_state = excluded.disposition_state,
+                      decided_by = excluded.decided_by,
+                      decided_at = excluded.decided_at,
+                      notes = excluded.notes,
+                      updated_at = excluded.updated_at
+        """,
+        (
+            property_id,
+            assessment_setup_id,
+            budget_year,
+            budget_draft_id,
+            str(row["line_key"]),
+            str(row["normalized_label"]),
+            str(row["line_label"]),
+            str(row["row_role"]),
+            disposition_state,
+            actor,
+            note,
+        ),
+    )
+    if disposition_state != "clear":
+        _deactivate_mapping_for_line(
+            property_id=property_id,
+            assessment_setup_id=assessment_setup_id,
+            row=row,
+            connection=connection,
+        )
+    _insert_review_row_audit_event(
+        property_id=property_id,
+        assessment_setup_id=assessment_setup_id,
+        budget_year=budget_year,
+        budget_draft_id=budget_draft_id,
+        line_key=str(row["line_key"]),
+        normalized_label=str(row["normalized_label"]),
+        line_label=str(row["line_label"]),
+        change_type="disposition",
+        previous_value=previous_state,
+        new_value=disposition_state,
+        pool_key=None,
+        actor=actor,
+        reason=note,
+        source="operator",
+        connection=connection,
+    )
+    if commit:
+        connection.commit()
+    return {
+        "line_key": row["line_key"],
+        "disposition_state": disposition_state,
+        "previous_disposition_state": previous_state,
+    }
+
+
+def assign_assessment_review_row_pool(
+    *,
+    property_id: int,
+    assessment_setup_id: int,
+    budget_year: Optional[int],
+    budget_draft_id: Optional[int],
+    row: dict[str, object],
+    pool_key: str,
+    actor: str,
+    note: str,
+    connection: sqlite3.Connection,
+    commit: bool = True,
+) -> dict[str, object]:
+    existing = connection.execute(
+        """
+        SELECT pool_key
+          FROM budget_line_pool_mappings
+         WHERE property_id = ?
+           AND assessment_setup_id = ?
+           AND budget_line_normalized_label = ?
+           AND section = ?
+           AND category = ?
+           AND fund_type = ?
+           AND COALESCE(account_code, '') = COALESCE(?, '')
+           AND active = 1
+        """,
+        (
+            property_id,
+            assessment_setup_id,
+            str(row["normalized_label"]),
+            str(row["section"]),
+            str(row["category"]),
+            str(row["fund_type"]),
+            row["account_code"],
+        ),
+    ).fetchone()
+    previous_pool_key = str(existing[0]) if existing is not None else None
+    connection.execute(
+        """
+        INSERT INTO budget_line_pool_mappings (
+            property_id, assessment_setup_id,
+            budget_line_normalized_label, section, category, fund_type,
+            account_code, pool_key, source_rule_id, mapping_source,
+            match_method, approval_status, review_state, budget_line_amount,
+            approved_by, approved_at, active
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'operator',
+                  'direct_assignment', 'approved', 'ready', ?, ?, datetime('now'), 1)
+        ON CONFLICT(property_id, assessment_setup_id,
+                    budget_line_normalized_label, section, category,
+                    fund_type, COALESCE(account_code, ''))
+        DO UPDATE SET pool_key = excluded.pool_key,
+                      mapping_source = excluded.mapping_source,
+                      match_method = excluded.match_method,
+                      approval_status = excluded.approval_status,
+                      review_state = excluded.review_state,
+                      budget_line_amount = excluded.budget_line_amount,
+                      approved_by = excluded.approved_by,
+                      approved_at = excluded.approved_at,
+                      active = 1
+        """,
+        (
+            property_id,
+            assessment_setup_id,
+            str(row["normalized_label"]),
+            str(row["section"]),
+            str(row["category"]),
+            str(row["fund_type"]),
+            row["account_code"],
+            pool_key,
+            row["assessment_mapping_amount"],
+            actor,
+        ),
+    )
+    connection.execute(
+        """
+        INSERT INTO assessment_budget_mapping_rules (
+            property_id, assessment_setup_id, pool_key, match_label,
+            normalized_label, account_code, match_type, rule_source,
+            approval_status, review_state, confidence, budget_line_derivation,
+            assessment_type, review_required, review_reason,
+            source_evidence_text
+        ) VALUES (?, ?, ?, ?, ?, ?, 'normalized_label', 'operator',
+                  'approved', 'ready', 1.0, 'explicit_lines',
+                  'unknown_needs_review', 0, '', ?)
+        ON CONFLICT(property_id, assessment_setup_id, pool_key, match_type,
+                    COALESCE(normalized_label, ''), COALESCE(account_code, ''))
+        DO UPDATE SET match_label = excluded.match_label,
+                      approval_status = 'approved',
+                      review_state = 'ready',
+                      active = 1,
+                      confidence = excluded.confidence,
+                      budget_line_derivation = 'explicit_lines',
+                      source_evidence_text = excluded.source_evidence_text,
+                      updated_at = datetime('now')
+        """,
+        (
+            property_id,
+            assessment_setup_id,
+            pool_key,
+            str(row["line_label"]),
+            str(row["normalized_label"]),
+            row["account_code"],
+            f"Operator assigned {row['line_label']} to {pool_key}.",
+        ),
+    )
+    if _sqlite_table_exists(connection, "assessment_review_row_dispositions"):
+        connection.execute(
+            """
+            UPDATE assessment_review_row_dispositions
+               SET disposition_state = 'clear',
+                   decided_by = ?,
+                   decided_at = datetime('now'),
+                   notes = ?,
+                   updated_at = datetime('now')
+             WHERE property_id = ?
+               AND assessment_setup_id = ?
+               AND review_line_key = ?
+               AND COALESCE(budget_year, -1) = COALESCE(?, -1)
+               AND COALESCE(budget_draft_id, -1) = COALESCE(?, -1)
+            """,
+            (
+                actor,
+                "Assignment clears prior disposition." if note else "",
+                property_id,
+                assessment_setup_id,
+                str(row["line_key"]),
+                budget_year,
+                budget_draft_id,
+            ),
+        )
+    _insert_review_row_audit_event(
+        property_id=property_id,
+        assessment_setup_id=assessment_setup_id,
+        budget_year=budget_year,
+        budget_draft_id=budget_draft_id,
+        line_key=str(row["line_key"]),
+        normalized_label=str(row["normalized_label"]),
+        line_label=str(row["line_label"]),
+        change_type="assignment",
+        previous_value=previous_pool_key,
+        new_value=pool_key,
+        pool_key=pool_key,
+        actor=actor,
+        reason=note,
+        source="operator",
+        connection=connection,
+    )
+    if commit:
+        connection.commit()
+    return {
+        "line_key": row["line_key"],
+        "pool_key": pool_key,
+        "previous_pool_key": previous_pool_key,
+        "current_status": "mapped",
+    }
+
+
+def carry_forward_reusable_mapping_rules_across_setups(
+    *,
+    property_id: int,
+    old_setup_id: int,
+    new_setup_id: int,
+    connection: sqlite3.Connection,
+    commit: bool = True,
+) -> int:
+    """Carry reusable rules to a new setup, downgrading incompatible pools."""
+    old_signatures = _pool_signature_by_key(
+        assessment_setup_id=old_setup_id,
+        connection=connection,
+    )
+    new_signatures = _pool_signature_by_key(
+        assessment_setup_id=new_setup_id,
+        connection=connection,
+    )
+    new_pool_ids = _pool_id_by_key(
+        assessment_setup_id=new_setup_id,
+        connection=connection,
+    )
+    rules = connection.execute(
+        """
+        SELECT pool_key, match_label, normalized_label, account_code,
+               match_type, approval_status, review_state, source_pages_json,
+               confidence, budget_line_derivation,
+               residual_after_pool_keys_json, residual_exclusions_json,
+               source_parent_category, assessment_type, review_required,
+               review_reason, source_evidence_text
+          FROM assessment_budget_mapping_rules
+         WHERE property_id = ?
+           AND assessment_setup_id = ?
+           AND active = 1
+        """,
+        (property_id, old_setup_id),
+    ).fetchall()
+    inserted = 0
+    for rule in rules:
+        pool_key = str(rule[0])
+        compatible = (
+            old_signatures.get(pool_key)
+            and old_signatures.get(pool_key) == new_signatures.get(pool_key)
+        )
+        approval_status = str(rule[5]) if compatible else "suggested"
+        review_state = str(rule[6]) if compatible else "pending_review"
+        cur = connection.execute(
+            """
+            INSERT OR IGNORE INTO assessment_budget_mapping_rules (
+                property_id, assessment_setup_id, pool_key, pool_id,
+                match_label, normalized_label, account_code, match_type,
+                rule_source, approval_status, review_state,
+                source_pages_json, confidence, budget_line_derivation,
+                residual_after_pool_keys_json, residual_exclusions_json,
+                structural_signature, source_parent_category,
+                assessment_type, review_required, review_reason,
+                source_evidence_text
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'carried_forward',
+                      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                property_id,
+                new_setup_id,
+                pool_key,
+                new_pool_ids.get(pool_key),
+                rule[1],
+                rule[2],
+                rule[3],
+                rule[4],
+                approval_status,
+                review_state,
+                rule[7],
+                rule[8],
+                rule[9],
+                rule[10],
+                rule[11],
+                new_signatures.get(pool_key),
+                rule[12],
+                rule[13],
+                rule[14],
+                rule[15],
+                rule[16],
+            ),
+        )
+        inserted += cur.rowcount
+    if commit:
+        connection.commit()
+    return inserted
+
+
+def backfill_rules_for_promoted_extraction_run(
+    *,
+    extraction_run_id: int,
+    connection: sqlite3.Connection,
+    commit: bool = True,
+) -> int:
+    """Create reusable rules for an already-promoted run's stored parsed JSON."""
+    row = connection.execute(
+        """
+        SELECT property_id, promoted_setup_id, parsed_json
+          FROM dre_extraction_runs
+         WHERE id = ?
+           AND review_status = 'promoted'
+           AND promoted_setup_id IS NOT NULL
+        """,
+        (extraction_run_id,),
+    ).fetchone()
+    if row is None or not row[2]:
+        return 0
+    extraction = DRESetupExtraction.model_validate_json(row[2])
+    return derive_rules_from_dre_extraction(
+        property_id=int(row[0]),
+        assessment_setup_id=int(row[1]),
+        source_dre_extraction_run_id=extraction_run_id,
+        extraction=extraction,
+        connection=connection,
+        commit=commit,
+    )
+
+
+def _line_key(line: dict) -> tuple[str, str, str, str, Optional[str]]:
+    normalized = normalize_budget_label(
+        str(line.get("normalized_label") or line.get("label") or "")
+    )
+    account_code = line.get("account_code")
+    return (
+        normalized,
+        str(line.get("section") or ""),
+        str(line.get("category") or ""),
+        str(line.get("fund_type") or ""),
+        str(account_code) if account_code not in (None, "") else None,
+    )
+
+
+def _existing_mapping_keys(
+    *,
+    property_id: int,
+    assessment_setup_id: int,
+    connection: sqlite3.Connection,
+) -> set[tuple[str, str, str, str, Optional[str]]]:
+    rows = connection.execute(
+        """
+        SELECT budget_line_normalized_label, section, category, fund_type,
+               account_code
+          FROM budget_line_pool_mappings
+         WHERE property_id = ?
+           AND assessment_setup_id = ?
+           AND active = 1
+        """,
+        (property_id, assessment_setup_id),
+    ).fetchall()
+    return {
+        (str(row[0]), str(row[1]), str(row[2]), str(row[3]), row[4])
+        for row in rows
+    }
+
+
+def _mark_stale_auto_mappings(
+    *,
+    property_id: int,
+    assessment_setup_id: int,
+    current_keys: set[tuple[str, str, str, str, Optional[str]]],
+    connection: sqlite3.Connection,
+) -> int:
+    rows = connection.execute(
+        """
+        SELECT id, budget_line_normalized_label, section, category, fund_type,
+               account_code
+          FROM budget_line_pool_mappings
+         WHERE property_id = ?
+           AND assessment_setup_id = ?
+           AND active = 1
+           AND mapping_source != 'operator'
+        """,
+        (property_id, assessment_setup_id),
+    ).fetchall()
+    stale_ids = [
+        int(row[0])
+        for row in rows
+        if (
+            str(row[1]),
+            str(row[2]),
+            str(row[3]),
+            str(row[4]),
+            row[5],
+        )
+        not in current_keys
+    ]
+    if not stale_ids:
+        return 0
+    placeholders = ",".join("?" for _ in stale_ids)
+    connection.execute(
+        f"""
+        UPDATE budget_line_pool_mappings
+           SET active = 0,
+               review_state = 'stale'
+         WHERE id IN ({placeholders})
+        """,
+        stale_ids,
+    )
+    return len(stale_ids)
+
+
+def _insert_materialized_mapping(
+    *,
+    property_id: int,
+    assessment_setup_id: int,
+    line: dict,
+    pool_key: str,
+    source_rule_id: Optional[int],
+    mapping_source: str,
+    match_method: str,
+    connection: sqlite3.Connection,
+) -> None:
+    normalized, section, category, fund_type, account_code = _line_key(line)
+    amount, _source_column_used = select_assessment_mapping_amount(line)
+    connection.execute(
+        """
+        INSERT INTO budget_line_pool_mappings (
+            property_id, assessment_setup_id,
+            budget_line_normalized_label, section, category,
+            fund_type, account_code, pool_key, source_rule_id,
+            mapping_source, match_method, approval_status, review_state,
+            budget_line_amount, approved_by, approved_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'auto_approved',
+                  'ready', ?, 'system', datetime('now'))
+        ON CONFLICT(property_id, assessment_setup_id,
+                    budget_line_normalized_label, section, category,
+                    fund_type, COALESCE(account_code, ''))
+        DO NOTHING
+        """,
+        (
+            property_id,
+            assessment_setup_id,
+            normalized,
+            section,
+            category,
+            fund_type,
+            account_code,
+            pool_key,
+            source_rule_id,
+            mapping_source,
+            match_method,
+            float(amount) if amount is not None else None,
+        ),
+    )
+
+
+def materialize_budget_line_pool_mappings(
+    *,
+    property_id: int,
+    assessment_setup_id: int,
+    budget_lines: list[dict],
+    connection: sqlite3.Connection,
+    commit: bool = True,
+) -> dict[str, int]:
+    """Create annual mappings from approved reusable rules."""
+    budget_lines = _with_assessment_mapping_amounts(budget_lines)
+    counts = {
+        "auto_approved": 0,
+        "manual_preserved": 0,
+        "suggested": 0,
+        "conflict": 0,
+        "unmatched": 0,
+        "non_blocking": 0,
+        "stale": 0,
+    }
+    classification_result = classify_budget_lines_for_mapping(budget_lines)
+    current_keys = {
+        item.line_key for item in classification_result.classifications
+        if item.canonical
+    }
+    counts["stale"] = _mark_stale_auto_mappings(
+        property_id=property_id,
+        assessment_setup_id=assessment_setup_id,
+        current_keys=current_keys,
+        connection=connection,
+    )
+    existing_keys = _existing_mapping_keys(
+        property_id=property_id,
+        assessment_setup_id=assessment_setup_id,
+        connection=connection,
+    )
+    rules = _active_rule_rows(
+        property_id=property_id,
+        assessment_setup_id=assessment_setup_id,
+        connection=connection,
+    )
+    pool_names = _pool_name_by_key(
+        assessment_setup_id=assessment_setup_id,
+        connection=connection,
+    )
+    account_rules = [r for r in rules if r[5] == "account_code" and r[4]]
+    label_rules = [
+        r
+        for r in rules
+        if r[5] in {"normalized_label", "exact_label"} and r[3]
+    ]
+    remainder_rules = [r for r in rules if r[5] == "remainder"]
+    aliases = _approved_aliases(
+        property_id=property_id,
+        assessment_setup_id=assessment_setup_id,
+        connection=connection,
+    )
+    review_rows = build_assessment_mapping_review_rows(
+        property_id=property_id,
+        assessment_setup_id=assessment_setup_id,
+        budget_lines=budget_lines,
+        connection=connection,
+    )
+    regular_review_keys = {
+        (
+            str(row["normalized_label"]),
+            str(row["section"]),
+            str(row["category"]),
+            str(row["fund_type"]),
+            row["account_code"],
+        )
+        for row in review_rows
+        if row["included_in_regular_basis"]
+    }
+    non_regular_review_keys = {
+        (
+            str(row["normalized_label"]),
+            str(row["section"]),
+            str(row["category"]),
+            str(row["fund_type"]),
+            row["account_code"],
+        )
+        for row in review_rows
+        if not row["included_in_regular_basis"]
+    }
+    claimed_labels: set[str] = set()
+
+    for idx, line in enumerate(budget_lines):
+        key = _line_key(line)
+        normalized = key[0]
+        classification = classification_result.classifications[idx]
+        if not classification.canonical:
+            counts["non_blocking"] += 1
+            continue
+        if key in non_regular_review_keys:
+            counts["non_blocking"] += 1
+            continue
+        if key not in regular_review_keys:
+            counts["non_blocking"] += 1
+            continue
+        if classification and not classification.requires_mapping:
+            counts["non_blocking"] += 1
+            continue
+        if key in existing_keys:
+            counts["manual_preserved"] += 1
+            claimed_labels.add(normalized)
+            continue
+        account_code = key[4]
+        alias_candidates = [
+            alias for alias in aliases
+            if str(alias[2]) == normalized
+            and (alias[3] in (None, "") or str(alias[3]) == str(account_code))
+        ]
+        candidates = []
+        match_method = "approved_alias"
+        mapping_source = "alias"
+        if len(alias_candidates) > 1:
+            counts["conflict"] += 1
+            continue
+        if alias_candidates:
+            alias = alias_candidates[0]
+            _insert_materialized_mapping(
+                property_id=property_id,
+                assessment_setup_id=assessment_setup_id,
+                line=line,
+                pool_key=str(alias[1]),
+                source_rule_id=None,
+                mapping_source=mapping_source,
+                match_method=match_method,
+                connection=connection,
+            )
+            existing_keys.add(key)
+            claimed_labels.add(normalized)
+            counts["auto_approved"] += 1
+            continue
+        candidates = [
+            r
+            for r in account_rules
+            if str(r[4]) == str(account_code)
+            and r[7] in {"approved", "auto_approved"}
+            and r[8] == "ready"
+        ]
+        match_method = "account_code"
+        mapping_source = "account_code"
+        if not candidates:
+            label_matches = [r for r in label_rules if r[3] == normalized]
+            approved_label_matches = [
+                r
+                for r in label_matches
+                if r[7] in {"approved", "auto_approved"} and r[8] == "ready"
+            ]
+            if len(approved_label_matches) > 1:
+                counts["conflict"] += 1
+                continue
+            if approved_label_matches:
+                candidates = approved_label_matches
+                match_method = str(candidates[0][5])
+                mapping_source = "normalized_label"
+        if len(candidates) > 1:
+            counts["conflict"] += 1
+            continue
+        if candidates:
+            rule = candidates[0]
+            _insert_materialized_mapping(
+                property_id=property_id,
+                assessment_setup_id=assessment_setup_id,
+                line=line,
+                pool_key=str(rule[1]),
+                source_rule_id=int(rule[0]),
+                mapping_source=mapping_source,
+                match_method=match_method,
+                connection=connection,
+            )
+            existing_keys.add(key)
+            claimed_labels.add(normalized)
+            counts["auto_approved"] += 1
+            continue
+
+    approved_remainders = [
+        r
+        for r in remainder_rules
+        if r[7] in {"approved", "auto_approved"} and r[8] == "ready"
+    ]
+    if approved_remainders:
+        for idx, line in enumerate(budget_lines):
+            key = _line_key(line)
+            normalized = key[0]
+            classification = classification_result.classifications[idx]
+            if key not in regular_review_keys:
+                continue
+            if classification and not classification.requires_mapping:
+                continue
+            if key in existing_keys:
+                continue
+            if not is_remainder_eligible_budget_line(
+                line,
+                already_mapped_normalized_labels=claimed_labels,
+            ):
+                continue
+            if len(approved_remainders) > 1:
+                counts["conflict"] += 1
+                continue
+            rule = approved_remainders[0]
+            source = (
+                "residual_default"
+                if str(rule[10]) == "residual_default"
+                else "remainder"
+            )
+            _insert_materialized_mapping(
+                property_id=property_id,
+                assessment_setup_id=assessment_setup_id,
+                line=line,
+                pool_key=str(rule[1]),
+                source_rule_id=int(rule[0]),
+                mapping_source=source,
+                match_method="remainder",
+                connection=connection,
+            )
+            existing_keys.add(key)
+            claimed_labels.add(normalized)
+            counts["auto_approved"] += 1
+
+    for idx, line in enumerate(budget_lines):
+        key = _line_key(line)
+        normalized = key[0]
+        classification = classification_result.classifications[idx]
+        if key not in regular_review_keys:
+            continue
+        if classification and not classification.requires_mapping:
+            continue
+        if key not in existing_keys and normalized not in claimed_labels:
+            suggested_candidates = _rank_line_review_candidates(
+                line=line,
+                classification=classification,
+                rules=rules,
+                pool_names=pool_names,
+            )
+            if suggested_candidates:
+                counts["suggested"] += 1
+            else:
+                counts["unmatched"] += 1
+    if commit:
+        connection.commit()
+    return counts
+
+
+def get_mapping_reconciliation(
+    *,
+    property_id: int,
+    assessment_setup_id: int,
+    assessment_target: object,
+    selected_budget_source_total: object,
+    excluded_total: object = 0,
+    offset_total: object = 0,
+    schedule_annual_total: object = 0,
+    tolerance: object = "0.01",
+    connection: sqlite3.Connection,
+) -> MappingReconciliation:
+    """Tie mapped dollars and schedule totals before final rendering."""
+    row = connection.execute(
+        """
+        SELECT COALESCE(SUM(COALESCE(budget_line_amount, 0)), 0)
+          FROM budget_line_pool_mappings
+         WHERE property_id = ?
+           AND assessment_setup_id = ?
+           AND active = 1
+        """,
+        (property_id, assessment_setup_id),
+    ).fetchone()
+    mapped_total = Decimal(str(row[0] or 0))
+    target = Decimal(str(assessment_target or 0))
+    source_total = Decimal(str(selected_budget_source_total or 0))
+    excluded = Decimal(str(excluded_total or 0))
+    offsets = Decimal(str(offset_total or 0))
+    schedule_total = Decimal(str(schedule_annual_total or 0))
+    allowed_delta = Decimal(str(tolerance or "0.01"))
+
+    failures: list[str] = []
+    if abs(mapped_total - target) > allowed_delta:
+        failures.append("mapped_pool_total_mismatch")
+    if abs(schedule_total - target) > allowed_delta:
+        failures.append("schedule_total_mismatch")
+    if abs((mapped_total + excluded + offsets) - source_total) > allowed_delta:
+        failures.append("budget_source_total_mismatch")
+
+    return MappingReconciliation(
+        mapped_pool_total=mapped_total,
+        assessment_target=target,
+        selected_budget_source_total=source_total,
+        excluded_total=excluded,
+        offset_total=offsets,
+        schedule_annual_total=schedule_total,
+        tolerance=allowed_delta,
+        passed=not failures,
+        failures=failures,
+    )
+
+
+__all__ = [
+    "BudgetLineClassification",
+    "BudgetLineClassificationResult",
+    "BudgetLineEligibility",
+    "DuplicateBudgetLineConflict",
+    "LineReviewCandidate",
+    "LineReviewItem",
+    "MappingReconciliation",
+    "backfill_rules_for_promoted_extraction_run",
+    "build_assessment_mapping_review_line_key",
+    "build_assessment_mapping_review_rows",
+    "build_line_review_items",
+    "classify_assessment_mapping_review_row_role",
+    "canonicalize_budget_lines_for_mapping",
+    "classify_budget_lines_for_mapping",
+    "carry_forward_reusable_mapping_rules_across_setups",
+    "derive_rules_from_dre_extraction",
+    "ensure_exemption_decisions_from_dre_extraction",
+    "get_mapping_reconciliation",
+    "is_remainder_eligible_budget_line",
+    "materialize_budget_line_pool_mappings",
+    "normalize_budget_label",
+    "record_scoped_alias",
+    "select_assessment_mapping_amount",
+    "set_exemption_decision_state",
+]

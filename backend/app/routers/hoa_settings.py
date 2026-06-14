@@ -33,6 +33,8 @@ def _row_to_dict(row) -> Dict[str, Any]:
         "letter_signed_by": row.letter_signed_by,
         # Priority-A disclosure inputs (drifting-puzzling-grove)
         "approved_monthly_assessment_per_unit": row.approved_monthly_assessment_per_unit,
+        "financial_packet_archetype": row.financial_packet_archetype or "dual-fund",
+        "reserve_interest_income_override": row.reserve_interest_income_override,
         "income_tax_provision_override": row.income_tax_provision_override,
         "reserve_funding_source": row.reserve_funding_source or "reserve_study_provision",
         "reserve_funding_manual_amount": row.reserve_funding_manual_amount,

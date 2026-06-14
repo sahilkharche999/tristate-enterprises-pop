@@ -29,7 +29,8 @@ import pytest
 def _valid_budget():
     from app.disclosure_package.schemas import BudgetDraft, LineItem
     return BudgetDraft(line_items=[
-        LineItem(label="X", amount=Decimal("100.00"), is_revenue=True, section="Income"),
+        LineItem(label="Assessment Income", amount=Decimal("100.00"), is_revenue=True, section="Income"),
+        LineItem(label="Reserve Contribution", amount=Decimal("10.00")),
     ])
 
 
@@ -228,6 +229,51 @@ def test_validate_inputs_does_not_block_on_zero_reserve_cash_balance():
     assert "reserve_cash_balance.amount" not in paths
 
 
+def test_validate_inputs_treats_blank_cash_override_as_missing_not_zero():
+    from app.disclosure_package.preflight import validate_inputs
+
+    spec = _spec_with_cash_balance(Decimal("123"))
+    errors = validate_inputs(
+        spec=spec,
+        budget_draft=_valid_budget(),
+        reserve_snapshot=_valid_reserve_snapshot(),
+        hoa_metadata=_valid_hoa_metadata(),
+        appendices_root=None,
+        hoa_settings_overrides={"reserve_cash_balance_eoy_prior": ""},
+    )
+
+    paths = [e.field_path for e in errors]
+    assert "reserve_cash_balance.amount" not in paths
+
+
+def test_validate_inputs_blocks_missing_reserve_funding_for_dual_fund_packet():
+    from app.disclosure_package.preflight import validate_inputs
+    from app.disclosure_package.schemas import ReserveStudySnapshot
+
+    empty_snapshot = ReserveStudySnapshot.model_construct(
+        study_date="September 2025",
+        components=[],
+        funding_plan_rows=[],
+    )
+    draft = _valid_budget()
+    draft.line_items = [
+        item for item in draft.line_items if "Reserve Contribution" not in item.label
+    ]
+
+    errors = validate_inputs(
+        spec=_spec_with_cash_balance(Decimal("100")),
+        budget_draft=draft,
+        reserve_snapshot=empty_snapshot,
+        hoa_metadata=_valid_hoa_metadata(),
+        appendices_root=None,
+        hoa_settings_overrides={"financial_packet_archetype": "dual-fund"},
+    )
+
+    relevant = [e for e in errors if e.field_path == "reserve_funding.source"]
+    assert relevant
+    assert relevant[0].severity == "blocking"
+
+
 # ── Test 6: missing static appendix files do NOT block preflight ──────────────
 
 
@@ -316,3 +362,199 @@ def test_validate_inputs_skips_filesystem_when_appendices_root_is_none():
     )
     paths = [e.field_path for e in errors]
     assert "package_spec.appendices" not in paths
+
+
+def test_validate_inputs_warns_when_reserve_funding_falls_back_to_component_provision():
+    from app.disclosure_package.preflight import validate_inputs
+    from app.disclosure_package.package_specs import OLD_MILL_2026
+    from app.disclosure_package.schemas import BudgetDraft, LineItem
+
+    errors = validate_inputs(
+        spec=OLD_MILL_2026,
+        budget_draft=BudgetDraft(line_items=[
+            LineItem(label="Assessment Income", amount=Decimal("100000"), is_revenue=True),
+        ]),
+        reserve_snapshot=_valid_reserve_snapshot(),
+        hoa_metadata=_valid_hoa_metadata(),
+        appendices_root=None,
+    )
+
+    issue = next(
+        e for e in errors
+        if e.field_path == "reserve_funding.source"
+    )
+    assert issue.severity == "warning"
+    assert issue.code == "reserve_funding_component_fallback"
+    assert issue.suggested_fix == "Enter a manual reserve funding amount or upload a budget/reserve study funding row."
+    assert "component annual provision" in issue.message
+
+
+def test_validate_inputs_warns_when_assessment_override_differs_from_budget_revenue():
+    from app.disclosure_package.preflight import validate_inputs
+    from app.disclosure_package.package_specs import OLD_MILL_2026
+    from app.disclosure_package.schemas import BudgetDraft, LineItem
+
+    errors = validate_inputs(
+        spec=OLD_MILL_2026,
+        budget_draft=BudgetDraft(line_items=[
+            LineItem(label="Assessment Income", amount=Decimal("2025540"), is_revenue=True),
+        ]),
+        reserve_snapshot=_valid_reserve_snapshot(),
+        hoa_metadata=_valid_hoa_metadata(),
+        appendices_root=None,
+        hoa_settings_overrides={"approved_monthly_assessment_per_unit": 606.97},
+    )
+
+    issue = next(
+        e for e in errors
+        if e.field_path == "assessment.annual_revenue"
+    )
+    assert issue.severity == "warning"
+    assert issue.code == "assessment_override_revenue_mismatch"
+    assert issue.suggested_fix == "Update the budget assessment revenue or confirm the approved monthly override."
+    assert "differs" in issue.message
+
+
+def test_validate_inputs_warns_when_reserve_funding_plan_row_is_inconsistent():
+    from app.disclosure_package.preflight import validate_inputs
+    from app.disclosure_package.package_specs import OLD_MILL_2026
+    from app.disclosure_package.schemas import (
+        ReserveFundingPlanRow,
+        ReserveStudySnapshot,
+    )
+
+    reserve_snapshot = ReserveStudySnapshot(
+        study_date="September 2025",
+        components=_valid_reserve_snapshot().components,
+        funding_plan_rows=[
+            ReserveFundingPlanRow(
+                year=2026,
+                annual_contribution=Decimal("1200"),
+                monthly_per_unit=Decimal("51"),
+            )
+        ],
+    )
+
+    errors = validate_inputs(
+        spec=OLD_MILL_2026,
+        budget_draft=_valid_budget(),
+        reserve_snapshot=reserve_snapshot,
+        hoa_metadata=_valid_hoa_metadata().model_copy(update={"units": 2}),
+        appendices_root=None,
+    )
+
+    issue = next(
+        e for e in errors
+        if e.field_path == "reserve_study_snapshot.funding_plan_rows"
+        and "monthly per-unit" in e.message
+    )
+    assert issue.severity == "warning"
+    assert issue.code == "reserve_funding_row_math_mismatch"
+    assert "monthly per-unit" in issue.message
+
+
+def test_validate_inputs_warns_when_funding_plan_implies_different_unit_count():
+    from app.disclosure_package.preflight import validate_inputs
+    from app.disclosure_package.package_specs import OLD_MILL_2026
+    from app.disclosure_package.schemas import (
+        ReserveFundingPlanRow,
+        ReserveStudySnapshot,
+    )
+
+    reserve_snapshot = ReserveStudySnapshot(
+        study_date="September 2025",
+        components=_valid_reserve_snapshot().components,
+        funding_plan_rows=[
+            ReserveFundingPlanRow(
+                year=2026,
+                annual_contribution=Decimal("850998"),
+                monthly_per_unit=Decimal("241.21"),
+            )
+        ],
+    )
+
+    errors = validate_inputs(
+        spec=OLD_MILL_2026.model_copy(update={"fiscal_year": 2026}),
+        budget_draft=_valid_budget(),
+        reserve_snapshot=reserve_snapshot,
+        hoa_metadata=_valid_hoa_metadata(),
+        appendices_root=None,
+    )
+
+    assert any(
+        e.field_path == "reserve_study_snapshot.funding_plan_rows"
+        and "implies 294 reserve-study units" in e.message
+        and e.code == "unit_count_conflict"
+        for e in errors
+    )
+
+
+def test_validate_inputs_warns_when_funding_plan_missing_package_year_row():
+    from app.disclosure_package.preflight import validate_inputs
+    from app.disclosure_package.package_specs import OLD_MILL_2026
+    from app.disclosure_package.schemas import (
+        ReserveFundingPlanRow,
+        ReserveStudySnapshot,
+    )
+
+    reserve_snapshot = ReserveStudySnapshot(
+        study_date="September 2025",
+        components=_valid_reserve_snapshot().components,
+        funding_plan_rows=[
+            ReserveFundingPlanRow(year=2025, annual_contribution=Decimal("850998"))
+        ],
+    )
+
+    errors = validate_inputs(
+        spec=OLD_MILL_2026.model_copy(update={"fiscal_year": 2026}),
+        budget_draft=_valid_budget(),
+        reserve_snapshot=reserve_snapshot,
+        hoa_metadata=_valid_hoa_metadata(),
+        appendices_root=None,
+    )
+
+    assert any(
+        e.field_path == "reserve_study_snapshot.funding_plan_rows"
+        and "No reserve-study funding plan row was found for fiscal year 2026" in e.message
+        and e.code == "fiscal_year_source_mismatch"
+        for e in errors
+    )
+
+
+def test_validate_inputs_warns_when_budget_and_study_reserve_funding_differ():
+    from app.disclosure_package.preflight import validate_inputs
+    from app.disclosure_package.package_specs import OLD_MILL_2026
+    from app.disclosure_package.schemas import (
+        BudgetDraft,
+        LineItem,
+        ReserveFundingPlanRow,
+        ReserveStudySnapshot,
+    )
+    spec = OLD_MILL_2026.model_copy(update={"fiscal_year": 2026})
+
+    reserve_snapshot = ReserveStudySnapshot(
+        study_date="September 2025",
+        components=_valid_reserve_snapshot().components,
+        funding_plan_rows=[
+            ReserveFundingPlanRow(year=2026, annual_contribution=Decimal("850998"))
+        ],
+    )
+    budget = BudgetDraft(line_items=[
+        LineItem(label="Assessment Income", amount=Decimal("2025540"), is_revenue=True),
+        LineItem(label="Monthly Contribution to Reserve", amount=Decimal("824414")),
+    ])
+
+    errors = validate_inputs(
+        spec=spec,
+        budget_draft=budget,
+        reserve_snapshot=reserve_snapshot,
+        hoa_metadata=_valid_hoa_metadata(),
+        appendices_root=None,
+    )
+
+    assert any(
+        e.field_path == "reserve_funding.source"
+        and "Reserve study cash-flow contribution differs" in e.message
+        and e.code == "reserve_funding_conflict"
+        for e in errors
+    )

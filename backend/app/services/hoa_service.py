@@ -5,6 +5,10 @@ from typing import List, Optional
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ..assessment_mode import (
+    ASSESSMENT_MODE_VARIABLE,
+    normalize_assessment_mode,
+)
 from ..ai_implementation.db import Property
 from ..models.hoa import HOACreateRequest, HOADetail, HOAListItem, HOAUpdateRequest
 from . import app_settings_service
@@ -28,6 +32,9 @@ def _hoa_payload(property_row: Property, *, reserve_inflation_rate: float) -> di
         "city": property_row.city or "",
         "portfolio_year": property_row.portfolio_year,
         "workflow_status": property_row.workflow_status or "Not Started",
+        "assessment_mode": normalize_assessment_mode(
+            getattr(property_row, "assessment_mode", ASSESSMENT_MODE_VARIABLE)
+        ),
     }
 
 
@@ -70,6 +77,7 @@ def create_hoa(session: Session, payload: HOACreateRequest) -> HOADetail:
         city=(payload.city or "").strip(),
         portfolio_year=datetime.now().year,
         workflow_status="Not Started",
+        assessment_mode=normalize_assessment_mode(payload.assessment_mode),
     )
     session.add(row)
     session.commit()
@@ -96,6 +104,8 @@ def update_hoa(session: Session, hoa_id: int, payload: HOAUpdateRequest) -> Opti
         row.city = payload.city.strip()
     if payload.reserve_inflation_rate is not None:
         row.reserve_inflation_rate = payload.reserve_inflation_rate
+    if payload.assessment_mode is not None:
+        row.assessment_mode = normalize_assessment_mode(payload.assessment_mode)
     session.commit()
     session.refresh(row)
     # Prefer the HOA-saved rate when non-zero so the per-HOA value

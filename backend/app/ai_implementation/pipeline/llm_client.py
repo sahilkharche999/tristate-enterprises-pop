@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import re
 import weakref
 from typing import Optional, Any
 
@@ -64,6 +65,39 @@ def _make_gemini_schema(response_schema: type[BaseModel]) -> dict:
     schema = json.loads(schema_str)
 
     return _strip_unsupported_schema_keys(schema)
+
+
+def _compact_log_value(value: object) -> str:
+    return " ".join(str(value or "").split())
+
+
+def _vision_log_context(
+    *,
+    response_schema: type[BaseModel],
+    text_parts: list[str],
+    image_count: int,
+    image_bytes: int,
+) -> str:
+    joined_text = "\n".join(text_parts[:8])
+    filename_match = re.search(r"Filename:\s*([^\n]+)", joined_text)
+    filename = _compact_log_value(filename_match.group(1)) if filename_match else "unknown"
+    schema_name = response_schema.__name__
+    purpose_by_schema = {
+        "_ReserveStudyBatchClassification": "reserve_discovery",
+        "ExtractedReserveStudyPage": "reserve_extract_page",
+        "ExtractedFinancialStatementPage": "budget_extract_page",
+        "StatementPageSelection": "budget_page_selection",
+    }
+    purpose = purpose_by_schema.get(schema_name, schema_name)
+    pages = []
+    for pattern in (r"\bPage:\s*(\d+)", r"\bPDF page\s+(\d+)", r"\bImage for Page:\s*(\d+)"):
+        pages.extend(re.findall(pattern, joined_text, flags=re.IGNORECASE))
+    unique_pages = sorted({int(page) for page in pages}) if pages else []
+    pages_text = ",".join(str(page) for page in unique_pages) if unique_pages else "unknown"
+    return (
+        f"purpose={purpose} schema={schema_name} filename={filename} pages={pages_text} "
+        f"image_count={image_count} image_bytes={image_bytes}"
+    )
 
 # Per-event-loop client cache.
 #
@@ -184,6 +218,11 @@ async def call_llm(
                 ),
                 timeout=timeout,
             )
+            parsed = getattr(response, "parsed", None)
+            if parsed is not None:
+                if isinstance(parsed, response_schema):
+                    return parsed
+                return response_schema.model_validate(parsed)
             if response.text:
                 return response_schema.model_validate_json(response.text)
             return None
@@ -236,26 +275,40 @@ async def call_llm_vision(
 
     system_text = None
     content_parts: list = []
+    text_parts_for_log: list[str] = []
+    image_count = 0
+    image_bytes = 0
     for msg in messages:
         if msg["role"] == "system":
             system_text = msg["content"]
             continue
         content = msg.get("content")
         if isinstance(content, str):
+            text_parts_for_log.append(content)
             content_parts.append(types.Part.from_text(text=content))
         elif isinstance(content, list):
             for part in content:
                 if part.get("type") == "text":
+                    text_parts_for_log.append(str(part["text"]))
                     content_parts.append(types.Part.from_text(text=part["text"]))
                 elif part.get("type") == "image":
                     # Image bytes from render_pdf_pages
                     if part.get("data") is not None:
+                        data = part["data"]
+                        image_count += 1
+                        image_bytes += len(data) if hasattr(data, "__len__") else 0
                         content_parts.append(
                             types.Part.from_bytes(
-                                data=part["data"],
+                                data=data,
                                 mime_type=part.get("mime_type", "image/png"),
                             )
                         )
+    log_context = _vision_log_context(
+        response_schema=response_schema,
+        text_parts=text_parts_for_log,
+        image_count=image_count,
+        image_bytes=image_bytes,
+    )
 
     gemini_schema = _make_gemini_schema(response_schema)
 
@@ -279,18 +332,26 @@ async def call_llm_vision(
                 timeout=timeout,
             )
             if response.text:
+                logger.info("Gemini vision call succeeded: %s", log_context)
                 return response_schema.model_validate_json(response.text)
+            logger.warning("Gemini vision call returned empty response: %s", log_context)
             return None
         except errors.ClientError as e:
             if e.code == 429:
                 wait = backoff_delays[min(attempt, len(backoff_delays) - 1)]
-                logger.warning("Rate limited, waiting %ds (attempt %d)...", wait, attempt + 1)
+                logger.warning("Gemini vision rate limited, waiting %ds (attempt %d): %s", wait, attempt + 1, log_context)
             else:
-                logger.error("Gemini vision API error: %s", e)
+                logger.error("Gemini vision API error: %s context=%s", e, log_context)
                 break
         except errors.ServerError as e:
             wait = backoff_delays[min(attempt, len(backoff_delays) - 1)]
-            logger.warning("Gemini vision server error (503/5xx), retrying in %ds (attempt %d)...: %s", wait, attempt + 1, e)
+            logger.warning(
+                "Gemini vision server error (503/5xx), retrying in %ds (attempt %d): %s context=%s",
+                wait,
+                attempt + 1,
+                e,
+                log_context,
+            )
         except asyncio.TimeoutError:
             # Retry transient slowness via the same backoff loop as 429/503.
             # Previously returned None immediately — which silently dropped
@@ -300,13 +361,24 @@ async def call_llm_vision(
             # guard in pdf_vlm_extractor._extract_full_document which refuses
             # partial results even if a page fails all retries here.
             if attempt >= len(backoff_delays):
-                logger.error("Gemini vision call timed out after %.1fs on final attempt (attempt %d)", timeout, attempt + 1)
+                logger.error(
+                    "Gemini vision call timed out after %.1fs on final attempt (attempt %d): %s",
+                    timeout,
+                    attempt + 1,
+                    log_context,
+                )
                 return None
             wait = backoff_delays[min(attempt, len(backoff_delays) - 1)]
-            logger.warning("Gemini vision call timed out after %.1fs, retrying in %ds (attempt %d)...", timeout, wait, attempt + 1)
+            logger.warning(
+                "Gemini vision call timed out after %.1fs, retrying in %ds (attempt %d): %s",
+                timeout,
+                wait,
+                attempt + 1,
+                log_context,
+            )
         except Exception as e:
-            logger.error("Unexpected Gemini vision error: %s", e)
+            logger.error("Unexpected Gemini vision error: %s context=%s", e, log_context)
             break
 
-    logger.error("All Gemini vision retry attempts exhausted")
+    logger.error("All Gemini vision retry attempts exhausted: %s", log_context)
     return None

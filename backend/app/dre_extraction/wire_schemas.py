@@ -102,6 +102,26 @@ WireAllocationMethod = Literal[
     "unknown",
 ]
 
+WireBudgetLineDerivation = Literal[
+    "explicit_lines",
+    "residual_default",
+    "formula_only",
+    "unknown",
+]
+
+WireBudgetLineAssessmentType = Literal[
+    "equal_base",
+    "prorated_variable",
+    "square_footage",
+    "ownership_percent",
+    "exemption_credit",
+    "subsidy_credit",
+    "pass_through",
+    "reserve_component",
+    "excluded_or_informational",
+    "unknown_needs_review",
+]
+
 WireUnitFactorType = Literal[
     "percent",
     "square_footage",
@@ -445,6 +465,34 @@ class WireAllocationPoolBlock(BaseModel):
             "(rare; usually empty)."
         )
     )
+    budget_line_derivation: WireBudgetLineDerivation = Field(
+        description=(
+            "How this pool's budget-line membership is identified. "
+            "explicit_lines: the DRE visibly lists the lines/categories "
+            "included in this pool. residual_default: the DRE derives this "
+            "pool as remaining/base/equal costs after other pools are "
+            "removed from a total. formula_only: the DRE gives an amount or "
+            "formula but does not show enough line-level evidence for annual "
+            "budget mapping. unknown: the basis is unclear and needs review."
+        )
+    )
+    residual_after_pool_keys: Optional[list[str]] = Field(
+        description=(
+            "For residual_default pools, list the pool_key values that must "
+            "claim explicit/special lines before this residual pool receives "
+            "the remaining eligible assessment-funded lines. Null or empty "
+            "for non-residual pools."
+        )
+    )
+    residual_exclusions: Optional[list[str]] = Field(
+        description=(
+            "For residual_default pools, generic categories that must not be "
+            "swept into the residual pool without review, such as "
+            "income_only, pass_through, reimbursement, special_assessment, "
+            "inactive, zero_amount, or already_mapped. Null or empty when "
+            "not visible or not applicable."
+        )
+    )
     source_pages: Optional[list[int]] = Field(
         description=(
             "Page numbers used to derive this pool. MUST contain at "
@@ -521,6 +569,52 @@ class WireReserveSetupBlock(BaseModel):
     )
     confidence: Optional[float] = Field(
         description="0.0–1.0 confidence in reserve_setup extraction."
+    )
+
+
+class WireBudgetLineMappingEvidence(BaseModel):
+    """DRE-visible evidence tying a budget line/category to a pool."""
+
+    account_code: Optional[str] = Field(
+        description="Account code printed on the DRE for this line/category, if visible."
+    )
+    source_label: Optional[str] = Field(
+        description="Budget line or category label exactly as printed on the DRE."
+    )
+    parent_category: Optional[str] = Field(
+        description="Parent category exactly as printed, if visible."
+    )
+    assessment_pool_key: Optional[str] = Field(
+        description="pool_key of the allocation pool this evidence supports."
+    )
+    assessment_type: WireBudgetLineAssessmentType = Field(
+        description=(
+            "equal_base: regular equal/base pool evidence. "
+            "prorated_variable: evidence for a variable/prorated pool. "
+            "square_footage: line is tied to a sqft-based pool. "
+            "ownership_percent: line is tied to an ownership-% pool. "
+            "exemption_credit: exemption/credit, not a regular operating line. "
+            "subsidy_credit: developer or subsidy credit, not a regular operating line. "
+            "pass_through: reimbursement/pass-through billing. "
+            "reserve_component: reserve-only component detail. "
+            "excluded_or_informational: not regular operating mapping evidence. "
+            "unknown_needs_review: ambiguous; operator must decide."
+        )
+    )
+    match_confidence: Optional[float] = Field(
+        description="0.0–1.0 confidence that this DRE evidence supports the pool mapping."
+    )
+    review_required: Optional[bool] = Field(
+        description="True when current-year applicability requires human confirmation."
+    )
+    review_reason: Optional[str] = Field(
+        description="Why this evidence still requires operator review."
+    )
+    source_page: Optional[int] = Field(
+        description="Page where this evidence appears."
+    )
+    source_evidence_text: Optional[str] = Field(
+        description="Short verbatim/paraphrased explanation of what on the page supports this mapping."
     )
 
 
@@ -628,9 +722,33 @@ class WireDRESetupExtraction(BaseModel):
     allocation_pools: list[WireAllocationPoolBlock]
     formulas: list[WireFormulaBlock]
     reserve_setup: Optional[WireReserveSetupBlock]
+    budget_line_mapping_evidence: list[WireBudgetLineMappingEvidence]
     validation_checks: list[WireValidationCheck]
     human_review_questions: list[WireHumanReviewQuestion]
     recommended_saved_setup: Optional[WireRecommendedSavedSetup]
+
+
+class WireMergeSuggestion(BaseModel):
+    """One Gemini-suggested GL merge candidate."""
+
+    primary_account_code: Optional[str] = Field(
+        description="Account code of the budget row that should remain."
+    )
+    secondary_account_code: Optional[str] = Field(
+        description="Account code of the budget row that would be hidden."
+    )
+    confidence: float = Field(
+        description="0.0-1.0 confidence that the two rows represent one GL."
+    )
+    reason: str = Field(
+        description="One short operator-facing reason for this suggestion."
+    )
+
+
+class WireMergeSuggestionList(BaseModel):
+    """Top-level structured response for GL merge suggestions."""
+
+    suggestions: list[WireMergeSuggestion]
 
 
 WIRE_SCHEMA_SHA256: str = hashlib.sha256(
@@ -639,11 +757,18 @@ WIRE_SCHEMA_SHA256: str = hashlib.sha256(
     ).encode("utf-8")
 ).hexdigest()
 
+WIRE_MERGE_SUGGESTION_SCHEMA_SHA256: str = hashlib.sha256(
+    json.dumps(
+        WireMergeSuggestionList.model_json_schema(), sort_keys=True
+    ).encode("utf-8")
+).hexdigest()
+
 
 __all__ = [
     "WireSetupType",
     "WireAllocationMethod",
     "WireUnitFactorType",
+    "WireBudgetLineAssessmentType",
     "WirePageInventoryEntry",
     "WirePageInventoryBatch",
     "WireDocumentMetadata",
@@ -655,9 +780,13 @@ __all__ = [
     "WireAllocationPoolBlock",
     "WireFormulaBlock",
     "WireReserveSetupBlock",
+    "WireBudgetLineMappingEvidence",
     "WireValidationCheck",
     "WireHumanReviewQuestion",
     "WireRecommendedSavedSetup",
     "WireDRESetupExtraction",
+    "WireMergeSuggestion",
+    "WireMergeSuggestionList",
     "WIRE_SCHEMA_SHA256",
+    "WIRE_MERGE_SUGGESTION_SCHEMA_SHA256",
 ]

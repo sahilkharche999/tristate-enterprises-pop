@@ -125,6 +125,7 @@ _EXTRACTION_SYSTEM_PROMPT = (
 _DISCOVERY_BATCH_SIZE = 10
 _DISCOVERY_RENDER_DPI = 72
 _VISION_ONLY_EXTRACTION_DPI = 200
+_RESERVE_VISION_TIMEOUT_SECONDS = 60.0
 
 
 class _ReserveStudyBatchClassification(BaseModel):
@@ -667,7 +668,7 @@ async def _classify_page_batch(
         ],
         _ReserveStudyBatchClassification,
         temperature=0.0,
-        timeout=120.0,
+        timeout=_RESERVE_VISION_TIMEOUT_SECONDS,
     )
     if result is None:
         return [
@@ -743,7 +744,7 @@ async def _extract_reserve_page(
         ],
         ExtractedReserveStudyPage,
         temperature=0.0,
-        timeout=120.0,
+        timeout=_RESERVE_VISION_TIMEOUT_SECONDS,
     )
 
 

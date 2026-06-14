@@ -7,6 +7,8 @@ import { SettingsScreen } from "./components/SettingsScreen";
 import { SettingsSelector } from "./components/SettingsSelector";
 import { BudgetScreenWrapper } from "./components/BudgetScreenWrapper";
 import { SyncHistoryScreen } from "./components/SyncHistoryScreen";
+import { DisclosureWorkspaceScreen } from "./components/DisclosureWorkspaceScreen";
+import { AssessmentMappingReviewScreen } from "./components/AssessmentMappingReviewScreen";
 import { ProtectedRoute } from "./components/ProtectedRoute";
 
 export const router = createBrowserRouter([
@@ -33,6 +35,14 @@ export const router = createBrowserRouter([
   {
     path: "/hoa/:id/settings",
     element: <ProtectedRoute><SettingsScreen /></ProtectedRoute>,
+  },
+  {
+    path: "/hoa/:id/disclosure",
+    element: <ProtectedRoute><DisclosureWorkspaceScreen /></ProtectedRoute>,
+  },
+  {
+    path: "/hoa/:id/assessment-mapping-review",
+    element: <ProtectedRoute><AssessmentMappingReviewScreen /></ProtectedRoute>,
   },
   {
     path: "/hoa/:id/sync-history",

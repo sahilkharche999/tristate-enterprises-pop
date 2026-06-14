@@ -30,6 +30,8 @@ export interface DREExtractionRunListItem {
   extraction_run_id: number;
   dre_document_id: number;
   property_id: number;
+  started_at: string;
+  job_status: string;
   status: string;
   review_status: string;
   promoted_setup_id: number | null;
@@ -38,6 +40,7 @@ export interface DREExtractionRunListItem {
   model_name: string | null;
   prompt_version: string | null;
   repair_attempt_count: number;
+  error_message: string;
 }
 
 export interface DREExtractionRunDetail extends DREExtractionRunListItem {
@@ -97,7 +100,12 @@ export async function uploadDRE(
 export async function triggerDREExtraction(
   hoaId: number,
   documentId: number,
-): Promise<{ document_id: number; status: string }> {
+): Promise<{
+  document_id: number;
+  extraction_run_id: number;
+  job_status: string;
+  status: string;
+}> {
   const res = await fetch(
     `${BASE_URL}/hoa/${hoaId}/dre/documents/${documentId}/extract`,
     { method: 'POST', headers: authHeaders() },

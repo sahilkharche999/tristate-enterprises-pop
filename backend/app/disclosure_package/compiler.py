@@ -63,8 +63,18 @@ from .formulas import (
     under_funded_balance_total,
 )
 from .merge import merge_pdfs, qpdf_check, write_atomic_bytes
-from .preflight import validate_inputs
+from .preflight import infer_special_assessment_status, validate_inputs
 from .render import render_template
+from .reconciliation import (
+    build_annual_statement_facts,
+    parse_optional_decimal_setting,
+    resolve_assessment_presentation_facts,
+    resolve_assessment_facts,
+    resolve_packet_archetype_facts,
+    resolve_reserve_funding_facts,
+    resolve_reserve_interest_tax_facts,
+    resolve_reserve_liability_facts,
+)
 from .assessment_schedule_matrix import (
     AssessmentScheduleMatrix,
     build_universal_assessment_matrix,
@@ -411,15 +421,23 @@ def _build_thirty_year_plan(
     Real Old Mill 2026 convention: per-component cells = current dollars,
     cash-flow "Repair and replacement costs" = inflated nominal dollars.
     """
-    inflation = inflation_rate or spec.static_data.replacement_cost_increase_rate or Decimal("0.03")
-    rate = interest_rate or spec.static_data.interest_rate_after_tax or Decimal("0.018")
+    inflation = (
+        inflation_rate
+        if inflation_rate is not None
+        else spec.static_data.replacement_cost_increase_rate or Decimal("0.03")
+    )
+    rate = (
+        interest_rate
+        if interest_rate is not None
+        else spec.static_data.interest_rate_after_tax or Decimal("0.018")
+    )
 
     per_component = _per_component_expenditures(components, fiscal_year_start)
     inflated_aggregate = _aggregate_expenditures_inflated(per_component, inflation)
 
     # Base replacement-fund monthly per-unit: operator override wins, else
     # derive from (annual provision / units / 12).
-    if base_replacement_fund_monthly_per_unit and base_replacement_fund_monthly_per_unit > 0:
+    if base_replacement_fund_monthly_per_unit is not None and base_replacement_fund_monthly_per_unit > 0:
         base_monthly = Decimal(str(base_replacement_fund_monthly_per_unit)).quantize(Decimal("0.01"))
     elif hoa_metadata.units > 0 and total_year_replacement_provision > 0:
         base_monthly = (
@@ -485,6 +503,7 @@ def _compute_all(
     reserve_snapshot: ReserveStudySnapshot,
     hoa_metadata: HOAMetadata,
     effective_hoa_settings: Optional[dict[str, Any]] = None,
+    assessment_matrix: Optional[AssessmentScheduleMatrix] = None,
 ) -> dict[str, Any]:
     """Materialize every value the templates reference.
 
@@ -501,12 +520,12 @@ def _compute_all(
     """
     settings = effective_hoa_settings or {}
 
-    def _setting_decimal(name: str) -> Decimal:
+    def _setting_decimal(name: str) -> Optional[Decimal]:
         """Pull a numeric setting as Decimal, falling back to spec.static_data."""
         raw = settings.get(name)
         if raw is None:
             raw = getattr(spec.static_data, name)
-        return Decimal(str(raw))
+        return parse_optional_decimal_setting(raw)
     operating_lis = [li for li in budget_draft.line_items if not li.is_reserve]
     reserve_lis = [li for li in budget_draft.line_items if li.is_reserve]
 
@@ -579,16 +598,16 @@ def _compute_all(
             "the reserve study so the date is auto-extracted."
         )
 
-    cash_setting = settings.get("reserve_cash_balance_eoy_prior")
-    if cash_setting in (None, "", 0, 0.0):
+    cash_setting = parse_optional_decimal_setting(settings.get("reserve_cash_balance_eoy_prior"))
+    if cash_setting is None:
         cash = Decimal("0")
         data_gaps.append(
             "Disclosure setting 'reserve_cash_balance_eoy_prior' is unset — "
             "reserve cash balance treated as $0 for funding calculations."
         )
     else:
-        cash = Decimal(str(cash_setting))
-    fund_balance_boy_op = _setting_decimal("fund_balance_boy_operations")
+        cash = cash_setting
+    fund_balance_boy_op = _setting_decimal("fund_balance_boy_operations") or Decimal("0")
     pct = percent_funded(cash_reserves=cash, estimated_liability=total_liab)
     under_total = under_funded_balance_total(
         estimated_liability=total_liab, cash_reserves=cash
@@ -599,73 +618,37 @@ def _compute_all(
         units=hoa_metadata.units,
     )
 
-    # Cover-letter "Reserves are being funded in the amount of $X monthly".
-    # Three sources, operator picks via hoa_settings.reserve_funding_source:
-    #   - reserve_study_provision (default): reserve_study annual provision / 12
-    #     per § 5550. Most studies recommend this.
-    #   - budget_allocation_line: the budget draft's "Reserve - Allocation/Transfer"
-    #     line / 12. Used when the board has approved a transfer different from
-    #     the study's provision.
-    #   - manual: operator types the annual figure in hoa_settings.reserve_funding_manual_amount.
-    funding_source = (settings.get("reserve_funding_source") or "reserve_study_provision")
-    if funding_source == "budget_allocation_line":
-        budget_reserve_transfer = sum(
-            (li.amount or Decimal(0))
-            for li in operating_lis
-            if li.label and "reserve" in li.label.lower() and (
-                "allocation" in li.label.lower() or "transfer" in li.label.lower()
-            )
-        )
-        annual_funding = Decimal(budget_reserve_transfer) if budget_reserve_transfer else Decimal(0)
-    elif funding_source == "manual":
-        manual_amount = settings.get("reserve_funding_manual_amount")
-        annual_funding = Decimal(str(manual_amount)) if manual_amount is not None else Decimal(0)
-    else:
-        annual_funding = total_prov or Decimal(0)
-    monthly_replacement_contribution_total = (
-        (annual_funding / Decimal(12)).quantize(Decimal("0.01"))
-        if annual_funding > 0
-        else Decimal("0.00")
+    reserve_funding_facts = resolve_reserve_funding_facts(
+        funding_source=settings.get("reserve_funding_source"),
+        manual_annual_amount=settings.get("reserve_funding_manual_amount"),
+        budget_line_items=budget_draft.line_items,
+        reserve_funding_plan_rows=reserve_snapshot.funding_plan_rows,
+        component_annual_provision=total_prov or Decimal("0"),
+        units=hoa_metadata.units,
+        fiscal_year=spec.fiscal_year,
     )
+    data_gaps.extend(reserve_funding_facts.warnings)
+    monthly_replacement_contribution_total = reserve_funding_facts.monthly_total
+    base_2026_monthly = reserve_funding_facts.monthly_per_unit
 
-    if hoa_metadata.units > 0 and total_prov > 0:
-        base_2026_monthly = (
-            total_prov / Decimal(hoa_metadata.units) / Decimal(12)
-        ).quantize(Decimal("0.01"))
-    else:
-        base_2026_monthly = Decimal("0.00")
-
-    # Monthly assessment per unit is whatever the draft says — sum the
-    # operating revenue lines whose label matches an "assessment" pattern,
-    # divided by units and 12 months. This replaces the previous hardcoded
-    # static_data value so that changing the draft changes the rendered
-    # cover letter / §5570 form / Note 4-5 / etc.
-    annual_assessment_revenue = sum(
-        (li.amount or Decimal(0))
-        for li in operating_lis
-        if li.is_revenue and li.label and "assessment" in li.label.lower()
+    assessment_facts = resolve_assessment_facts(
+        budget_line_items=operating_lis,
+        approved_monthly_assessment_per_unit=settings.get("approved_monthly_assessment_per_unit"),
+        units=hoa_metadata.units,
     )
-    # Operator-approved override (Priority A #1) — when the board's approved
-    # monthly differs from `annual_assessment_revenue / units / 12` (typically
-    # because the draft includes parking/garage assessments that shouldn't be
-    # blended into the residential per-unit figure, or the board adopted a
-    # different rate). Cents are preserved — never rounded to whole dollars.
-    approved_override = settings.get("approved_monthly_assessment_per_unit")
-    if approved_override is not None:
-        monthly_assessment_per_unit_current = Decimal(str(approved_override)).quantize(
-            Decimal("0.01")
-        )
-    elif annual_assessment_revenue and hoa_metadata.units > 0:
-        monthly_assessment_per_unit_current = (
-            Decimal(annual_assessment_revenue) / Decimal(hoa_metadata.units) / Decimal(12)
-        ).quantize(Decimal("0.01"))
-    else:
-        monthly_assessment_per_unit_current = Decimal("0.00")
+    monthly_assessment_per_unit_current = assessment_facts.monthly_assessment_per_unit_current
+    annual_assessment_revenue = assessment_facts.approved_annual_assessment_revenue
+    data_gaps.extend(assessment_facts.warnings)
+    if assessment_facts.source == "missing":
         data_gaps.append(
             "No operating revenue line item with 'assessment' in its label — "
             "monthly assessment per unit could not be derived from the active draft. "
             "Set 'approved_monthly_assessment_per_unit' under Disclosure Settings to override."
         )
+
+    packet_archetype_facts = resolve_packet_archetype_facts(
+        packet_archetype_setting=settings.get("financial_packet_archetype"),
+    )
 
     # Pro-forma footnote counts — currently a strict subset of the reserve
     # study. Phase 12 adds a board-deferral / signed-contracts admin form;
@@ -676,32 +659,16 @@ def _compute_all(
         if not c.useful_life or int(c.useful_life) <= 0
     )
 
-    # Income tax provision — HOAs pay tax on non-exempt income, dominated by
-    # reserve interest revenue. Derive from the draft's actual interest line
-    # items where present (assumed 30% federal Form 1120-H rate, applied to
-    # non-membership income). Falls back to the spec default for backward
-    # compatibility on drafts that have not yet split out interest revenue.
-    interest_revenue_total = sum(
-        (li.amount or Decimal(0))
-        for li in (operating_lis + reserve_lis)
-        if li.is_revenue and li.label and "interest" in li.label.lower()
+    reserve_interest_tax_facts = resolve_reserve_interest_tax_facts(
+        reserve_interest_income_override=settings.get("reserve_interest_income_override"),
+        income_tax_provision_override=settings.get("income_tax_provision_override"),
+        budget_line_items=budget_draft.line_items,
+        reserve_funding_plan_rows=reserve_snapshot.funding_plan_rows,
+        fiscal_year=spec.fiscal_year,
     )
-    # Operator override (Priority A #6) wins over the derived value when set.
-    tax_override = settings.get("income_tax_provision_override")
-    if tax_override is not None:
-        income_tax_provision = Decimal(str(tax_override)).quantize(Decimal("1"))
-    elif interest_revenue_total:
-        income_tax_provision = (
-            (Decimal(interest_revenue_total) * Decimal("0.30"))
-            .quantize(Decimal("1"))
-        )
-    else:
-        income_tax_provision = Decimal("0")
-        data_gaps.append(
-            "No revenue line item with 'interest' in its label — "
-            "income tax provision defaulted to $0. Set "
-            "'income_tax_provision_override' under Disclosure Settings to specify a value."
-        )
+    data_gaps.extend(reserve_interest_tax_facts.warnings)
+    interest_revenue_total = reserve_interest_tax_facts.reserve_interest_income
+    income_tax_provision = reserve_interest_tax_facts.reserve_tax_provision
 
     # Parse Priority-A structured inputs (special assessments / additional
     # assessments / outstanding loan) from JSON-stored settings. Templates
@@ -731,7 +698,13 @@ def _compute_all(
         except (json.JSONDecodeError, TypeError):
             return None
 
-    special_assessments = _parse_json_list("special_assessments_json")
+    special_assessments = []
+    for entry in _parse_json_list("special_assessments_json"):
+        if not isinstance(entry, dict):
+            continue
+        normalized_entry = dict(entry)
+        normalized_entry["status"] = infer_special_assessment_status(normalized_entry)
+        special_assessments.append(normalized_entry)
     additional_assessments_needed = _parse_json_list("additional_assessments_needed_json")
     outstanding_loan = _parse_json_object("outstanding_loan_json")
 
@@ -746,16 +719,10 @@ def _compute_all(
         ]
     board_deferrals_list = _parse_json_list("board_deferrals_json")
     replacement_fund_monthly_raw = settings.get("replacement_fund_monthly_assessment_per_unit")
-    base_replacement_fund_monthly = (
-        Decimal(str(replacement_fund_monthly_raw))
-        if replacement_fund_monthly_raw not in (None, "")
-        else None
+    base_replacement_fund_monthly = parse_optional_decimal_setting(
+        replacement_fund_monthly_raw
     )
 
-    # Assessment-change phrase for the cover letter. The real Old Mill
-    # package reads "will remain the same at $605.00" when the assessment
-    # is unchanged, "will increase to $X" / "will decrease to $X" otherwise.
-    # Compare current (after override resolution above) to prior-year.
     prior_assessment_raw = settings.get("monthly_assessment_per_unit_prior")
     if prior_assessment_raw is not None:
         try:
@@ -764,14 +731,52 @@ def _compute_all(
             prior_assessment = None
     else:
         prior_assessment = None
-    if prior_assessment is None or monthly_assessment_per_unit_current == Decimal("0.00"):
-        assessment_change_phrase = "is"
-    elif monthly_assessment_per_unit_current == prior_assessment:
-        assessment_change_phrase = "will remain the same at"
-    elif monthly_assessment_per_unit_current > prior_assessment:
-        assessment_change_phrase = "will increase to"
-    else:
-        assessment_change_phrase = "will decrease to"
+    presentation_facts = resolve_assessment_presentation_facts(
+        recipient_grain=assessment_matrix.recipient_grain if assessment_matrix else None,
+        monthly_assessment_per_unit_current=monthly_assessment_per_unit_current,
+        monthly_assessment_per_unit_prior=prior_assessment,
+    )
+    assessment_change_phrase = presentation_facts.assessment_change_phrase
+
+    reserve_liability_facts = resolve_reserve_liability_facts(
+        cash_reserve_balance_eoy_prior=cash,
+        total_estimated_liability=total_liab,
+        under_funded_balance_total=under_total,
+        under_funded_balance_per_unit=under_per_unit,
+        percent_funded=pct,
+        annual_replacement_provision=total_prov,
+    )
+    other_operating_revenue = sum(
+        (
+            Decimal(li.amount or 0)
+            for li in operating_lis
+            if li.is_revenue
+            and li.label
+            and "assessment" not in li.label.lower()
+            and "interest" not in li.label.lower()
+        ),
+        Decimal("0"),
+    )
+    other_replacement_revenue = sum(
+        (
+            Decimal(li.amount or 0)
+            for li in reserve_lis
+            if li.is_revenue and li.label and "interest" not in li.label.lower()
+        ),
+        Decimal("0"),
+    )
+    annual_statement_facts = build_annual_statement_facts(
+        packet_archetype=packet_archetype_facts.archetype,
+        total_regular_assessment_revenue=annual_assessment_revenue,
+        reserve_assessment_revenue=reserve_funding_facts.annual_contribution,
+        reserve_interest_income=reserve_interest_tax_facts.reserve_interest_income,
+        reserve_tax_provision=reserve_interest_tax_facts.reserve_tax_provision,
+        other_operating_revenue=other_operating_revenue,
+        other_replacement_revenue=other_replacement_revenue,
+        total_operating_expenses=total_exp_op,
+        beginning_balance_operations=fund_balance_boy_op,
+        reserve_liability_facts=reserve_liability_facts,
+    )
 
     return {
         "computed": {
@@ -847,7 +852,11 @@ def _compute_all(
                 inflation_rate=_setting_decimal("replacement_cost_increase_rate"),
                 interest_rate=_setting_decimal("interest_rate_after_tax"),
                 assessment_schedule=assessment_schedule_raw,
-                base_replacement_fund_monthly_per_unit=base_replacement_fund_monthly,
+                base_replacement_fund_monthly_per_unit=(
+                    base_replacement_fund_monthly
+                    if base_replacement_fund_monthly is not None
+                    else reserve_funding_facts.monthly_per_unit
+                ),
                 special_assessments=special_assessments,
                 board_deferrals=board_deferrals_list,
             ),
@@ -860,7 +869,15 @@ def _compute_all(
             "special_assessments": special_assessments,
             "additional_assessments_needed": additional_assessments_needed,
             "outstanding_loan": outstanding_loan,
-            "reserve_funding_source": funding_source,
+            "packet_archetype_facts": packet_archetype_facts.model_dump(),
+            "presentation_facts": presentation_facts.model_dump(),
+            "reserve_funding_source": reserve_funding_facts.source,
+            "reserve_funding_source_label": reserve_funding_facts.source_label,
+            "reserve_funding_facts": reserve_funding_facts.model_dump(),
+            "reserve_interest_tax_facts": reserve_interest_tax_facts.model_dump(),
+            "reserve_liability_facts": reserve_liability_facts.model_dump(),
+            "annual_statement_facts": annual_statement_facts.model_dump(),
+            "assessment_facts": assessment_facts.model_dump(),
             "assessment_change_phrase": assessment_change_phrase,
             "assessment_change_disclosure": (
                 "0%"
@@ -961,6 +978,16 @@ def compile_package(
             f"Preflight blocked compilation: {len(blocking)} error(s)",
             field_paths=[e.field_path for e in blocking],
         )
+    if assessment_matrix is not None:
+        matrix_blocking = [
+            issue for issue in assessment_matrix.preflight_issues
+            if issue.severity == "blocking"
+        ]
+        if matrix_blocking:
+            raise CompileError(
+                f"Preflight blocked compilation: {len(matrix_blocking)} error(s)",
+                field_paths=[issue.field_path for issue in matrix_blocking],
+            )
 
     # 2. Build effective hoa_settings dict — spec.static_data defaults
     #    overlaid with any operator-saved overrides from the hoa_settings
@@ -1001,8 +1028,10 @@ def compile_package(
         "hoa_incorporation_year": None,
         # Priority-A settings — same pre-seed for template safety.
         "approved_monthly_assessment_per_unit": None,
+        "financial_packet_archetype": "dual-fund",
+        "reserve_interest_income_override": None,
         "income_tax_provision_override": None,
-        "reserve_funding_source": "reserve_study_provision",
+        "reserve_funding_source": "auto",
         "reserve_funding_manual_amount": None,
         "special_assessments_json": "[]",
         "additional_assessments_needed_json": "[]",
@@ -1079,6 +1108,7 @@ def compile_package(
         computed = _compute_all(
             spec, budget_draft, reserve_snapshot, hoa_metadata,
             effective_hoa_settings=effective_hoa_settings,
+            assessment_matrix=assessment_matrix,
         )
         if assessment_matrix is None:
             # Backward-compatible fallback for tests and legacy callers.

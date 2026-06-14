@@ -2,7 +2,12 @@
 {% block title %}Notes 4-5 to Financial Statements{% endblock %}
 {% block content %}
 <h2 id="note-4">Note 4 — Revenues</h2>
-{% set assessments_vary = matrix.recipient_grain == 'group' or matrix.recipient_grain == 'unit' %}
+{% set presentation = computed.presentation_facts if computed.presentation_facts is defined else none %}
+{% set packet = computed.packet_archetype_facts if computed.packet_archetype_facts is defined else none %}
+{% set reserve_funding = computed.reserve_funding_facts if computed.reserve_funding_facts is defined else none %}
+{% set reserve_liability = computed.reserve_liability_facts if computed.reserve_liability_facts is defined else none %}
+{% set matrix_says_vary = matrix.recipient_grain == 'group' or matrix.recipient_grain == 'unit' %}
+{% set assessments_vary = matrix_says_vary or (presentation.assessments_vary if presentation else false) %}
 <p>Operating revenues consist principally of monthly regular assessments
 levied on each separate interest in the Association.
 {% if assessments_vary %}
@@ -10,20 +15,26 @@ Current monthly assessments vary by ownership interest as shown in the
 assessment schedule included in this package.
 {% else %}
 The current monthly assessment per unit is
-${{ '{:,.2f}'.format(computed.monthly_assessment_per_unit_current) }},
-unchanged from the prior year.
+{{ presentation.assessment_change_phrase if presentation else computed.assessment_change_phrase }}
+${{ '{:,.2f}'.format(computed.monthly_assessment_per_unit_current) }}.
 {% endif %}
 A portion of each monthly assessment is
 allocated to the Replacement Fund in accordance with the funding plan
 adopted by the Board pursuant to California Civil Code § 5550;
 the {{ fiscal_year }} per-unit Replacement Fund contribution is
-${{ '{:,.2f}'.format(computed.monthly_replacement_contribution_per_unit_2026) }}
-per month.</p>
+${{ '{:,.2f}'.format(reserve_funding.monthly_per_unit if reserve_funding else computed.monthly_replacement_contribution_per_unit_2026) }}
+per month, based on {{ reserve_funding.source_label if reserve_funding else computed.reserve_funding_source_label }}.</p>
 
 <p>The Association also forecasts interest income on bank and
 certificate-of-deposit balances held within the Replacement Fund;
 interest income is recognized as earned and is reported net of any
 estimated income tax provision.</p>
+
+{% if packet and packet.archetype == 'reserve-only' %}
+<p>The accompanying forecast pages present replacement-fund activity only;
+operations-fund activities are not included in the accountant-style
+financial statement pages.</p>
+{% endif %}
 
 <h2 id="note-5">Note 5 — Replacement Fund Balance</h2>
 
@@ -31,23 +42,23 @@ estimated income tax provision.</p>
   <tbody>
     <tr>
       <td>Estimated cash reserves (end of prior year)</td>
-      <td>${{ '{:,.0f}'.format(hoa_settings.reserve_cash_balance_eoy_prior) }}</td>
+      <td>${{ '{:,.0f}'.format(reserve_liability.cash_reserve_balance_eoy_prior if reserve_liability else hoa_settings.reserve_cash_balance_eoy_prior) }}</td>
     </tr>
     <tr>
       <td>Estimated total liability for major component replacement</td>
-      <td>${{ '{:,.0f}'.format(computed.total_estimated_liability) }}</td>
+      <td>${{ '{:,.0f}'.format(reserve_liability.total_estimated_liability if reserve_liability else computed.total_estimated_liability) }}</td>
     </tr>
     <tr class="totals-row">
       <td>Under-funded balance</td>
-      <td>${{ '{:,.0f}'.format(computed.under_funded_balance_total) }}</td>
+      <td>${{ '{:,.0f}'.format(reserve_liability.under_funded_balance_total if reserve_liability else computed.under_funded_balance_total) }}</td>
     </tr>
     <tr>
       <td>Under-funded balance per unit</td>
-      <td>${{ '{:,.0f}'.format(computed.under_funded_balance_per_unit) }}</td>
+      <td>${{ '{:,.0f}'.format(reserve_liability.under_funded_balance_per_unit if reserve_liability else computed.under_funded_balance_per_unit) }}</td>
     </tr>
     <tr class="totals-row">
       <td>Percent funded</td>
-      <td>{{ computed.percent_funded }}%</td>
+      <td>{{ reserve_liability.percent_funded if reserve_liability else computed.percent_funded }}%</td>
     </tr>
   </tbody>
 </table>

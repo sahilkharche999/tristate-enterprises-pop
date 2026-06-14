@@ -177,6 +177,10 @@ async def generate_budget(
 ):
     """Run the full budget pipeline reusing existing Python code in the repo.
 
+    V1 decision for add-budget-source-mode-switch: this developer-oriented
+    route remains income-statement-only. The operator-facing HOA upload flow
+    carries `source_mode`; parity here is an explicit follow-up task.
+
     This endpoint saves the uploaded files to temporary paths, calls the
     `generate_budget_pipeline.BudgetPipeline` runner, and returns JSON containing
     the enriched intermediate sheet and a small preview of the final budget workbook.

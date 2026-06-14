@@ -3,8 +3,10 @@ from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..assessment_mode import AssessmentMode, ASSESSMENT_MODE_VARIABLE
 
 JsonObject = dict[str, Any]
+BudgetSourceMode = Literal["income_statement", "proforma_final_budget"]
 
 
 class BudgetTimelineEvent(BaseModel):
@@ -46,6 +48,8 @@ class BudgetVersionSummary(BaseModel):
     source_draft_id: Optional[int] = None
     output_storage_key: Optional[str] = None
     source_upload_filename: Optional[str] = None
+    source_mode: BudgetSourceMode = "income_statement"
+    assessment_mode: AssessmentMode = ASSESSMENT_MODE_VARIABLE
 
 
 class BudgetVersionDetail(BudgetVersionSummary):
@@ -91,9 +95,12 @@ class BudgetDraftPayload(BaseModel):
     growth_factor_note: Optional[str] = None
     reserve_inflation_rate: float = 0.0
     reserve_inflation_note: Optional[str] = None
+    version_int: int = 0
     updated_at: Optional[str] = None
     upload_filename: Optional[str] = None
     enriched_file_available: bool = False
+    source_mode: BudgetSourceMode = "income_statement"
+    assessment_mode: AssessmentMode = ASSESSMENT_MODE_VARIABLE
 
 
 class BudgetDraftSummary(BaseModel):
@@ -108,10 +115,13 @@ class BudgetDraftSummary(BaseModel):
     reopened_from_version_code: Optional[str] = None
     reserve_inflation_rate: float = 0.0
     reserve_inflation_note: Optional[str] = None
+    version_int: int = 0
     reserve_study_status: str = "none"
     updated_at: Optional[str] = None
     actor_name: str
     enriched_file_available: bool = False
+    source_mode: BudgetSourceMode = "income_statement"
+    assessment_mode: AssessmentMode = ASSESSMENT_MODE_VARIABLE
 
 
 class BudgetHistoryResponse(BaseModel):
@@ -120,6 +130,67 @@ class BudgetHistoryResponse(BaseModel):
     timeline: list[BudgetTimelineEvent] = Field(default_factory=list)
     versions: list[BudgetVersionSummary] = Field(default_factory=list)
     notes: list[BudgetNoteRecord] = Field(default_factory=list)
+
+
+class BudgetGlIdentityPayload(BaseModel):
+    account_code: Optional[str]
+    label: str
+    normalized_label: Optional[str]
+    line_item_key: Optional[str]
+    section: str
+    category: str
+    fund_type: str
+
+
+class BudgetGlMergeCommitRequest(BaseModel):
+    primary: BudgetGlIdentityPayload
+    secondary: BudgetGlIdentityPayload
+    source: Literal["manual", "gemini_suggestion"]
+
+
+class BudgetGlMergeApplicationPayload(BaseModel):
+    id: int
+    merge_id: int
+    property_id: int
+    budget_draft_id: int
+    assessment_setup_id: Optional[int]
+    source: str
+    status: str
+    match_strategy: Optional[str]
+
+
+class BudgetGlMergeCommitResponse(BaseModel):
+    merge_id: int
+    application: BudgetGlMergeApplicationPayload
+    draft_version: int
+
+
+class BudgetGlMergeListItem(BaseModel):
+    id: int
+    property_id: int
+    primary_account_code: Optional[str]
+    primary_label: str
+    primary_normalized_label: str
+    secondary_account_code: Optional[str]
+    secondary_label: str
+    secondary_normalized_label: str
+    status: str
+    application_id: Optional[int]
+    application_status: Optional[str]
+    source: Optional[str]
+
+
+class BudgetGlMergeSuggestionPayload(BaseModel):
+    primary_account_code: Optional[str]
+    secondary_account_code: Optional[str]
+    primary_label: str
+    secondary_label: str
+    primary_normalized_label: str
+    secondary_normalized_label: str
+    confidence: float
+    reason: str
+    local_only: bool
+    wire_schema_sha256: str
 
 
 class ExtractionQualityWarning(BaseModel):
@@ -132,6 +203,14 @@ class ExtractionQualityWarning(BaseModel):
     severity: str = "warning"  # "warning" | "info"
 
 
+class ExtractionDebugInfo(BaseModel):
+    """Technical extraction details shown when an upload needs review."""
+
+    code: str
+    message: str
+    details: JsonObject = Field(default_factory=dict)
+
+
 class BudgetUploadResponse(BaseModel):
     upload_id: int
     draft: Optional[BudgetDraftPayload] = None
@@ -139,6 +218,7 @@ class BudgetUploadResponse(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     review_required: bool = False
     review_reason: Optional[str] = None
+    debug_info: Optional[ExtractionDebugInfo] = None
     # Set when the extractor took a degraded path (e.g. scanned-PDF
     # vision-only fallback). The frontend renders this as a one-shot
     # dismissible dialog telling the user to double-check the numbers.
@@ -153,6 +233,7 @@ class BundleFileStatus(BaseModel):
     status: Literal["completed", "review_required", "failed", "pending"] = "pending"
     warnings: list[str] = Field(default_factory=list)
     review_reason: Optional[str] = None
+    debug_info: Optional[ExtractionDebugInfo] = None
 
 
 class BudgetBundleUploadResponse(BaseModel):
@@ -208,6 +289,16 @@ class BudgetGenerateRequest(BaseModel):
     draft_id: int
     line_items: list[JsonObject] = Field(default_factory=list)
     global_note: Optional[str] = None
+
+
+class BudgetUploadRequest(BaseModel):
+    source_mode: BudgetSourceMode = "income_statement"
+    assessment_mode: AssessmentMode = ASSESSMENT_MODE_VARIABLE
+
+
+class BudgetBundleUploadRequest(BaseModel):
+    source_mode: BudgetSourceMode = "income_statement"
+    assessment_mode: AssessmentMode = ASSESSMENT_MODE_VARIABLE
 
 
 class BudgetGenerateResponse(BaseModel):
@@ -330,6 +421,8 @@ class BudgetVersionCompareCard(BaseModel):
     statement_month: Optional[int] = None
     fiscal_year_start_month: int
     fiscal_year_end_month: int
+    source_mode: BudgetSourceMode = "income_statement"
+    assessment_mode: AssessmentMode = ASSESSMENT_MODE_VARIABLE
 
 
 class BudgetVersionCompareResponse(BaseModel):

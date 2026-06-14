@@ -59,11 +59,94 @@ class ReserveStudyComponent(BaseModel):
     year_new: Optional[int] = Field(default=None, ge=1900, le=3000)
 
 
+class ReserveFundingPlanRow(BaseModel):
+    """One fiscal-year row from a reserve-study cash-flow funding plan."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    year: int = Field(ge=1900, le=3000)
+    beginning_balance: Optional[Decimal] = None
+    annual_contribution: Optional[Decimal] = None
+    monthly_per_unit: Optional[Decimal] = None
+    interest_income: Optional[Decimal] = None
+    reserve_expenditures: Optional[Decimal] = None
+    ending_balance: Optional[Decimal] = None
+    fully_funded_balance: Optional[Decimal] = None
+    percent_funded: Optional[Decimal] = None
+    source_page: Optional[int] = Field(default=None, ge=1)
+
+    def consistency_warnings(self, *, units: int) -> list[str]:
+        """Return soft validation warnings for extracted funding-plan math."""
+        warnings: list[str] = []
+        if (
+            self.annual_contribution is not None
+            and self.monthly_per_unit is not None
+            and units > 0
+        ):
+            if self.annual_contribution > 0 and self.monthly_per_unit > 0:
+                implied_units = (
+                    self.annual_contribution / self.monthly_per_unit / Decimal(12)
+                )
+                nearest_units = implied_units.quantize(Decimal("1"))
+                if abs(implied_units - nearest_units) <= Decimal("0.05") and int(
+                    nearest_units
+                ) != units:
+                    warnings.append(
+                        f"Reserve funding row {self.year} implies "
+                        f"{int(nearest_units)} reserve-study units from annual "
+                        "contribution and monthly per-unit amount, but HOA "
+                        f"assessment unit count is {units}."
+                    )
+            expected = (
+                self.annual_contribution / Decimal(units) / Decimal(12)
+            ).quantize(Decimal("0.01"))
+            if expected != self.monthly_per_unit.quantize(Decimal("0.01")):
+                warnings.append(
+                    f"Reserve funding row {self.year} monthly per-unit amount "
+                    "does not match annual contribution divided by units and 12."
+                )
+        if (
+            self.beginning_balance is not None
+            and self.annual_contribution is not None
+            and self.interest_income is not None
+            and self.reserve_expenditures is not None
+            and self.ending_balance is not None
+        ):
+            expected_ending = (
+                self.beginning_balance
+                + self.annual_contribution
+                + self.interest_income
+                - self.reserve_expenditures
+            ).quantize(Decimal("1"))
+            if expected_ending != self.ending_balance.quantize(Decimal("1")):
+                warnings.append(
+                    f"Reserve funding row {self.year} ending balance does not "
+                    "match beginning balance plus contribution and interest "
+                    "minus reserve expenditures."
+                )
+        if (
+            self.ending_balance is not None
+            and self.fully_funded_balance is not None
+            and self.percent_funded is not None
+            and self.fully_funded_balance > 0
+        ):
+            expected_percent = (
+                self.ending_balance / self.fully_funded_balance * Decimal("100")
+            ).quantize(Decimal("1"))
+            if expected_percent != self.percent_funded.quantize(Decimal("1")):
+                warnings.append(
+                    f"Reserve funding row {self.year} percent funded does not "
+                    "match ending balance divided by fully funded balance."
+                )
+        return warnings
+
+
 class ReserveStudySnapshot(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     study_date: str
     components: List[ReserveStudyComponent] = Field(default_factory=list)
+    funding_plan_rows: List[ReserveFundingPlanRow] = Field(default_factory=list)
 
 
 class HOAMetadata(BaseModel):
@@ -168,6 +251,9 @@ class PreflightError(BaseModel):
     field_path: str
     message: str
     severity: Literal["blocking", "warning"] = "blocking"
+    code: Optional[str] = None
+    affected_value: Optional[Any] = None
+    suggested_fix: Optional[str] = None
 
 
 class FormulaCall(BaseModel):

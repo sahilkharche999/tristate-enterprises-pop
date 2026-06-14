@@ -202,7 +202,60 @@ def _minimal_computed_context() -> dict[str, Any]:
             "major_component_expenditure_schedule": _major_component_rows(60),
             "monthly_assessment_per_unit_current": Decimal("605.00"),
             "monthly_replacement_contribution_total": Decimal("56074"),
-            "assessment_change_phrase": "no change",
+            "assessment_change_phrase": "will increase to",
+            "reserve_funding_source_label": "approved budget reserve contribution",
+            "assessment_facts": {
+                "source": "budget_assessment_revenue",
+                "uploaded_annual_assessment_revenue": Decimal("2025540"),
+                "approved_annual_assessment_revenue": Decimal("2025540"),
+                "monthly_assessment_per_unit_current": Decimal("605.00"),
+                "revenue_mismatch": Decimal("0"),
+                "warnings": [],
+            },
+            "packet_archetype_facts": {
+                "archetype": "dual-fund",
+                "renders_operations_fund": True,
+                "renders_replacement_fund": True,
+                "source": "default",
+            },
+            "presentation_facts": {
+                "mode": "fixed",
+                "assessments_vary": False,
+                "should_show_single_monthly_amount": True,
+                "assessment_change_phrase": "will increase to",
+                "schedule_reference_text": "assessment schedule included in this package",
+            },
+            "reserve_liability_facts": {
+                "cash_reserve_balance_eoy_prior": Decimal("1500000"),
+                "total_estimated_liability": Decimal("4575000"),
+                "under_funded_balance_total": Decimal("1975000"),
+                "under_funded_balance_per_unit": Decimal("7080"),
+                "percent_funded": Decimal("57"),
+                "annual_replacement_provision": Decimal("150000"),
+            },
+            "annual_statement_facts": {
+                "packet_archetype": "dual-fund",
+                "operating_assessment_revenue": Decimal("1201126"),
+                "reserve_assessment_revenue": Decimal("824414"),
+                "reserve_interest_income": Decimal("22000"),
+                "other_operating_revenue": Decimal("0"),
+                "other_replacement_revenue": Decimal("0"),
+                "replacement_provision_expense": Decimal("150000"),
+                "reserve_tax_provision": Decimal("0"),
+                "total_revenues_operations": Decimal("1201126"),
+                "total_revenues_replacement": Decimal("846414"),
+                "total_revenues": Decimal("2047540"),
+                "total_expenses_operations": Decimal("295000"),
+                "total_expenses_replacement": Decimal("150000"),
+                "total_expenses": Decimal("445000"),
+                "excess_revenues_over_expenses_operations": Decimal("906126"),
+                "excess_revenues_over_expenses_replacement": Decimal("696414"),
+                "beginning_balance_operations": Decimal("100000"),
+                "beginning_balance_replacement": Decimal("-3075000"),
+                "ending_balance_operations": Decimal("1006126"),
+                "ending_balance_replacement": Decimal("-2378586"),
+                "ending_balance_total": Decimal("-1372460"),
+            },
             "expenses_by_section": {},
             "revenues_by_section": {},
         },
@@ -420,6 +473,109 @@ def test_grouped_assessment_wording_does_not_claim_flat_per_unit_amount():
     assert "per unit per month" not in note_7_text.lower()
 
 
+def test_note_4_uses_assessment_change_phrase_for_flat_hoa():
+    ctx = _build_context()
+
+    note_4_text = _text_from_template("note_4_5.html", ctx)
+
+    assert "will increase to" in note_4_text
+    assert "unchanged from the prior year" not in note_4_text
+
+
+def test_forecast_statement_hides_internal_assessment_override_mismatch_copy():
+    ctx = _build_context()
+    ctx["computed"]["assessment_facts"] = {
+        "source": "manual_monthly_override",
+        "uploaded_annual_assessment_revenue": Decimal("2025540"),
+        "approved_annual_assessment_revenue": Decimal("2032135.56"),
+        "monthly_assessment_per_unit_current": Decimal("606.97"),
+        "revenue_mismatch": Decimal("6595.56"),
+        "warnings": ["Approved monthly assessment revenue differs from uploaded budget assessment revenue."],
+    }
+
+    text = _text_from_template("forecasted_income_statement.html", ctx)
+
+    assert "Approved monthly assessment override" not in text
+    assert "uploaded budget assessment revenue" not in text
+
+
+def test_cover_letter_hides_internal_data_gap_banner():
+    ctx = _build_context()
+    ctx["computed"]["data_gaps"] = ["Reserve funding could not be resolved."]
+
+    text = _text_from_template("cover_letter.html", ctx)
+
+    assert "Data gaps detected" not in text
+    assert "Reserve funding could not be resolved." not in text
+
+
+def test_reserve_only_income_statement_omits_operations_fund_columns():
+    ctx = _build_context()
+    ctx["computed"]["packet_archetype_facts"] = {
+        "archetype": "reserve-only",
+        "renders_operations_fund": False,
+        "renders_replacement_fund": True,
+        "source": "hoa_settings",
+    }
+    ctx["computed"]["annual_statement_facts"] = {
+        **ctx["computed"]["annual_statement_facts"],
+        "packet_archetype": "reserve-only",
+    }
+
+    text = _text_from_template("forecasted_income_statement.html", ctx)
+
+    assert "Operations Fund" not in text
+    assert "Regular reserve assessments" in text
+
+
+def test_assessment_schedule_page_stays_unchanged_for_fixed_matrix():
+    base_ctx = _build_context()
+    changed_ctx = _build_context()
+    changed_ctx["computed"]["packet_archetype_facts"] = {
+        "archetype": "reserve-only",
+        "renders_operations_fund": False,
+        "renders_replacement_fund": True,
+        "source": "hoa_settings",
+    }
+    changed_ctx["computed"]["presentation_facts"] = {
+        "mode": "fixed",
+        "assessments_vary": False,
+        "should_show_single_monthly_amount": True,
+        "assessment_change_phrase": "will remain the same at",
+        "schedule_reference_text": "assessment schedule included in this package",
+    }
+
+    baseline = _text_from_template("assessment_schedule/universal.html", base_ctx)
+    changed = _text_from_template("assessment_schedule/universal.html", changed_ctx)
+
+    assert changed == baseline
+
+
+def test_assessment_schedule_page_stays_unchanged_for_grouped_matrix():
+    base_ctx = _build_context()
+    base_ctx["matrix"] = _grouped_assessment_matrix()
+    changed_ctx = _build_context()
+    changed_ctx["matrix"] = _grouped_assessment_matrix()
+    changed_ctx["computed"]["packet_archetype_facts"] = {
+        "archetype": "dual-fund",
+        "renders_operations_fund": True,
+        "renders_replacement_fund": True,
+        "source": "hoa_settings",
+    }
+    changed_ctx["computed"]["presentation_facts"] = {
+        "mode": "variable",
+        "assessments_vary": True,
+        "should_show_single_monthly_amount": False,
+        "assessment_change_phrase": "assessments vary by ownership interest",
+        "schedule_reference_text": "assessment schedule included in this package",
+    }
+
+    baseline = _text_from_template("assessment_schedule/universal.html", base_ctx)
+    changed = _text_from_template("assessment_schedule/universal.html", changed_ctx)
+
+    assert changed == baseline
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Test 2: every GeneratedPage entry renders within ±1 of its page_count_hint
 # ─────────────────────────────────────────────────────────────────────────────
@@ -629,3 +785,4 @@ def test_note_6_renders_monthly_base_contribution_value():
         "Note 6 must surface the $200.98 monthly per-unit Replacement Fund "
         "base contribution from formulas.py"
     )
+    assert "approved budget reserve contribution" in text

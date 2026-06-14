@@ -45,6 +45,196 @@ class TestSchemaCreatesEngineTables:
             "budget_line_pool_mappings",
         }.issubset(names)
 
+    def test_reusable_mapping_rule_table_exists_with_audit_columns(
+        self, fresh_db: sqlite3.Connection
+    ) -> None:
+        columns = {
+            row[1]
+            for row in fresh_db.execute(
+                "PRAGMA table_info(assessment_budget_mapping_rules)"
+            ).fetchall()
+        }
+        assert {
+            "id",
+            "property_id",
+            "assessment_setup_id",
+            "pool_key",
+            "pool_id",
+            "match_label",
+            "normalized_label",
+            "account_code",
+            "match_type",
+            "rule_source",
+            "approval_status",
+            "review_state",
+            "active",
+            "source_dre_extraction_run_id",
+            "source_pages_json",
+            "confidence",
+            "source_parent_category",
+            "assessment_type",
+            "review_required",
+            "review_reason",
+            "source_evidence_text",
+            "created_at",
+            "updated_at",
+        }.issubset(columns)
+
+    def test_mapping_rules_and_pools_preserve_derivation_metadata(
+        self, fresh_db: sqlite3.Connection
+    ) -> None:
+        rule_columns = {
+            row[1]
+            for row in fresh_db.execute(
+                "PRAGMA table_info(assessment_budget_mapping_rules)"
+            ).fetchall()
+        }
+        pool_columns = {
+            row[1]
+            for row in fresh_db.execute("PRAGMA table_info(allocation_pools)").fetchall()
+        }
+        assert {
+            "budget_line_derivation",
+            "residual_after_pool_keys_json",
+            "residual_exclusions_json",
+        }.issubset(rule_columns)
+        assert {
+            "budget_line_derivation",
+            "residual_after_pool_keys_json",
+            "residual_exclusions_json",
+        }.issubset(pool_columns)
+
+        fresh_db.execute("INSERT INTO properties (name, units) VALUES ('T', 10)")
+        property_id = fresh_db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        fresh_db.execute(
+            "INSERT INTO assessment_setups (property_id, setup_type, display_mode) "
+            "VALUES (?, 'grouped', 'grouped')",
+            (property_id,),
+        )
+        setup_id = fresh_db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        for derivation in (
+            "explicit_lines",
+            "residual_default",
+            "formula_only",
+            "unknown",
+        ):
+            fresh_db.execute(
+                """
+                INSERT INTO assessment_budget_mapping_rules
+                    (property_id, assessment_setup_id, pool_key, match_type,
+                     rule_source, approval_status, review_state, budget_line_derivation)
+                VALUES
+                    (?, ?, ?, 'remainder', 'system_remainder',
+                     'suggested', 'pending_review', ?)
+                """,
+                (property_id, setup_id, f"{derivation}_pool", derivation),
+            )
+
+    def test_exemption_applicability_is_budget_year_or_draft_scoped(
+        self, fresh_db: sqlite3.Connection
+    ) -> None:
+        columns = {
+            row[1]
+            for row in fresh_db.execute(
+                "PRAGMA table_info(assessment_exemption_decisions)"
+            ).fetchall()
+        }
+        assert {
+            "id",
+            "property_id",
+            "assessment_setup_id",
+            "budget_year",
+            "budget_draft_id",
+            "pool_key",
+            "exemption_state",
+            "operator_decision",
+            "decided_by",
+            "decided_at",
+            "notes",
+            "evidence_ref_json",
+            "created_at",
+            "updated_at",
+        }.issubset(columns)
+
+        fresh_db.execute("INSERT INTO properties (name, units) VALUES ('T', 10)")
+        property_id = fresh_db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        fresh_db.execute(
+            "INSERT INTO assessment_setups (property_id, setup_type, display_mode) "
+            "VALUES (?, 'grouped', 'grouped')",
+            (property_id,),
+        )
+        setup_id = fresh_db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        fresh_db.execute(
+            """
+            INSERT INTO assessment_exemption_decisions
+                (property_id, assessment_setup_id, budget_year, pool_key, exemption_state)
+            VALUES
+                (?, ?, 2026, 'exempted_costs', 'pending_review')
+            """,
+            (property_id, setup_id),
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            fresh_db.execute(
+                """
+                INSERT INTO assessment_exemption_decisions
+                    (property_id, assessment_setup_id, budget_year, pool_key, exemption_state)
+                VALUES
+                    (?, ?, 2026, 'exempted_costs', 'active')
+                """,
+                (property_id, setup_id),
+            )
+
+    def test_review_row_disposition_and_audit_tables_exist(
+        self, fresh_db: sqlite3.Connection
+    ) -> None:
+        disposition_columns = {
+            row[1]
+            for row in fresh_db.execute(
+                "PRAGMA table_info(assessment_review_row_dispositions)"
+            ).fetchall()
+        }
+        audit_columns = {
+            row[1]
+            for row in fresh_db.execute(
+                "PRAGMA table_info(assessment_review_row_audit_events)"
+            ).fetchall()
+        }
+        assert {
+            "id",
+            "property_id",
+            "assessment_setup_id",
+            "budget_year",
+            "budget_draft_id",
+            "review_line_key",
+            "normalized_label",
+            "line_label",
+            "row_role",
+            "disposition_state",
+            "decided_by",
+            "decided_at",
+            "notes",
+            "created_at",
+            "updated_at",
+        }.issubset(disposition_columns)
+        assert {
+            "id",
+            "property_id",
+            "assessment_setup_id",
+            "budget_year",
+            "budget_draft_id",
+            "review_line_key",
+            "normalized_label",
+            "line_label",
+            "change_type",
+            "previous_value",
+            "new_value",
+            "pool_key",
+            "actor",
+            "reason",
+            "source",
+            "created_at",
+        }.issubset(audit_columns)
+
     def test_audit_tables_exist(self, fresh_db: sqlite3.Connection) -> None:
         # Phase 4.5/4.6/4.7 audit tables
         names = {
@@ -232,6 +422,24 @@ class TestSchemaCreatesEngineTables:
             "VALUES (?, ?, 'dues', 'reserve_income', 'reserve_income', 'reserve', 'reserve_pool')",
             (property_id, setup_id),
         )
+
+    def test_budget_line_mapping_provenance_columns_exist(
+        self, fresh_db: sqlite3.Connection
+    ) -> None:
+        columns = {
+            row[1]
+            for row in fresh_db.execute(
+                "PRAGMA table_info(budget_line_pool_mappings)"
+            ).fetchall()
+        }
+        assert {
+            "source_rule_id",
+            "mapping_source",
+            "match_method",
+            "approval_status",
+            "review_state",
+            "budget_line_amount",
+        }.issubset(columns)
 
 
 class TestOldMillSeed:

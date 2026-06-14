@@ -2,15 +2,6 @@
 {% block title %}{{ hoa.name }} — Cover Letter{% endblock %}
 {% block content %}
 
-{% if computed.data_gaps %}
-<div style="border:1.5pt solid #b91c1c; background:#fef2f2; padding:8pt; margin-bottom:14pt; font-size:9pt; line-height:1.35">
-  <p style="margin:0 0 4pt 0; font-weight:bold; color:#7f1d1d">Data gaps detected — review before distributing this disclosure package:</p>
-  <ul style="margin:0; padding-left:16pt">
-    {% for gap in computed.data_gaps %}<li style="margin-top:2pt">{{ gap }}</li>{% endfor %}
-  </ul>
-</div>
-{% endif %}
-
 <div class="letter-meta">
   <div>{{ hoa_settings.letter_date or today }}</div>
   <div style="margin-top:6pt">To: {{ hoa.name }} Homeowners</div>
@@ -22,7 +13,9 @@
 
 <div class="letter-body">
 
-{% set assessments_vary = matrix.recipient_grain == 'group' or matrix.recipient_grain == 'unit' %}
+{% set presentation = computed.presentation_facts if computed.presentation_facts is defined else none %}
+{% set matrix_says_vary = matrix.recipient_grain == 'group' or matrix.recipient_grain == 'unit' %}
+{% set assessments_vary = matrix_says_vary or (presentation.assessments_vary if presentation else false) %}
 
 <p>Thank you for the prompt payment of your assessments for the current year.
 The enclosed operating budget has been approved by your Board of Directors and
@@ -31,7 +24,7 @@ will become effective on January 1, {{ fiscal_year }}.
 Monthly assessments for {{ fiscal_year }} vary by ownership interest and are
 shown in the assessment schedule included in this package.
 {% else %}
-The monthly assessment per unit for {{ fiscal_year }} {{ computed.assessment_change_phrase }}
+The monthly assessment per unit for {{ fiscal_year }} {{ presentation.assessment_change_phrase if presentation else computed.assessment_change_phrase }}
 ${{ '{:,.2f}'.format(computed.monthly_assessment_per_unit_current) }}.
 {% endif %}</p>
 

@@ -29,6 +29,7 @@ from .schemas import (
     BudgetDraft,
     HOAMetadata,
     LineItem,
+    ReserveFundingPlanRow,
     ReserveStudyComponent,
     ReserveStudySnapshot,
 )
@@ -153,7 +154,9 @@ def from_reserve_study_extraction(document: Any) -> ReserveStudySnapshot:
     """
     study_date = _attr_or_key(document, "study_date") or ""
     raw_rows = _attr_or_key(document, "rows") or []
+    raw_funding_rows = _attr_or_key(document, "funding_plan_rows") or []
     components: list[ReserveStudyComponent] = []
+    funding_plan_rows: list[ReserveFundingPlanRow] = []
     for raw in raw_rows:
         useful_life = _attr_or_key(raw, "useful_life")
         if useful_life in (None, 0):
@@ -171,7 +174,35 @@ def from_reserve_study_extraction(document: Any) -> ReserveStudySnapshot:
             replacement_cost=_to_decimal(replacement_cost),
             year_new=year_new,
         ))
-    return ReserveStudySnapshot(study_date=str(study_date), components=components)
+    for raw in raw_funding_rows:
+        year = _attr_or_key(raw, "year")
+        if year is None:
+            continue
+        funding_plan_rows.append(ReserveFundingPlanRow(
+            year=int(year),
+            beginning_balance=_to_decimal(_attr_or_key(raw, "beginning_balance"))
+            if _attr_or_key(raw, "beginning_balance") is not None else None,
+            annual_contribution=_to_decimal(_attr_or_key(raw, "annual_contribution"))
+            if _attr_or_key(raw, "annual_contribution") is not None else None,
+            monthly_per_unit=_to_decimal(_attr_or_key(raw, "monthly_per_unit"))
+            if _attr_or_key(raw, "monthly_per_unit") is not None else None,
+            interest_income=_to_decimal(_attr_or_key(raw, "interest_income"))
+            if _attr_or_key(raw, "interest_income") is not None else None,
+            reserve_expenditures=_to_decimal(_attr_or_key(raw, "reserve_expenditures"))
+            if _attr_or_key(raw, "reserve_expenditures") is not None else None,
+            ending_balance=_to_decimal(_attr_or_key(raw, "ending_balance"))
+            if _attr_or_key(raw, "ending_balance") is not None else None,
+            fully_funded_balance=_to_decimal(_attr_or_key(raw, "fully_funded_balance"))
+            if _attr_or_key(raw, "fully_funded_balance") is not None else None,
+            percent_funded=_to_decimal(_attr_or_key(raw, "percent_funded"))
+            if _attr_or_key(raw, "percent_funded") is not None else None,
+            source_page=_attr_or_key(raw, "source_page"),
+        ))
+    return ReserveStudySnapshot(
+        study_date=str(study_date),
+        components=components,
+        funding_plan_rows=funding_plan_rows,
+    )
 
 
 def from_hoa_record(property_row: Any) -> HOAMetadata:

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import {
   type AssessmentIncreaseBracket,
   type BoardDeferralEntry,
+  type FinancialPacketArchetype,
   type HOADisclosureSettings,
   type OutstandingLoan,
   type ReserveFundingSource,
@@ -123,6 +124,7 @@ export function HOADisclosureSettingsForm({ hoaId }: { hoaId: number }) {
     ['interest_rate_after_tax', 'Interest rate after tax (decimal, e.g. 0.018)', 'number'],
     ['replacement_fund_monthly_assessment_per_unit', 'Replacement fund monthly assessment per unit (30-year forecast base; blank = derive from reserve study ÷ units ÷ 12)', 'number'],
     ['approved_monthly_assessment_per_unit', 'Approved monthly assessment per unit (overrides derived; cents preserved)', 'number'],
+    ['reserve_interest_income_override', 'Reserve interest income override (annual; blank = derive from budget or reserve study)', 'number'],
     ['income_tax_provision_override', 'Income tax provision override (annual; blank = derive from interest revenue)', 'number'],
     ['reserve_funding_manual_amount', 'Reserve funding manual amount (annual; used when source = manual)', 'number'],
     ['letter_date', 'Cover-letter date (free text, e.g. "November 18, 2025")', 'text'],
@@ -362,6 +364,7 @@ export function HOADisclosureSettingsForm({ hoaId }: { hoaId: number }) {
                   // For required fields (rates, cash balance) treat as 0.
                   const v = e.target.value === ''
                     ? (key === 'approved_monthly_assessment_per_unit'
+                       || key === 'reserve_interest_income_override'
                        || key === 'income_tax_provision_override'
                        || key === 'reserve_funding_manual_amount'
                        || key === 'replacement_fund_monthly_assessment_per_unit'
@@ -376,6 +379,22 @@ export function HOADisclosureSettingsForm({ hoaId }: { hoaId: number }) {
             />
           </label>
         ))}
+
+        <label className="block text-sm">
+          <span className="block text-xs text-[#737373] mb-1">
+            Financial packet archetype
+          </span>
+          <select
+            value={settings.financial_packet_archetype}
+            onChange={(e) =>
+              update('financial_packet_archetype', e.target.value as FinancialPacketArchetype)
+            }
+            className="w-full border border-[#d4d4d4] rounded px-2 py-1 text-sm"
+          >
+            <option value="dual-fund">Dual-fund accountant statement</option>
+            <option value="reserve-only">Reserve-only accountant statement</option>
+          </select>
+        </label>
 
         <label className="block text-sm">
           <span className="block text-xs text-[#737373] mb-1">

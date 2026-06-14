@@ -10,9 +10,15 @@ import {
   finalizeAnnualPackage,
   listAnnualPackages,
 } from '../api/annualPackages';
+import {
+  assessmentModeLabel,
+  assessmentModeWorkflowCopy,
+  type AssessmentMode,
+} from '../lib/assessmentMode';
 
 type Props = {
   hoaId: number;
+  liveAssessmentMode: AssessmentMode;
 };
 
 const STATUS_COLORS: Record<AnnualPackage['status'], string> = {
@@ -23,7 +29,7 @@ const STATUS_COLORS: Record<AnnualPackage['status'], string> = {
   finalized: 'bg-green-100 text-green-800',
 };
 
-export function AnnualPackagesPanel({ hoaId }: Props) {
+export function AnnualPackagesPanel({ hoaId, liveAssessmentMode }: Props) {
   const [packages, setPackages] = useState<AnnualPackage[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -59,6 +65,19 @@ export function AnnualPackagesPanel({ hoaId }: Props) {
       await createAnnualPackage(hoaId, {
         budget_year: year,
         fiscal_year: year,
+      });
+      refresh();
+    } catch (exc) {
+      setError(String(exc));
+    }
+  }
+
+  async function onCreateRegeneration(pkg: AnnualPackage) {
+    try {
+      await createAnnualPackage(hoaId, {
+        budget_year: pkg.budget_year,
+        fiscal_year: pkg.fiscal_year,
+        regen_of_package_id: pkg.package_id,
       });
       refresh();
     } catch (exc) {
@@ -130,12 +149,16 @@ export function AnnualPackagesPanel({ hoaId }: Props) {
       <header className="flex items-center justify-between">
         <h2 className="text-lg font-semibold">Annual disclosure packages</h2>
       </header>
-      <div className="rounded border border-gray-200 bg-gray-50 p-2 text-xs text-gray-700">
-        <strong>Fixed-HOA fast path:</strong> if your HOA charges every
-        unit the same monthly amount, you can skip the DRE upload entirely.
-        Just create a package below, approve it with your operator-chosen
-        annual revenue, and finalize. The engine will allocate evenly
-        across the unit count from the property record.
+      <div className="rounded border border-gray-200 bg-gray-50 p-3 text-xs text-gray-700">
+        <p>
+          <strong>Current assessment mode:</strong>{' '}
+          {packages[0] ? assessmentModeLabel(packages[0].live_assessment_mode) : assessmentModeLabel(liveAssessmentMode)}
+        </p>
+        <p className="mt-2">
+          {packages[0]
+            ? assessmentModeWorkflowCopy(packages[0].live_assessment_mode)
+            : assessmentModeWorkflowCopy(liveAssessmentMode)}
+        </p>
       </div>
 
       {error && (
@@ -154,13 +177,15 @@ export function AnnualPackagesPanel({ hoaId }: Props) {
             <th>Approved by</th>
             <th>Finalized</th>
             <th>Version</th>
+            <th>Assessment mode</th>
+            <th>Impact</th>
             <th>Actions</th>
           </tr>
         </thead>
         <tbody>
           {packages.length === 0 && (
             <tr>
-              <td colSpan={8} className="py-4 text-center text-gray-500">
+              <td colSpan={10} className="py-4 text-center text-gray-500">
                 No packages yet. Create one below.
               </td>
             </tr>
@@ -186,6 +211,26 @@ export function AnnualPackagesPanel({ hoaId }: Props) {
                 {pkg.finalized_at ? pkg.finalized_at.slice(0, 10) : '—'}
               </td>
               <td className="text-gray-600">{pkg.version_int}</td>
+              <td className="text-gray-600">
+                <div>{assessmentModeLabel(pkg.assessment_mode)}</div>
+                <div className="mt-1 text-xs text-gray-500">
+                  Live: {assessmentModeLabel(pkg.live_assessment_mode)}
+                </div>
+              </td>
+              <td className="text-gray-600">
+                {pkg.package_impact === 'none' ? (
+                  '—'
+                ) : (
+                  <div>
+                    <div className="font-medium text-amber-700">
+                      {pkg.package_impact === 'recheck_required' ? 'Recheck required' : 'Regeneration required'}
+                    </div>
+                    {pkg.package_impact_reason ? (
+                      <div className="mt-1 max-w-xs text-xs text-amber-700">{pkg.package_impact_reason}</div>
+                    ) : null}
+                  </div>
+                )}
+              </td>
               <td className="space-x-1">
                 {(pkg.status === 'draft' || pkg.status === 'preflight_failed') && (
                   <button
@@ -196,13 +241,22 @@ export function AnnualPackagesPanel({ hoaId }: Props) {
                     Approve
                   </button>
                 )}
-                {(pkg.status === 'approved' || pkg.status === 'rendered') && (
+                {(pkg.status === 'approved' || pkg.status === 'rendered') && pkg.package_impact !== 'recheck_required' && (
                   <button
                     type="button"
                     onClick={() => onFinalize(pkg)}
                     className="rounded border border-green-400 px-2 py-0.5 text-xs text-green-700 hover:bg-green-50"
                   >
                     Finalize
+                  </button>
+                )}
+                {pkg.package_impact === 'regeneration_required' && (
+                  <button
+                    type="button"
+                    onClick={() => void onCreateRegeneration(pkg)}
+                    className="rounded border border-amber-400 px-2 py-0.5 text-xs text-amber-700 hover:bg-amber-50"
+                  >
+                    Create Regeneration Draft
                   </button>
                 )}
               </td>

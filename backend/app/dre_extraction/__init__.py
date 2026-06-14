@@ -35,6 +35,7 @@ from .page_rendering import (
 from .schemas import (
     AllocationPoolBlock,
     AssessmentSetupBlock,
+    BudgetLineMappingEvidence,
     BudgetPoolMapping,
     DRESetupExtraction,
     DocumentMetadata,
@@ -74,6 +75,7 @@ __all__ = [
     "AllocationMethodMapping",
     "AllocationPoolBlock",
     "AssessmentSetupBlock",
+    "BudgetLineMappingEvidence",
     "BudgetPoolMapping",
     "CitationAudit",
     "ClassificationResult",
