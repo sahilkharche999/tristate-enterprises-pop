@@ -215,3 +215,34 @@ def test_default_model_name_uses_settings_model(monkeypatch) -> None:
     importlib.reload(callbacks)
 
     assert callbacks.default_model_name() == "gemini-3.5-flash"
+
+
+def test_run_seed_skips_existing_accepted_cases(monkeypatch, tmp_path: Path) -> None:
+    from sqlalchemy import create_engine, event
+
+    from app.ai_implementation import database as database_module
+    from app.ai_implementation.db import session as session_module
+    from app.ai_implementation.seed import seed_database as seed_module
+
+    db_path = tmp_path / "seed.db"
+    engine = create_engine(
+        f"sqlite:///{db_path}",
+        connect_args={"check_same_thread": False},
+        echo=False,
+    )
+    event.listen(engine, "connect", session_module._set_sqlite_pragmas)
+
+    monkeypatch.setattr(database_module.settings, "DB_PATH", str(db_path), raising=False)
+    monkeypatch.setattr(database_module, "engine", engine)
+    monkeypatch.setattr(seed_module, "init_db", database_module.init_db)
+    monkeypatch.setattr(seed_module, "get_db", database_module.get_db)
+
+    first = seed_module.run_seed()
+    second = seed_module.run_seed()
+
+    assert first["total_accepted"] > 0
+    assert second == {
+        "existing": first["total_accepted"],
+        "portfolio_seeded": 0,
+        "skipped": True,
+    }

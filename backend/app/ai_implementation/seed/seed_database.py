@@ -739,12 +739,14 @@ def run_seed(force: bool = False) -> dict:
     try:
         portfolio_seeded = sync_portfolio_properties(db)
 
-        # Check if already seeded
+        # Check if already seeded. The bundled startup seed currently inserts
+        # fewer than 50 accepted cases, so any existing accepted case means the
+        # initial seed has already run and should not append duplicates.
         if not force:
             existing = db.execute(
                 "SELECT COUNT(*) FROM feedback_cases WHERE user_decision = 'accepted'"
             ).fetchone()[0]
-            if existing >= 50:
+            if existing > 0:
                 logger.info(f"Database already has {existing} accepted cases, skipping seed. Use force=True to re-seed.")
                 return {"existing": existing, "portfolio_seeded": portfolio_seeded, "skipped": True}
 
