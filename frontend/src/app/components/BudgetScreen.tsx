@@ -55,6 +55,7 @@ import {
   mergeSuggestionKey,
   resolveMergeSuggestionItems,
 } from '../lib/glMerge.ts';
+import { FileDropzone } from './fileDropzone';
 import {
   glMergeSuggestionStorageKey,
   readGlMergeSuggestionCache,
@@ -1194,23 +1195,6 @@ export function BudgetScreen({
     bundleUploadResult?.reserve_study.status === 'failed' ||
     bundleUploadResult?.reserve_study.status === 'review_required';
 
-  const uploadTileClassName = (options: {
-    hasFile: boolean;
-    requiresAttention: boolean;
-    isMissingWhileOtherSelected: boolean;
-  }) => {
-    if (options.requiresAttention) {
-      return 'rounded-2xl border-2 border-[#f59e0b] bg-[#fff7ed] p-5 text-left shadow-sm transition-colors';
-    }
-    if (options.hasFile) {
-      return 'rounded-2xl border-2 border-[#111111] bg-white p-5 text-left shadow-sm transition-colors';
-    }
-    if (options.isMissingWhileOtherSelected) {
-      return 'rounded-2xl border-2 border-dashed border-[#f59e0b] bg-[#fff7ed] p-5 text-left shadow-sm transition-colors';
-    }
-    return 'rounded-2xl border-2 border-dashed border-[#d4d4d4] bg-[#fafafa] p-5 text-left shadow-sm transition-colors hover:border-[#a3a3a3] hover:bg-white';
-  };
-
   const handleApplyAISuggestions = (selectedSuggestions: AISuggestion[]) => {
     const snapshot = new Map<string, { feedbackCaseId: number; appliedPercent: number }>();
     for (const s of selectedSuggestions) {
@@ -1350,70 +1334,59 @@ export function BudgetScreen({
                 </p>
               </div>
               <div className="grid w-full gap-4 md:grid-cols-2">
-                <label
-                  className={uploadTileClassName({
-                    hasFile: Boolean(budgetSourceFile),
-                    requiresAttention: Boolean(budgetFileRequiresAttention),
-                    isMissingWhileOtherSelected: Boolean(!budgetSourceFile && reserveStudyFile),
-                  })}
-                >
-                  <input
-                    type="file"
-                    accept=".xlsx,.xls,.pdf"
-                    onChange={(event) => setBudgetSourceFile(event.target.files?.[0] ?? null)}
-                    className="sr-only"
-                  />
-                  <div className="flex items-start justify-between gap-4">
-                    <div>
-                      <span className="mb-2 block text-xs font-medium uppercase tracking-[0.18em] text-[#737373]">
-                        {budgetSourceModeUploadTitle(budgetSourceMode)}
-                      </span>
-                      <p className="text-sm font-medium text-[#111111]">
-                        {budgetSourceFile?.name ?? budgetSourceModeUploadPlaceholder(budgetSourceMode)}
-                      </p>
-                      <p className="mt-2 text-xs text-[#737373]">
-                        {budgetSourceFile
-                          ? 'Selected and ready to upload.'
-                          : budgetSourceModeHelperCopy(budgetSourceMode)}
-                      </p>
-                    </div>
-                    <span className="rounded-lg border border-[#d4d4d4] bg-white px-3 py-2 text-xs font-medium text-[#111111] shadow-sm">
-                      {budgetSourceFile ? 'Change File' : 'Select File'}
-                    </span>
-                  </div>
-                </label>
-                <label
-                  className={uploadTileClassName({
-                    hasFile: Boolean(reserveStudyFile),
-                    requiresAttention: Boolean(reserveFileRequiresAttention),
-                    isMissingWhileOtherSelected: Boolean(!reserveStudyFile && budgetSourceFile),
-                  })}
-                >
-                  <input
-                    type="file"
-                    accept=".pdf"
-                    onChange={(event) => setReserveStudyFile(event.target.files?.[0] ?? null)}
-                    className="sr-only"
-                  />
-                  <div className="flex items-start justify-between gap-4">
-                    <div>
-                      <span className="mb-2 block text-xs font-medium uppercase tracking-[0.18em] text-[#737373]">
-                        Reserve Study PDF
-                      </span>
-                      <p className="text-sm font-medium text-[#111111]">
-                        {reserveStudyFile?.name ?? 'Separate reserve study PDF'}
-                      </p>
-                      <p className="mt-2 text-xs text-[#737373]">
-                        {reserveStudyFile
-                          ? 'Selected and ready to upload.'
-                          : 'Optional. Attach a reserve study PDF to review reserve components with this draft.'}
-                      </p>
-                    </div>
-                    <span className="rounded-lg border border-[#d4d4d4] bg-white px-3 py-2 text-xs font-medium text-[#111111] shadow-sm">
-                      {reserveStudyFile ? 'Change File' : 'Select File'}
-                    </span>
-                  </div>
-                </label>
+                <FileDropzone
+                  title={budgetSourceModeUploadTitle(budgetSourceMode)}
+                  helper={budgetSourceModeHelperCopy(budgetSourceMode)}
+                  accept=".xlsx,.xls,.pdf"
+                  fileName={budgetSourceFile?.name ?? null}
+                  disabled={uploadState === 'uploading'}
+                  required
+                  status={
+                    budgetFileRequiresAttention
+                      ? 'attention'
+                      : budgetSourceFile
+                        ? 'selected'
+                        : reserveStudyFile
+                          ? 'attention'
+                          : 'idle'
+                  }
+                  statusMessage={
+                    budgetSourceFile
+                      ? 'Selected and ready to upload.'
+                      : reserveStudyFile
+                        ? 'Budget source is still needed.'
+                        : budgetSourceModeUploadPlaceholder(budgetSourceMode)
+                  }
+                  actionLabel="Select file"
+                  onFilesSelected={(files) => setBudgetSourceFile(files?.[0] ?? null)}
+                  onClear={() => setBudgetSourceFile(null)}
+                />
+                <FileDropzone
+                  title="Reserve Study PDF"
+                  helper="Optional. Attach a reserve study PDF to review reserve components with this draft."
+                  accept=".pdf,application/pdf"
+                  fileName={reserveStudyFile?.name ?? null}
+                  disabled={uploadState === 'uploading'}
+                  status={
+                    reserveFileRequiresAttention
+                      ? 'attention'
+                      : reserveStudyFile
+                        ? 'selected'
+                        : budgetSourceFile
+                          ? 'attention'
+                          : 'idle'
+                  }
+                  statusMessage={
+                    reserveStudyFile
+                      ? 'Selected and ready to upload.'
+                      : budgetSourceFile
+                        ? 'Add now if available, or continue with budget only.'
+                        : 'Separate reserve study PDF'
+                  }
+                  actionLabel="Select PDF"
+                  onFilesSelected={(files) => setReserveStudyFile(files?.[0] ?? null)}
+                  onClear={() => setReserveStudyFile(null)}
+                />
               </div>
               <Button
                 onClick={handleCreateDraftUpload}
@@ -1544,7 +1517,7 @@ export function BudgetScreen({
               </Link>
                 <div>
                   <h1 className="text-xl font-semibold text-[#111111]">{hoa.name}</h1>
-                  <div className="mt-1 flex items-center gap-3">
+                  <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
                     <p className="text-sm text-[#737373]">Fiscal Year: {fiscalYearLabel}</p>
                     <span className="text-[#d4d4d4]">•</span>
                     <p className="text-xs text-[#737373]">Draft {draftId ?? 'Unavailable'}</p>
@@ -1557,8 +1530,8 @@ export function BudgetScreen({
                   </div>
                 </div>
               </div>
-            <div className="flex items-center gap-4">
-              <div className="text-right">
+            <div className="flex flex-wrap items-center justify-end gap-3">
+              <div className="rounded-lg border border-[#e5e5e5] bg-[#fafafa] px-3 py-2 text-right">
                 <span className="text-xs text-[#a3a3a3]">Last Saved</span>
                 <p className="text-sm font-medium text-[#525252]">
                   {lastSaved ? formatTimestamp(lastSaved) : 'Not saved yet'}
@@ -1652,8 +1625,8 @@ export function BudgetScreen({
       </header>
 
       <div className="sticky top-[140px] z-20 border-b border-[#e5e5e5] bg-white shadow-md">
-        <div className="flex items-center justify-between bg-white/95 px-8 py-5 backdrop-blur-sm">
-          <div className="flex items-center gap-2">
+        <div className="flex items-center justify-between gap-4 bg-white/95 px-8 py-5 backdrop-blur-sm">
+          <div className="flex flex-wrap items-center gap-2">
             <Button
               variant={currentView === 'enriched' ? 'default' : 'outline'}
               onClick={() => setCurrentView('enriched')}
@@ -1737,7 +1710,7 @@ export function BudgetScreen({
         {currentView === 'enriched' && (
           <>
             {draftId && isComparePanelOpen ? (
-              <div className="mb-8">
+              <div className="mb-8 rounded-xl border border-[#e5e5e5] bg-white p-4 shadow-sm">
                 <DraftBaselineComparePanel
                   hoaId={hoaId}
                   draftId={draftId}

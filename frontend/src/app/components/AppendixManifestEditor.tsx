@@ -13,6 +13,7 @@ import {
   updateAppendix,
   uploadAppendix,
 } from '../api/appendices';
+import { FileDropzone } from './fileDropzone';
 
 type Props = {
   hoaId: number;
@@ -148,7 +149,7 @@ export function AppendixManifestEditor({ hoaId }: Props) {
   return (
     <section className="space-y-4 p-4">
       <header className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold">Disclosure-package appendices</h2>
+        <h2 className="text-lg font-semibold text-[#111111]">Disclosure-package appendices</h2>
         <label className="flex items-center gap-2 text-sm">
           <input
             type="checkbox"
@@ -167,8 +168,8 @@ export function AppendixManifestEditor({ hoaId }: Props) {
 
       <table className="min-w-full text-sm">
         <thead>
-          <tr className="border-b text-left">
-            <th className="py-1">#</th>
+          <tr className="border-b border-[#e5e5e5] text-left text-xs uppercase tracking-[0.08em] text-[#737373]">
+            <th className="py-2">#</th>
             <th>Display title</th>
             <th>File</th>
             <th>Include by default</th>
@@ -187,8 +188,8 @@ export function AppendixManifestEditor({ hoaId }: Props) {
             </tr>
           )}
           {appendices.map((row) => (
-            <tr key={row.appendix_id} className="border-b">
-              <td className="py-1">{row.default_display_order}</td>
+            <tr key={row.appendix_id} className="border-b border-[#f0f0f0]">
+              <td className="py-3">{row.default_display_order}</td>
               <td>
                 <span className="font-medium">{row.display_title}</span>
                 {row.needs_cadence_review && (
@@ -197,7 +198,7 @@ export function AppendixManifestEditor({ hoaId }: Props) {
                   </span>
                 )}
               </td>
-              <td className="text-gray-600">{row.file_name}</td>
+              <td className="text-[#737373]">{row.file_name}</td>
               <td>
                 <input
                   type="checkbox"
@@ -232,7 +233,7 @@ export function AppendixManifestEditor({ hoaId }: Props) {
                   type="button"
                   disabled={row.status === 'retired'}
                   onClick={() => onReorder(row, 'up')}
-                  className="rounded border px-1 py-0.5 text-xs"
+                  className="rounded border border-[#d4d4d4] px-1 py-0.5 text-xs hover:bg-[#f5f5f5]"
                 >
                   ↑
                 </button>
@@ -240,7 +241,7 @@ export function AppendixManifestEditor({ hoaId }: Props) {
                   type="button"
                   disabled={row.status === 'retired'}
                   onClick={() => onReorder(row, 'down')}
-                  className="rounded border px-1 py-0.5 text-xs"
+                  className="rounded border border-[#d4d4d4] px-1 py-0.5 text-xs hover:bg-[#f5f5f5]"
                 >
                   ↓
                 </button>
@@ -250,7 +251,7 @@ export function AppendixManifestEditor({ hoaId }: Props) {
                   <button
                     type="button"
                     onClick={() => onRetire(row)}
-                    className="rounded border border-red-300 px-2 py-0.5 text-xs text-red-700 hover:bg-red-50"
+                    className="rounded border border-red-200 px-2 py-0.5 text-xs text-red-700 hover:bg-red-50"
                   >
                     Retire
                   </button>
@@ -263,21 +264,25 @@ export function AppendixManifestEditor({ hoaId }: Props) {
         </tbody>
       </table>
 
-      <form onSubmit={onUpload} className="space-y-2 rounded border bg-gray-50 p-3">
-        <h3 className="font-medium">Upload new appendix</h3>
+      <form onSubmit={onUpload} className="space-y-3 rounded border border-[#e5e5e5] bg-[#fafafa] p-3">
+        <h3 className="font-medium text-[#111111]">Upload new appendix</h3>
+        <FileDropzone
+          title="Appendix PDF"
+          helper="Upload a persistent, annual, or one-time disclosure appendix."
+          accept="application/pdf,.pdf"
+          fileName={uploadFile?.name ?? null}
+          disabled={uploading}
+          status={uploadFile ? 'selected' : 'idle'}
+          statusMessage={uploadFile ? 'File selected.' : 'PDF only.'}
+          actionLabel="Choose PDF"
+          onFilesSelected={(files) => setUploadFile(files?.[0] ?? null)}
+          onClear={() => setUploadFile(null)}
+        />
         <div className="grid grid-cols-2 gap-2 text-sm">
-          <label>
-            PDF:
-            <input
-              type="file"
-              accept="application/pdf"
-              onChange={(e) => setUploadFile(e.target.files?.[0] ?? null)}
-            />
-          </label>
           <label>
             Display title:
             <input
-              className="w-full rounded border px-2 py-1"
+              className="w-full rounded border border-[#d4d4d4] px-2 py-1"
               value={uploadTitle}
               onChange={(e) => setUploadTitle(e.target.value)}
               placeholder="e.g. ADR / IDR Policy"
@@ -286,7 +291,7 @@ export function AppendixManifestEditor({ hoaId }: Props) {
           <label>
             Cadence:
             <select
-              className="w-full rounded border px-2 py-1"
+              className="w-full rounded border border-[#d4d4d4] px-2 py-1"
               value={uploadCadence}
               onChange={(e) => setUploadCadence(e.target.value as AppendixCadence)}
             >
@@ -302,7 +307,7 @@ export function AppendixManifestEditor({ hoaId }: Props) {
               <label>
                 Annual year:
                 <input
-                  className="w-full rounded border px-2 py-1"
+                  className="w-full rounded border border-[#d4d4d4] px-2 py-1"
                   value={uploadAnnualYear}
                   onChange={(e) => setUploadAnnualYear(e.target.value)}
                   placeholder="2026"
@@ -311,7 +316,7 @@ export function AppendixManifestEditor({ hoaId }: Props) {
               <label>
                 Valid through year:
                 <input
-                  className="w-full rounded border px-2 py-1"
+                  className="w-full rounded border border-[#d4d4d4] px-2 py-1"
                   value={uploadValidThrough}
                   onChange={(e) => setUploadValidThrough(e.target.value)}
                   placeholder="2027"
@@ -323,7 +328,7 @@ export function AppendixManifestEditor({ hoaId }: Props) {
         <button
           type="submit"
           disabled={uploading || !uploadFile || !uploadTitle}
-          className="rounded bg-blue-600 px-3 py-1 text-white hover:bg-blue-700 disabled:opacity-50"
+          className="rounded-md bg-[#111111] px-3 py-2 text-white hover:bg-[#262626] disabled:cursor-not-allowed disabled:opacity-50"
         >
           {uploading ? 'Uploading…' : 'Upload appendix'}
         </button>

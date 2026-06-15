@@ -4,8 +4,8 @@
 // operator delete any of them. The disclosure compiler appends every PDF
 // in this list (sorted by filename) after the generated pages.
 
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { Plus, Trash2, FileText, Loader2 } from 'lucide-react';
+import { useCallback, useEffect, useState } from 'react';
+import { Trash2, FileText } from 'lucide-react';
 
 import {
   type DisclosureAppendixEntry,
@@ -14,6 +14,7 @@ import {
   uploadDisclosureAppendix,
 } from '../../api/disclosurePackage';
 import { Button } from '../ui/button';
+import { FileDropzone } from '../fileDropzone';
 
 export interface DisclosureAppendixManagerProps {
   hoaId: number;
@@ -36,7 +37,6 @@ export function DisclosureAppendixManager({
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -68,7 +68,6 @@ export function DisclosureAppendixManager({
       setError(err instanceof Error ? err.message : 'Upload failed');
     } finally {
       setUploading(false);
-      if (fileInputRef.current) fileInputRef.current.value = '';
     }
   };
 
@@ -91,30 +90,20 @@ export function DisclosureAppendixManager({
             PDFs uploaded here are appended to every generated package, sorted by filename.
           </p>
         </div>
-        <div>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="application/pdf,.pdf"
-            multiple
-            className="hidden"
-            onChange={(e) => void handleFiles(e.target.files)}
-          />
-          <Button
-            variant="outline"
-            disabled={disabled || uploading}
-            onClick={() => fileInputRef.current?.click()}
-            className="border-[#d4d4d4] text-[#111111] hover:border-[#a3a3a3] hover:bg-[#f5f5f5]"
-          >
-            {uploading ? (
-              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-            ) : (
-              <Plus className="mr-2 h-4 w-4" />
-            )}
-            {uploading ? 'Uploading…' : 'Upload PDF'}
-          </Button>
-        </div>
       </div>
+
+      <FileDropzone
+        title="Upload static appendix PDFs"
+        helper="These PDFs are appended to every generated package."
+        accept="application/pdf,.pdf"
+        multiple
+        fileName={null}
+        disabled={disabled || uploading}
+        status={uploading ? 'attention' : 'idle'}
+        statusMessage={uploading ? 'Uploading…' : undefined}
+        actionLabel="Choose PDFs"
+        onFilesSelected={(files) => void handleFiles(files)}
+      />
 
       {error ? (
         <p className="rounded border border-[#fecaca] bg-[#fef2f2] px-3 py-2 text-xs text-[#b91c1c]">

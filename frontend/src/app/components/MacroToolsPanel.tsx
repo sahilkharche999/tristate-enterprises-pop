@@ -1,7 +1,8 @@
-import { useState, useRef } from 'react';
+import { useState } from 'react';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
+import { FileDropzone } from './fileDropzone';
 import * as api from '../api/macros';
 import type { TableResponse, SumResponse, DupsResponse, SimpleResponse, RunPipelineResponse, CumulativeSumResponse } from '../api/macros';
 
@@ -18,12 +19,25 @@ type ToolResult =
 
 // ─── Shared sub-components ────────────────────────────────────────────────────
 
-function FileField({ fileRef }: { fileRef: React.RefObject<HTMLInputElement | null> }) {
+function FileField({
+  file,
+  setFile,
+}: {
+  file: File | null;
+  setFile: (file: File | null) => void;
+}) {
   return (
-    <div className="space-y-1">
-      <Label className="text-xs text-[#525252]">Excel File (.xlsx / .xls)</Label>
-      <Input ref={fileRef} type="file" accept=".xlsx,.xls" className="bg-white border-[#E5E5E5] text-sm" />
-    </div>
+    <FileDropzone
+      title="Excel file"
+      helper="Upload an .xlsx or .xls workbook."
+      accept=".xlsx,.xls"
+      fileName={file?.name ?? null}
+      status={file ? 'selected' : 'idle'}
+      statusMessage={file ? 'File selected.' : 'Excel workbook required.'}
+      actionLabel="Choose workbook"
+      onFilesSelected={(files) => setFile(files?.[0] ?? null)}
+      onClear={() => setFile(null)}
+    />
   );
 }
 
@@ -159,48 +173,47 @@ function ToolCard({
 
 export function MacroToolsPanel() {
   // Remove Protection
-  const removeProtFile = useRef<HTMLInputElement>(null);
+  const [removeProtFile, setRemoveProtFile] = useState<File | null>(null);
 
   // Run Pipeline
-  const pipelineFile = useRef<HTMLInputElement>(null);
+  const [pipelineFile, setPipelineFile] = useState<File | null>(null);
   const [pipelineSheet, setPipelineSheet] = useState('Income Statement');
 
   // Payment Search
-  const paymentFile = useRef<HTMLInputElement>(null);
+  const [paymentFile, setPaymentFile] = useState<File | null>(null);
   const [paymentSheet, setPaymentSheet] = useState('Sheet1');
 
   // Sum & Format
-  const sumFile = useRef<HTMLInputElement>(null);
+  const [sumFile, setSumFile] = useState<File | null>(null);
   const [sumSheet, setSumSheet] = useState('');
   const [sumStartCell, setSumStartCell] = useState('');
   const [sumRowCount, setSumRowCount] = useState('');
   const [sumTargetCol, setSumTargetCol] = useState('H');
 
   // ACH Sum
-  const achFile = useRef<HTMLInputElement>(null);
+  const [achFile, setAchFile] = useState<File | null>(null);
   const [achSheet, setAchSheet] = useState('');
   const [achStartCell, setAchStartCell] = useState('');
   const [achFindText, setAchFindText] = useState('ACH Draft');
 
   // One Cell
-  const oneCellFile = useRef<HTMLInputElement>(null);
+  const [oneCellFile, setOneCellFile] = useState<File | null>(null);
   const [oneCellSheet, setOneCellSheet] = useState('');
   const [oneCellStartCell, setOneCellStartCell] = useState('');
 
   // Find Dups
-  const dupsFile = useRef<HTMLInputElement>(null);
+  const [dupsFile, setDupsFile] = useState<File | null>(null);
   const [dupsSheet, setDupsSheet] = useState('');
   const [dupsLookupCol, setDupsLookupCol] = useState('F');
 
   // Cumulative Sum
-  const cumsumFile = useRef<HTMLInputElement>(null);
+  const [cumsumFile, setCumsumFile] = useState<File | null>(null);
   const [cumsumSheet, setCumsumSheet] = useState('');
   const [cumsumStartRow, setCumsumStartRow] = useState('');
   const [cumsumStartCol, setCumsumStartCol] = useState('');
   const [cumsumEndRow, setCumsumEndRow] = useState('');
 
-  const getFile = (ref: React.RefObject<HTMLInputElement | null>): File => {
-    const file = ref.current?.files?.[0];
+  const getFile = (file: File | null): File => {
     if (!file) throw { message: 'Please select a file first.' };
     return file;
   };
@@ -229,7 +242,7 @@ export function MacroToolsPanel() {
             return { kind: 'download' } as ToolResult;
           }}
         >
-          <FileField fileRef={removeProtFile} />
+          <FileField file={removeProtFile} setFile={setRemoveProtFile} />
         </ToolCard>
 
         {/* Run Pipeline */}
@@ -242,7 +255,7 @@ export function MacroToolsPanel() {
             return { kind: 'pipeline', data } as ToolResult;
           }}
         >
-          <FileField fileRef={pipelineFile} />
+          <FileField file={pipelineFile} setFile={setPipelineFile} />
           <div className="space-y-1">
             <Label className="text-xs text-[#525252]">Sheet Name</Label>
             <Input value={pipelineSheet} onChange={(e) => setPipelineSheet(e.target.value)} className="bg-white border-[#E5E5E5] text-sm" placeholder="Income Statement" />
@@ -259,7 +272,7 @@ export function MacroToolsPanel() {
             return { kind: 'table', data } as ToolResult;
           }}
         >
-          <FileField fileRef={paymentFile} />
+          <FileField file={paymentFile} setFile={setPaymentFile} />
           <div className="space-y-1">
             <Label className="text-xs text-[#525252]">Sheet Name</Label>
             <Input value={paymentSheet} onChange={(e) => setPaymentSheet(e.target.value)} className="bg-white border-[#E5E5E5] text-sm" placeholder="Sheet1" />
@@ -282,7 +295,7 @@ export function MacroToolsPanel() {
             return { kind: 'sum', data } as ToolResult;
           }}
         >
-          <FileField fileRef={sumFile} />
+          <FileField file={sumFile} setFile={setSumFile} />
           <div className="grid grid-cols-2 gap-2">
             <div className="space-y-1">
               <Label className="text-xs text-[#525252]">Sheet</Label>
@@ -318,7 +331,7 @@ export function MacroToolsPanel() {
             return { kind: 'sum', data } as ToolResult;
           }}
         >
-          <FileField fileRef={achFile} />
+          <FileField file={achFile} setFile={setAchFile} />
           <div className="grid grid-cols-2 gap-2">
             <div className="space-y-1">
               <Label className="text-xs text-[#525252]">Sheet</Label>
@@ -345,7 +358,7 @@ export function MacroToolsPanel() {
             return { kind: 'simple', data } as ToolResult;
           }}
         >
-          <FileField fileRef={oneCellFile} />
+          <FileField file={oneCellFile} setFile={setOneCellFile} />
           <div className="grid grid-cols-2 gap-2">
             <div className="space-y-1">
               <Label className="text-xs text-[#525252]">Sheet</Label>
@@ -368,7 +381,7 @@ export function MacroToolsPanel() {
             return { kind: 'dups', data } as ToolResult;
           }}
         >
-          <FileField fileRef={dupsFile} />
+          <FileField file={dupsFile} setFile={setDupsFile} />
           <div className="grid grid-cols-2 gap-2">
             <div className="space-y-1">
               <Label className="text-xs text-[#525252]">Sheet</Label>
@@ -397,7 +410,7 @@ export function MacroToolsPanel() {
             return { kind: 'cumsum', data } as ToolResult;
           }}
         >
-          <FileField fileRef={cumsumFile} />
+          <FileField file={cumsumFile} setFile={setCumsumFile} />
           <div className="grid grid-cols-2 gap-2">
             <div className="space-y-1">
               <Label className="text-xs text-[#525252]">Sheet</Label>

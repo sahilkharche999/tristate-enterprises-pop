@@ -12,6 +12,7 @@ import {
   triggerDREExtraction,
   uploadDRE,
 } from '../api/dre';
+import { FileDropzone } from './fileDropzone';
 import { DREReviewWorkbench } from './DREReviewWorkbench';
 
 type Props = {
@@ -195,9 +196,9 @@ export function DREPanel({ hoaId }: Props) {
 
   return (
     <section className="space-y-4 p-4">
-      <header>
-        <h2 className="text-lg font-semibold">DRE documents & extractions</h2>
-        <p className="text-sm text-gray-600">
+      <header className="space-y-1">
+        <h2 className="text-lg font-semibold text-[#111111]">DRE documents & extractions</h2>
+        <p className="text-sm text-[#525252]">
           Upload a DRE PDF to extract its assessment setup via Gemini Vision.
           Review the extraction in the Workbench, then approve to promote
           it into a live AssessmentSetup.
@@ -205,20 +206,22 @@ export function DREPanel({ hoaId }: Props) {
       </header>
 
       {error && (
-        <div className="rounded border border-red-300 bg-red-50 p-2 text-sm text-red-700">
+        <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
           {error}
         </div>
       )}
 
-      <section>
-        <h3 className="mb-1 text-sm font-medium">Uploaded DRE documents</h3>
+      <section className="rounded-xl border border-[#e5e5e5] bg-white p-4 shadow-sm">
+        <h3 className="mb-3 text-sm font-semibold text-[#111111]">Uploaded DRE documents</h3>
         {docs.length === 0 ? (
-          <p className="text-sm text-gray-500">No DREs uploaded yet.</p>
+          <p className="rounded-lg border border-dashed border-[#d4d4d4] bg-[#fafafa] px-3 py-4 text-sm text-[#737373]">
+            No DREs uploaded yet.
+          </p>
         ) : (
           <table className="min-w-full text-sm">
             <thead>
-              <tr className="border-b text-left">
-                <th>ID</th>
+              <tr className="border-b border-[#e5e5e5] text-left text-xs uppercase tracking-[0.08em] text-[#737373]">
+                <th className="py-2">ID</th>
                 <th>File</th>
                 <th>Pages</th>
                 <th>Status</th>
@@ -238,23 +241,23 @@ export function DREPanel({ hoaId }: Props) {
                       ? 'Running…'
                       : 'Run extraction';
                 return (
-                  <tr key={d.document_id} className="border-b">
-                    <td>{d.document_id}</td>
+                  <tr key={d.document_id} className="border-b border-[#f0f0f0] transition-colors hover:bg-[#fafafa]">
+                    <td className="py-3">{d.document_id}</td>
                     <td className="font-mono">{d.file_name}</td>
                     <td>{d.page_count ?? '—'}</td>
                     <td>
-                      <span className="rounded bg-gray-100 px-2 py-0.5 text-xs">
+                      <span className="rounded-full bg-[#f5f5f5] px-2 py-0.5 text-xs text-[#525252]">
                         {d.status}
                       </span>
                     </td>
                     <td>{d.uploaded_at.slice(0, 10)}</td>
-                    <td className="text-gray-500">{d.uploaded_by || '—'}</td>
+                    <td className="text-[#737373]">{d.uploaded_by || '—'}</td>
                     <td>
                       <button
                         type="button"
                         disabled={busy || d.status !== 'active'}
                         onClick={() => onRunExtraction(d.document_id)}
-                        className="rounded border border-blue-400 px-2 py-0.5 text-xs text-blue-700 hover:bg-blue-50 disabled:opacity-50"
+                        className="rounded-md border border-[#d4d4d4] px-2 py-1 text-xs text-[#111111] hover:border-[#a3a3a3] hover:bg-[#f5f5f5] disabled:cursor-not-allowed disabled:opacity-50"
                       >
                         {buttonLabel}
                       </button>
@@ -267,18 +270,18 @@ export function DREPanel({ hoaId }: Props) {
         )}
       </section>
 
-      <section>
-        <h3 className="mb-1 text-sm font-medium">Extraction runs</h3>
+      <section className="rounded-xl border border-[#e5e5e5] bg-white p-4 shadow-sm">
+        <h3 className="mb-3 text-sm font-semibold text-[#111111]">Extraction runs</h3>
         {runs.length === 0 ? (
-          <p className="text-sm text-gray-500">
+          <p className="rounded-lg border border-dashed border-[#d4d4d4] bg-[#fafafa] px-3 py-4 text-sm text-[#737373]">
             No extractions yet. Click <strong>Run extraction</strong> on an
             uploaded DRE row above to kick off a Gemini Vision extraction.
           </p>
         ) : (
           <table className="min-w-full text-sm">
             <thead>
-              <tr className="border-b text-left">
-                <th>Run ID</th>
+              <tr className="border-b border-[#e5e5e5] text-left text-xs uppercase tracking-[0.08em] text-[#737373]">
+                <th className="py-2">Run ID</th>
                 <th>Doc</th>
                 <th>Status</th>
                 <th>Review</th>
@@ -291,13 +294,13 @@ export function DREPanel({ hoaId }: Props) {
               {runs.map((r) => {
                 const active = isActiveRun(r);
                 return (
-                  <tr key={r.extraction_run_id} className="border-b">
-                    <td>{r.extraction_run_id}</td>
+                  <tr key={r.extraction_run_id} className="border-b border-[#f0f0f0] transition-colors hover:bg-[#fafafa]">
+                    <td className="py-3">{r.extraction_run_id}</td>
                     <td>{r.dre_document_id}</td>
                     <td>
                       <div className="space-y-1">
                         <span
-                          className={`inline-block rounded px-2 py-0.5 text-xs ${lifecycleTone(r)}`}
+                          className={`inline-block rounded-full px-2 py-0.5 text-xs ${lifecycleTone(r)}`}
                         >
                           {lifecycleLabel(r)}
                         </span>
@@ -310,7 +313,7 @@ export function DREPanel({ hoaId }: Props) {
                     </td>
                     <td>
                       <span
-                        className={`inline-block rounded px-2 py-0.5 text-xs ${
+                        className={`inline-block rounded-full px-2 py-0.5 text-xs ${
                           REVIEW_STATUS_COLORS[r.review_status] ||
                           'bg-gray-100 text-gray-700'
                         }`}
@@ -327,7 +330,7 @@ export function DREPanel({ hoaId }: Props) {
                         type="button"
                         disabled={active}
                         onClick={() => setSelectedRunId(r.extraction_run_id)}
-                        className="rounded border px-2 py-0.5 text-xs hover:bg-gray-50 disabled:opacity-50"
+                        className="rounded-md border border-[#d4d4d4] px-2 py-1 text-xs text-[#111111] hover:border-[#a3a3a3] hover:bg-[#f5f5f5] disabled:cursor-not-allowed disabled:opacity-50"
                       >
                         {active ? 'Waiting…' : 'Review →'}
                       </button>
@@ -340,22 +343,25 @@ export function DREPanel({ hoaId }: Props) {
         )}
       </section>
 
-      <form
-        onSubmit={onUpload}
-        className="flex items-end gap-3 rounded border bg-gray-50 p-3"
-      >
-        <label className="flex-1">
-          <span className="block text-sm">Upload new DRE PDF</span>
-          <input
-            type="file"
-            accept="application/pdf"
-            onChange={(e) => setUploadFile(e.target.files?.[0] ?? null)}
+      <form onSubmit={onUpload} className="flex items-end gap-3 rounded border border-[#e5e5e5] bg-[#fafafa] p-3">
+        <div className="flex-1">
+          <FileDropzone
+            title="Upload new DRE PDF"
+            helper="Pick the scanned DRE PDF that describes assessment setup."
+            accept="application/pdf,.pdf"
+            fileName={uploadFile?.name ?? null}
+            disabled={uploading}
+            status={uploadFile ? 'selected' : 'idle'}
+            statusMessage={uploadFile ? 'File selected.' : 'Scanned PDF preferred.'}
+            actionLabel="Choose PDF"
+            onFilesSelected={(files) => setUploadFile(files?.[0] ?? null)}
+            onClear={() => setUploadFile(null)}
           />
-        </label>
+        </div>
         <button
           type="submit"
           disabled={!uploadFile || uploading}
-          className="rounded bg-blue-600 px-3 py-1 text-sm text-white hover:bg-blue-700 disabled:opacity-50"
+          className="rounded-md bg-[#111111] px-3 py-2 text-sm text-white hover:bg-[#262626] disabled:cursor-not-allowed disabled:opacity-50"
         >
           {uploading ? 'Uploading…' : 'Upload'}
         </button>
