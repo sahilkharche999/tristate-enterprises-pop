@@ -692,6 +692,361 @@ def test_db_builder_accepts_legacy_draft_line_item_shape_when_mappings_exist() -
     assert matrix.preflight_issues == []
 
 
+def test_db_builder_800_high_multi_factor_units_do_not_require_global_ownership_percent() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE assessment_setups (
+            id INTEGER PRIMARY KEY,
+            property_id INTEGER,
+            setup_type TEXT,
+            status TEXT,
+            approved_at TEXT
+        );
+        CREATE TABLE dre_extraction_runs (
+            id INTEGER PRIMARY KEY,
+            property_id INTEGER,
+            promoted_setup_id INTEGER,
+            parsed_json TEXT
+        );
+        CREATE TABLE allocation_pools (
+            id INTEGER PRIMARY KEY,
+            assessment_setup_id INTEGER,
+            pool_key TEXT,
+            pool_name TEXT,
+            allocation_method TEXT,
+            recipient_scope TEXT,
+            denominator_value NUMERIC,
+            include_in_pdf INTEGER,
+            display_order INTEGER
+        );
+        CREATE TABLE assessment_groups (
+            id INTEGER PRIMARY KEY,
+            assessment_setup_id INTEGER,
+            group_name TEXT,
+            unit_count INTEGER,
+            average_square_feet NUMERIC,
+            ownership_percent NUMERIC,
+            display_order INTEGER
+        );
+        CREATE TABLE assessment_units (
+            id INTEGER PRIMARY KEY,
+            assessment_setup_id INTEGER,
+            unit_number TEXT,
+            square_feet NUMERIC,
+            ownership_percent NUMERIC,
+            category TEXT,
+            parking_spaces INTEGER
+        );
+        CREATE TABLE budget_line_pool_mappings (
+            budget_line_normalized_label TEXT,
+            section TEXT,
+            category TEXT,
+            fund_type TEXT,
+            account_code TEXT,
+            pool_key TEXT,
+            active INTEGER,
+            property_id INTEGER,
+            assessment_setup_id INTEGER
+        );
+        CREATE TABLE assessment_unit_pool_allocations (
+            assessment_unit_id INTEGER,
+            assessment_setup_id INTEGER,
+            pool_key TEXT,
+            specified_monthly_amount NUMERIC
+        );
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO assessment_setups
+        (id, property_id, setup_type, status, approved_at)
+        VALUES (2, 1, 'per_unit', 'approved', '2026-06-15T06:08:47+00:00')
+        """
+    )
+    conn.executemany(
+        """
+        INSERT INTO allocation_pools
+        (id, assessment_setup_id, pool_key, pool_name, allocation_method,
+         recipient_scope, denominator_value, include_in_pdf, display_order)
+        VALUES (?, 2, ?, ?, ?, ?, ?, 1, ?)
+        """,
+        [
+            (1, "general_prorated", "General Prorated", "ownership_percentage", "all_units", 1, 0),
+            (2, "general_equal", "General Equal", "equal", "all_units", 61, 1),
+            (3, "residential_prorated", "Residential Prorated", "ownership_percentage", "residential_only", 1, 2),
+            (4, "residential_equal", "Residential Equal", "equal", "residential_only", 60, 3),
+            (5, "parking_garage", "Parking Garage", "equal", "parking_users", 64, 4),
+        ],
+    )
+    conn.executemany(
+        """
+        INSERT INTO assessment_units
+        (id, assessment_setup_id, unit_number, square_feet, ownership_percent, category, parking_spaces)
+        VALUES (?, 2, ?, ?, NULL, ?, ?)
+        """,
+        [
+            (1, "Retail", 1498, "commercial", 0),
+            (2, "101", 1613, "residential", 0),
+            (3, "102", 1738, "residential", 0),
+        ],
+    )
+    conn.executemany(
+        """
+        INSERT INTO budget_line_pool_mappings
+        (budget_line_normalized_label, section, category, fund_type,
+         account_code, pool_key, active, property_id, assessment_setup_id)
+        VALUES (?, ?, ?, ?, ?, ?, 1, 1, 2)
+        """,
+        [
+            ("management services", "Administrative Expenses", "operating", "operating", None, "general_equal"),
+            ("general insurance", "Administrative Expenses", "operating", "operating", None, "general_prorated"),
+            ("window cleaning maintenance", "General Maintenance", "operating", "operating", None, "residential_prorated"),
+            ("telephone internet", "Utilities", "operating", "operating", None, "general_equal"),
+            ("water and sewer", "Utilities", "operating", "operating", None, "residential_prorated"),
+            ("electricity", "Utilities", "operating", "operating", None, "parking_garage"),
+        ],
+    )
+    conn.execute(
+        """
+        INSERT INTO dre_extraction_runs
+        (id, property_id, promoted_setup_id, parsed_json)
+        VALUES (1, 1, 2, ?)
+        """,
+        (
+            json.dumps(
+                {
+                    "assessment_setup": {"source_pages": [58]},
+                    "allocation_pools": [
+                        {
+                            "pool_key": "general_prorated",
+                            "pool_name": "General Prorated",
+                            "allocation_method": "ownership_percentage",
+                            "recipient_scope": "all_units",
+                            "denominator_value": "1",
+                            "annual_amount": "45276",
+                            "monthly_amount": "3773.01",
+                            "source_pages": [58],
+                        },
+                        {
+                            "pool_key": "general_equal",
+                            "pool_name": "General Equal",
+                            "allocation_method": "equal",
+                            "recipient_scope": "all_units",
+                            "denominator_value": "61",
+                            "annual_amount": "80650",
+                            "monthly_amount": "6720.82",
+                            "source_pages": [58],
+                        },
+                        {
+                            "pool_key": "residential_prorated",
+                            "pool_name": "Residential Prorated",
+                            "allocation_method": "ownership_percentage",
+                            "recipient_scope": "residential_only",
+                            "denominator_value": "1",
+                            "annual_amount": "69544",
+                            "monthly_amount": "5795.32",
+                            "source_pages": [58],
+                        },
+                        {
+                            "pool_key": "residential_equal",
+                            "pool_name": "Residential Equal",
+                            "allocation_method": "equal",
+                            "recipient_scope": "residential_only",
+                            "denominator_value": "60",
+                            "annual_amount": "104019.48",
+                            "monthly_amount": "8668.29",
+                            "source_pages": [58],
+                        },
+                        {
+                            "pool_key": "parking_garage",
+                            "pool_name": "Parking Garage",
+                            "allocation_method": "equal",
+                            "recipient_scope": "parking_users",
+                            "denominator_value": "64",
+                            "annual_amount": "30861",
+                            "monthly_amount": "2571.74",
+                            "source_pages": [58],
+                        },
+                    ],
+                    "unit_structure": {
+                        "units": [
+                            {
+                                "unit_number": "Retail",
+                                "square_feet": "1498",
+                                "ownership_percent": None,
+                                "category": "Retail",
+                                "residential_commercial_flag": "commercial",
+                                "parking_flag": "no",
+                                "pool_factors": [
+                                    {
+                                        "pool_key": "general_prorated",
+                                        "factor_value": "0",
+                                        "factor_label": "General Assessment Interest",
+                                        "factor_type": "percent",
+                                        "source_page": 58,
+                                    },
+                                    {
+                                        "pool_key": "residential_prorated",
+                                        "factor_value": "0",
+                                        "factor_label": "Residential Assessment Interest",
+                                        "factor_type": "percent",
+                                        "source_page": 58,
+                                    },
+                                ],
+                            },
+                            {
+                                "unit_number": "101",
+                                "square_feet": "1613",
+                                "ownership_percent": None,
+                                "category": "Residential",
+                                "residential_commercial_flag": "residential",
+                                "parking_flag": "no",
+                                "pool_factors": [
+                                    {
+                                        "pool_key": "general_prorated",
+                                        "factor_value": "0.02",
+                                        "factor_label": "General Assessment Interest",
+                                        "factor_type": "percent",
+                                        "source_page": 58,
+                                    },
+                                    {
+                                        "pool_key": "residential_prorated",
+                                        "factor_value": "0.02",
+                                        "factor_label": "Residential Assessment Interest",
+                                        "factor_type": "percent",
+                                        "source_page": 58,
+                                    },
+                                ],
+                            },
+                            {
+                                "unit_number": "102",
+                                "square_feet": "1738",
+                                "ownership_percent": None,
+                                "category": "Residential",
+                                "residential_commercial_flag": "residential",
+                                "parking_flag": "no",
+                                "pool_factors": [
+                                    {
+                                        "pool_key": "general_prorated",
+                                        "factor_value": "0.0215",
+                                        "factor_label": "General Assessment Interest",
+                                        "factor_type": "percent",
+                                        "source_page": 58,
+                                    },
+                                    {
+                                        "pool_key": "residential_prorated",
+                                        "factor_value": "0.0215",
+                                        "factor_label": "Residential Assessment Interest",
+                                        "factor_type": "percent",
+                                        "source_page": 58,
+                                    },
+                                ],
+                            },
+                        ]
+                    },
+                }
+            ),
+        ),
+    )
+
+    matrix = build_matrix_from_approved_assessment_setup(
+        connection=conn,
+        property_id=1,
+        fiscal_year=2025,
+        budget_draft=SimpleNamespace(
+            line_items=[
+                SimpleNamespace(
+                    label="Management Services",
+                    amount=Decimal("36000"),
+                    annual_budget=Decimal("36000"),
+                    projection=Decimal("36000"),
+                    is_revenue=False,
+                    is_reserve=False,
+                    category="operating",
+                    section="Administrative Expenses",
+                    account_code=None,
+                ),
+                SimpleNamespace(
+                    label="General Insurance",
+                    amount=Decimal("54000"),
+                    annual_budget=Decimal("54000"),
+                    projection=Decimal("54000"),
+                    is_revenue=False,
+                    is_reserve=False,
+                    category="operating",
+                    section="Administrative Expenses",
+                    account_code=None,
+                ),
+                SimpleNamespace(
+                    label="Window Cleaning Maintenance",
+                    amount=Decimal("9996"),
+                    annual_budget=Decimal("9996"),
+                    projection=Decimal("9996"),
+                    is_revenue=False,
+                    is_reserve=False,
+                    category="operating",
+                    section="General Maintenance",
+                    account_code=None,
+                ),
+                SimpleNamespace(
+                    label="Water and Sewer",
+                    amount=Decimal("78000"),
+                    annual_budget=Decimal("78000"),
+                    projection=Decimal("78000"),
+                    is_revenue=False,
+                    is_reserve=False,
+                    category="operating",
+                    section="Utilities",
+                    account_code=None,
+                ),
+                SimpleNamespace(
+                    label="Electricity",
+                    amount=Decimal("2100"),
+                    annual_budget=Decimal("2100"),
+                    projection=Decimal("2100"),
+                    is_revenue=False,
+                    is_reserve=False,
+                    category="operating",
+                    section="Utilities",
+                    account_code=None,
+                ),
+                SimpleNamespace(
+                    label="Telephone/Internet",
+                    amount=Decimal("25000"),
+                    annual_budget=Decimal("25000"),
+                    projection=Decimal("25000"),
+                    is_revenue=False,
+                    is_reserve=False,
+                    category="operating",
+                    section="Utilities",
+                    account_code=None,
+                ),
+                SimpleNamespace(
+                    label="Assessments",
+                    amount=Decimal("606236.4"),
+                    annual_budget=Decimal("606236.4"),
+                    projection=Decimal("606236.4"),
+                    is_revenue=True,
+                    is_reserve=False,
+                    category="income",
+                    section="income",
+                    account_code=None,
+                ),
+            ]
+        ),
+        hoa_name="800 High Street Condominiums Association",
+        unit_count=61,
+        approved_assessment_revenue_annual=Decimal("606236.4"),
+    )
+
+    assert matrix.recipient_grain == "unit"
+    assert matrix.preflight_issues == []
+    unit_101 = next(row for row in matrix.rows if row.recipient_label == "101")
+    assert unit_101.component_values_monthly["general_prorated"] == Decimal("90.00")
+    assert unit_101.component_values_monthly["residential_prorated"] == Decimal("146.66")
+
+
 def test_ryland_grouped_rows_use_per_unit_and_group_budget_semantics() -> None:
     groups = [
         RecipientReference(ref_type="group", ref_id=1, label="Type A", unit_count=10, square_feet=Decimal("1000")),

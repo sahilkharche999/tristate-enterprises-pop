@@ -77,6 +77,21 @@ type InlineAnalysisHint = {
 
 const MAIN_BLOCKER_CATEGORIES = new Set(['unresolved_eligible_lines', 'pending_split']);
 
+function analysisCacheKey(hoaId: number) {
+  return `assessment-mapping-analysis-${hoaId}`;
+}
+
+function readCachedAnalysis(hoaId: number): MappingReviewAnalysis | null {
+  if (!Number.isFinite(hoaId)) return null;
+  if (typeof sessionStorage === 'undefined') return null;
+  try {
+    const cached = sessionStorage.getItem(analysisCacheKey(hoaId));
+    return cached ? JSON.parse(cached) : null;
+  } catch {
+    return null;
+  }
+}
+
 function matchesAnalysisSubject(row: ReviewRow, item: AnalysisSubject) {
   const sameLabel = item.normalized_label === row.normalized_label || item.line_label === row.line_label;
   const sameAccount = !item.account_code || !row.account_code || item.account_code === row.account_code;
@@ -132,7 +147,10 @@ export function AssessmentMappingReviewScreen() {
   const { id } = useParams<{ id: string }>();
   const hoaId = Number(id);
   const [state, setState] = useState<MappingReviewState | null>(null);
-  const [analysis, setAnalysis] = useState<MappingReviewAnalysis | null>(null);
+  const [analysisState, setAnalysisState] = useState<{ hoaId: number; analysis: MappingReviewAnalysis | null }>(() => ({
+    hoaId,
+    analysis: readCachedAnalysis(hoaId),
+  }));
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [editingRuleId, setEditingRuleId] = useState<number | null>(null);
@@ -140,6 +158,7 @@ export function AssessmentMappingReviewScreen() {
   const [aliasDraft, setAliasDraft] = useState({ pool_key: '', dre_label: '', budget_label: '' });
   const [exemptionNotes, setExemptionNotes] = useState<Record<string, string>>({});
   const [rowPoolSelections, setRowPoolSelections] = useState<Record<string, string>>({});
+  const analysis = analysisState.hoaId === hoaId ? analysisState.analysis : readCachedAnalysis(hoaId);
 
   async function load() {
     if (!Number.isFinite(hoaId)) return;
@@ -209,7 +228,6 @@ export function AssessmentMappingReviewScreen() {
     setBusy(label);
     setError(null);
     try {
-      setAnalysis(null);
       await action();
       await load();
     } catch (err) {
@@ -222,7 +240,13 @@ export function AssessmentMappingReviewScreen() {
     setBusy('analyze');
     setError(null);
     try {
-      setAnalysis(await analyzeAssessmentMappingReview(hoaId));
+      const nextAnalysis = await analyzeAssessmentMappingReview(hoaId);
+      try {
+        sessionStorage.setItem(analysisCacheKey(hoaId), JSON.stringify(nextAnalysis));
+      } catch {
+        // Cache is best-effort; mapping workflow must still work if storage is full.
+      }
+      setAnalysisState({ hoaId, analysis: nextAnalysis });
     } catch (err) {
       setError(getErrorMessage(err, 'Failed to analyze mapping review.'));
     } finally {

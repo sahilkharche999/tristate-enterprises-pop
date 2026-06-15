@@ -1477,6 +1477,104 @@ def _generated_revenue_split_by_dre_pool_proportions(
     return budget_lines, mappings
 
 
+def _per_unit_factor_value_lookup_from_payload(
+    *,
+    payload: dict[str, Any],
+    pools: list[PoolDefinition],
+    unit_id_by_number: dict[str, int],
+    pool_totals_annual: dict[str, Decimal],
+) -> tuple[dict[tuple[int, str], Decimal], set[str]]:
+    """Build runtime per-unit pool amounts from multi-factor DRE payloads.
+
+    Some per-unit DREs, including 800 High-style packets, store pool-specific
+    participation factors on each unit instead of one global ownership percent.
+    The current engine cannot consume a different ownership percentage per
+    pool, but it *can* consume per-unit specified values. For those multi-
+    factor pools we therefore convert:
+
+      current budget pool monthly total × unit pool factor = unit monthly amount
+
+    and feed the result through ``specified_value_lookup`` at runtime.
+    """
+    lookup: dict[tuple[int, str], Decimal] = {}
+    converted_pool_keys: set[str] = set()
+
+    for pool in pools:
+        if pool.allocation_method != "ownership_percentage":
+            continue
+        annual_total = pool_totals_annual.get(pool.pool_key)
+        if annual_total in (None, ""):
+            continue
+        try:
+            pool_monthly_total = _money(annual_total) / Decimal("12")
+        except Exception:
+            continue
+        if pool_monthly_total <= Decimal("0"):
+            continue
+
+        pool_values: dict[int, Decimal] = {}
+        saw_factor = False
+        for unit in ((payload.get("unit_structure") or {}).get("units") or []):
+            unit_number = str(unit.get("unit_number") or "")
+            unit_id = unit_id_by_number.get(unit_number)
+            if unit_id is None:
+                continue
+            for factor in unit.get("pool_factors") or []:
+                if str(factor.get("pool_key") or "") != pool.pool_key:
+                    continue
+                if str(factor.get("factor_type") or "") != "percent":
+                    continue
+                factor_value = factor.get("factor_value")
+                if factor_value in (None, ""):
+                    continue
+                saw_factor = True
+                try:
+                    share = _money(factor_value)
+                except Exception:
+                    continue
+                pool_values[unit_id] = (
+                    pool_monthly_total * share
+                ).quantize(Decimal("0.01"))
+                break
+        if saw_factor and pool_values:
+            converted_pool_keys.add(pool.pool_key)
+            lookup.update({(unit_id, pool.pool_key): value for unit_id, value in pool_values.items()})
+
+    return lookup, converted_pool_keys
+
+
+def _pool_totals_annual_for_mappings(
+    *,
+    budget_lines: list[BudgetLineInput],
+    mappings: list[BudgetLineMappingInput],
+) -> dict[str, Decimal]:
+    routing = {
+        (
+            mapping.budget_line_normalized_label,
+            mapping.section,
+            mapping.category,
+            mapping.fund_type,
+            mapping.account_code,
+        ): mapping.pool_key
+        for mapping in mappings
+        if mapping.active
+    }
+    totals: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
+    for line in budget_lines:
+        pool_key = routing.get(
+            (
+                line.normalized_label,
+                line.section,
+                line.category,
+                line.fund_type,
+                line.account_code,
+            )
+        )
+        if pool_key:
+            totals[pool_key] += line.amount
+    return dict(totals)
+
+
 def _assessment_mapping_category(raw_category: object) -> str:
     category = str(raw_category or "").lower()
     if category == "income":
@@ -1551,9 +1649,6 @@ def build_matrix_from_approved_assessment_setup(
     matrix instead of raising for missing setup/mapping data so the generated
     package makes the missing assessment basis visible during preview.
     """
-    import logging as _logging
-    _log = _logging.getLogger(__name__)
-    _log.warning("DEBUG build_matrix: property_id=%s fiscal_year=%s revenue=%s", property_id, fiscal_year, approved_assessment_revenue_annual)
     setup = connection.execute(
         """
         SELECT id, setup_type, approved_at
@@ -1564,7 +1659,6 @@ def build_matrix_from_approved_assessment_setup(
         (property_id,),
     ).fetchone()
     if setup is None:
-        _log.warning("DEBUG build_matrix: FALLBACK no approved setup")
         return _fallback_matrix_for_db_issue(
             hoa_name=hoa_name,
             fiscal_year=fiscal_year,
@@ -1734,13 +1828,6 @@ def build_matrix_from_approved_assessment_setup(
         ) in regular_review_keys
     ]
     if review_summary["final_render_blocked"] or review_summary["reconciliation_failures"] or review_blockers:
-        _log.warning("DEBUG build_matrix: FALLBACK review_blocked=%s reconciliation_failures=%s review_blockers=%s unresolved=%s diff=%s",
-            review_summary["final_render_blocked"],
-            review_summary["reconciliation_failures"],
-            review_blockers,
-            review_summary["unresolved_required_rows"],
-            review_summary["difference"],
-        )
         blocker_messages: list[str] = []
         if review_summary["unresolved_required_rows"]:
             blocker_messages.append(
@@ -1816,6 +1903,22 @@ def build_matrix_from_approved_assessment_setup(
             )
         )
 
+    unit_id_by_number = {
+        str(_get(recipient, "label") or ""): int(_get(recipient, "ref_id"))
+        for recipient in recipients
+        if _get(recipient, "ref_type") == "unit"
+    }
+    pool_totals_annual = _pool_totals_annual_for_mappings(
+        budget_lines=budget_lines,
+        mappings=mappings,
+    )
+    payload_factor_lookup, payload_factor_pool_keys = _per_unit_factor_value_lookup_from_payload(
+        payload=payload,
+        pools=pools,
+        unit_id_by_number=unit_id_by_number,
+        pool_totals_annual=pool_totals_annual,
+    )
+
     specified_lookup = {
         (row[0], row[1]): _money(row[2])
         for row in connection.execute(
@@ -1827,12 +1930,20 @@ def build_matrix_from_approved_assessment_setup(
             (setup_id,),
         ).fetchall()
     }
+    specified_lookup.update(payload_factor_lookup)
+
+    engine_pools = [
+        pool.model_copy(
+            update={"allocation_method": "specified_value"}
+        ) if pool.pool_key in payload_factor_pool_keys else pool
+        for pool in pools
+    ]
 
     try:
         result = run_assessment_engine(
             CalcInput(
                 setup_type=effective_setup_type,
-                pools=pools,
+                pools=engine_pools,
                 recipient_set=RecipientSet(recipients=recipients),
                 budget_lines=budget_lines,
                 mappings=mappings,
