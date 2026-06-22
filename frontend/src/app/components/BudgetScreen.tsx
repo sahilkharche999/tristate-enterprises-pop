@@ -22,12 +22,12 @@ import { EnrichedView } from './EnrichedView';
 import { GLMergeSuggestions } from './GLMergeSuggestions';
 import { ReserveStudyView } from './ReserveStudyView';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
+import { exportEnrichedBudget } from '../lib/exportBudget';
 import {
   applyReserveStudyToBudget,
   commitBudgetGlMerge,
   replaceReserveStudy,
   deleteActiveDraft,
-  downloadBudgetDraftEnriched,
   fetchBudgetGlMergeSuggestions,
   getActiveBudgetDraft,
   listBudgetGlMerges,
@@ -210,7 +210,7 @@ export function BudgetScreen({
   const [isComparePanelOpen, setIsComparePanelOpen] = useState(false);
   const [isSavingDraft, setIsSavingDraft] = useState(false);
   const [isDeletingDraft, setIsDeletingDraft] = useState(false);
-  const [isDownloadingEnriched, setIsDownloadingEnriched] = useState(false);
+  const [isDownloadingEnriched] = useState(false);
   const [autoSaveEnabled, setAutoSaveEnabled] = useState(false);
   const [budgetSourceFile, setBudgetSourceFile] = useState<File | null>(null);
   const [reserveStudyFile, setReserveStudyFile] = useState<File | null>(null);
@@ -824,22 +824,16 @@ export function BudgetScreen({
     workingReserveStudySnapshot,
   ]);
 
-  const handleDownloadEnriched = async () => {
-    if (!draftId) {
-      toast.error(budgetSourceModeGenericDraftError());
+  const handleDownloadEnriched = () => {
+    if (!lineItems.length) {
+      toast.error('No budget lines to export.');
       return;
     }
-
-    setIsDownloadingEnriched(true);
     try {
-      const persistedDraft = await ensurePersistedDraftSnapshot();
-      const blob = await downloadBudgetDraftEnriched(hoaId, persistedDraft.id);
-      downloadBlob(blob, `draft-${persistedDraft.id}-enriched.xlsx`);
-      toast.success(`Draft ${persistedDraft.id} enriched workbook downloaded.`);
+      const fiscalYear = hoa.portfolio_year ?? new Date().getFullYear();
+      exportEnrichedBudget(lineItems, hoa.name, activeReserveInflationRate, fiscalYear);
     } catch (error) {
-      toast.error(getErrorMessage(error, 'Failed to download the enriched draft.'));
-    } finally {
-      setIsDownloadingEnriched(false);
+      toast.error(getErrorMessage(error, 'Failed to generate the proforma export.'));
     }
   };
 
