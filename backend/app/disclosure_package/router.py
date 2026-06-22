@@ -9,13 +9,14 @@ Endpoints:
 All endpoints require auth (T-11-02, REQ-D11-017). Job access is
 ownership-checked (T-11-01) — cross-user reads return 404, NOT 403.
 
-Filename for download: ``old-mill-{fiscal_year}-disclosure-package.pdf``
-(UI-SPEC OQ-7).
+Filename for download: ``{hoa-slug}-{fiscal_year}-disclosure-package.pdf``
+where ``hoa-slug`` is derived from the job's HOA name (UI-SPEC OQ-7).
 """
 from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
@@ -151,6 +152,27 @@ async def get_job_status(
     return DisclosurePackageJobResponse.model_validate(job)
 
 
+def _download_filename(session: Session, job) -> str:
+    """Build the download filename from the job's HOA name and fiscal year.
+
+    Derives the HOA slug from the property record (job.property_id) rather
+    than hardcoding a single HOA — every HOA gets a correctly-named file.
+    Falls back to a generic slug when the property can't be resolved.
+    """
+    hoa_name = ""
+    try:
+        prop = session.get(Property, job.property_id)
+        if prop is not None:
+            hoa_name = (prop.name or "").strip()
+    except Exception:  # pragma: no cover - defensive; name is cosmetic
+        hoa_name = ""
+
+    slug = re.sub(r"[^A-Za-z0-9]+", "-", hoa_name).strip("-").lower()
+    if not slug:
+        slug = "hoa"
+    return f"{slug}-{job.fiscal_year}-disclosure-package.pdf"
+
+
 @router.get("/{job_id}/download")
 async def download_job_pdf(
     job_id: str,
@@ -179,7 +201,7 @@ async def download_job_pdf(
             status_code=HTTP_410_GONE,
             detail="Output file is no longer available",
         )
-    filename = f"old-mill-{job.fiscal_year}-disclosure-package.pdf"
+    filename = _download_filename(session, job)
     return FileResponse(
         path=str(pdf_path),
         filename=filename,
