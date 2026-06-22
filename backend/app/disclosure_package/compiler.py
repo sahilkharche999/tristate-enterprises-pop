@@ -84,6 +84,7 @@ from .schemas import (
     GeneratedPage,
     HOAMetadata,
     PackageSpec,
+    PreflightError,
     ReserveStudySnapshot,
     StaticAppendix,
 )
@@ -96,13 +97,31 @@ APPENDICES_DIR = Path(__file__).parent / "appendices"
 class CompileError(RuntimeError):
     """Raised when compile_package cannot produce a valid PDF.
 
-    Carries the failing PreflightError field paths so the caller can
-    surface them in the DisclosurePreflightChecklist UI (UI-SPEC §9.3).
+    Carries the full structured PreflightError list so the caller can
+    surface human-readable messages and suggested fixes in the UI.
+    ``field_paths`` is kept as a derived convenience property for back-compat.
     """
 
-    def __init__(self, message: str, *, field_paths: Optional[list[str]] = None):
+    def __init__(
+        self,
+        message: str,
+        *,
+        field_paths: Optional[list[str]] = None,
+        errors: Optional[list[PreflightError]] = None,
+    ):
         super().__init__(message)
-        self.field_paths = field_paths or []
+        self._errors: list[PreflightError] = list(errors or [])
+        self._field_paths_override: Optional[list[str]] = field_paths
+
+    @property
+    def errors(self) -> list[PreflightError]:
+        return self._errors
+
+    @property
+    def field_paths(self) -> list[str]:
+        if self._field_paths_override is not None:
+            return self._field_paths_override
+        return [e.field_path for e in self._errors]
 
 
 class CompileResult(BaseModel):
@@ -976,7 +995,7 @@ def compile_package(
     if blocking:
         raise CompileError(
             f"Preflight blocked compilation: {len(blocking)} error(s)",
-            field_paths=[e.field_path for e in blocking],
+            errors=blocking,
         )
     if assessment_matrix is not None:
         matrix_blocking = [
@@ -986,7 +1005,7 @@ def compile_package(
         if matrix_blocking:
             raise CompileError(
                 f"Preflight blocked compilation: {len(matrix_blocking)} error(s)",
-                field_paths=[issue.field_path for issue in matrix_blocking],
+                errors=matrix_blocking,
             )
 
     # 2. Build effective hoa_settings dict — spec.static_data defaults

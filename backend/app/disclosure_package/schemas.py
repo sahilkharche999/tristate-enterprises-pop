@@ -316,3 +316,21 @@ class GenerateDisclosurePackageRequest(BaseModel):
 
     hoa_id: int = Field(ge=1)
     fiscal_year: int = Field(ge=1900, le=3000)
+
+
+class PreflightErrorResponse(BaseModel):
+    """One finding from the preflight gate, serialized for the API."""
+
+    field_path: str
+    message: str
+    severity: Literal["blocking", "warning"]
+    code: Optional[str] = None
+    suggested_fix: Optional[str] = None
+
+
+class DisclosurePreflightResponse(BaseModel):
+    """Response for GET /api/disclosure-package/hoa/{hoa_id}/preflight."""
+
+    ready: bool
+    blocking: list[PreflightErrorResponse]
+    warnings: list[PreflightErrorResponse]

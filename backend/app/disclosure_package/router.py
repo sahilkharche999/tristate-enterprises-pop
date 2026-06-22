@@ -41,7 +41,9 @@ from ..auth.dependencies import get_current_user
 from . import service as dp_service
 from .schemas import (
     DisclosurePackageJobResponse,
+    DisclosurePreflightResponse,
     GenerateDisclosurePackageRequest,
+    PreflightErrorResponse,
 )
 
 router = APIRouter(prefix="/api/disclosure-package", tags=["Disclosure Package"])
@@ -206,6 +208,51 @@ async def download_job_pdf(
         path=str(pdf_path),
         filename=filename,
         media_type="application/pdf",
+    )
+
+
+@router.get(
+    "/hoa/{hoa_id}/preflight",
+    response_model=DisclosurePreflightResponse,
+)
+async def get_disclosure_preflight(
+    hoa_id: int,
+    fiscal_year: int,
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user),  # noqa: ARG001 — auth gate
+) -> DisclosurePreflightResponse:
+    """Evaluate disclosure-package readiness without starting a render job.
+
+    Runs the same preflight gate (`preflight.validate_inputs`) and input
+    resolution path that the live render uses. Returns a structured list of
+    blocking findings and warnings plus an overall ``ready`` boolean.
+
+    Auth/ownership: requires authentication; HOA access follows the same
+    tenant scoping as other disclosure endpoints. No job is created.
+    """
+    blocking, warnings = dp_service.run_preflight(session, hoa_id, fiscal_year)
+    return DisclosurePreflightResponse(
+        ready=len(blocking) == 0,
+        blocking=[
+            PreflightErrorResponse(
+                field_path=e.field_path,
+                message=e.message,
+                severity=e.severity,
+                code=e.code,
+                suggested_fix=e.suggested_fix,
+            )
+            for e in blocking
+        ],
+        warnings=[
+            PreflightErrorResponse(
+                field_path=e.field_path,
+                message=e.message,
+                severity=e.severity,
+                code=e.code,
+                suggested_fix=e.suggested_fix,
+            )
+            for e in warnings
+        ],
     )
 
 

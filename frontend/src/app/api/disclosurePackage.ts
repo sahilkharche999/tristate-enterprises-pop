@@ -126,6 +126,36 @@ export async function downloadDisclosurePackagePdf(jobId: string): Promise<Downl
   return { blob, filename };
 }
 
+// ── Preflight readiness ───────────────────────────────────────────────────────
+
+export type PreflightSeverity = 'blocking' | 'warning';
+
+export interface PreflightFinding {
+  field_path: string;
+  message: string;
+  severity: PreflightSeverity;
+  code?: string | null;
+  suggested_fix?: string | null;
+}
+
+export interface DisclosurePreflightResult {
+  ready: boolean;
+  blocking: PreflightFinding[];
+  warnings: PreflightFinding[];
+}
+
+export async function getDisclosurePreflight(
+  hoaId: number,
+  fiscalYear: number,
+): Promise<DisclosurePreflightResult> {
+  const params = new URLSearchParams({ fiscal_year: String(fiscalYear) });
+  const res = await fetch(
+    `${BASE_URL}/api/disclosure-package/hoa/${hoaId}/preflight?${params}`,
+    { headers: authHeaders() },
+  );
+  return handleResponse<DisclosurePreflightResult>(res);
+}
+
 // ── Per-HOA static-appendix uploads ──────────────────────────────────────────
 
 export interface DisclosureAppendixEntry {

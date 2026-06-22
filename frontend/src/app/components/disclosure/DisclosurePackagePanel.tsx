@@ -1,26 +1,25 @@
 // Top-level disclosure-package panel (UI-SPEC §5.1, §6.1, §7.1).
 //
 // State machine:
-//   - idle (ready)   — preflight (all-pass) + enabled Generate button
+//   - idle (ready)   — live preflight checklist + Generate button (gated on blocking items)
 //   - idle (locked)  — unsupported HOA: disabled Generate + locked body copy
 //   - starting       — POST in flight; CTA → "Starting..." disabled
 //   - running        — progress block with stage chips + elapsed
 //   - completed      — result block with Download / Regenerate
 //   - failed         — failure block with Retry
 //
-// The panel is mounted in BudgetScreenWrapper.tsx for every HOA workspace
-// (UI-SPEC §5.2 visibility rule). Old Mill is the only `isSupportedHoa=true`
-// HOA in Phase 11; other HOAs see the locked state.
-//
-// Card chrome verbatim from ReserveStudyView.tsx:65-105 (PATTERNS analog).
-// Visible strings come from UI-SPEC §9 verbatim.
+// The preflight checklist is fetched live on mount and on explicit re-check.
+// The Generate button is disabled while blocking preflight findings exist.
 
-import { useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
+import {
+  getDisclosurePreflight,
+  type DisclosurePreflightResult,
+} from '../../api/disclosurePackage';
 import { useDisclosureJob } from './useDisclosureJob';
 import {
   DisclosurePreflightChecklist,
-  OLD_MILL_PREFLIGHT_LABELS,
   type PreflightRow,
 } from './DisclosurePreflightChecklist';
 import { DisclosureProgressBlock } from './DisclosureProgressBlock';
@@ -34,15 +33,33 @@ export interface DisclosurePackagePanelProps {
   hoaId: number;
   fiscalYear: number;
   hoaName: string;
-  // True only for "Old Mill Homeowners Association" in Phase 11. Forward-
-  // compatible with a backend-derived `disclosure_supported` boolean per
-  // UI-SPEC OQ-3.
+  // Phase-11 gate; always true now (is_supported_hoa retired). Kept on
+  // signature so parent components don't need to be updated simultaneously.
   isSupportedHoa: boolean;
 }
 
-const SUPPORTED_PREFLIGHT_PASS: PreflightRow[] = OLD_MILL_PREFLIGHT_LABELS.map(
-  (label) => ({ label, status: 'pass' as const }),
-);
+function findingsToRows(result: DisclosurePreflightResult): PreflightRow[] {
+  const rows: PreflightRow[] = [];
+  for (const e of result.blocking) {
+    rows.push({
+      label: e.message,
+      status: 'fail',
+      secondaryText: e.suggested_fix ?? undefined,
+    });
+  }
+  for (const e of result.warnings) {
+    rows.push({
+      label: e.message,
+      status: 'warning',
+      secondaryText: e.suggested_fix ?? undefined,
+    });
+  }
+  return rows;
+}
+
+function loadingRows(): PreflightRow[] {
+  return [{ label: 'Checking readiness…', status: 'loading' }];
+}
 
 export function DisclosurePackagePanel({
   hoaId,
@@ -53,31 +70,64 @@ export function DisclosurePackagePanel({
   const { state, job, stage, elapsedMs, error, generate, reset } = useDisclosureJob();
   const [auditOpen, setAuditOpen] = useState(false);
 
+  const [preflight, setPreflight] = useState<DisclosurePreflightResult | null>(null);
+  const [preflightLoading, setPreflightLoading] = useState(false);
+
+  const fetchPreflight = useCallback(async () => {
+    setPreflightLoading(true);
+    try {
+      const result = await getDisclosurePreflight(hoaId, fiscalYear);
+      setPreflight(result);
+    } catch {
+      // On error, treat as unknown readiness (don't block the operator).
+      setPreflight(null);
+    } finally {
+      setPreflightLoading(false);
+    }
+  }, [hoaId, fiscalYear]);
+
+  useEffect(() => {
+    void fetchPreflight();
+  }, [fetchPreflight]);
+
+  const blockingCount = preflight?.blocking.length ?? 0;
+  const isGenerateBlocked =
+    !isSupportedHoa || (preflight !== null && blockingCount > 0);
+
   const handleGenerate = () => {
-    if (!isSupportedHoa) return;
+    if (isGenerateBlocked) return;
     void generate(hoaId, fiscalYear);
   };
 
   const handleRetry = () => {
     reset();
-    if (!isSupportedHoa) return;
-    void generate(hoaId, fiscalYear);
+    if (!isGenerateBlocked) void generate(hoaId, fiscalYear);
   };
 
   const handleRegenerate = () => {
     reset();
-    if (!isSupportedHoa) return;
-    void generate(hoaId, fiscalYear);
+    if (!isGenerateBlocked) void generate(hoaId, fiscalYear);
   };
 
-  // UI-SPEC §9.1 — verbatim copy strings. Body interpolates `hoa.name` and
-  // `fiscal_year` when supported; falls back to the locked-out line for
-  // unsupported HOAs.
   const supportedBody = `Compile the full annual budget disclosure PDF for ${hoaName}'s ${fiscalYear} fiscal year, including the cover letter, pro forma operating budget, reserve disclosure, 30-year funding plan, and required policy appendices.`;
   const lockedBody = 'Disclosure package generation is not yet available for this HOA.';
   const bodyCopy = isSupportedHoa ? supportedBody : lockedBody;
 
   const showCta = state === 'idle' || state === 'starting';
+
+  // Rows fed to the live checklist while the panel is idle.
+  const preflightRows: PreflightRow[] = preflightLoading
+    ? loadingRows()
+    : preflight !== null
+      ? findingsToRows(preflight)
+      : [];
+
+  const generateButtonLabel =
+    state === 'starting'
+      ? 'Starting…'
+      : blockingCount > 0
+        ? `Resolve ${blockingCount} item${blockingCount === 1 ? '' : 's'} to generate`
+        : 'Generate Disclosure Package';
 
   return (
     <section className="space-y-6">
@@ -94,20 +144,21 @@ export function DisclosurePackagePanel({
           </div>
           {showCta ? (
             <div className="flex flex-wrap items-center gap-2 md:flex-nowrap md:justify-end">
-              {state === 'starting' ? (
+              <Button
+                onClick={handleGenerate}
+                disabled={state === 'starting' || isGenerateBlocked}
+                className="whitespace-nowrap bg-[#111111] text-white shadow-sm hover:bg-[#262626] disabled:opacity-50"
+              >
+                {generateButtonLabel}
+              </Button>
+              {state === 'idle' && (
                 <Button
-                  disabled
-                  className="whitespace-nowrap bg-[#111111] text-white opacity-50 shadow-sm"
+                  variant="outline"
+                  onClick={() => void fetchPreflight()}
+                  disabled={preflightLoading}
+                  className="whitespace-nowrap text-xs disabled:opacity-50"
                 >
-                  Starting...
-                </Button>
-              ) : (
-                <Button
-                  onClick={handleGenerate}
-                  disabled={!isSupportedHoa}
-                  className="whitespace-nowrap bg-[#111111] text-white shadow-sm hover:bg-[#262626] disabled:opacity-50"
-                >
-                  Generate Disclosure Package
+                  {preflightLoading ? 'Checking…' : 'Re-check'}
                 </Button>
               )}
             </div>
@@ -116,7 +167,10 @@ export function DisclosurePackagePanel({
 
         <div className="mt-6">
           {state === 'idle' && isSupportedHoa ? (
-            <DisclosurePreflightChecklist rows={SUPPORTED_PREFLIGHT_PASS} />
+            <DisclosurePreflightChecklist
+              rows={preflightRows}
+              ready={preflight?.ready ?? false}
+            />
           ) : null}
           {state === 'starting' || state === 'running' ? (
             <DisclosureProgressBlock currentStage={stage} elapsedMs={elapsedMs} />

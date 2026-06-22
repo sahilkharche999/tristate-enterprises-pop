@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import re
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -49,6 +50,8 @@ from .adapters import (
 )
 from .compiler import CompileError, compile_package
 from .package_specs import SPECS
+from .preflight import partition_errors, validate_inputs
+from .schemas import PreflightError
 
 logger = logging.getLogger(__name__)
 
@@ -385,15 +388,18 @@ def _set_status(
 
 
 def _compile_error_status_message(exc: CompileError) -> str:
-    base = str(exc)
-    if not exc.field_paths:
-        return base
-    if exc.field_paths == ["hoa_metadata.units"]:
-        return (
-            "Preflight blocked compilation: HOA unit count is missing or invalid. "
-            "Go to Settings and enter a positive unit count for this HOA."
-        )
-    return f"{base}: {', '.join(exc.field_paths)}"
+    if exc.errors:
+        parts: list[str] = []
+        for e in exc.errors:
+            part = e.message
+            if e.suggested_fix:
+                part = f"{part} {e.suggested_fix}"
+            parts.append(part)
+        if len(parts) == 1:
+            return parts[0]
+        return "Preflight blocked compilation: " + "; ".join(parts)
+    # No structured errors on this CompileError — return its plain message.
+    return str(exc)
 
 
 def _assessment_mapping_category(raw_category: object) -> str:
@@ -548,6 +554,160 @@ def _resolve_pool_forecast_overlay(
     return overlay
 
 
+@dataclass
+class _PreflightInputBundle:
+    """Typed bundle of resolved inputs shared by the preflight endpoint and the render job."""
+    spec: Any
+    budget_draft: Any
+    reserve_snapshot: Any
+    hoa_metadata: Any
+    overrides: dict
+
+
+def _resolve_preflight_inputs(
+    session: Session,
+    hoa_id: int,
+    fiscal_year: int,
+    *,
+    budget_history_service_module: Any = None,
+) -> _PreflightInputBundle:
+    """Assemble the disclosure-package inputs shared by the preflight check and render.
+
+    Raises:
+        CompileError: HOA not found, unit count invalid, or no matching spec.
+        LookupError: No active budget draft for the HOA.
+    """
+    if budget_history_service_module is None:
+        from ..services import budget_history_service as budget_history_service_module
+
+    property_row = (
+        session.query(Property).filter(Property.id == hoa_id).one_or_none()
+    )
+    if property_row is None:
+        raise CompileError(f"HOA not found: {hoa_id}")
+
+    try:
+        hoa_metadata = from_hoa_record(property_row)
+    except ValueError as exc:
+        raise CompileError(
+            "Preflight blocked compilation: 1 error(s)",
+            errors=[PreflightError(
+                field_path="hoa_metadata.units",
+                message="HOA unit count is missing or invalid. Go to Settings and enter a positive unit count for this HOA.",
+                severity="blocking",
+                suggested_fix="Go to Settings and enter a positive unit count for this HOA.",
+            )],
+        ) from exc
+
+    spec = _resolve_spec_for_property(hoa_id, fiscal_year)
+    if spec is None:
+        raise CompileError(
+            f"HOA not yet supported in Phase 11: {hoa_metadata.name}"
+        )
+
+    budget_payload = budget_history_service_module.get_active_draft(session, hoa_id)
+    budget_draft = from_budget_history_record(budget_payload)
+
+    reserve_doc = _build_reserve_doc_from_draft(
+        budget_payload, session=session, hoa_id=hoa_id
+    )
+    reserve_snapshot = from_reserve_study_extraction(reserve_doc)
+
+    from ..services import hoa_settings_service as hoa_settings_module
+
+    settings_row = hoa_settings_module.get_or_create(session, hoa_id=hoa_id)
+    overrides: dict = {}
+    for field in (
+        "management_company", "management_company_address",
+        "management_company_phone", "management_company_fax", "management_company_web",
+        "cpa_firm_name", "cpa_firm_address", "reserve_study_expert_name",
+        "reserve_study_date",
+        "reserve_cash_balance_eoy_prior", "fund_balance_boy_operations",
+        "monthly_assessment_per_unit_prior", "interest_rate_after_tax",
+        "replacement_cost_increase_rate", "letter_signed_by",
+        "approved_monthly_assessment_per_unit",
+        "financial_packet_archetype",
+        "reserve_interest_income_override",
+        "income_tax_provision_override",
+        "reserve_funding_source",
+        "reserve_funding_manual_amount",
+        "special_assessments_json",
+        "additional_assessments_needed_json",
+        "outstanding_loan_json",
+        "letter_date",
+        "letter_signed_by_title",
+        "accountant_report_date",
+        "reserve_funding_plan_date",
+        "hoa_state",
+        "hoa_entity_type",
+        "hoa_incorporation_year",
+        "assessment_increase_schedule_json",
+        "replacement_fund_monthly_assessment_per_unit",
+        "board_deferrals_json",
+    ):
+        val = getattr(settings_row, field, None)
+        if val not in (None, ""):
+            overrides[field] = val
+
+    pool_overlay = _resolve_pool_forecast_overlay(session=session, property_id=hoa_id)
+    overrides.update(pool_overlay)
+
+    return _PreflightInputBundle(
+        spec=spec.model_copy(update={"hoa_id": hoa_id, "fiscal_year": fiscal_year}),
+        budget_draft=budget_draft,
+        reserve_snapshot=reserve_snapshot,
+        hoa_metadata=hoa_metadata,
+        overrides=overrides,
+    )
+
+
+def run_preflight(
+    session: Session,
+    hoa_id: int,
+    fiscal_year: int,
+) -> tuple[list[PreflightError], list[PreflightError]]:
+    """Evaluate disclosure-package readiness without creating a render job.
+
+    Returns ``(blocking, warnings)``. Never raises — resolution failures are
+    mapped to blocking PreflightError entries so the caller always gets a list.
+    """
+    try:
+        bundle = _resolve_preflight_inputs(session, hoa_id, fiscal_year)
+    except CompileError as exc:
+        if exc.errors:
+            return exc.errors, []
+        field = exc.field_paths[0] if exc.field_paths else "setup"
+        return [PreflightError(
+            field_path=field,
+            message=str(exc),
+            severity="blocking",
+        )], []
+    except LookupError as exc:
+        return [PreflightError(
+            field_path="budget_draft.line_items",
+            message=f"No active budget draft found. Upload and activate a budget before generating.",
+            severity="blocking",
+            suggested_fix="Go to Budget and upload or activate a budget draft.",
+        )], []
+    except Exception:
+        logger.exception("Unexpected error resolving preflight inputs for HOA %s", hoa_id)
+        return [PreflightError(
+            field_path="setup",
+            message="Could not evaluate readiness due to an unexpected error. Please try again.",
+            severity="blocking",
+        )], []
+
+    errors = validate_inputs(
+        spec=bundle.spec,
+        budget_draft=bundle.budget_draft,
+        reserve_snapshot=bundle.reserve_snapshot,
+        hoa_metadata=bundle.hoa_metadata,
+        appendices_root=appendix_dir_for(hoa_id),
+        hoa_settings_overrides=bundle.overrides,
+    )
+    return partition_errors(errors)
+
+
 def run_render_job(
     job_id: str,
     hoa_id: int,
@@ -582,128 +742,35 @@ def run_render_job(
             stage=DISCLOSURE_STAGE_VALIDATING,
         )
 
-        # Fetch the Property ORM row directly. hoa_service.get_hoa returns
-        # a Pydantic HOADetail (which lacks the raw `units`/`name` fields
-        # in the right shape for from_hoa_record), so we go to the row.
-        property_row = (
-            session.query(Property).filter(Property.id == hoa_id).one_or_none()
+        bundle = _resolve_preflight_inputs(
+            session,
+            hoa_id,
+            fiscal_year,
+            budget_history_service_module=budget_history_service_module,
         )
-        if property_row is None:
-            raise CompileError(f"HOA not found: {hoa_id}")
-        assessment_mode = normalize_assessment_mode(
-            getattr(property_row, "assessment_mode", None)
-        )
-        try:
-            hoa_metadata = from_hoa_record(property_row)
-        except ValueError as exc:
-            raise CompileError(
-                "Preflight blocked compilation: 1 error(s)",
-                field_paths=["hoa_metadata.units"],
-            ) from exc
-
-        spec = _resolve_spec_for_property(hoa_id, fiscal_year)
-        if spec is None:
-            raise CompileError(
-                f"HOA not yet supported in Phase 11: {hoa_metadata.name}"
-            )
-
-        budget_payload = budget_history_service_module.get_active_draft(
-            session, hoa_id
-        )
-        budget_draft = from_budget_history_record(budget_payload)
-
-        reserve_doc = _build_reserve_doc_from_draft(
-            budget_payload, session=session, hoa_id=hoa_id
-        )
-        reserve_snapshot = from_reserve_study_extraction(reserve_doc)
 
         _set_status(session, job_id, stage=DISCLOSURE_STAGE_COMPUTING)
 
-        # Load operator-saved disclosure settings (Phase 11 plan 11-08
-        # Task 4). Fields left at the defaults / unset are skipped so
-        # spec.static_data continues to drive them in compile_package.
-        # Local import keeps the module-import graph cycle-free.
-        from ..services import hoa_settings_service as hoa_settings_module
-
-        settings_row = hoa_settings_module.get_or_create(session, hoa_id=hoa_id)
-        overrides: dict = {}
-        # Skip-rule: only None and "" are treated as "operator didn't set this".
-        # An explicit 0 / 0.0 is a valid value — e.g. setting interest_rate to 0
-        # for an HOA whose reserves earn no interest, or setting reserve cash
-        # to 0 for a brand-new HOA. The previous filter ``val not in (None, "", 0, 0.0)``
-        # silently fell back to spec.static_data when the operator entered 0.
-        for field in (
-            "management_company", "management_company_address",
-            "management_company_phone", "management_company_fax", "management_company_web",
-            "cpa_firm_name", "cpa_firm_address", "reserve_study_expert_name",
-            "reserve_study_date",
-            "reserve_cash_balance_eoy_prior", "fund_balance_boy_operations",
-            "monthly_assessment_per_unit_prior", "interest_rate_after_tax",
-            "replacement_cost_increase_rate", "letter_signed_by",
-            # Priority-A disclosure inputs (drifting-puzzling-grove)
-            "approved_monthly_assessment_per_unit",
-            "financial_packet_archetype",
-            "reserve_interest_income_override",
-            "income_tax_provision_override",
-            "reserve_funding_source",
-            "reserve_funding_manual_amount",
-            "special_assessments_json",
-            "additional_assessments_needed_json",
-            "outstanding_loan_json",
-            # Phase 1 boilerplate-gap fields (drifting-puzzling-grove)
-            "letter_date",
-            "letter_signed_by_title",
-            "accountant_report_date",
-            "reserve_funding_plan_date",
-            "hoa_state",
-            "hoa_entity_type",
-            "hoa_incorporation_year",
-            # 30-year reserve funding study (drifting-puzzling-grove rebuild).
-            # ``assessment_increase_schedule_json`` and
-            # ``replacement_fund_monthly_assessment_per_unit`` are read from
-            # the active AssessmentSetup's allocation pools when present
-            # (Task #185 of dre-driven-assessment-engine) — the
-            # ``_pool_forecast_overlay`` block below overrides any hoa_settings
-            # value with the per-pool one.
-            "assessment_increase_schedule_json",
-            "replacement_fund_monthly_assessment_per_unit",
-            "board_deferrals_json",
-        ):
-            val = getattr(settings_row, field, None)
-            if val not in (None, ""):
-                overrides[field] = val
-
-        # Task #185: prefer AssessmentSetup pool-level forecast inputs over
-        # the deprecated hoa_settings columns. When the operator has set
-        # ``escalation_schedule_json`` or ``starting_monthly_per_unit`` on
-        # the reserve allocation pool (recipient_scope='all_units' is the
-        # current convention — Phase 12+ will support per-pool variants),
-        # those values take precedence.
-        pool_overlay = _resolve_pool_forecast_overlay(
-            session=session, property_id=hoa_id,
+        # Fetch assessment_mode from the property row for the matrix builder.
+        property_row = (
+            session.query(Property).filter(Property.id == hoa_id).one_or_none()
         )
-        overrides.update(pool_overlay)
+        assessment_mode = normalize_assessment_mode(
+            getattr(property_row, "assessment_mode", None) if property_row else None
+        )
 
-        # Resolve the per-HOA appendix manifest (Phase 5.4 task 159 of
-        # dre-driven-assessment-engine). When the operator has uploaded
-        # appendix PDFs through the Settings → Appendices tab, the manifest
-        # resolver returns their on-disk paths in deterministic order. The
-        # render job doesn't yet have an AnnualPackage row to anchor on,
-        # so we pass ``package_id=None`` to get the property-wide
-        # include-by-default set. When the compile flow becomes
-        # AnnualPackage-driven (deferred), pass the package_id here.
         from .compile_inputs import resolve_compile_appendix_paths
+        from .assessment_schedule_matrix import build_matrix_for_assessment_mode
 
         raw_conn = session.connection().connection
         manifest_paths = resolve_compile_appendix_paths(
             property_id=hoa_id, package_id=None, connection=raw_conn,
         )
-        from .assessment_schedule_matrix import build_matrix_for_assessment_mode
 
         assessment_mapping_counts = _materialize_assessment_mappings_for_budget_draft(
             connection=raw_conn,
             hoa_id=hoa_id,
-            budget_draft=budget_draft,
+            budget_draft=bundle.budget_draft,
         )
         logger.info(
             "Materialized assessment mappings for disclosure job %s: %s",
@@ -711,13 +778,13 @@ def run_render_job(
             assessment_mapping_counts,
         )
 
-        assessment_revenue = _assessment_revenue_for_budget_draft(budget_draft)
+        assessment_revenue = _assessment_revenue_for_budget_draft(bundle.budget_draft)
         if assessment_revenue == Decimal("0"):
-            monthly_raw = overrides.get("approved_monthly_assessment_per_unit")
+            monthly_raw = bundle.overrides.get("approved_monthly_assessment_per_unit")
             if monthly_raw not in (None, ""):
                 assessment_revenue = (
                     Decimal(str(monthly_raw))
-                    * Decimal(hoa_metadata.units)
+                    * Decimal(bundle.hoa_metadata.units)
                     * Decimal("12")
                 ).quantize(Decimal("0.01"))
 
@@ -725,24 +792,22 @@ def run_render_job(
             connection=raw_conn,
             property_id=hoa_id,
             fiscal_year=fiscal_year,
-            budget_draft=budget_draft,
-            hoa_name=hoa_metadata.name,
-            unit_count=hoa_metadata.units,
+            budget_draft=bundle.budget_draft,
+            hoa_name=bundle.hoa_metadata.name,
+            unit_count=bundle.hoa_metadata.units,
             approved_assessment_revenue_annual=assessment_revenue,
             assessment_mode=assessment_mode,
         )
 
         output_dir = _output_dir_for(hoa_id, fiscal_year, job_id)
         result = compile_package(
-            spec=spec.model_copy(
-                update={"hoa_id": hoa_id, "fiscal_year": fiscal_year}
-            ),
-            budget_draft=budget_draft,
-            reserve_snapshot=reserve_snapshot,
-            hoa_metadata=hoa_metadata,
+            spec=bundle.spec,
+            budget_draft=bundle.budget_draft,
+            reserve_snapshot=bundle.reserve_snapshot,
+            hoa_metadata=bundle.hoa_metadata,
             output_dir=output_dir,
             appendices_root=appendix_dir_for(hoa_id),
-            hoa_settings_overrides=overrides,
+            hoa_settings_overrides=bundle.overrides,
             extra_appendix_paths=manifest_paths,
             assessment_matrix=assessment_matrix,
         )
@@ -765,22 +830,28 @@ def run_render_job(
             error_message=error_message,
         )
     except LookupError as exc:
-        # raised by services.budget_history_service.get_active_draft when
-        # no draft exists for the HOA — surface as a clean failure not a 500
+        # raised by _resolve_preflight_inputs when no active budget draft exists
+        human_msg = (
+            "No active budget draft found. "
+            "Upload and activate a budget before generating."
+        )
         logger.warning("Missing input for job %s: %s", job_id, exc)
         _set_status(
             session,
             job_id,
             status=DISCLOSURE_JOB_FAILED,
-            error_message=str(exc),
+            error_message=human_msg,
         )
-    except Exception as exc:  # noqa: BLE001 — BackgroundTasks must never raise
+    except Exception:  # noqa: BLE001 — BackgroundTasks must never raise
         logger.exception("Unexpected error in render job %s", job_id)
         _set_status(
             session,
             job_id,
             status=DISCLOSURE_JOB_FAILED,
-            error_message=f"Internal error: {type(exc).__name__}: {exc}",
+            error_message=(
+                "An unexpected error stopped generation. "
+                "Please try again or contact support."
+            ),
         )
     finally:
         session.close()
@@ -795,6 +866,7 @@ __all__ = [
     "delete_appendix",
     "is_supported_hoa",
     "list_appendices",
+    "run_preflight",
     "run_render_job",
     "save_appendix",
     "_output_dir_for",
