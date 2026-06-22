@@ -309,6 +309,50 @@ async def save_budget_draft(
         raise HTTPException(status_code=409, detail=str(exc))
 
 
+@router.post(
+    "/hoa/{hoa_id}/budget/drafts/{draft_id}/reserve-study/upload",
+    response_model=BudgetDraftPayload,
+)
+async def replace_budget_reserve_study(
+    hoa_id: int,
+    draft_id: int,
+    reserve_study_file: UploadFile = File(...),
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user),
+) -> BudgetDraftPayload:
+    """Replace the reserve study PDF on an existing draft.
+
+    The new study is extracted and attached to the draft; it is NOT
+    automatically applied to budget line items. Non-PDF files are rejected
+    with a 422. On extraction failure the prior reserve rows are preserved.
+    """
+    filename = reserve_study_file.filename or "reserve-study.pdf"
+    if not (
+        filename.lower().endswith(".pdf")
+        or "pdf" in (reserve_study_file.content_type or "").lower()
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="Reserve study must be a PDF file. Please upload a .pdf document.",
+        )
+    try:
+        return budget_history_service.replace_reserve_study(
+            session,
+            hoa_id=hoa_id,
+            draft_id=draft_id,
+            actor=current_user,
+            reserve_filename=filename,
+            reserve_content_type=reserve_study_file.content_type,
+            reserve_file_bytes=await reserve_study_file.read(),
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @router.patch("/hoa/{hoa_id}/budget/drafts/{draft_id}/reserve-study", response_model=BudgetDraftPayload)
 async def save_budget_reserve_study(
     hoa_id: int,

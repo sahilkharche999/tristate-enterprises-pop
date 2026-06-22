@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { AlertTriangle, ArrowDown, ArrowUp, Heading2, Plus, Save, Trash2 } from 'lucide-react';
+import { useRef, useState } from 'react';
+import { AlertTriangle, ArrowDown, ArrowUp, Heading2, Plus, Save, Trash2, Upload } from 'lucide-react';
 
 import { Button } from './ui/button';
 import { Input } from './ui/input';
@@ -30,6 +30,7 @@ interface ReserveStudyViewProps {
   onDeleteRow: (index: number) => void;
   onSave: () => Promise<void>;
   onApply: () => Promise<void>;
+  onReplaceFile?: (file: File) => Promise<void>;
   hasUnsavedChanges: boolean;
   isSaving: boolean;
   isApplying: boolean;
@@ -47,12 +48,27 @@ export function ReserveStudyView({
   onDeleteRow,
   onSave,
   onApply,
+  onReplaceFile,
   hasUnsavedChanges,
   isSaving,
   isApplying,
   applyMessage,
 }: ReserveStudyViewProps) {
   const [deleteIndex, setDeleteIndex] = useState<number | null>(null);
+  const [isReplacing, setIsReplacing] = useState(false);
+  const replaceInputRef = useRef<HTMLInputElement>(null);
+
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !onReplaceFile) return;
+    setIsReplacing(true);
+    try {
+      await onReplaceFile(file);
+    } finally {
+      setIsReplacing(false);
+      if (replaceInputRef.current) replaceInputRef.current.value = '';
+    }
+  };
 
   const pendingDeleteRow = deleteIndex === null ? null : rows[deleteIndex] ?? null;
 
@@ -84,6 +100,27 @@ export function ReserveStudyView({
               <span className="whitespace-nowrap rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-medium text-amber-900">
                 Unsaved changes
               </span>
+            ) : null}
+            {onReplaceFile ? (
+              <>
+                <input
+                  ref={replaceInputRef}
+                  type="file"
+                  accept=".pdf,application/pdf"
+                  className="hidden"
+                  onChange={(e) => void handleFileChange(e)}
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={isReplacing}
+                  onClick={() => replaceInputRef.current?.click()}
+                  className="whitespace-nowrap border-[#d4d4d4] text-[#525252] hover:bg-[#f5f5f5] gap-1.5"
+                >
+                  <Upload className="h-4 w-4" />
+                  {isReplacing ? 'Replacing…' : 'Replace PDF'}
+                </Button>
+              </>
             ) : null}
             <Button
               variant="outline"

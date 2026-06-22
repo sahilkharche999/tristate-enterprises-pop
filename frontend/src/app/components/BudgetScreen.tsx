@@ -25,6 +25,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '.
 import {
   applyReserveStudyToBudget,
   commitBudgetGlMerge,
+  replaceReserveStudy,
   deleteActiveDraft,
   downloadBudgetDraftEnriched,
   fetchBudgetGlMergeSuggestions,
@@ -581,6 +582,48 @@ export function BudgetScreen({
       lineItems.map((item) =>
         item.id === itemId ? { ...item, percentChange: newPercent } : item,
       ),
+    );
+  };
+
+  const handleLineItemFieldChange = (
+    itemId: string,
+    field: 'name' | 'ytdActual' | 'annualBudget' | 'projection',
+    value: string,
+  ) => {
+    onLineItemsUpdate(
+      lineItems.map((item) => {
+        if (item.id !== itemId) return item;
+        if (field === 'name') {
+          return { ...item, name: value, label: value };
+        }
+        const numValue = parseFloat(value) || 0;
+        return { ...item, [field]: numValue };
+      }),
+    );
+  };
+
+  const handleReserveStudyReplaced = (updatedDraft: BudgetDraftPayload) => {
+    hydrateReserveState(updatedDraft);
+    setCurrentView('reserve');
+  };
+
+  const handleReplaceReserveFile = async (file: File) => {
+    if (!draftId) return;
+    const updatedDraft = await replaceReserveStudy(hoaId, draftId, file);
+    handleReserveStudyReplaced(updatedDraft);
+  };
+
+  const handleReadOnlyOverride = (itemId: string, override: boolean | null) => {
+    onLineItemsUpdate(
+      lineItems.map((item) => {
+        if (item.id !== itemId) return item;
+        // When unlocking (override=false): set readOnly=false so the row renders as editable.
+        // When re-locking (override=null): restore readOnly from the category default.
+        const isReserveCategory =
+          item.category === 'reserve_income' || item.category === 'reserve_expense';
+        const newReadOnly = override === null ? isReserveCategory : override;
+        return { ...item, readOnlyOverride: override, readOnly: newReadOnly };
+      }),
     );
   };
 
@@ -1742,10 +1785,13 @@ export function BudgetScreen({
               draftId={draftId}
               lineItems={lineItems}
               onPercentChange={handlePercentChange}
+              onFieldChange={handleLineItemFieldChange}
               onNoteSaved={handleNoteSaved}
               onRequestMerge={handleRequestMerge}
+              onReadOnlyOverride={handleReadOnlyOverride}
               units={hoa.units}
               reserveInflationRate={activeReserveInflationRate}
+              hasUnsavedChanges={hasUnsavedDraftChanges}
             />
           </>
         )}
@@ -1778,6 +1824,7 @@ export function BudgetScreen({
             onDeleteRow={handleDeleteReserveStudyRow}
             onSave={handleSaveReserveStudy}
             onApply={handleApplyReserveStudy}
+            onReplaceFile={draftId ? handleReplaceReserveFile : undefined}
             hasUnsavedChanges={hasUnsavedReserveStudyChanges}
             isSaving={isSavingReserveStudy}
             isApplying={isApplyingReserveStudy}

@@ -23,6 +23,7 @@ export interface LineItem {
   currentPeriod?: number | null;
   variance?: number | null;
   readOnly?: boolean;    // true = excluded from board-adjustable flow (reserve-study rows)
+  readOnlyOverride?: boolean | null; // explicit per-line unlock (null = use category default)
   accountCode?: number;  // 60000 — parsed from "60000 - Electricity & Gas"
   label?: string;        // "60000 - Electricity & Gas" — full string from col B
   lineItemKey?: string | null;

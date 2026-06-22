@@ -2,7 +2,7 @@
  * Shared budget calculation utilities.
  * All formulas mirror the backend pipeline (generate_budget_pipeline.py).
  */
-import { type LineItem } from '../data/mockData';
+import { type LineItem } from '../data/mockData.ts';
 
 // ── Formatting ────────────────────────────────────────────────────────────────
 
@@ -106,6 +106,13 @@ export const calcSettingsDerivedReservePercent = (
 // ── Category aggregation ──────────────────────────────────────────────────────
 
 export type TotalField = 'ytdActual' | 'annualBudget' | 'projection' | 'proposedChange' | 'monthly';
+
+/** Proposed income total — sum over all income-category items. */
+export const calcTotalIncome = (
+  incomeItems: LineItem[],
+  reserveInflationRate?: number | null,
+): number =>
+  calcDisplayCategoryTotal(incomeItems, 'proposedChange', reserveInflationRate);
 
 export const calcCategoryTotal = (items: LineItem[], field: TotalField): number =>
   items.reduce((sum, item) => {

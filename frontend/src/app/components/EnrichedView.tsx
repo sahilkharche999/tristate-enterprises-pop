@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { MessageSquare, ChevronDown, Percent, DollarSign } from 'lucide-react';
+import { GitMerge, Lock, MessageSquare, ChevronDown, Percent, DollarSign, Unlock } from 'lucide-react';
 import { toast } from 'sonner';
 import { Input } from './ui/input';
 import { Button } from './ui/button';
@@ -16,6 +16,7 @@ import {
   calcDisplayMonthly,
   calcDisplayProposed,
   calcSettingsDerivedReservePercent,
+  calcTotalIncome,
   isReserveComponent,
 } from '../lib/budget';
 import { getErrorMessage } from '../lib/errors';
@@ -25,10 +26,13 @@ interface EnrichedViewProps {
   draftId: number | null;
   lineItems: LineItem[];
   onPercentChange: (itemId: string, newPercent: number) => void;
+  onFieldChange: (itemId: string, field: 'name' | 'ytdActual' | 'annualBudget' | 'projection', value: string) => void;
   onNoteSaved: (itemId: string, title: string, body: string) => void;
   onRequestMerge: (itemId: string) => void;
+  onReadOnlyOverride?: (itemId: string, override: boolean | null) => void;
   units: number;
   reserveInflationRate: number;
+  hasUnsavedChanges?: boolean;
 }
 
 export function EnrichedView({
@@ -36,10 +40,13 @@ export function EnrichedView({
   draftId,
   lineItems,
   onPercentChange,
+  onFieldChange,
   onNoteSaved,
   onRequestMerge,
+  onReadOnlyOverride,
   units,
   reserveInflationRate,
+  hasUnsavedChanges = false,
 }: EnrichedViewProps) {
   const [expandedNote, setExpandedNote] = useState<string | null>(null);
   const [noteEdits, setNoteEdits] = useState<Record<string, { title: string; body: string }>>({});
@@ -118,23 +125,43 @@ export function EnrichedView({
     return acc;
   }, {} as Record<string, LineItem[]>);
 
-  // Total Annual Budget = expenses only (operating + reserve expenses), not reserve income
+  // Live mirror: sum of reserve allocation/transfer lines for Reserve Income display.
+  // Backend computes the authoritative value on save; this keeps the UI in sync while editing.
+  const liveTransferTotal = lineItems.reduce((sum, item) => {
+    if (item.category === 'reserve_expense' && item.reserveGroup === 'transfer') {
+      return sum + (item.annualBudget || 0);
+    }
+    return sum;
+  }, 0);
+
+  // Total Annual Budget = expenses only (operating + reserve expenses), not reserve income.
+  // Assessment math depends on this definition — do not change.
   const totalAnnualBudget =
     calcDisplayCategoryTotal(groupedItems['operating'] || [], 'proposedChange', reserveInflationRate) +
     calcDisplayCategoryTotal(groupedItems['reserve'] || [], 'proposedChange', reserveInflationRate) +
     calcDisplayCategoryTotal(groupedItems['reserve_expense'] || [], 'proposedChange', reserveInflationRate);
 
+  const totalIncome = calcTotalIncome(groupedItems['income'] || [], reserveInflationRate);
+  const netSurplusDeficit = totalIncome - totalAnnualBudget;
+
   const perUnitMonthly = units > 0 ? totalAnnualBudget / 12 / units : null;
 
   return (
     <div className="space-y-8">
+      {hasUnsavedChanges ? (
+        <div className="flex items-center">
+          <span className="whitespace-nowrap rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-medium text-amber-900">
+            Unsaved changes
+          </span>
+        </div>
+      ) : null}
       {/* Table */}
       <div className="bg-white border border-[#e5e5e5] rounded-lg overflow-hidden shadow-sm">
         <div className="overflow-x-auto">
           <table className="w-full">
             <thead className="bg-[#fafafa] border-b border-[#e5e5e5]">
               <tr>
-                <th className="text-left px-6 py-4 text-xs font-semibold text-[#525252] uppercase tracking-wider">Line Item</th>
+                <th className="text-left px-6 py-4 text-xs font-semibold text-[#525252] uppercase tracking-wider min-w-[260px] w-[260px]">Line Item</th>
                 <th className="text-right px-6 py-4 text-xs font-semibold text-[#525252] uppercase tracking-wider">YTD Actual</th>
                 <th className="text-right px-6 py-4 text-xs font-semibold text-[#525252] uppercase tracking-wider">Annual Budget</th>
                 <th className="text-right px-6 py-4 text-xs font-semibold text-[#525252] uppercase tracking-wider">% Difference</th>
@@ -162,6 +189,14 @@ export function EnrichedView({
 
                   // ── Read-only row (reserve-study / reserve-labeled, excluded from budget flow) ──
                   if (item.readOnly) {
+                    const isReserveIncomeLine =
+                      item.category === 'reserve_income' && item.reserveGroup !== 'income';
+                    // Live-mirror: show the transfer total for reserve income contribution lines.
+                    const displayAnnualBudget = isReserveIncomeLine
+                      ? liveTransferTotal
+                      : item.annualBudget;
+                    const canUnlock = !!onReadOnlyOverride;
+
                     if (isReserveComponent(item)) {
                       const adjustedReserveAmount = calcDisplayProposed(item, reserveInflationRate);
                       const adjustedMonthly = calcDisplayMonthly(item, reserveInflationRate);
@@ -200,24 +235,42 @@ export function EnrichedView({
                             </button>
                           </td>
                           <td className="px-6 py-4 text-right">
-                            <Button
-                              type="button"
-                              variant="outline"
-                              size="sm"
-                              disabled
-                              className="border-[#e5e5e5] text-[#a3a3a3]"
-                            >
-                              Merge with...
-                            </Button>
+                            {canUnlock ? (
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                onClick={() => onReadOnlyOverride(item.id, false)}
+                                className="border-[#d4d4d4] text-[#525252] hover:border-[#a3a3a3] hover:bg-[#f5f5f5] gap-1"
+                                title="Unlock to edit this reserve line"
+                              >
+                                <Unlock className="w-3 h-3" />
+                                Unlock
+                              </Button>
+                            ) : (
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="icon"
+                                disabled
+                                className="h-8 w-8 border-[#e5e5e5] text-[#d4d4d4]"
+                                title="Cannot merge read-only reserve rows"
+                              >
+                                <GitMerge className="w-3.5 h-3.5" />
+                              </Button>
+                            )}
                           </td>
                         </tr>,
                       ];
                     }
                     return [
-                      <tr key={item.id} className="border-b border-[#e5e5e5] opacity-60">
+                      <tr key={item.id} className={`border-b border-[#e5e5e5] ${isReserveIncomeLine ? '' : 'opacity-60'}`}>
                         <td className="px-6 py-4 text-sm text-[#525252] italic">
                           <div className="flex flex-col gap-1">
                             <span>{item.name}</span>
+                            {isReserveIncomeLine ? (
+                              <span className="text-[10px] text-[#737373]">Mirrors allocation — derived from transfer lines</span>
+                            ) : null}
                             {mergedLabel ? (
                               <span
                                 title={mergedTooltip}
@@ -229,10 +282,10 @@ export function EnrichedView({
                           </div>
                         </td>
                         <td className="px-6 py-4 text-sm text-[#737373] text-right font-mono">{formatCurrency(item.ytdActual)}</td>
-                        <td className="px-6 py-4 text-sm text-[#737373] text-right font-mono">{formatCurrency(item.annualBudget)}</td>
+                        <td className="px-6 py-4 text-sm text-[#737373] text-right font-mono">{formatCurrency(displayAnnualBudget)}</td>
                         <td className="px-6 py-4 text-sm text-[#a3a3a3] text-right">—</td>
                         <td className="px-6 py-4 text-sm text-[#a3a3a3] text-right">—</td>
-                        <td className="px-6 py-4 text-sm text-[#a3a3a3] text-right text-xs">Excluded</td>
+                        <td className="px-6 py-4 text-sm text-[#a3a3a3] text-right text-xs">{isReserveIncomeLine ? 'Derived' : 'Excluded'}</td>
                         <td className="px-6 py-4 text-sm text-[#a3a3a3] text-right">—</td>
                         <td className="px-6 py-4 text-sm text-[#a3a3a3] text-right">—</td>
                         <td className="px-6 py-4 text-center">
@@ -241,19 +294,28 @@ export function EnrichedView({
                           </button>
                         </td>
                         <td className="px-6 py-4 text-right">
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="sm"
-                            disabled
-                            className="border-[#e5e5e5] text-[#a3a3a3]"
-                          >
-                            Merge with...
-                          </Button>
+                          {canUnlock && !isReserveIncomeLine ? (
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              onClick={() => onReadOnlyOverride(item.id, false)}
+                              className="border-[#d4d4d4] text-[#525252] hover:border-[#a3a3a3] hover:bg-[#f5f5f5] gap-1"
+                              title="Unlock to edit this reserve line. It stays in the reserve bucket — edits change its value, not the operating total."
+                            >
+                              <Unlock className="w-3 h-3" />
+                              Unlock
+                            </Button>
+                          ) : (
+                            <span />
+                          )}
                         </td>
                       </tr>,
                     ];
                   }
+
+                  // An explicitly-unlocked reserve line: show inline hint + lock button.
+                  const wasUnlocked = item.readOnlyOverride === false;
 
                   const projection = item.projection ?? 0;
                   const proposedChange = calcProposed(item.annualBudget, item.percentChange);
@@ -261,10 +323,20 @@ export function EnrichedView({
                   const percentDiff = calcPercentDiff(projection, item.annualBudget);
 
                   return [
-                    <tr key={item.id} className="border-b border-[#e5e5e5] hover:bg-[#fafafa] transition-colors">
-                      <td className="px-6 py-4 text-sm text-[#111111] font-medium">
-                        <div className="flex flex-col gap-1">
-                          <span>{item.name}</span>
+                    <tr key={item.id} className={`border-b border-[#e5e5e5] hover:bg-[#fafafa] transition-colors ${wasUnlocked ? 'bg-[#fffbeb]' : ''}`}>
+                      <td className="px-4 py-3 text-sm text-[#111111] font-medium">
+                        <div className="flex flex-col gap-1.5">
+                          <Input
+                            type="text"
+                            value={item.name}
+                            onChange={(e) => onFieldChange(item.id, 'name', e.target.value)}
+                            className="w-full min-w-[220px] border-[#e5e5e5] bg-white text-sm text-[#111111] focus:border-[#737373] focus:ring-1 focus:ring-[#737373]"
+                          />
+                          {wasUnlocked ? (
+                            <span className="text-[10px] text-amber-600 font-medium">
+                              Unlocked — stays in reserve bucket; won't change operating total
+                            </span>
+                          ) : null}
                           {mergedLabel ? (
                             <span
                               title={mergedTooltip}
@@ -275,17 +347,35 @@ export function EnrichedView({
                           ) : null}
                         </div>
                       </td>
-                      <td className="px-6 py-4 text-sm text-[#525252] text-right font-mono">
-                        {formatCurrency(item.ytdActual)}
+                      <td className="px-4 py-3 text-right">
+                        <input
+                          type="number"
+                          step="any"
+                          value={item.ytdActual}
+                          onChange={(e) => onFieldChange(item.id, 'ytdActual', e.target.value)}
+                          className="w-28 rounded-md border border-[#e5e5e5] bg-white px-2 py-1.5 text-right text-sm font-mono text-[#525252] focus:border-[#737373] focus:outline-none focus:ring-1 focus:ring-[#737373] [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                        />
                       </td>
-                      <td className="px-6 py-4 text-sm text-[#525252] text-right font-mono">
-                        {formatCurrency(item.annualBudget)}
+                      <td className="px-4 py-3 text-right">
+                        <input
+                          type="number"
+                          step="any"
+                          value={item.annualBudget}
+                          onChange={(e) => onFieldChange(item.id, 'annualBudget', e.target.value)}
+                          className="w-28 rounded-md border border-[#e5e5e5] bg-white px-2 py-1.5 text-right text-sm font-mono text-[#525252] focus:border-[#737373] focus:outline-none focus:ring-1 focus:ring-[#737373] [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                        />
                       </td>
                       <td className="px-6 py-4 text-sm text-[#737373] text-right font-mono">
                         {percentDiff.toFixed(1)}%
                       </td>
-                      <td className="px-6 py-4 text-sm text-[#525252] text-right font-mono">
-                        {formatCurrency(projection)}
+                      <td className="px-4 py-3 text-right">
+                        <input
+                          type="number"
+                          step="any"
+                          value={item.projection ?? 0}
+                          onChange={(e) => onFieldChange(item.id, 'projection', e.target.value)}
+                          className="w-28 rounded-md border border-[#e5e5e5] bg-white px-2 py-1.5 text-right text-sm font-mono text-[#525252] focus:border-[#737373] focus:outline-none focus:ring-1 focus:ring-[#737373] [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                        />
                       </td>
                       <td className="px-6 py-4 text-right">
                         <div className="flex flex-col gap-1">
@@ -347,15 +437,32 @@ export function EnrichedView({
                         </button>
                       </td>
                       <td className="px-6 py-4 text-right">
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          onClick={() => onRequestMerge(item.id)}
-                          className="border-[#d4d4d4] text-[#111111] hover:border-[#a3a3a3] hover:bg-[#f5f5f5]"
-                        >
-                          Merge with...
-                        </Button>
+                        <div className="flex flex-col gap-1.5 items-end">
+                          {wasUnlocked && onReadOnlyOverride ? (
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              onClick={() => onReadOnlyOverride(item.id, null)}
+                              className="border-amber-300 text-amber-700 hover:bg-amber-50 gap-1"
+                              title="Re-lock this line — return to read-only reserve default"
+                            >
+                              <Lock className="w-3 h-3" />
+                              Lock
+                            </Button>
+                          ) : (
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="icon"
+                              onClick={() => onRequestMerge(item.id)}
+                              className="h-8 w-8 border-[#d4d4d4] text-[#525252] hover:border-[#a3a3a3] hover:bg-[#f5f5f5]"
+                              title="Merge with another row"
+                            >
+                              <GitMerge className="w-3.5 h-3.5" />
+                            </Button>
+                          )}
+                        </div>
                       </td>
                     </tr>,
                     // Note Expansion
@@ -446,6 +553,7 @@ export function EnrichedView({
         <div className="bg-white border border-[#e5e5e5] rounded-lg p-6 shadow-sm">
           <div className="text-xs font-medium text-[#737373] mb-2 uppercase tracking-wide">Total Annual Budget</div>
           <div className="text-3xl font-semibold text-[#111111]">{formatCurrency(totalAnnualBudget)}</div>
+          <div className="text-xs text-[#a3a3a3] mt-1">Operating + reserve expenses</div>
         </div>
         <div className="bg-white border border-[#e5e5e5] rounded-lg p-6 shadow-sm">
           <div className="text-xs font-medium text-[#737373] mb-2 uppercase tracking-wide">Monthly Total</div>
@@ -455,6 +563,39 @@ export function EnrichedView({
           <div className="text-xs font-medium text-[#737373] mb-2 uppercase tracking-wide">Per Unit Monthly</div>
           <div className="text-3xl font-semibold text-[#111111]">
             {perUnitMonthly == null ? '—' : formatCurrency(perUnitMonthly)}
+          </div>
+        </div>
+      </div>
+
+      {/* Profit / Loss Summary */}
+      <div className="bg-white border border-[#e5e5e5] rounded-lg shadow-sm overflow-hidden">
+        <div className="px-6 py-4 border-b border-[#e5e5e5] bg-[#fafafa]">
+          <span className="text-xs font-semibold text-[#525252] uppercase tracking-wide">Income vs. Expense Summary</span>
+        </div>
+        <div className="grid grid-cols-3 divide-x divide-[#e5e5e5]">
+          <div className="px-6 py-4">
+            <div className="text-xs font-medium text-[#737373] mb-1 uppercase tracking-wide">Total Income</div>
+            <div className="text-2xl font-semibold text-[#16a34a]">{formatCurrency(totalIncome)}</div>
+          </div>
+          <div className="px-6 py-4">
+            <div className="text-xs font-medium text-[#737373] mb-1 uppercase tracking-wide">Total Expense</div>
+            <div className="text-2xl font-semibold text-[#dc2626]">{formatCurrency(totalAnnualBudget)}</div>
+          </div>
+          <div className="px-6 py-4">
+            <div className="text-xs font-medium text-[#737373] mb-1 uppercase tracking-wide">
+              {netSurplusDeficit > 0 ? 'Surplus' : netSurplusDeficit < 0 ? 'Deficit' : 'Balanced'}
+            </div>
+            <div className={`text-2xl font-semibold ${
+              netSurplusDeficit > 0
+                ? 'text-[#16a34a]'
+                : netSurplusDeficit < 0
+                  ? 'text-[#dc2626]'
+                  : 'text-[#111111]'
+            }`}>
+              {netSurplusDeficit === 0
+                ? formatCurrency(0)
+                : `${netSurplusDeficit > 0 ? '+' : ''}${formatCurrency(netSurplusDeficit)}`}
+            </div>
           </div>
         </div>
       </div>

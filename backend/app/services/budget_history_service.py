@@ -540,7 +540,7 @@ def _parse_proforma_excel_source(path: str) -> list[dict[str, Any]]:
                 "annual_budget": annual_value,
                 "projection": annual_value,
                 "percent_change": 0.0,
-                "read_only": category in READ_ONLY_SECTIONS,
+                "read_only": _effective_read_only({}, category),
                 "reserve_group": reserve_group,
                 "source_column": annual_source_column,
                 "source_page_or_cell": f"{selected_sheet.title}!{annual_col_letter}{row_idx}",
@@ -561,6 +561,55 @@ def _parse_proforma_excel_source(path: str) -> list[dict[str, Any]]:
 
 def _default_proforma_statement_month(hoa: Property) -> int:
     return int(hoa.fiscal_year_end_month or 12)
+
+
+def _effective_read_only(item: dict[str, Any], category: str) -> bool:
+    """Resolve the effective read-only flag for a line item.
+
+    An explicit per-line override takes precedence over the section default.
+    When override is None (absent) the category policy from READ_ONLY_SECTIONS
+    applies unchanged.
+    """
+    override = item.get("read_only_override")
+    if override is not None:
+        return bool(override)
+    return category in READ_ONLY_SECTIONS
+
+
+def _derive_reserve_income(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Derive reserve_income contribution line amounts from reserve allocation transfers.
+
+    Sums the annual_budget of all reserve_expense lines whose reserve_group is
+    "transfer" (the operating-side contribution to the reserve fund) and sets
+    that sum as the annual_budget on reserve_income lines that are not explicitly
+    classified as interest (reserve_group != "income"). This keeps the two sides
+    of the reserve transfer in sync without allowing them to diverge.
+
+    Interest lines (reserve_group == "income") are left untouched.
+    """
+    transfer_total: float = 0.0
+    for it in items:
+        if (
+            isinstance(it, dict)
+            and it.get("category") == "reserve_expense"
+            and it.get("reserve_group") == "transfer"
+        ):
+            transfer_total += float(it.get("annual_budget") or 0)
+
+    if transfer_total == 0.0:
+        return items
+
+    result = []
+    for it in items:
+        if (
+            isinstance(it, dict)
+            and it.get("category") == "reserve_income"
+            and it.get("reserve_group") != "income"
+        ):
+            result.append({**it, "annual_budget": transfer_total})
+        else:
+            result.append(it)
+    return result
 
 
 def _now_text() -> str:
@@ -1068,7 +1117,7 @@ def _statement_to_budget_line_items(
                 "annual_budget": item.annual_budget,
                 "projection": item.annual_budget,
                 "percent_change": 0.0,
-                "read_only": category in READ_ONLY_SECTIONS,
+                "read_only": _effective_read_only({}, category),
                 "reserve_group": reserve_group,
                 "source_column": source_column,
                 "source_page_or_cell": (
@@ -1388,10 +1437,11 @@ def _table_to_line_items(table: dict[str, Any]) -> tuple[list[dict[str, Any]], l
             "annual_budget": item.get("Annual Budget"),
             "projection": item.get("Projection"),
             "percent_change": item.get("% Change") or item.get("Percent Change"),
-            # Use shared constant so read-only logic is consistent with the parser
-            # and the taxonomy definition. Adding a new read-only section means
-            # changing ONE constant (READ_ONLY_SECTIONS), not this check.
-            "read_only": category in READ_ONLY_SECTIONS,
+            # Use _effective_read_only so per-line overrides (read_only_override)
+            # take precedence over the section default. New items have no override,
+            # so this is equivalent to `category in READ_ONLY_SECTIONS` on initial
+            # creation; the resolver applies on re-serialization.
+            "read_only": _effective_read_only(item, category),
             # Per the DRE-driven assessment engine invariant
             # (BudgetDraft.line_items.amount = annual), audit which source
             # column the annual value came from. "annual_budget" here means
@@ -1463,13 +1513,16 @@ def _serialize_timeline_event(event: BudgetAuditEvent) -> BudgetTimelineEvent:
 
 def _serialize_draft(draft: BudgetDraft, upload: Optional[BudgetUpload] = None) -> BudgetDraftPayload:
     reserve_study_rows, _ = canonicalize_reserve_study_row_dicts(_json_loads(draft.reserve_study_rows_json, []))
+    raw_line_items: list[dict[str, Any]] = _json_loads(draft.line_items_json, [])
+    # Derive reserve income from the allocation transfer so they always match.
+    line_items = _derive_reserve_income(raw_line_items)
     return BudgetDraftPayload(
         id=draft.id,
         status=draft.status,
         source_upload_id=draft.source_upload_id,
         reserve_study_upload_id=draft.reserve_study_upload_id,
         reopened_from_version_id=draft.reopened_from_version_id,
-        line_items=_json_loads(draft.line_items_json, []),
+        line_items=line_items,
         reserve_study_status=draft.reserve_study_status or "none",
         reserve_study_rows=reserve_study_rows,
         reserve_study_warnings=_json_loads(draft.reserve_study_warnings_json, []),
@@ -2407,6 +2460,156 @@ def create_upload(
         shutil.rmtree(temp_output_dir, ignore_errors=True)
 
 
+def _persist_reserve_study_to_draft(
+    session: Session,
+    *,
+    hoa_id: int,
+    draft_id: Optional[int],
+    actor: dict[str, Any],
+    reserve_filename: str,
+    reserve_content_type: Optional[str],
+    reserve_file_bytes: bytes,
+) -> tuple[Optional["BudgetUpload"], BundleFileStatus]:
+    """Upload, extract, and persist a reserve study PDF onto a draft.
+
+    Returns (upload_record, status). On hard extraction failure, prior reserve
+    rows on the draft are preserved — only the upload_id and warnings are
+    updated. Pass draft_id=None to record the upload without touching any draft.
+    """
+    reserve_route = choose_financial_document_route(reserve_filename, reserve_content_type)
+    reserve_is_pdf = (
+        Path(reserve_filename).suffix.lower() == ".pdf"
+        or "pdf" in (reserve_content_type or "").lower()
+    )
+    if not (reserve_route.is_supported and reserve_is_pdf):
+        unsupported_reason = "Unsupported reserve study file type. Upload a reserve study PDF."
+        return None, BundleFileStatus(
+            filename=reserve_filename,
+            status="failed",
+            review_reason=unsupported_reason,
+            debug_info=ExtractionDebugInfo(
+                code="unsupported_file_type",
+                message=unsupported_reason,
+                details={"content_type": reserve_content_type},
+            ),
+        )
+
+    timestamp = _now_text()
+    reserve_upload = _create_upload_record(
+        session,
+        hoa_id=hoa_id,
+        actor=actor,
+        original_filename=reserve_filename,
+        content_type=reserve_content_type,
+        file_bytes=reserve_file_bytes,
+        timestamp=timestamp,
+        document_role="reserve_study",
+        enrichment_status="completed",
+    )
+
+    try:
+        reserve_result = _extract_reserve_study_sync(
+            _budget_storage_path(reserve_upload.storage_key).as_posix()
+        )
+    except Exception as exc:
+        reserve_result = DocumentExtractionFailure(
+            code="reserve_provider_error",
+            message=f"Reserve study extraction could not complete automatically: {exc}",
+            details={"error": str(exc)},
+        )
+
+    if isinstance(reserve_result, DocumentExtractionFailure):
+        reserve_status = BundleFileStatus(
+            upload_id=reserve_upload.id,
+            filename=reserve_filename,
+            status="review_required",
+            warnings=[reserve_result.message],
+            review_reason=reserve_result.message,
+            debug_info=ExtractionDebugInfo(
+                code=reserve_result.code,
+                message=reserve_result.message,
+                details=reserve_result.details,
+            ),
+        )
+        if draft_id is not None:
+            draft_row = _get_editable_draft(session, hoa_id, draft_id)
+            draft_row.reserve_study_upload_id = reserve_upload.id
+            draft_row.reserve_study_status = "review_required"
+            # Preserve prior rows on hard failure — do not wipe them.
+            draft_row.reserve_study_warnings_json = _json_dumps([reserve_result.message])
+            draft_row.updated_by_user_id = actor["id"]
+            draft_row.actor_name = _actor_name(actor)
+            draft_row.updated_at = _now_text()
+            session.commit()
+    else:
+        has_review_flags = bool(reserve_result.warnings) or any(
+            row.flags for row in reserve_result.rows
+        )
+        persisted_status = "review_required" if has_review_flags else "completed"
+        reserve_status = BundleFileStatus(
+            upload_id=reserve_upload.id,
+            filename=reserve_filename,
+            status=persisted_status,
+            warnings=reserve_result.warnings,
+            review_reason=(
+                "Reserve study rows need review before applying to the budget."
+                if has_review_flags
+                else None
+            ),
+        )
+        if draft_id is not None:
+            draft_row = _get_editable_draft(session, hoa_id, draft_id)
+            draft_row.reserve_study_upload_id = reserve_upload.id
+            draft_row.reserve_study_status = persisted_status
+            draft_row.reserve_study_rows_json = _json_dumps(
+                [row.model_dump() for row in reserve_result.rows]
+            )
+            draft_row.reserve_study_warnings_json = _json_dumps(reserve_result.warnings)
+            draft_row.updated_by_user_id = actor["id"]
+            draft_row.actor_name = _actor_name(actor)
+            draft_row.updated_at = _now_text()
+            extracted_date = getattr(reserve_result, "study_date", None)
+            if extracted_date:
+                from ..services import hoa_settings_service as _hoa_settings_service
+                settings_row = _hoa_settings_service.get_or_create(session, hoa_id=hoa_id)
+                settings_row.reserve_study_date = str(extracted_date)
+            session.commit()
+
+    return reserve_upload, reserve_status
+
+
+def replace_reserve_study(
+    session: Session,
+    *,
+    hoa_id: int,
+    draft_id: int,
+    actor: dict[str, Any],
+    reserve_filename: str,
+    reserve_content_type: Optional[str],
+    reserve_file_bytes: bytes,
+) -> BudgetDraftPayload:
+    """Replace the reserve study on an existing draft with a new PDF.
+
+    The new study is extracted and persisted, but NOT automatically applied
+    to budget line items. The operator applies separately via the existing
+    apply endpoint. On hard extraction failure prior reserve rows are preserved.
+    """
+    _get_property(session, hoa_id)
+    draft_row = _get_editable_draft(session, hoa_id, draft_id)
+    _, _ = _persist_reserve_study_to_draft(
+        session,
+        hoa_id=hoa_id,
+        draft_id=draft_id,
+        actor=actor,
+        reserve_filename=reserve_filename,
+        reserve_content_type=reserve_content_type,
+        reserve_file_bytes=reserve_file_bytes,
+    )
+    # Reload after commit inside helper
+    session.refresh(draft_row)
+    return _serialize_draft(draft_row, _get_upload(session, draft_row.source_upload_id))
+
+
 def create_upload_bundle(
     session: Session,
     *,
@@ -2462,123 +2665,18 @@ def create_upload_bundle(
             ),
         )
 
-    reserve_route = choose_financial_document_route(reserve_filename, reserve_content_type)
-    reserve_is_pdf = Path(reserve_filename).suffix.lower() == ".pdf" or "pdf" in (reserve_content_type or "").lower()
-    reserve_upload: Optional[BudgetUpload] = None
-    if reserve_route.is_supported and reserve_is_pdf:
-        timestamp = _now_text()
-        reserve_upload = _create_upload_record(
-            session,
-            hoa_id=hoa_id,
-            actor=actor,
-            original_filename=reserve_filename,
-            content_type=reserve_content_type,
-            file_bytes=reserve_file_bytes,
-            timestamp=timestamp,
-            document_role="reserve_study",
-            enrichment_status="completed",
-            source_mode=source_mode,
-            assessment_mode=assessment_mode,
-        )
-        reserve_status = BundleFileStatus(
-            upload_id=reserve_upload.id,
-            filename=reserve_filename,
-            status="pending",
-        )
-        try:
-            reserve_result = _extract_reserve_study_sync(
-                _budget_storage_path(reserve_upload.storage_key).as_posix()
-            )
-        except Exception as exc:
-            reserve_result = DocumentExtractionFailure(
-                code="reserve_provider_error",
-                message=f"Reserve study extraction could not complete automatically: {exc}",
-                details={"error": str(exc)},
-            )
-        if isinstance(reserve_result, DocumentExtractionFailure):
-            reserve_status = BundleFileStatus(
-                upload_id=reserve_upload.id,
-                filename=reserve_filename,
-                status="review_required",
-                warnings=[reserve_result.message],
-                review_reason=reserve_result.message,
-                debug_info=ExtractionDebugInfo(
-                    code=reserve_result.code,
-                    message=reserve_result.message,
-                    details=reserve_result.details,
-                ),
-            )
-            if draft is not None:
-                draft_row = _get_editable_draft(session, hoa_id, draft.id)
-                draft_row.reserve_study_upload_id = reserve_upload.id
-                draft_row.reserve_study_status = "review_required"
-                draft_row.reserve_study_rows_json = _json_dumps([])
-                draft_row.reserve_study_warnings_json = _json_dumps([reserve_result.message])
-                draft_row.updated_by_user_id = actor["id"]
-                draft_row.actor_name = _actor_name(actor)
-                draft_row.updated_at = _now_text()
-                session.commit()
-                draft = _serialize_draft(draft_row, _get_upload(session, draft_row.source_upload_id))
-        else:
-            has_review_flags = bool(reserve_result.warnings) or any(row.flags for row in reserve_result.rows)
-            persisted_status = "review_required" if has_review_flags else "completed"
-            reserve_status = BundleFileStatus(
-                upload_id=reserve_upload.id,
-                filename=reserve_filename,
-                status=persisted_status,
-                warnings=reserve_result.warnings,
-                review_reason="Reserve study rows need review before applying to the budget." if has_review_flags else None,
-            )
-            if draft is not None:
-                draft_row = _get_editable_draft(session, hoa_id, draft.id)
-                draft_row.reserve_study_upload_id = reserve_upload.id
-                draft_row.reserve_study_status = persisted_status
-                draft_row.reserve_study_rows_json = _json_dumps(
-                    [row.model_dump() for row in reserve_result.rows]
-                )
-                draft_row.reserve_study_warnings_json = _json_dumps(reserve_result.warnings)
-                draft_row.updated_by_user_id = actor["id"]
-                draft_row.actor_name = _actor_name(actor)
-                draft_row.updated_at = _now_text()
-                # Cache the extracted study_date on hoa_settings so the
-                # disclosure compiler can render it in the Notes section
-                # without re-parsing the reserve study PDF. The operator can
-                # override via the Disclosure Settings form.
-                extracted_date = getattr(reserve_result, "study_date", None)
-                if extracted_date:
-                    from ..services import hoa_settings_service as _hoa_settings_service
-                    settings_row = _hoa_settings_service.get_or_create(
-                        session, hoa_id=hoa_id
-                    )
-                    settings_row.reserve_study_date = str(extracted_date)
-                session.commit()
-                draft = _serialize_draft(draft_row, _get_upload(session, draft_row.source_upload_id))
-    else:
-        unsupported_reserve_reason = "Unsupported reserve study file type. Upload a reserve study PDF."
-        reserve_status = BundleFileStatus(
-            filename=reserve_filename,
-            status="failed",
-            review_reason=unsupported_reserve_reason,
-            debug_info=ExtractionDebugInfo(
-                code="unsupported_file_type",
-                message=unsupported_reserve_reason,
-                details={"content_type": reserve_content_type},
-            ),
-        )
-
-    if draft is not None and reserve_upload is not None and reserve_status.status == "pending":
+    reserve_upload, reserve_status = _persist_reserve_study_to_draft(
+        session,
+        hoa_id=hoa_id,
+        draft_id=draft.id if draft is not None else None,
+        actor=actor,
+        reserve_filename=reserve_filename,
+        reserve_content_type=reserve_content_type,
+        reserve_file_bytes=reserve_file_bytes,
+    )
+    if draft is not None and reserve_upload is not None:
         draft_row = _get_editable_draft(session, hoa_id, draft.id)
-        draft_row.reserve_study_upload_id = reserve_upload.id
-        draft_row.reserve_study_status = "pending"
-        draft_row.reserve_study_rows_json = _json_dumps([])
-        draft_row.reserve_study_warnings_json = _json_dumps([])
-        draft_row.updated_by_user_id = actor["id"]
-        draft_row.actor_name = _actor_name(actor)
-        draft_row.updated_at = _now_text()
-        session.commit()
         draft = _serialize_draft(draft_row, _get_upload(session, draft_row.source_upload_id))
-    elif reserve_upload is not None:
-        session.commit()
 
     return BudgetBundleUploadResponse(
         draft=draft,
@@ -2686,7 +2784,14 @@ def save_draft(
         "growth_factor_note": payload.growth_factor_note,
     }
 
-    draft.line_items_json = _json_dumps(payload.line_items)
+    # Recompute read_only from read_only_override before persisting, so the
+    # stored flag always reflects the current override state.
+    normalized_items = [
+        {**it, "read_only": _effective_read_only(it, str(it.get("category", "")))}
+        if isinstance(it, dict) else it
+        for it in payload.line_items
+    ]
+    draft.line_items_json = _json_dumps(normalized_items)
     draft.global_note = payload.global_note
     draft.statement_month = payload.statement_month
     draft.growth_factor = payload.growth_factor

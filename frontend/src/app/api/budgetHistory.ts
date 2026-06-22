@@ -522,6 +522,10 @@ export function budgetHistoryLineItemToEditorItem(record: JsonObject, index: num
     currentPeriod,
     variance,
     readOnly: Boolean(record.readOnly ?? record.read_only),
+    readOnlyOverride:
+      record.read_only_override !== undefined
+        ? (record.read_only_override as boolean | null)
+        : null,
     accountCode,
     label,
     lineItemKey: pickString(record.line_item_key) ?? null,
@@ -589,6 +593,7 @@ export function mapEditorLineItemsToBudgetHistory(lineItems: LineItem[]): JsonOb
     variance: item.variance ?? null,
     readOnly: item.readOnly ?? false,
     read_only: item.readOnly ?? false,
+    read_only_override: item.readOnlyOverride ?? null,
     reserve_group: item.reserveGroup ?? null,
     section: item.rawSection ?? null,
     fund_type: item.fundType ?? null,
@@ -779,6 +784,24 @@ export async function applyReserveStudyToBudget(
     headers: authHeaders(),
   });
   return handleResponse<ApplyReserveStudyResponse>(res);
+}
+
+export async function replaceReserveStudy(
+  hoaId: number | string,
+  draftId: number | string,
+  file: File,
+): Promise<BudgetDraftPayload> {
+  const formData = new FormData();
+  formData.append('reserve_study_file', file);
+  const res = await fetch(
+    `${BASE_URL}/hoa/${hoaId}/budget/drafts/${draftId}/reserve-study/upload`,
+    {
+      method: 'POST',
+      headers: authHeaders(),
+      body: formData,
+    },
+  );
+  return handleResponse<BudgetDraftPayload>(res);
 }
 
 export async function saveBudgetNote(
