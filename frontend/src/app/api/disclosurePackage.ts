@@ -93,11 +93,37 @@ export function disclosurePackageDownloadUrl(jobId: string): string {
   return `${BASE_URL}/api/disclosure-package/${encodeURIComponent(jobId)}/download`;
 }
 
-export async function downloadDisclosurePackagePdf(jobId: string): Promise<Blob> {
+/** Parse the filename from a Content-Disposition header, preferring the
+ *  RFC 5987 `filename*=utf-8''...` form, then the quoted `filename="..."`. */
+function parseContentDispositionFilename(header: string | null): string | null {
+  if (!header) return null;
+  const star = header.match(/filename\*=(?:UTF-8'')?([^;]+)/i);
+  if (star?.[1]) {
+    try {
+      return decodeURIComponent(star[1].trim().replace(/^"|"$/g, ''));
+    } catch {
+      /* fall through to plain filename */
+    }
+  }
+  const plain = header.match(/filename="?([^";]+)"?/i);
+  return plain?.[1]?.trim() ?? null;
+}
+
+export interface DownloadedPdf {
+  blob: Blob;
+  /** Server-provided filename from Content-Disposition, when present. */
+  filename: string | null;
+}
+
+export async function downloadDisclosurePackagePdf(jobId: string): Promise<DownloadedPdf> {
   const res = await fetch(disclosurePackageDownloadUrl(jobId), {
     headers: authHeaders(),
   });
-  return handleBlobResponse(res);
+  const filename = parseContentDispositionFilename(
+    res.headers.get('Content-Disposition'),
+  );
+  const blob = await handleBlobResponse(res);
+  return { blob, filename };
 }
 
 // ── Per-HOA static-appendix uploads ──────────────────────────────────────────

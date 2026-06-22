@@ -37,18 +37,21 @@ export function DisclosureResultBlock({
   onRegenerate,
 }: DisclosureResultBlockProps) {
   const generated = formatTimestamp(job.completed_at);
-  const filename = `old-mill-${job.fiscal_year}-disclosure-package.pdf`;
+  // Filename comes from the server's Content-Disposition (derived from the
+  // HOA name). Only fall back to a generic name if the header is absent —
+  // never hardcode a specific HOA.
+  const fallbackFilename = `disclosure-package-${job.fiscal_year}.pdf`;
   const [downloading, setDownloading] = useState(false);
 
   async function handleDownload() {
     if (downloading) return;
     setDownloading(true);
     try {
-      const blob = await downloadDisclosurePackagePdf(job.id);
+      const { blob, filename } = await downloadDisclosurePackagePdf(job.id);
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = filename;
+      a.download = filename || fallbackFilename;
       document.body.appendChild(a);
       a.click();
       a.remove();

@@ -72,6 +72,9 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        # Let browser JS read the download filename on cross-origin responses
+        # (e.g. Railway, where frontend and backend are separate domains).
+        expose_headers=["Content-Disposition"],
     )
 
     @app.get("/healthz")
