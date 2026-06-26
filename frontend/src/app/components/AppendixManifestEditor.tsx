@@ -343,7 +343,7 @@ export function AppendixManifestEditor({ hoaId }: Props) {
         </div>
         <button
           type="submit"
-          disabled={uploading || !uploadFile || !uploadTitle}
+          disabled={uploading}
           className="rounded-md bg-[#111111] px-3 py-2 text-white hover:bg-[#262626] disabled:cursor-not-allowed disabled:opacity-50"
         >
           {uploading ? 'Uploading…' : 'Upload appendix'}

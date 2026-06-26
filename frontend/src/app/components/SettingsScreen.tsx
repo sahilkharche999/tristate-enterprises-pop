@@ -181,6 +181,8 @@ export function SettingsScreen() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const disclosureFormRef = useRef<HOADisclosureSettingsFormHandle>(null);
+  const returnTo = searchParams.get('returnTo');
+  const backHref = returnTo ?? `/hoa/${id}`;
   const requestedSection = searchParams.get('section');
   const selectedSection = SETTINGS_SECTIONS.includes(requestedSection as SettingsSection)
     ? (requestedSection as SettingsSection)
@@ -307,7 +309,7 @@ export function SettingsScreen() {
       <header className="border-b border-[#e5e5e5] bg-white sticky top-0 z-10 shadow-sm">
         <div className="px-8 py-6 flex items-center justify-between">
           <div className="flex items-center gap-6">
-            <Link to={`/hoa/${id}`} className="p-2 hover:bg-[#f5f5f5] rounded-lg transition-colors">
+            <Link to={backHref} className="p-2 hover:bg-[#f5f5f5] rounded-lg transition-colors">
               <ArrowLeft className="w-5 h-5 text-[#525252]" />
             </Link>
             <div>

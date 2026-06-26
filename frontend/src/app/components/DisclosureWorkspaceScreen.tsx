@@ -50,7 +50,7 @@ function buildReadinessRows(hoaId: string, assessmentMode: AssessmentMode): Read
     {
       label: 'HOA settings',
       detail: 'Verify association identity, fiscal year, unit count, and disclosure defaults.',
-      href: `/hoa/${hoaId}/settings?section=disclosure`,
+      href: `/hoa/${hoaId}/settings?section=disclosure&returnTo=/hoa/${hoaId}/disclosure`,
       icon: Settings,
       status: 'Review setup',
     },
@@ -60,7 +60,7 @@ function buildReadinessRows(hoaId: string, assessmentMode: AssessmentMode): Read
         assessmentMode === 'fixed'
           ? 'Fixed mode is active. Regular dues use the equal-per-unit path, so DRE upload is optional here.'
           : 'Variable mode is active. Approve the DRE-backed assessment setup before final rendering.',
-      href: `/hoa/${hoaId}/settings?section=dre`,
+      href: `/hoa/${hoaId}/settings?section=dre&returnTo=/hoa/${hoaId}/disclosure`,
       icon: Landmark,
       status: assessmentMode === 'fixed' ? 'Ready' : 'Review setup',
     },
@@ -77,14 +77,14 @@ function buildReadinessRows(hoaId: string, assessmentMode: AssessmentMode): Read
     {
       label: 'Annual package state',
       detail: 'Create, approve, and finalize the annual package for this fiscal year.',
-      href: `/hoa/${hoaId}/settings?section=packages`,
+      href: `/hoa/${hoaId}/settings?section=packages&returnTo=/hoa/${hoaId}/disclosure`,
       icon: PackageCheck,
       status: 'Review setup',
     },
     {
       label: 'Appendices',
       detail: 'Confirm static policy appendices that should be bundled with the PDF.',
-      href: `/hoa/${hoaId}/settings?section=appendices`,
+      href: `/hoa/${hoaId}/settings?section=appendices&returnTo=/hoa/${hoaId}/disclosure`,
       icon: FileArchive,
       status: 'Ready',
     },
