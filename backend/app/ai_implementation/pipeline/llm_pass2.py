@@ -2,8 +2,9 @@
 import logging
 from typing import Any, Optional
 
-from ..models.schemas import LLMPass1Result, LLMPass2Result, LLMPass2FlaggedItem
+from ..models.schemas import EnrichedLineItem, LLMPass1Result, LLMPass2Result, LLMPass2FlaggedItem
 from ..models.prompts import build_pass2_system_prompt, build_pass2_user_prompt
+from ..pipeline.feature_engineering import compute_suggestion_bound
 from ..pipeline.llm_client import call_llm
 
 logger = logging.getLogger(__name__)
@@ -104,6 +105,8 @@ async def run_pass2(
 def apply_pass2_revisions(
     pass1_results: list[LLMPass1Result],
     pass2_result: LLMPass2Result,
+    enriched_item_map: Optional[dict[int, EnrichedLineItem]] = None,
+    pct_year_elapsed: float = 0.0,
 ) -> tuple[list[LLMPass1Result], list[dict]]:
     """Apply Pass 2 revisions to flagged items.
 
@@ -119,7 +122,13 @@ def apply_pass2_revisions(
             # LLM returns revised_pct_change in percentage points (e.g. -10.0 = -10%)
             # Convert back to decimal fraction for internal use
             revised_decimal = flagged.revised_pct_change / 100.0
-            revised_decimal = max(-0.30, min(0.30, revised_decimal))
+            # Apply the same projection-anchored bound as Pass 1 (not the old flat ±0.30)
+            if enriched_item_map and suggestion.account_code in enriched_item_map:
+                item = enriched_item_map[suggestion.account_code]
+                bound = compute_suggestion_bound(item.adjusted_pct_diff, pct_year_elapsed)
+            else:
+                bound = 2.0
+            revised_decimal = max(-bound, min(bound, revised_decimal))
             original_reason = suggestion.reason
             updated.append(LLMPass1Result(
                 account_code=suggestion.account_code,

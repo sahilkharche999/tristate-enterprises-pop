@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Optional
 import numpy as np
 
+from ..db.models import MAX_SUGGESTION_PCT
 from ..models.schemas import EnrichedLineItem, LineItemInput
 
 logger = logging.getLogger(__name__)
@@ -106,6 +107,20 @@ def compute_adjusted_features(
         "pct_diff": pct_diff,
         "coverage_ratio": coverage_ratio,
     }
+
+
+def compute_suggestion_bound(adjusted_pct_diff: float, pct_year_elapsed: float) -> float:
+    """Max |suggested_pct_change| allowed for this item.
+
+    Starts at the legacy 0.30 guardrail and expands toward the projection gap
+    as the year progresses and the projection becomes trustworthy.
+    At <50% elapsed the bound stays near 0.30 (noisy early data).
+    At 100% elapsed the bound tracks the full projection gap up to MAX_SUGGESTION_PCT.
+    """
+    trust = min(1.0, max(0.0, pct_year_elapsed) / 0.50)
+    gap = abs(adjusted_pct_diff)
+    bound = 0.30 + max(0.0, gap - 0.30) * trust
+    return min(bound, MAX_SUGGESTION_PCT)
 
 
 def normalize_budgets(items: list[EnrichedLineItem]) -> list[EnrichedLineItem]:

@@ -231,6 +231,32 @@ export function AISuggestionMode({
         )}
       </div>
 
+      {/* Assessment Recommendation Card */}
+      {aiResponse.recommended_assessment_increase_pct > 0 ? (
+        <div className="bg-amber-50 border border-amber-200 rounded-lg p-6">
+          <div className="flex items-start gap-3">
+            <div className="flex-1">
+              <div className="flex items-center gap-3 mb-2">
+                <h3 className="text-sm font-semibold text-amber-900">Assessment Increase Recommendation</h3>
+                <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800 border border-amber-300">
+                  +{(aiResponse.recommended_assessment_increase_pct * 100).toFixed(1)}% recommended
+                </span>
+              </div>
+              <p className="text-sm text-amber-800 leading-relaxed">
+                {aiResponse.assessment_recommendation_note}
+              </p>
+              <p className="text-xs text-amber-700 mt-2">
+                This estimate is based on the suggested expense increases above. Review and adjust as needed before applying.
+              </p>
+            </div>
+          </div>
+        </div>
+      ) : aiResponse.assessment_recommendation_note ? (
+        <div className="bg-green-50 border border-green-200 rounded-lg p-4">
+          <p className="text-sm text-green-800">{aiResponse.assessment_recommendation_note}</p>
+        </div>
+      ) : null}
+
       {/* Suggestions Table */}
       <div className="bg-white border border-[#E5E5E5] rounded-lg overflow-hidden">
         <div className="overflow-x-auto">

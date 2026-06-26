@@ -11,7 +11,7 @@ from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 
 from ..config import settings
-from ..db.models import FeedbackCase, DECIDED_STATUSES, FEATURE_COLUMNS, MAX_PCT_CHANGE
+from ..db.models import FeedbackCase, DECIDED_STATUSES, FEATURE_COLUMNS, MAX_PCT_CHANGE, MAX_SUGGESTION_PCT
 from ..models.schemas import EnrichedLineItem
 
 logger = logging.getLogger(__name__)
@@ -154,7 +154,7 @@ def predict(model, enriched_items: list[EnrichedLineItem]) -> dict[int, float]:
 
     try:
         predictions = model.predict(features)
-        predictions = np.clip(predictions, -MAX_PCT_CHANGE, MAX_PCT_CHANGE)
+        predictions = np.clip(predictions, -MAX_SUGGESTION_PCT, MAX_SUGGESTION_PCT)
         return {item.account_code: float(pred) for item, pred in zip(active_items, predictions)}
     except Exception as e:
         logger.error(f"CatBoost inference failed: {e}")

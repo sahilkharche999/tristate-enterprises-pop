@@ -19,7 +19,7 @@ Portfolio Context:
 - Total YTD actuals: ${macro_context.get('total_ytd_actuals', 0):,.2f} ({macro_context.get('pct_year_elapsed', 0)*100:.1f}% of year elapsed)
 - Overall status: {macro_context.get('overall_budget_status', 'unknown')}
 
-For each line item you will receive: account_code, account_name, category, annual_budget, ytd_actual, adjusted_projection (annualized YTD), adjusted_pct_diff (projection vs budget gap), adjusted_coverage_ratio (YTD vs expected-to-date), and optionally a cbr_anchor (similar historical decision) and ml_baseline (model prediction).
+For each line item you will receive: account_code, account_name, category, annual_budget, ytd_actual, adjusted_projection (annualized YTD), adjusted_pct_diff (projection vs budget gap as a decimal — e.g. 1.08 means the line is running 108% over budget), adjusted_coverage_ratio (YTD vs expected-to-date), pct_year_elapsed (fraction of fiscal year completed), and optionally a cbr_anchor (similar historical decision) and ml_baseline (model prediction).
 
 INCOME ACCOUNT RULES (category = "income"):
 - HOA assessment income is contractually fixed: annual budget = assessment rate × units.
@@ -48,12 +48,22 @@ Your task for EACH item:
 
 Each reason must be distinct and grounded in the account's real-world function. Avoid repeating the same sentence structure across items.
 
+PROJECTION-ANCHORED SUGGESTION RULE (mandatory):
+- When pct_year_elapsed >= 0.50 (half the year or more has passed) and the line has had
+  consistent spend, your suggested_pct_change should move toward closing the projection gap
+  (adjusted_pct_diff). For example, if adjusted_pct_diff = 1.08 (running 108% over budget)
+  and the year is 75% complete, a suggestion near 1.00–1.10 is appropriate — not 0.30.
+- When pct_year_elapsed < 0.50, the data is thin; stay conservative (within ±0.30) unless
+  you have a very strong reason (e.g., a signed rate change).
+- A hard downstream clamp enforces the safe maximum, so do not artificially hold your number
+  to 0.30 when the evidence supports a larger correction.
+
 You MUST output ONLY valid JSON matching this exact schema:
 {{
   "results": [
     {{
       "account_code": <integer>,
-      "suggested_pct_change": <float between -0.30 and 0.30>,
+      "suggested_pct_change": <float — negative for reduction, positive for increase; projection-anchored when year is ≥50% elapsed>,
       "reason": "<2-3 sentences specific to this account type and its actual spend pattern>",
       "confidence": <float between 0.0 and 1.0>
     }}
@@ -75,7 +85,11 @@ def build_pass2_system_prompt() -> str:
     return """You are a senior property management budget reviewer performing a final sanity check.
 
 IMPORTANT — units: all suggested_pct_change values are in PERCENTAGE POINTS, not decimals.
-For example: -15.0 means a 15% budget reduction. 5.0 means a 5% increase. 0.5 means half a percent.
+For example: -15.0 means a 15% budget reduction. 100.0 means a 100% increase. 0.5 means half a percent.
+
+Large suggested increases (above 30%) are valid and expected when a line has run significantly
+over budget for most of the year — do NOT reduce them simply because they seem large. Only
+flag if the reason contradicts the direction.
 
 Review ALL budget suggestions together for coherence. Flag items that fail ANY of the following checks:
 
@@ -94,14 +108,15 @@ INCOME ACCOUNT CHECK:
   justification for a cut — revise to 0.0.
 
 COHERENCE CHECK:
-- Individual items with extreme changes that contradict the overall direction
-- Inconsistencies between related accounts
-- Whether the aggregate change makes business sense
+- Inconsistencies between closely related accounts (e.g., two fire-alarm lines moving in
+  opposite directions with no explanation).
+- Whether the aggregate change makes business sense given the overall budget status.
 
 In your executive_summary:
-- State the overall direction (e.g. "modest reductions averaging X%")
-- Call out the range of changes actually present (e.g. "ranging from -20% to +15%")
-- Note any major themes (income accounts down, utilities up, etc.)
+- State the overall direction and the actual range of changes present (e.g. "increases ranging
+  from +5% to +108%").
+- Note any major themes (utilities over-budget, maintenance spike, etc.).
+- Do NOT mention a dues/assessment increase — that is computed separately elsewhere.
 
 You MUST output ONLY valid JSON matching this exact schema:
 {

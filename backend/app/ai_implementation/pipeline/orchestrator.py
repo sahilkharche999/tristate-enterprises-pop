@@ -84,7 +84,10 @@ async def run_pipeline(request: SuggestRequest, session: Session) -> SuggestResp
 
     # ── Stage 4: LLM Pass 1 ─────────────────────────────────────────────────────
     t0 = time.time()
-    pass1_results = await run_pass1(active_items, cbr_results, ml_results, macro_context, session)
+    pass1_results = await run_pass1(
+        active_items, cbr_results, ml_results, macro_context, session,
+        pct_year_elapsed=request.pct_year_elapsed,
+    )
     timings["llm_pass1_ms"] = round((time.time() - t0) * 1000)
     logger.info(f"Stage 4 done: {len(pass1_results)} suggestions in {timings['llm_pass1_ms']}ms")
 
@@ -93,7 +96,12 @@ async def run_pipeline(request: SuggestRequest, session: Session) -> SuggestResp
     budget_map = {item.account_code: item.annual_budget for item in active_items}
     aggregate = compute_aggregate(pass1_results, request.total_annual_budget, budget_map)
     pass2_result = await run_pass2(pass1_results, aggregate, macro_context)
-    final_results, flagged_serialized = apply_pass2_revisions(pass1_results, pass2_result)
+    enriched_item_map = {item.account_code: item for item in active_items}
+    final_results, flagged_serialized = apply_pass2_revisions(
+        pass1_results, pass2_result,
+        enriched_item_map=enriched_item_map,
+        pct_year_elapsed=request.pct_year_elapsed,
+    )
     timings["llm_pass2_ms"] = round((time.time() - t0) * 1000)
     logger.info(f"Stage 5 done in {timings['llm_pass2_ms']}ms")
 
@@ -155,6 +163,11 @@ async def run_pipeline(request: SuggestRequest, session: Session) -> SuggestResp
         for f in flagged_serialized
     ]
 
+    # ── Deficit-driven assessment recommendation ──────────────────────────────────
+    projected_deficit, recommended_assessment_pct, assessment_note = _compute_assessment_recommendation(
+        enriched_items, pass1_map
+    )
+
     logger.info(f"Pipeline complete in {total_latency_ms}ms | timings: {timings}")
 
     return SuggestResponse(
@@ -164,7 +177,56 @@ async def run_pipeline(request: SuggestRequest, session: Session) -> SuggestResp
         coherence_score=pass2_result.coherence_score,
         total_budget_impact=impact_str,
         flagged_items=flagged_items,
+        projected_deficit=projected_deficit,
+        recommended_assessment_increase_pct=recommended_assessment_pct,
+        assessment_recommendation_note=assessment_note,
     )
+
+
+def _compute_assessment_recommendation(
+    enriched_items: list[EnrichedLineItem],
+    pass1_map: dict[int, LLMPass1Result],
+) -> tuple[float, float, str]:
+    """Compute deficit-driven assessment (dues) increase recommendation.
+
+    Projects next-year expenses using the suggested % changes, holds income flat,
+    then calculates what dues increase would close the resulting deficit.
+    Reserve funding (non-income items) is included in the expense projection per plan.
+
+    Returns (projected_deficit, recommended_pct, note_string).
+    """
+    projected_expenses = 0.0
+    projected_income = 0.0
+
+    for item in enriched_items:
+        if item.read_only or item.annual_budget is None or item.annual_budget <= 0:
+            continue
+        if item.is_income:
+            projected_income += item.annual_budget
+        else:
+            p1 = pass1_map.get(item.account_code)
+            suggested = p1.suggested_pct_change if p1 else 0.0
+            projected_expenses += item.annual_budget * (1.0 + suggested)
+
+    projected_deficit = projected_expenses - projected_income
+
+    if projected_income <= 0 or projected_deficit <= 0:
+        surplus = -projected_deficit
+        note = (
+            f"Projected expenses ${projected_expenses:,.0f} vs. income ${projected_income:,.0f} "
+            f"— surplus of ${surplus:,.0f}. No assessment increase needed."
+            if projected_deficit <= 0
+            else "No income data available to compute assessment recommendation."
+        )
+        return projected_deficit, 0.0, note
+
+    recommended_pct = projected_deficit / projected_income
+    note = (
+        f"Projected expenses ${projected_expenses:,.0f} exceed income ${projected_income:,.0f} "
+        f"by ${projected_deficit:,.0f} (incl. reserve funding). "
+        f"Raise assessments ~{recommended_pct*100:.1f}% to break even."
+    )
+    return projected_deficit, recommended_pct, note
 
 
 def _persist_run(

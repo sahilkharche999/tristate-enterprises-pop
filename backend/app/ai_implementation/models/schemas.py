@@ -2,6 +2,8 @@
 from typing import Any, Optional
 from pydantic import BaseModel, Field
 
+from ..db.models import MAX_SUGGESTION_PCT
+
 
 # ── Input models ──────────────────────────────────────────────────────────────
 
@@ -68,6 +70,9 @@ class SuggestResponse(BaseModel):
     coherence_score: str = "medium"
     total_budget_impact: str
     flagged_items: list[FlaggedItem] = []
+    projected_deficit: float = 0.0
+    recommended_assessment_increase_pct: float = 0.0
+    assessment_recommendation_note: str = ""
 
 
 class FeedbackResponse(BaseModel):
@@ -125,8 +130,8 @@ class LLMPass1Result(BaseModel):
     confidence: float
 
     def model_post_init(self, __context: Any) -> None:
-        # Clamp values that Gemini may return outside business range
-        self.suggested_pct_change = max(-0.30, min(0.30, self.suggested_pct_change))
+        # Wide absolute ceiling only — per-item projection-gated bound applied in the pipeline
+        self.suggested_pct_change = max(-MAX_SUGGESTION_PCT, min(MAX_SUGGESTION_PCT, self.suggested_pct_change))
         self.confidence = max(0.0, min(1.0, self.confidence))
 
 

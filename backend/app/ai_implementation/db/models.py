@@ -14,7 +14,8 @@ class Base(DeclarativeBase):
 # ── Shared constants ─────────────────────────────────────────────────────────
 
 DECIDED_STATUSES = ["accepted", "modified"]
-MAX_PCT_CHANGE = 0.30
+MAX_PCT_CHANGE = 0.30        # CatBoost training-target sanity bound (unchanged)
+MAX_SUGGESTION_PCT = 2.0     # absolute ceiling for pipeline suggestions (200%)
 
 FEATURE_COLUMNS = [
     "account_level_1", "account_level_2", "account_level_3",

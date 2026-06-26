@@ -120,6 +120,9 @@ export interface AISuggestionResponse {
   coherence_score: 'high' | 'medium' | 'low';
   total_budget_impact: string;
   flagged_items: FlaggedItem[];
+  projected_deficit: number;
+  recommended_assessment_increase_pct: number;
+  assessment_recommendation_note: string;
 }
 
 export interface FlaggedItem {
