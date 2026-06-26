@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useParams, Link, useSearchParams } from 'react-router';
 import {
   ArrowLeft,
@@ -25,7 +25,7 @@ import { exportData } from '../api/macros';
 import { getHOA, updateHOA, type HOARecord } from '../api/hoa';
 import { getErrorMessage } from '../lib/errors';
 import { MONTH_NAMES, monthNameToNumber, monthNumberToName } from '../lib/hoa';
-import { HOADisclosureSettingsForm } from './HOADisclosureSettingsForm';
+import { HOADisclosureSettingsForm, type HOADisclosureSettingsFormHandle } from './HOADisclosureSettingsForm';
 import { AppendixManifestEditor } from './AppendixManifestEditor';
 import { AnnualPackagesPanel } from './AnnualPackagesPanel';
 import { DREPanel } from './DREPanel';
@@ -180,6 +180,7 @@ export function SettingsScreen() {
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const disclosureFormRef = useRef<HOADisclosureSettingsFormHandle>(null);
   const requestedSection = searchParams.get('section');
   const selectedSection = SETTINGS_SECTIONS.includes(requestedSection as SettingsSection)
     ? (requestedSection as SettingsSection)
@@ -250,6 +251,11 @@ export function SettingsScreen() {
 
   const handleSave = async () => {
     if (!id) return;
+
+    if (selectedSection === 'disclosure') {
+      await disclosureFormRef.current?.save();
+      return;
+    }
 
     const nextErrors = validateForm(hoaConfig);
     setValidationErrors(nextErrors);
@@ -523,7 +529,7 @@ export function SettingsScreen() {
 
           <TabsContent value="disclosure" className="space-y-6">
             <div className="bg-[#F7F7F7] border border-[#E5E5E5] rounded-lg p-8">
-              <HOADisclosureSettingsForm hoaId={hoa.id} />
+              <HOADisclosureSettingsForm hoaId={hoa.id} ref={disclosureFormRef} />
             </div>
           </TabsContent>
 

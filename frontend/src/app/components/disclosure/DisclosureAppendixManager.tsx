@@ -5,11 +5,12 @@
 // in this list (sorted by filename) after the generated pages.
 
 import { useCallback, useEffect, useState } from 'react';
-import { Trash2, FileText } from 'lucide-react';
+import { Download, Trash2, FileText } from 'lucide-react';
 
 import {
   type DisclosureAppendixEntry,
   deleteDisclosureAppendix,
+  downloadDisclosureAppendix,
   listDisclosureAppendices,
   uploadDisclosureAppendix,
 } from '../../api/disclosurePackage';
@@ -131,16 +132,31 @@ export function DisclosureAppendixManager({
                   {formatBytes(item.size_bytes)}
                 </span>
               </div>
-              <Button
-                variant="ghost"
-                size="sm"
-                disabled={disabled}
-                onClick={() => void handleDelete(item.filename)}
-                className="text-[#737373] hover:bg-[#fef2f2] hover:text-[#b91c1c]"
-                aria-label={`Remove ${item.filename}`}
-              >
-                <Trash2 className="h-4 w-4" />
-              </Button>
+              <div className="flex items-center gap-1 shrink-0">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() =>
+                    void downloadDisclosureAppendix(hoaId, item.filename).catch(() =>
+                      alert('Download failed')
+                    )
+                  }
+                  className="text-[#737373] hover:bg-[#f5f5f5]"
+                  aria-label={`Download ${item.filename}`}
+                >
+                  <Download className="h-4 w-4" />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={disabled}
+                  onClick={() => void handleDelete(item.filename)}
+                  className="text-[#737373] hover:bg-[#fef2f2] hover:text-[#b91c1c]"
+                  aria-label={`Remove ${item.filename}`}
+                >
+                  <Trash2 className="h-4 w-4" />
+                </Button>
+              </div>
             </li>
           ))}
         </ul>

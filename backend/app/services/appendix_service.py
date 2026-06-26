@@ -85,6 +85,13 @@ def _fetch_appendix(
     return _row_to_response(row)
 
 
+def get_appendix(
+    property_id: int, appendix_id: int, connection: sqlite3.Connection
+) -> AppendixDocumentResponse:
+    """Return a single appendix row, raising AppendixNotFound if missing."""
+    return _fetch_appendix(connection, property_id, appendix_id)
+
+
 def upload_appendix(
     *,
     property_id: int,

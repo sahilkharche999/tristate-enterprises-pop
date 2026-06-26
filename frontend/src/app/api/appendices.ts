@@ -108,3 +108,21 @@ export async function retireAppendix(
   });
   return handleResponse<AppendixDocument>(res);
 }
+
+export async function downloadAnnualAppendix(
+  hoaId: number,
+  appendixId: number,
+  fileName: string,
+): Promise<void> {
+  const res = await fetch(`${BASE_URL}/hoa/${hoaId}/appendices/${appendixId}/download`, {
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(`Download failed: ${res.status}`);
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fileName;
+  a.click();
+  URL.revokeObjectURL(url);
+}

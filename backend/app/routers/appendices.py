@@ -10,15 +10,18 @@ from __future__ import annotations
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..ai_implementation.db import get_session
 from ..auth.dependencies import get_current_user
+from ..disclosure_package.appendix_storage import appendix_file_path
 from ..services.appendix_service import (
     AppendixDocumentResponse,
     AppendixNotFound,
     PropertyNotFound,
+    get_appendix,
     list_appendices,
     retire_appendix,
     update_appendix,
@@ -103,6 +106,25 @@ async def upload_hoa_appendix(
         )
     except PropertyNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/hoa/{hoa_id}/appendices/{appendix_id}/download")
+def download_hoa_appendix(
+    hoa_id: int,
+    appendix_id: int,
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user),  # noqa: ARG001
+) -> FileResponse:
+    """Download the file for an appendix document."""
+    raw_conn = session.connection().connection
+    try:
+        doc = get_appendix(property_id=hoa_id, appendix_id=appendix_id, connection=raw_conn)
+    except AppendixNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    path = appendix_file_path(doc.file_id)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Appendix file not found on disk")
+    return FileResponse(path=path, filename=doc.file_name, media_type="application/pdf")
 
 
 @router.put(

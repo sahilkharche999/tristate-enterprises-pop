@@ -328,6 +328,24 @@ async def upload_hoa_appendix(
     return JSONResponse(status_code=HTTP_201_CREATED, content=entry)
 
 
+@router.get("/hoa/{hoa_id}/appendices/{filename}/download")
+async def download_hoa_appendix(
+    hoa_id: int,
+    filename: str,
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user),  # noqa: ARG001 — auth gate
+) -> FileResponse:
+    """Download a previously uploaded static appendix PDF."""
+    _ensure_hoa_supported(session, hoa_id)
+    safe = dp_service._sanitize_appendix_filename(filename)
+    path = dp_service.appendix_dir_for(hoa_id) / safe
+    if not path.exists():
+        raise HTTPException(
+            status_code=HTTP_404_NOT_FOUND, detail=f"Appendix not found: {filename}"
+        )
+    return FileResponse(path=path, filename=safe, media_type="application/pdf")
+
+
 @router.delete(
     "/hoa/{hoa_id}/appendices/{filename}", status_code=HTTP_204_NO_CONTENT
 )

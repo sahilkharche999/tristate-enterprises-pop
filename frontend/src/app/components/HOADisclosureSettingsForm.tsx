@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { forwardRef, useEffect, useImperativeHandle, useState } from 'react';
 import {
   type AssessmentIncreaseBracket,
   type BoardDeferralEntry,
@@ -68,7 +68,14 @@ function parseLoan(raw: string | null | undefined): OutstandingLoan | null {
   }
 }
 
-export function HOADisclosureSettingsForm({ hoaId }: { hoaId: number }) {
+export interface HOADisclosureSettingsFormHandle {
+  save: () => Promise<void>;
+}
+
+export const HOADisclosureSettingsForm = forwardRef<
+  HOADisclosureSettingsFormHandle,
+  { hoaId: number }
+>(function HOADisclosureSettingsForm({ hoaId }, ref) {
   const [settings, setSettings] = useState<HOADisclosureSettings | null>(null);
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState<string | null>(null);
@@ -106,6 +113,8 @@ export function HOADisclosureSettingsForm({ hoaId }: { hoaId: number }) {
       setSaving(false);
     }
   };
+
+  useImperativeHandle(ref, () => ({ save }), [save]);
 
   const scalarFields: Array<[keyof HOADisclosureSettings, string, 'text' | 'number']> = [
     ['management_company', 'Management company name', 'text'],
@@ -603,4 +612,4 @@ export function HOADisclosureSettingsForm({ hoaId }: { hoaId: number }) {
       </div>
     </div>
   );
-}
+});

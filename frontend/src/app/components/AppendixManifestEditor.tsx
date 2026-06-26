@@ -8,6 +8,7 @@ import { useEffect, useState } from 'react';
 import {
   type AppendixCadence,
   type AppendixDocument,
+  downloadAnnualAppendix,
   listAppendices,
   retireAppendix,
   updateAppendix,
@@ -176,13 +177,14 @@ export function AppendixManifestEditor({ hoaId }: Props) {
             <th>Cadence</th>
             <th>Status</th>
             <th>Reorder</th>
+            <th>Download</th>
             <th>Retire</th>
           </tr>
         </thead>
         <tbody>
           {appendices.length === 0 && (
             <tr>
-              <td colSpan={8} className="py-4 text-center text-gray-500">
+              <td colSpan={9} className="py-4 text-center text-gray-500">
                 No appendices uploaded yet.
               </td>
             </tr>
@@ -244,6 +246,20 @@ export function AppendixManifestEditor({ hoaId }: Props) {
                   className="rounded border border-[#d4d4d4] px-1 py-0.5 text-xs hover:bg-[#f5f5f5]"
                 >
                   ↓
+                </button>
+              </td>
+              <td>
+                <button
+                  type="button"
+                  onClick={() =>
+                    void downloadAnnualAppendix(hoaId, row.appendix_id, row.file_name).catch(() =>
+                      alert('Download failed')
+                    )
+                  }
+                  className="rounded border border-[#d4d4d4] px-2 py-0.5 text-xs hover:bg-[#f5f5f5]"
+                  title="Download"
+                >
+                  ↓ Download
                 </button>
               </td>
               <td>
