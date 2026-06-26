@@ -13,9 +13,11 @@ from .db import get_session, FeedbackCase, Property, SOPRule, SuggestionRun, Use
 from .models.schemas import (
     FeedbackRequest,
     FeedbackResponse,
+    FlaggedItem,
     StatsResponse,
     SuggestRequest,
     SuggestResponse,
+    SuggestionItem,
 )
 from .pipeline.cbr_engine import retain_feedback
 from .pipeline.ml_model import should_activate
@@ -50,6 +52,56 @@ async def suggest(request: SuggestRequest, session: Session = Depends(get_sessio
     except Exception as e:
         logger.exception("Pipeline error")
         raise HTTPException(status_code=500, detail="AI suggestion pipeline failed. Check server logs for details.")
+
+
+@router.get("/suggest/{property_id}/latest", response_model=SuggestResponse)
+def get_latest_suggestions(
+    property_id: int,
+    session: Session = Depends(get_session),
+) -> SuggestResponse:
+    """Return the most recent suggestion run for a property (no pipeline re-execution)."""
+    run = session.execute(
+        select(SuggestionRun)
+        .where(SuggestionRun.property_id == property_id)
+        .order_by(SuggestionRun.id.desc())
+    ).scalars().first()
+    if run is None:
+        raise HTTPException(status_code=404, detail="No suggestion run found for this property")
+
+    cases = session.execute(
+        select(FeedbackCase)
+        .where(FeedbackCase.run_id == run.id)
+        .order_by(FeedbackCase.account_code)
+    ).scalars().all()
+
+    suggestions = [
+        SuggestionItem(
+            id=c.id,
+            account_code=c.account_code,
+            account_name=c.account_name,
+            suggested_pct_change=c.ai_suggested_pct_change or 0.0,
+            reason=c.ai_reason or "",
+            confidence=c.ai_confidence or 0.0,
+            revised_by_pass2=bool(c.revised_by_pass2),
+            cbr_match=c.cbr_similarity,
+            ml_baseline=c.ml_baseline_pct,
+        )
+        for c in cases
+    ]
+
+    flagged = json.loads(run.flagged_items_json or "[]")
+
+    return SuggestResponse(
+        run_id=run.id,
+        suggestions=suggestions,
+        executive_summary=run.executive_summary or "",
+        coherence_score=run.coherence_score or "medium",
+        total_budget_impact=run.total_budget_impact or "",
+        flagged_items=[FlaggedItem(**f) for f in flagged],
+        projected_deficit=run.projected_deficit or 0.0,
+        recommended_assessment_increase_pct=run.recommended_assessment_increase_pct or 0.0,
+        assessment_recommendation_note=run.assessment_recommendation_note or "",
+    )
 
 
 @router.post("/feedback", response_model=FeedbackResponse)

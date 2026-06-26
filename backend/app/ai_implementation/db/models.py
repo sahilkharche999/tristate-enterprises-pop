@@ -152,6 +152,9 @@ class SuggestionRun(Base):
     total_budget_impact = Column(Text)
     flagged_items_json = Column(Text)
     latency_ms = Column(Integer)
+    projected_deficit = Column(Float)
+    recommended_assessment_increase_pct = Column(Float)
+    assessment_recommendation_note = Column(Text)
     created_at = Column(Text, server_default=_CREATED_AT_DEFAULT)
 
     property = relationship("Property", back_populates="runs", lazy="raise")

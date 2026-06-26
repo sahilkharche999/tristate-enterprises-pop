@@ -44,17 +44,27 @@ export function BudgetScreenWrapper() {
   const [activeDraft, setActiveDraft] = useState<BudgetDraftPayload | null>(null);
   const [generatedVersion, setGeneratedVersion] = useState<BudgetVersionDetail | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
-  const [aiResponse, setAiResponse] = useState<AISuggestionResponse | null>(() => {
-    if (!id) return null;
-    try {
-      const cached = sessionStorage.getItem(`ai-suggestions-${id}`);
-      return cached ? JSON.parse(cached) : null;
-    } catch {
-      return null;
-    }
-  });
+  const [aiResponse, setAiResponse] = useState<AISuggestionResponse | null>(null);
   const reopenedFromVersionId = activeDraft?.reopened_from_version_id ?? null;
 
+  // Load persisted suggestions on mount: sessionStorage first (instant), then DB fallback.
+  useEffect(() => {
+    if (!id) return;
+    try {
+      const cached = sessionStorage.getItem(`ai-suggestions-${id}`);
+      if (cached) {
+        setAiResponse(JSON.parse(cached));
+        return;
+      }
+    } catch { /* ignore */ }
+    import('../api/macros').then(({ getLatestAISuggestions }) =>
+      getLatestAISuggestions(id)
+        .then((resp) => { if (resp) setAiResponse(resp); })
+        .catch(() => { /* non-blocking — no suggestions yet is fine */ })
+    );
+  }, [id]);
+
+  // Keep sessionStorage in sync for fast within-session re-renders.
   useEffect(() => {
     if (!id) return;
     if (aiResponse) {

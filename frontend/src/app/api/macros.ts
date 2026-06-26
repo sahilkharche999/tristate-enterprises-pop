@@ -226,6 +226,16 @@ export async function getAISuggestions(params: {
   return handleResponse<import('../data/mockData').AISuggestionResponse>(res);
 }
 
+export async function getLatestAISuggestions(
+  propertyId: string
+): Promise<import('../data/mockData').AISuggestionResponse | null> {
+  const res = await fetch(`${BASE_URL}/ai/suggest/${propertyId}/latest`, {
+    headers: authHeaders(),
+  });
+  if (res.status === 404) return null;
+  return handleResponse<import('../data/mockData').AISuggestionResponse>(res);
+}
+
 export async function submitAIFeedback(params: {
   runId: number;
   decisions: import('../data/mockData').FeedbackDecision[];

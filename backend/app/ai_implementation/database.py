@@ -794,6 +794,40 @@ def _iter_missing_dre_extraction_runs_columns(
             yield column_name, column_sql
 
 
+_SUGGESTION_RUN_COLUMN_DEFINITIONS: dict[str, str] = {
+    "projected_deficit": "REAL",
+    "recommended_assessment_increase_pct": "REAL",
+    "assessment_recommendation_note": "TEXT",
+}
+
+
+def _iter_missing_suggestion_run_columns(
+    raw_conn: sqlite3.Connection,
+) -> Iterable[tuple[str, str]]:
+    existing_columns = {
+        row[1]
+        for row in raw_conn.execute("PRAGMA table_info(suggestion_runs)").fetchall()
+    }
+    for column_name, column_sql in _SUGGESTION_RUN_COLUMN_DEFINITIONS.items():
+        if column_name not in existing_columns:
+            yield column_name, column_sql
+
+
+def ensure_suggestion_run_columns() -> None:
+    """Brownfield migration path for suggestion_runs columns added post-launch."""
+    raw_conn = engine.raw_connection()
+    try:
+        missing_columns = list(_iter_missing_suggestion_run_columns(raw_conn))
+        for column_name, column_sql in missing_columns:
+            logger.info("Adding missing suggestion_runs.%s column", column_name)
+            raw_conn.execute(
+                f"ALTER TABLE suggestion_runs ADD COLUMN {column_name} {column_sql}"
+            )
+        raw_conn.commit()
+    finally:
+        raw_conn.close()
+
+
 def ensure_dre_extraction_runs_columns() -> None:
     """Brownfield migration path for dre_extraction_runs columns added post-launch."""
     raw_conn = engine.raw_connection()
@@ -1030,6 +1064,7 @@ def init_db() -> None:
     ensure_budget_upload_columns()
     ensure_budget_draft_columns()
     ensure_budget_version_columns()
+    ensure_suggestion_run_columns()
     ensure_dre_extraction_runs_columns()
     raw_conn = engine.raw_connection()
     try:

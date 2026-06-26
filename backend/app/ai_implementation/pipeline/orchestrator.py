@@ -119,12 +119,19 @@ async def run_pipeline(request: SuggestRequest, session: Session) -> SuggestResp
 
     pass1_map = {r.account_code: r for r in final_results}
 
+    # ── Deficit-driven assessment recommendation (before persist so it's stored) ──
+    projected_deficit, recommended_assessment_pct, assessment_note = _compute_assessment_recommendation(
+        enriched_items, pass1_map
+    )
+
     # ── Persist to SQLite ───────────────────────────────────────────────────────
     run_id, case_ids = await asyncio.to_thread(
         _persist_run, request, enriched_items, pass1_map,
         cbr_results, ml_results, revised_by_pass2_map,
         pass2_result.executive_summary, pass2_result.coherence_score,
-        impact_str, flagged_serialized, total_latency_ms, session,
+        impact_str, flagged_serialized, total_latency_ms,
+        projected_deficit, recommended_assessment_pct, assessment_note,
+        session,
     )
 
     # ── Build Response ──────────────────────────────────────────────────────────
@@ -162,11 +169,6 @@ async def run_pipeline(request: SuggestRequest, session: Session) -> SuggestResp
         )
         for f in flagged_serialized
     ]
-
-    # ── Deficit-driven assessment recommendation ──────────────────────────────────
-    projected_deficit, recommended_assessment_pct, assessment_note = _compute_assessment_recommendation(
-        enriched_items, pass1_map
-    )
 
     logger.info(f"Pipeline complete in {total_latency_ms}ms | timings: {timings}")
 
@@ -241,6 +243,9 @@ def _persist_run(
     impact_str: str,
     flagged_serialized: list,
     latency_ms: int,
+    projected_deficit: float,
+    recommended_assessment_increase_pct: float,
+    assessment_recommendation_note: str,
     session: Session,
 ) -> tuple[int, list[int]]:
     """Persist suggestion run and feedback_cases. Returns (run_id, [case_ids])."""
@@ -268,6 +273,9 @@ def _persist_run(
         total_budget_impact=impact_str,
         flagged_items_json=json.dumps(flagged_serialized),
         latency_ms=latency_ms,
+        projected_deficit=projected_deficit,
+        recommended_assessment_increase_pct=recommended_assessment_increase_pct,
+        assessment_recommendation_note=assessment_recommendation_note,
     )
     session.add(run)
     session.flush()
