@@ -1,4 +1,4 @@
-import { forwardRef, useEffect, useImperativeHandle, useState } from 'react';
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useState } from 'react';
 import {
   type AssessmentIncreaseBracket,
   type BoardDeferralEntry,
@@ -87,18 +87,8 @@ export const HOADisclosureSettingsForm = forwardRef<
       .catch((e) => setError(e instanceof Error ? e.message : String(e)));
   }, [hoaId]);
 
-  if (error) return <p className="text-xs text-[#b91c1c]">{error}</p>;
-  if (!settings) return <p className="text-sm text-[#737373]">Loading…</p>;
-
-  const update = <K extends keyof HOADisclosureSettings>(k: K, v: HOADisclosureSettings[K]) =>
-    setSettings((prev) => (prev ? { ...prev, [k]: v } : prev));
-
-  const updateList = (
-    key: 'special_assessments_json' | 'additional_assessments_needed_json',
-    next: SpecialAssessmentEntry[],
-  ) => update(key, JSON.stringify(next));
-
-  const save = async () => {
+  // Must be defined before early returns so hook call count is stable per render.
+  const save = useCallback(async () => {
     if (!settings) return;
     setSaving(true);
     setError(null);
@@ -112,9 +102,20 @@ export const HOADisclosureSettingsForm = forwardRef<
     } finally {
       setSaving(false);
     }
-  };
+  }, [settings, hoaId]);
 
   useImperativeHandle(ref, () => ({ save }), [save]);
+
+  if (error) return <p className="text-xs text-[#b91c1c]">{error}</p>;
+  if (!settings) return <p className="text-sm text-[#737373]">Loading…</p>;
+
+  const update = <K extends keyof HOADisclosureSettings>(k: K, v: HOADisclosureSettings[K]) =>
+    setSettings((prev) => (prev ? { ...prev, [k]: v } : prev));
+
+  const updateList = (
+    key: 'special_assessments_json' | 'additional_assessments_needed_json',
+    next: SpecialAssessmentEntry[],
+  ) => update(key, JSON.stringify(next));
 
   const scalarFields: Array<[keyof HOADisclosureSettings, string, 'text' | 'number']> = [
     ['management_company', 'Management company name', 'text'],
