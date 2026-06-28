@@ -1,7 +1,8 @@
-// DRE upload + list panel (Phase 3.1 + Phase 4.1).
-// Lists every DRE document and extraction run for the HOA. Provides
-// upload form for new DRE PDFs, a "Run extraction" button per uploaded
-// document, and a "Review →" link to each run's Review Workbench page.
+// DRE settings section panel — tabbed container with two sub-tabs:
+//   "DRE Documents"      — upload DRE PDFs, run extraction, review & promote.
+//   "CC&R / Governing Docs" — upload CC&R PDFs, run extraction, enter per-unit
+//                             factors, and promote into a live AssessmentSetup.
+// Both sub-tabs live inside the existing value="dre" settings section.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -14,6 +15,8 @@ import {
 } from '../api/dre';
 import { FileDropzone } from './fileDropzone';
 import { DREReviewWorkbench } from './DREReviewWorkbench';
+import { CCRPanel } from './CCRPanel';
+import { Tabs, TabsList, TabsTrigger, TabsContent } from './ui/tabs';
 
 type Props = {
   hoaId: number;
@@ -52,7 +55,7 @@ function lifecycleTone(run: DREExtractionRunListItem): string {
   return 'bg-rose-100 text-rose-800';
 }
 
-export function DREPanel({ hoaId }: Props) {
+function DREDocumentsTab({ hoaId }: Props) {
   const [docs, setDocs] = useState<DREDocument[]>([]);
   const [runs, setRuns] = useState<DREExtractionRunListItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -367,5 +370,32 @@ export function DREPanel({ hoaId }: Props) {
         </button>
       </form>
     </section>
+  );
+}
+
+export function DREPanel({ hoaId }: Props) {
+  return (
+    <Tabs defaultValue="dre-docs" className="w-full">
+      <TabsList className="border-b border-[#e5e5e5] bg-transparent px-4 pt-3">
+        <TabsTrigger
+          value="dre-docs"
+          className="rounded-t-md border border-b-0 border-[#e5e5e5] bg-white px-4 py-2 text-sm font-medium data-[state=inactive]:bg-[#f5f5f5] data-[state=inactive]:text-[#737373]"
+        >
+          DRE Documents
+        </TabsTrigger>
+        <TabsTrigger
+          value="ccr-docs"
+          className="rounded-t-md border border-b-0 border-[#e5e5e5] bg-white px-4 py-2 text-sm font-medium data-[state=inactive]:bg-[#f5f5f5] data-[state=inactive]:text-[#737373]"
+        >
+          CC&R / Governing Docs
+        </TabsTrigger>
+      </TabsList>
+      <TabsContent value="dre-docs">
+        <DREDocumentsTab hoaId={hoaId} />
+      </TabsContent>
+      <TabsContent value="ccr-docs">
+        <CCRPanel hoaId={hoaId} />
+      </TabsContent>
+    </Tabs>
   );
 }

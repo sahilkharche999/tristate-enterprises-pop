@@ -573,7 +573,50 @@ _DRE_EXTRACTION_RUNS_COLUMN_DEFINITIONS: dict[str, str] = {
     "model_version_resolved": "TEXT NOT NULL DEFAULT ''",
     "finish_reason": "TEXT NOT NULL DEFAULT ''",
     "output_tokens_used": "INTEGER NOT NULL DEFAULT 0",
+    # Added by ccr-assessment-extraction: discriminates DRE vs governing-doc
+    # (CC&R) extraction runs so each path keeps its own listing and hashes.
+    "document_type": "TEXT NOT NULL DEFAULT 'dre'",
+    # Operator-entered per-unit allocation factors for CC&R runs where the
+    # legal text defines the method but not the per-unit quantities.
+    # JSON: {"unit_number": {"square_feet": N, "ownership_percent": X}, ...}
+    "operator_unit_factors_json": "TEXT NOT NULL DEFAULT '{}'",
 }
+
+
+_DRE_DOCUMENTS_COLUMN_DEFINITIONS: dict[str, str] = {
+    # Added by ccr-assessment-extraction: 'dre' | 'ccr'; existing rows default to 'dre'.
+    "document_type": "TEXT NOT NULL DEFAULT 'dre'",
+}
+
+
+def _iter_missing_dre_documents_columns(
+    raw_conn: sqlite3.Connection,
+) -> Iterable[tuple[str, str]]:
+    if not _table_exists(raw_conn, "dre_documents"):
+        return
+    existing_columns = {
+        row[1]
+        for row in raw_conn.execute("PRAGMA table_info(dre_documents)").fetchall()
+    }
+    for column_name, column_sql in _DRE_DOCUMENTS_COLUMN_DEFINITIONS.items():
+        if column_name not in existing_columns:
+            yield column_name, column_sql
+
+
+def ensure_dre_documents_columns() -> None:
+    """Brownfield migration for dre_documents columns added post-launch."""
+    raw_conn = engine.raw_connection()
+    try:
+        missing_columns = list(_iter_missing_dre_documents_columns(raw_conn))
+        for column_name, column_sql in missing_columns:
+            logger.info("Adding missing dre_documents.%s column", column_name)
+            raw_conn.execute(
+                f"ALTER TABLE dre_documents ADD COLUMN {column_name} {column_sql}"
+            )
+        raw_conn.commit()
+    finally:
+        raw_conn.close()
+
 
 _ASSESSMENT_BUDGET_MAPPING_RULE_COLUMN_DEFINITIONS: dict[str, str] = {
     "source_parent_category": "TEXT",
@@ -1066,6 +1109,7 @@ def init_db() -> None:
     ensure_budget_version_columns()
     ensure_suggestion_run_columns()
     ensure_dre_extraction_runs_columns()
+    ensure_dre_documents_columns()
     raw_conn = engine.raw_connection()
     try:
         raw_conn.executescript(_SCHEMA_PATH.read_text())

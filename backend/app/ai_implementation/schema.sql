@@ -597,7 +597,12 @@ CREATE TABLE IF NOT EXISTS dre_documents (
     status          TEXT NOT NULL DEFAULT 'active'
                     CHECK (status IN ('active','superseded','retired')),
     uploaded_by     TEXT,
-    uploaded_at     TEXT NOT NULL DEFAULT (datetime('now'))
+    uploaded_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    -- Discriminates DRE setup documents from CC&R / governing documents that
+    -- share this table. CC&R rows are tagged 'ccr'; the brownfield migration
+    -- backfills existing rows to 'dre'. DRE endpoints filter on 'dre',
+    -- CC&R endpoints on 'ccr'. See ensure_dre_documents_columns().
+    document_type   TEXT NOT NULL DEFAULT 'dre'
 );
 
 CREATE INDEX IF NOT EXISTS idx_dre_documents_property
@@ -647,7 +652,15 @@ CREATE TABLE IF NOT EXISTS dre_extraction_runs (
     -- output_tokens_used is the candidates_token_count from usage_metadata.
     model_version_resolved     TEXT NOT NULL DEFAULT '',
     finish_reason              TEXT NOT NULL DEFAULT '',
-    output_tokens_used         INTEGER NOT NULL DEFAULT 0
+    output_tokens_used         INTEGER NOT NULL DEFAULT 0,
+    -- Discriminates DRE extraction runs from CC&R / governing-document runs
+    -- that share this table (mirrors dre_documents.document_type).
+    document_type              TEXT NOT NULL DEFAULT 'dre',
+    -- Operator-entered per-unit allocation factors (square footage / ownership
+    -- percentage) for CC&R promotion, keyed by unit number. CC&Rs reference
+    -- allocation bases but rarely carry machine-readable per-unit data, so the
+    -- operator supplies it before promotion. Empty object for DRE runs.
+    operator_unit_factors_json TEXT NOT NULL DEFAULT '{}'
 );
 
 CREATE INDEX IF NOT EXISTS idx_dre_extraction_runs_doc

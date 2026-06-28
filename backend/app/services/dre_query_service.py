@@ -27,6 +27,7 @@ class DREDocumentResponse(BaseModel):
     uploaded_by: Optional[str]
     uploaded_at: str
     supersedes_id: Optional[int]
+    document_type: str = "dre"
 
 
 class DREExtractionRunListItem(BaseModel):
@@ -44,6 +45,7 @@ class DREExtractionRunListItem(BaseModel):
     prompt_version: Optional[str]
     repair_attempt_count: int
     error_message: str
+    document_type: str = "dre"
 
 
 class DREExtractionRunDetail(BaseModel):
@@ -67,30 +69,80 @@ class DREExtractionRunDetail(BaseModel):
     validation_warnings: Optional[list]
     schema_validation_errors: Optional[list]
     error_message: str
+    document_type: str = "dre"
+    operator_unit_factors: Optional[dict] = None
 
 
 class DREExtractionRunNotFound(LookupError):
     """Raised when the run isn't found for the property."""
 
 
-def list_dre_documents(
-    *, property_id: int, connection: sqlite3.Connection,
+def _list_documents_by_type(
+    *, property_id: int, document_type: str, connection: sqlite3.Connection,
 ) -> list[DREDocumentResponse]:
     rows = connection.execute(
         """
         SELECT id, property_id, file_id, file_name, page_count,
-               status, uploaded_by, uploaded_at, supersedes_id
+               status, uploaded_by, uploaded_at, supersedes_id,
+               COALESCE(document_type, 'dre')
           FROM dre_documents
-         WHERE property_id = ?
+         WHERE property_id = ? AND COALESCE(document_type, 'dre') = ?
          ORDER BY uploaded_at DESC
         """,
-        (property_id,),
+        (property_id, document_type),
     ).fetchall()
     return [
         DREDocumentResponse(
             document_id=r[0], property_id=r[1], file_id=r[2], file_name=r[3],
             page_count=r[4], status=r[5], uploaded_by=r[6], uploaded_at=r[7],
-            supersedes_id=r[8],
+            supersedes_id=r[8], document_type=r[9],
+        )
+        for r in rows
+    ]
+
+
+def list_dre_documents(
+    *, property_id: int, connection: sqlite3.Connection,
+) -> list[DREDocumentResponse]:
+    """List DRE documents only (document_type='dre'). CC&R docs excluded."""
+    return _list_documents_by_type(
+        property_id=property_id, document_type="dre", connection=connection
+    )
+
+
+def list_ccr_documents(
+    *, property_id: int, connection: sqlite3.Connection,
+) -> list[DREDocumentResponse]:
+    """List CC&R / governing documents only (document_type='ccr')."""
+    return _list_documents_by_type(
+        property_id=property_id, document_type="ccr", connection=connection
+    )
+
+
+def _list_runs_by_type(
+    *, property_id: int, document_type: str, connection: sqlite3.Connection,
+) -> list[DREExtractionRunListItem]:
+    rows = connection.execute(
+        """
+        SELECT id, dre_document_id, property_id, started_at, job_status,
+               status, review_status, promoted_setup_id, promoted_at, completed_at,
+               model_name, prompt_version, repair_attempt_count, error_message,
+               COALESCE(document_type, 'dre')
+          FROM dre_extraction_runs
+         WHERE property_id = ? AND COALESCE(document_type, 'dre') = ?
+         ORDER BY CASE WHEN job_status IN ('queued', 'running') THEN 0 ELSE 1 END,
+                  COALESCE(completed_at, started_at) DESC,
+                  id DESC
+        """,
+        (property_id, document_type),
+    ).fetchall()
+    return [
+        DREExtractionRunListItem(
+            extraction_run_id=r[0], dre_document_id=r[1], property_id=r[2],
+            started_at=r[3], job_status=r[4], status=r[5], review_status=r[6],
+            promoted_setup_id=r[7], promoted_at=r[8], completed_at=r[9],
+            model_name=r[10], prompt_version=r[11], repair_attempt_count=r[12],
+            error_message=r[13] or "", document_type=r[14],
         )
         for r in rows
     ]
@@ -99,29 +151,19 @@ def list_dre_documents(
 def list_extraction_runs(
     *, property_id: int, connection: sqlite3.Connection,
 ) -> list[DREExtractionRunListItem]:
-    rows = connection.execute(
-        """
-        SELECT id, dre_document_id, property_id, started_at, job_status,
-               status, review_status, promoted_setup_id, promoted_at, completed_at,
-               model_name, prompt_version, repair_attempt_count, error_message
-          FROM dre_extraction_runs
-         WHERE property_id = ?
-         ORDER BY CASE WHEN job_status IN ('queued', 'running') THEN 0 ELSE 1 END,
-                  COALESCE(completed_at, started_at) DESC,
-                  id DESC
-        """,
-        (property_id,),
-    ).fetchall()
-    return [
-        DREExtractionRunListItem(
-            extraction_run_id=r[0], dre_document_id=r[1], property_id=r[2],
-            started_at=r[3], job_status=r[4], status=r[5], review_status=r[6],
-            promoted_setup_id=r[7], promoted_at=r[8], completed_at=r[9],
-            model_name=r[10], prompt_version=r[11], repair_attempt_count=r[12],
-            error_message=r[13] or "",
-        )
-        for r in rows
-    ]
+    """List DRE extraction runs only (document_type='dre'). CC&R runs excluded."""
+    return _list_runs_by_type(
+        property_id=property_id, document_type="dre", connection=connection
+    )
+
+
+def list_ccr_extraction_runs(
+    *, property_id: int, connection: sqlite3.Connection,
+) -> list[DREExtractionRunListItem]:
+    """List CC&R extraction runs only (document_type='ccr')."""
+    return _list_runs_by_type(
+        property_id=property_id, document_type="ccr", connection=connection
+    )
 
 
 def _safe_json(value: Optional[str]) -> Any:
@@ -144,7 +186,9 @@ def get_extraction_run(
                model_name, prompt_version, prompt_sha256,
                repair_attempt_count, parsed_json,
                citation_audit_json, low_confidence_flags_json,
-               validation_warnings_json, schema_validation_errors, error_message
+               validation_warnings_json, schema_validation_errors, error_message,
+               COALESCE(document_type, 'dre'),
+               COALESCE(operator_unit_factors_json, '{}')
           FROM dre_extraction_runs
          WHERE id = ? AND property_id = ?
         """,
@@ -176,6 +220,8 @@ def get_extraction_run(
         validation_warnings=_safe_json(row[17]),
         schema_validation_errors=_safe_json(row[18]),
         error_message=row[19] or "",
+        document_type=row[20],
+        operator_unit_factors=_safe_json(row[21]),
     )
 
 
@@ -186,5 +232,7 @@ __all__ = [
     "DREExtractionRunNotFound",
     "get_extraction_run",
     "list_dre_documents",
+    "list_ccr_documents",
     "list_extraction_runs",
+    "list_ccr_extraction_runs",
 ]
