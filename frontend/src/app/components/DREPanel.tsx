@@ -12,6 +12,7 @@ import {
   listExtractionRuns,
   triggerDREExtraction,
   uploadDRE,
+  demoteExtractionRun,
 } from '../api/dre';
 import { FileDropzone } from './fileDropzone';
 import { DREReviewWorkbench } from './DREReviewWorkbench';
@@ -63,6 +64,7 @@ function DREDocumentsTab({ hoaId }: Props) {
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
   const [selectedRunId, setSelectedRunId] = useState<number | null>(null);
+  const [demotingRunId, setDemotingRunId] = useState<number | null>(null);
   const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pollFailureCount = useRef(0);
 
@@ -174,6 +176,31 @@ function DREDocumentsTab({ hoaId }: Props) {
       await refresh();
     } catch (exc) {
       setError(String(exc));
+    }
+  }
+
+  async function onDemote(runId: number) {
+    if (!window.confirm(
+      'Demote this promoted DRE? Its assessment setup will be unseated and ' +
+      'the prior setup (if any) restored. You can re-promote or switch to a ' +
+      'CC&R afterward.',
+    )) {
+      return;
+    }
+    setDemotingRunId(runId);
+    setError(null);
+    try {
+      await demoteExtractionRun(hoaId, runId);
+      await refresh();
+    } catch (exc: unknown) {
+      const detail = (exc as { detail?: { message?: string } })?.detail;
+      setError(
+        detail && typeof detail === 'object' && detail.message
+          ? detail.message
+          : String(exc),
+      );
+    } finally {
+      setDemotingRunId(null);
     }
   }
 
@@ -329,14 +356,26 @@ function DREDocumentsTab({ hoaId }: Props) {
                       {(r.started_at || '').slice(0, 19).replace('T', ' ') || '—'}
                     </td>
                     <td>
-                      <button
-                        type="button"
-                        disabled={active}
-                        onClick={() => setSelectedRunId(r.extraction_run_id)}
-                        className="rounded-md border border-[#d4d4d4] px-2 py-1 text-xs text-[#111111] hover:border-[#a3a3a3] hover:bg-[#f5f5f5] disabled:cursor-not-allowed disabled:opacity-50"
-                      >
-                        {active ? 'Waiting…' : 'Review →'}
-                      </button>
+                      <div className="flex gap-1">
+                        <button
+                          type="button"
+                          disabled={active}
+                          onClick={() => setSelectedRunId(r.extraction_run_id)}
+                          className="rounded-md border border-[#d4d4d4] px-2 py-1 text-xs text-[#111111] hover:border-[#a3a3a3] hover:bg-[#f5f5f5] disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          {active ? 'Waiting…' : 'Review →'}
+                        </button>
+                        {!active && r.review_status === 'promoted' && (
+                          <button
+                            type="button"
+                            disabled={demotingRunId === r.extraction_run_id}
+                            onClick={() => void onDemote(r.extraction_run_id)}
+                            className="rounded-md border border-rose-300 bg-rose-50 px-2 py-1 text-xs text-rose-700 hover:bg-rose-100 disabled:opacity-50"
+                          >
+                            {demotingRunId === r.extraction_run_id ? 'Demoting…' : 'Demote'}
+                          </button>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 );

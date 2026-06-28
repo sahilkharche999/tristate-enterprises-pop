@@ -15,6 +15,7 @@ import {
   getCCRUnitFactors,
   saveCCRUnitFactors,
   approveCCRRun,
+  demoteCCRRun,
   type CCRUnitFactorEntry,
 } from '../api/ccr';
 import { getExtractionRun } from '../api/dre';
@@ -279,6 +280,7 @@ export function CCRPanel({ hoaId }: Props) {
   const [selectedRunId, setSelectedRunId] = useState<number | null>(null);
   const [factorRunId, setFactorRunId] = useState<number | null>(null);
   const [approvingRunId, setApprovingRunId] = useState<number | null>(null);
+  const [demotingRunId, setDemotingRunId] = useState<number | null>(null);
   const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pollFailureCount = useRef(0);
 
@@ -405,6 +407,31 @@ export function CCRPanel({ hoaId }: Props) {
       }
     } finally {
       setApprovingRunId(null);
+    }
+  }
+
+  async function onDemote(runId: number) {
+    if (!window.confirm(
+      'Demote this promoted CC&R? Its assessment setup will be unseated and ' +
+      'the prior setup (if any) restored. You can re-promote or switch to a ' +
+      'different document afterward.',
+    )) {
+      return;
+    }
+    setDemotingRunId(runId);
+    setError(null);
+    try {
+      await demoteCCRRun(hoaId, runId);
+      await refresh();
+    } catch (exc: unknown) {
+      const detail = (exc as { detail?: { message?: string } })?.detail;
+      if (detail && typeof detail === 'object' && detail.message) {
+        setError(detail.message);
+      } else {
+        setError(String(exc));
+      }
+    } finally {
+      setDemotingRunId(null);
     }
   }
 
@@ -535,6 +562,7 @@ export function CCRPanel({ hoaId }: Props) {
                 const active = isActiveRun(r);
                 const canReview = !active && r.job_status !== 'failed';
                 const canPromote = canReview && r.review_status !== 'promoted';
+                const canDemote = !active && r.review_status === 'promoted';
                 return (
                   <tr key={r.extraction_run_id} className="border-b border-[#f0f0f0] transition-colors hover:bg-[#fafafa]">
                     <td className="py-3">{r.extraction_run_id}</td>
@@ -589,6 +617,16 @@ export function CCRPanel({ hoaId }: Props) {
                                 className="rounded-md bg-[#111111] px-2 py-1 text-xs text-white hover:bg-[#262626] disabled:opacity-50"
                               >
                                 {approvingRunId === r.extraction_run_id ? 'Promoting…' : 'Promote'}
+                              </button>
+                            )}
+                            {canDemote && (
+                              <button
+                                type="button"
+                                disabled={demotingRunId === r.extraction_run_id}
+                                onClick={() => void onDemote(r.extraction_run_id)}
+                                className="rounded-md border border-rose-300 bg-rose-50 px-2 py-1 text-xs text-rose-700 hover:bg-rose-100 disabled:opacity-50"
+                              >
+                                {demotingRunId === r.extraction_run_id ? 'Demoting…' : 'Demote'}
                               </button>
                             )}
                           </>

@@ -42,10 +42,14 @@ from app.services.ccr_extraction_service import (
 )
 from app.services.dre_approval_service import (
     DREApprovalResponse,
+    DREDemotionResponse,
     ExtractionRunAlreadyPromoted,
     ExtractionRunNotApprovable,
     ExtractionRunNotFound,
+    ExtractionRunNotPromoted,
+    SetupPinnedByFinalizedPackage,
     SetupTypeLiteral,
+    demote_extraction_run,
 )
 from app.services.dre_query_service import (
     DREDocumentResponse,
@@ -309,4 +313,41 @@ def approve_ccr_run(
                 "message": str(exc),
                 "missing_pool_keys": exc.missing_pool_keys,
             },
+        ) from exc
+
+
+@router.post(
+    "/hoa/{hoa_id}/ccr/extraction-runs/{run_id}/demote",
+    response_model=DREDemotionResponse,
+)
+def demote_ccr_run(
+    hoa_id: int,
+    run_id: int,
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user),
+) -> DREDemotionResponse:
+    """Reverse a promotion: unseat a wrongly-promoted CC&R extraction run.
+
+    Symmetric with the DRE demote endpoint — the lifecycle is
+    ``document_type``-agnostic. Supersedes the promoted AssessmentSetup,
+    restores the prior one (or clears the property default so a different
+    document can be promoted instead), and reverts the run to
+    ``review_status='approved'``.
+    """
+    raw_conn = session.connection().connection
+    try:
+        return demote_extraction_run(
+            property_id=hoa_id,
+            extraction_run_id=run_id,
+            reviewed_by=_actor_email(current_user),
+            connection=raw_conn,
+        )
+    except ExtractionRunNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ExtractionRunNotPromoted as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except SetupPinnedByFinalizedPackage as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"message": str(exc), "package_ids": exc.package_ids},
         ) from exc

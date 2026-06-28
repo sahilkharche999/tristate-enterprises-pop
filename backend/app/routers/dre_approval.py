@@ -12,11 +12,15 @@ from ..ai_implementation.db import get_session
 from ..auth.dependencies import get_current_user
 from ..services.dre_approval_service import (
     DREApprovalResponse,
+    DREDemotionResponse,
     ExtractionRunAlreadyPromoted,
     ExtractionRunNotApprovable,
     ExtractionRunNotFound,
+    ExtractionRunNotPromoted,
+    SetupPinnedByFinalizedPackage,
     SetupTypeLiteral,
     approve_extraction_run,
+    demote_extraction_run,
 )
 
 
@@ -63,3 +67,40 @@ def approve_dre_extraction_run(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ExtractionRunNotApprovable as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post(
+    "/hoa/{hoa_id}/dre/extraction-runs/{run_id}/demote",
+    response_model=DREDemotionResponse,
+)
+def demote_dre_extraction_run(
+    hoa_id: int,
+    run_id: int,
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user),
+) -> DREDemotionResponse:
+    """Reverse a promotion: unseat a wrongly-promoted DRE extraction run.
+
+    Supersedes the promoted AssessmentSetup, restores the prior one (or
+    clears the property's default so a different document can be promoted
+    instead), and reverts the run to ``review_status='approved'``. A run
+    that was never promoted returns ``400``; a setup pinned by a finalized
+    AnnualPackage returns ``409``; a missing run returns ``404``.
+    """
+    raw_conn = session.connection().connection
+    try:
+        return demote_extraction_run(
+            property_id=hoa_id,
+            extraction_run_id=run_id,
+            reviewed_by=_actor_email(current_user),
+            connection=raw_conn,
+        )
+    except ExtractionRunNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ExtractionRunNotPromoted as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except SetupPinnedByFinalizedPackage as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"message": str(exc), "package_ids": exc.package_ids},
+        ) from exc

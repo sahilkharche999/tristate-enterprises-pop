@@ -13,12 +13,18 @@ import { BASE_URL } from './config';
 import { authHeaders, handleResponse } from './http';
 import type {
   DREApprovalResponse,
+  DREDemotionResponse,
   DREDocument,
   DREExtractionRunListItem,
 } from './dre';
 
 // Re-export DRE types reused by the CC&R panel.
-export type { DREDocument, DREExtractionRunListItem, DREApprovalResponse };
+export type {
+  DREDocument,
+  DREExtractionRunListItem,
+  DREApprovalResponse,
+  DREDemotionResponse,
+};
 
 export interface CCRUnitFactorEntry {
   unit_number: string;
@@ -111,6 +117,18 @@ export async function approveCCRRun(
       headers: { ...authHeaders(), 'Content-Type': 'application/json' },
       body: JSON.stringify({ setup_type: setupType }),
     },
+  );
+  return handleResponse(res);
+}
+
+// Reverse a CC&R promotion (symmetric with demoteExtractionRun for DRE).
+export async function demoteCCRRun(
+  hoaId: number,
+  runId: number,
+): Promise<DREDemotionResponse> {
+  const res = await fetch(
+    `${BASE_URL}/hoa/${hoaId}/ccr/extraction-runs/${runId}/demote`,
+    { method: 'POST', headers: authHeaders() },
   );
   return handleResponse(res);
 }

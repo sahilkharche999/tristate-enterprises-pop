@@ -83,6 +83,14 @@ export interface DREApprovalResponse {
   snapshot_counts: Record<string, number>;
 }
 
+export interface DREDemotionResponse {
+  extraction_run_id: number;
+  demoted_setup_id: number;
+  restored_setup_id: number | null;
+  review_status: string;
+  default_assessment_setup_id: number | null;
+}
+
 export async function uploadDRE(
   hoaId: number,
   file: File,
@@ -199,6 +207,20 @@ export async function approveExtractionRun(
       headers: { ...authHeaders(), 'Content-Type': 'application/json' },
       body: JSON.stringify({ setup_type: setupType }),
     },
+  );
+  return handleResponse(res);
+}
+
+// Reverse a promotion: unseat a wrongly-promoted DRE run. Supersedes the
+// promoted AssessmentSetup and restores the prior one (or clears the
+// property default so a different document can be promoted instead).
+export async function demoteExtractionRun(
+  hoaId: number,
+  runId: number,
+): Promise<DREDemotionResponse> {
+  const res = await fetch(
+    `${BASE_URL}/hoa/${hoaId}/dre/extraction-runs/${runId}/demote`,
+    { method: 'POST', headers: authHeaders() },
   );
   return handleResponse(res);
 }

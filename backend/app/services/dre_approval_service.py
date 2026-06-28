@@ -131,6 +131,38 @@ class ExtractionRunNotApprovable(RuntimeError):
     """
 
 
+class ExtractionRunNotPromoted(RuntimeError):
+    """Raised when a demote is requested on a run that was never
+    promoted (``promoted_at IS NULL``). Endpoint maps this to HTTP 400.
+    """
+
+
+class SetupPinnedByFinalizedPackage(RuntimeError):
+    """Raised when a demote would unseat an AssessmentSetup that a
+    finalized AnnualPackage depends on. A finalized package is an
+    immutable disclosure artifact, so demoting its setup is refused
+    (HTTP 409) until the operator deals with the package first.
+    """
+
+    def __init__(self, setup_id: int, package_ids: list[int]) -> None:
+        self.setup_id = setup_id
+        self.package_ids = package_ids
+        super().__init__(
+            f"AssessmentSetup id={setup_id} is referenced by finalized "
+            f"AnnualPackage(s) {package_ids}; cannot demote."
+        )
+
+
+class DREDemotionResponse(BaseModel):
+    """JSON shape returned by the demote endpoint."""
+
+    extraction_run_id: int
+    demoted_setup_id: int
+    restored_setup_id: Optional[int]
+    review_status: str
+    default_assessment_setup_id: Optional[int]
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
@@ -297,4 +329,124 @@ def approve_extraction_run(
         promoted_at=promoted_at_ts,
         reviewed_by=reviewed_by,
         snapshot_counts=snapshot_counts,
+    )
+
+
+def demote_extraction_run(
+    *,
+    property_id: int,
+    extraction_run_id: int,
+    reviewed_by: Optional[str],
+    connection: sqlite3.Connection,
+) -> DREDemotionResponse:
+    """Reverse a promotion: unseat a wrongly-promoted extraction run.
+
+    This is the inverse of :func:`approve_extraction_run`. It works for
+    both DRE and CC&R runs (the lifecycle is ``document_type``-agnostic):
+
+      1. Mark the promoted ``AssessmentSetup`` ``status='superseded'``.
+      2. Restore the setup this promotion superseded (the most-recent
+         ``superseded`` setup with a lower id) back to ``status='approved'``
+         and repoint ``properties.default_assessment_setup_id`` to it.
+         If there is no prior setup, clear the default pointer so the
+         property has no live setup — leaving a clean slate for promoting
+         a different document (e.g. switching from a wrong DRE to a CC&R).
+      3. Revert the run to ``review_status='approved'`` (still reviewed,
+         no longer promoted) and clear ``promoted_setup_id`` / ``promoted_at``
+         so the UI offers re-promote.
+
+    The promoted setup is **superseded, not deleted**, so its child pool /
+    group / unit rows and any ``annual_packages`` / merge-application
+    pointers (``ON DELETE SET NULL``) remain valid — demotion is
+    non-destructive and reversible by re-promoting.
+
+    Raises:
+        ExtractionRunNotFound: run doesn't exist for the property.
+        ExtractionRunNotPromoted: run was never promoted.
+        SetupPinnedByFinalizedPackage: a finalized AnnualPackage depends
+            on the setup; endpoint maps to HTTP 409.
+    """
+    row = connection.execute(
+        "SELECT id, review_status, promoted_at, promoted_setup_id "
+        "FROM dre_extraction_runs WHERE id = ? AND property_id = ?",
+        (extraction_run_id, property_id),
+    ).fetchone()
+    if row is None:
+        raise ExtractionRunNotFound(
+            f"extraction_run_id={extraction_run_id} not found for property_id={property_id}"
+        )
+    _run_id, review_status, promoted_at, promoted_setup_id = row
+
+    if promoted_at is None or promoted_setup_id is None:
+        raise ExtractionRunNotPromoted(
+            f"extraction_run_id={extraction_run_id} is not promoted "
+            f"(review_status={review_status!r}); nothing to demote."
+        )
+
+    # Guard: refuse if a finalized AnnualPackage pins this setup. Finalized
+    # packages are immutable disclosure artifacts; the operator must resolve
+    # them before the underlying setup can be unseated.
+    finalized = connection.execute(
+        "SELECT id FROM annual_packages "
+        "WHERE assessment_setup_id = ? AND status = 'finalized'",
+        (promoted_setup_id,),
+    ).fetchall()
+    if finalized:
+        raise SetupPinnedByFinalizedPackage(
+            setup_id=promoted_setup_id,
+            package_ids=[r[0] for r in finalized],
+        )
+
+    # 1. Supersede the wrongly-promoted setup.
+    connection.execute(
+        "UPDATE assessment_setups SET status = 'superseded', updated_at = ? "
+        "WHERE id = ? AND property_id = ?",
+        (_now_iso(), promoted_setup_id, property_id),
+    )
+
+    # 2. Restore the setup this promotion superseded, if any. The inverse of
+    #    promote's "supersede prior approved" step: pick the highest-id
+    #    superseded setup below the demoted one — the one that was live
+    #    immediately before this promotion.
+    prior = connection.execute(
+        """
+        SELECT id FROM assessment_setups
+         WHERE property_id = ? AND status = 'superseded' AND id < ?
+         ORDER BY id DESC LIMIT 1
+        """,
+        (property_id, promoted_setup_id),
+    ).fetchone()
+    restored_setup_id = prior[0] if prior else None
+
+    if restored_setup_id is not None:
+        connection.execute(
+            "UPDATE assessment_setups SET status = 'approved', updated_at = ? "
+            "WHERE id = ?",
+            (_now_iso(), restored_setup_id),
+        )
+    connection.execute(
+        "UPDATE properties SET default_assessment_setup_id = ? WHERE id = ?",
+        (restored_setup_id, property_id),
+    )
+
+    # 3. Revert the run to a reviewed-but-not-promoted state.
+    connection.execute(
+        """
+        UPDATE dre_extraction_runs
+           SET review_status = 'approved',
+               promoted_setup_id = NULL,
+               promoted_at = NULL,
+               reviewed_by = COALESCE(?, reviewed_by)
+         WHERE id = ?
+        """,
+        (reviewed_by, extraction_run_id),
+    )
+
+    connection.commit()
+    return DREDemotionResponse(
+        extraction_run_id=extraction_run_id,
+        demoted_setup_id=promoted_setup_id,
+        restored_setup_id=restored_setup_id,
+        review_status="approved",
+        default_assessment_setup_id=restored_setup_id,
     )
