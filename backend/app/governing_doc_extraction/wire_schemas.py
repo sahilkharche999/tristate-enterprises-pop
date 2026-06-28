@@ -125,6 +125,35 @@ class WireCCRAssessmentSetupBlock(BaseModel):
     )
 
 
+class WireCCRUnitFactor(BaseModel):
+    """One per-unit allocation factor read from a percentage-interest / exhibit table.
+
+    Populated ONLY when the per-unit table is actually present and legible in the
+    classified pages (e.g. an 'exhibit/percentage-interest table' page). Never
+    invented from floor-plan drawings or a referenced-but-absent exhibit.
+    """
+
+    unit_number: str = Field(
+        description="Unit identifier exactly as printed in the table (e.g. '101', 'A', '12-B')."
+    )
+    square_feet: Optional[float] = Field(
+        description=(
+            "Per-unit living-area square footage if the table states it as a number; "
+            "null if the table only gives a percentage or omits square footage."
+        )
+    )
+    ownership_percent: Optional[float] = Field(
+        description=(
+            "Per-unit allocation/ownership percentage as printed (e.g. 13.15 for "
+            "'13.15%'); null if the table gives only square footage. A percentage "
+            "interest computed from square footage IS a valid proportional factor."
+        )
+    )
+    source_page: Optional[int] = Field(
+        description="The page number of the table this row was read from."
+    )
+
+
 class WireCCRUnitStructure(BaseModel):
     """Unit count and any per-unit factor data machine-readable from the document."""
 
@@ -143,6 +172,14 @@ class WireCCRUnitStructure(BaseModel):
             "Verbatim reference to the exhibit or schedule that contains per-unit "
             "factors (e.g. 'Exhibit B', 'Schedule of Percentage Interests'). "
             "Null if no such cross-reference exists."
+        )
+    )
+    units: list[WireCCRUnitFactor] = Field(
+        description=(
+            "One row per unit when a per-unit allocation/percentage-interest table "
+            "is PRESENT and legible in the classified pages — extract every row "
+            "verbatim. Empty list when no such table is present (factors only "
+            "referenced, in floor plans, or in an absent exhibit). Never invent rows."
         )
     )
 
@@ -261,6 +298,7 @@ __all__ = [
     "WirePageInventoryBatch",
     "WireCCRDocumentMetadata",
     "WireCCRAssessmentSetupBlock",
+    "WireCCRUnitFactor",
     "WireCCRUnitStructure",
     "WireCCRAllocationPool",
     "WireCCRReservePolicy",

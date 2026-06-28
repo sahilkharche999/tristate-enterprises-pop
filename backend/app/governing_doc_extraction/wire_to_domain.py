@@ -29,6 +29,7 @@ from app.dre_extraction.schemas import (
     HumanReviewQuestion,
     PageInventoryEntry,
     ReserveSetupBlock,
+    UnitRow,
     UnitStructure,
     ValidationCheck,
 )
@@ -105,6 +106,16 @@ def _setup(wire: ws.WireCCRAssessmentSetupBlock) -> AssessmentSetupBlock:
     )
 
 
+def _unit(wire: ws.WireCCRUnitFactor) -> UnitRow:
+    return UnitRow(
+        unit_number=_text(wire.unit_number),
+        square_feet=_decimal(wire.square_feet),
+        ownership_percent=_decimal(wire.ownership_percent),
+        source_page=wire.source_page,
+        confidence=0.0,
+    )
+
+
 def _pool(wire: ws.WireCCRAllocationPool) -> AllocationPoolBlock:
     is_residual = wire.is_residual_base if wire.is_residual_base is not None else False
     derivation = "residual_default" if is_residual else "explicit_lines"
@@ -175,7 +186,7 @@ def to_domain(wire: ws.WireCCRPolicyExtraction) -> DRESetupExtraction:
             unit_count=wire.unit_structure.unit_count,
             group_count=None,
             groups=[],
-            units=[],
+            units=[_unit(u) for u in _list(wire.unit_structure.units)],
         ),
         allocation_pools=[_pool(p) for p in _list(wire.allocation_pools)],
         formulas=[],

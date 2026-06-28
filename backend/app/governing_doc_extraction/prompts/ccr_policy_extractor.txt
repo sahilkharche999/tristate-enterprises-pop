@@ -53,6 +53,11 @@ D. RESERVE CONTRIBUTIONS — whether reserves are funded through the same apport
 
 E. CROSS-REFERENCES — if the policy defers to an exhibit, schedule, or DRE budget for specific numbers (e.g., "as set forth in the budget submitted to the California DRE and as set forth in Exhibit B"), record the cross-reference verbatim. Do NOT invent per-unit numbers from floor-plan drawings.
 
+F. PER-UNIT FACTOR TABLE — decide whether the per-unit allocation data is PRESENT or merely REFERENCED:
+   - PRESENT: one of the pages you classified as "exhibit/percentage-interest table" (or an equivalent schedule) actually shows a legible, machine-readable table of per-unit factors — a list of units each with a square footage and/or an ownership/allocation percentage. When present, you MUST read EVERY row of that table verbatim into unit_structure.units (see STEP 3). This is reading printed values, NOT inventing them — extract them even though the prose pool rule only describes the basis. A percentage-interest column counts as a proportional factor (it is the normalized square-footage share).
+   - REFERENCED-BUT-ABSENT: the policy names an exhibit/schedule that is NOT among the uploaded/legible pages, or the only per-unit data is in floor-plan drawings. Then leave unit_structure.units empty, record the cross-reference, and raise a human_review_question. Never fabricate rows.
+   - If a corrected/amended version of the table supersedes an earlier one in the same document, use the corrected values.
+
 ════════════════════════════════════════════════════════
 STEP 3 — BUILD THE STRUCTURED OUTPUT
 ════════════════════════════════════════════════════════
@@ -77,9 +82,17 @@ assessment_setup
   • source_pages: cite the section(s) that establish the structure.
 
 unit_structure
-  • If the document states total unit count, record it.
-  • If the document references an exhibit listing per-unit square footage or ownership interest, record groups/units with null factor values and a cross_reference note in the human_review_questions.
-  • Never invent per-unit square footage from floor-plan drawings.
+  • unit_count: if the document states a total unit count, record it.
+  • per_unit_factors_available: true if a legible per-unit factor table is present in the classified pages; false if factors are only referenced, in floor plans, or in an absent exhibit.
+  • factor_exhibit_reference: the verbatim exhibit/schedule name if one is named (e.g., "Exhibit B"); null otherwise.
+  • units: when a per-unit allocation/percentage-interest table is PRESENT and legible (STEP 2-F), populate one row per unit, reading values verbatim:
+      - unit_number: exactly as printed.
+      - ownership_percent: the printed percentage (e.g., 13.15 for "13.15%"); null if the table gives only square footage.
+      - square_feet: the printed square footage; null if the table gives only a percentage.
+      - source_page: the page the row was read from.
+    A populated units list lets the proportional pool promote directly — without it the operator must hand-enter every factor, so DO extract a table that is actually present.
+  • When the per-unit table is REFERENCED-BUT-ABSENT, leave units empty and raise a human_review_question.
+  • Never invent per-unit square footage or percentages from floor-plan drawings or from a denominator you cannot see.
 
 allocation_pools
   Build one pool per distinct allocation rule:
@@ -108,7 +121,7 @@ validation_checks: record any internal consistency checks you can perform, e.g.,
 human_review_questions
   Surface a question whenever:
   • The allocation method is stated by reference to an exhibit not uploaded (severity: high if it blocks knowing the denominator, medium if the policy is clear but the numbers are missing).
-  • Per-unit square footage or ownership percentages are needed for a proportional pool but are only in floor-plan drawings or an exhibit not present (severity: high).
+  • Per-unit square footage or ownership percentages are needed for a proportional pool but are NOT present in the classified pages — only in floor-plan drawings or an exhibit not uploaded (severity: high). Do NOT raise this when the per-unit table IS present and you extracted it into unit_structure.units.
   • The document contains a category or expense type whose allocation rule is genuinely ambiguous (severity: medium).
   • A value is on a faded or handwritten page with confidence < 0.7 (severity: low).
   Leave the affected field null rather than guessing.
@@ -118,7 +131,7 @@ CITATION AND CONFIDENCE RULES
 ════════════════════════════════════════════════════════
 
 • Every pool, metadata block, and allocation rule MUST cite source_pages (at least one page number).
-• Per-unit factor values (square footage, ownership %) MUST NOT be invented. If not machine-readable from assessment-relevant pages, set to null and add a human_review_question.
+• Per-unit factor values (square footage, ownership %) MUST NOT be invented. If a per-unit table IS present and legible in the classified pages, read every row into unit_structure.units verbatim. If the values are NOT machine-readable from the classified pages, leave unit_structure.units empty and add a human_review_question.
 • Confidence < 0.7 = the source page is faded, handwritten, or ambiguous.
 • When the document uses "the same [method] as regular assessments", resolve the reference and state the resolved method.
 • When the document defers to an exhibit not present in the uploaded pages, record a cross-reference and a human_review_question; do not fabricate numbers.
