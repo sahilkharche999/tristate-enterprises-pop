@@ -186,7 +186,16 @@ def _canonicalize_single_reserve_row(
         and normalized_reference_year is not None
         and row.useful_life is not None
     ):
-        normalized_remaining_life = max(row.useful_life - (normalized_reference_year - row.year_new), 0)
+        # A component's age cannot be negative. When YEAR NEW is at or after the
+        # reference year (a brand-new or future-scheduled component, e.g. a
+        # sealing/repair item placed in service next cycle), the component has
+        # not aged yet, so its remaining life is its full useful life — never
+        # more. Flooring age at 0 keeps remaining_life within [0, useful_life];
+        # without it, a future YEAR NEW yields remaining_life > useful_life,
+        # which is logically impossible and corrupts the downstream
+        # estimated_liability ((useful_life - remaining_life) / useful_life).
+        age = max(normalized_reference_year - row.year_new, 0)
+        normalized_remaining_life = max(row.useful_life - age, 0)
 
     year_replacement_provision = row.year_replacement_provision
     if (

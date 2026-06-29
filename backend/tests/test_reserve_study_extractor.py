@@ -1489,6 +1489,36 @@ def test_canonicalize_reserve_rows_clamps_overdue_remaining_life_to_zero():
     assert rows[0].estimated_liability == 10000
 
 
+def test_canonicalize_reserve_rows_clamps_future_year_new_to_full_useful_life():
+    # RAC-style component-data formats carry YEAR NEW + EXPECT. LIFE but no
+    # remaining-life column, so remaining life is derived. A future-dated
+    # YEAR NEW (component scheduled to be placed in service after the study's
+    # reference year) must not produce remaining_life > useful_life.
+    rows, reference_year = canonicalize_reserve_study_rows(
+        [
+            ExtractedReserveStudyRow(
+                row_id="asphalt-1",
+                line_item="Asphalt Sealing & Repairs",
+                useful_life=6,
+                remaining_life=None,
+                quantity="315 S.F.",
+                replacement_cost=630.0,
+                year_new=2026,
+                source_page=18,
+            )
+        ],
+        explicit_reference_year=2024,
+    )
+
+    assert reference_year == 2024
+    # age floored at 0 -> remaining life == full useful life, never more.
+    assert rows[0].remaining_life == 6
+    assert rows[0].remaining_life <= rows[0].useful_life
+    # not-yet-aged component carries no accrued liability.
+    assert rows[0].estimated_liability == 0
+    assert "missing_remaining_life" not in rows[0].flags
+
+
 def test_extraction_keeps_rows_with_blank_fields_and_flags_them(monkeypatch, tmp_path):
     monkeypatch.setattr(
         "app.services.reserve_study_extractor._extract_pdf_text_table",
