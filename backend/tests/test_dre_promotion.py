@@ -291,6 +291,81 @@ class TestPopulateUnits:
         assert counts["units"] == 0
 
 
+class TestProportionalPoolNormalization:
+    def test_square_footage_pool_without_sqft_falls_back_to_ownership_percentage(self, db):
+        # Los Altos case: CC&R prose says "in proportion to square footage",
+        # but Exhibit B carries percentage interests, not square feet. The
+        # pool must allocate by ownership_percentage so the engine can compute
+        # it (otherwise: UnsupportedAllocationMethod -> package render 500).
+        pid, setup_id = _seed_property_and_setup(db)
+        payload = _make_extraction_payload(
+            pools=[{
+                "pool_key": "sqft_proportional_exceptions",
+                "pool_name": "Square Footage Proportional Exceptions",
+                "annual_amount": None,
+                "allocation_method": "square_footage",
+                "recipient_scope": "all_units",
+                "denominator_label": "total square footage of all units",
+                "denominator_value": None,
+                "denominator_source": "unknown",
+                "included_budget_lines": ["insurance"],
+                "excluded_budget_lines": [],
+                "source_pages": [16],
+                "confidence": 0.9,
+            }],
+            units=[
+                {"unit_number": "101", "ownership_percent": "13.15"},
+                {"unit_number": "102", "ownership_percent": "12.02"},
+            ],
+        )
+        ext = parse_extraction_payload(json.dumps(payload))
+        populate_setup_children(
+            setup_id=setup_id, setup_type="per_unit",
+            extraction=ext, connection=db,
+        )
+        method = db.execute(
+            "SELECT allocation_method FROM allocation_pools "
+            "WHERE assessment_setup_id = ? AND pool_key = 'sqft_proportional_exceptions'",
+            (setup_id,),
+        ).fetchone()[0]
+        assert method == "ownership_percentage"
+
+    def test_square_footage_pool_with_real_sqft_is_untouched(self, db):
+        # A setup with genuine per-unit square footage must keep square_footage.
+        pid, setup_id = _seed_property_and_setup(db)
+        payload = _make_extraction_payload(
+            pools=[{
+                "pool_key": "sqft_pool",
+                "pool_name": "Sqft Pool",
+                "annual_amount": None,
+                "allocation_method": "square_footage",
+                "recipient_scope": "all_units",
+                "denominator_label": "total sqft",
+                "denominator_value": "2050",
+                "denominator_source": "dre_shown",
+                "included_budget_lines": [],
+                "excluded_budget_lines": [],
+                "source_pages": [3],
+                "confidence": 0.95,
+            }],
+            units=[
+                {"unit_number": "101", "square_feet": "850", "ownership_percent": "1.5"},
+                {"unit_number": "102", "square_feet": "1200"},
+            ],
+        )
+        ext = parse_extraction_payload(json.dumps(payload))
+        populate_setup_children(
+            setup_id=setup_id, setup_type="per_unit",
+            extraction=ext, connection=db,
+        )
+        method = db.execute(
+            "SELECT allocation_method FROM allocation_pools "
+            "WHERE assessment_setup_id = ? AND pool_key = 'sqft_pool'",
+            (setup_id,),
+        ).fetchone()[0]
+        assert method == "square_footage"
+
+
 class TestSpecifiedValueAllocations:
     def test_per_unit_specified_value_pool_creates_unit_allocations(self, db):
         pid, setup_id = _seed_property_and_setup(db)

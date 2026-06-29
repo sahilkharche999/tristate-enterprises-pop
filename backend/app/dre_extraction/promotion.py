@@ -283,6 +283,59 @@ def parse_extraction_payload(
         return None
 
 
+def _normalize_proportional_pool_methods(
+    extraction: DRESetupExtraction,
+) -> DRESetupExtraction:
+    """Reconcile a declared ``square_footage`` basis with the per-unit data.
+
+    A governing document may state that costs are split "in proportion to
+    square footage" while the only machine-readable per-unit factor it carries
+    is a *percentage interest* (e.g. an Exhibit B that lists each unit's % of
+    the whole). A percentage interest is the normalized square-footage share,
+    so the document's intent is preserved by allocating via
+    ``ownership_percentage`` — which the engine can actually compute. Without
+    this, a ``square_footage`` pool with no per-unit square feet and no
+    denominator makes the engine raise ``UnsupportedAllocationMethod`` and the
+    whole package render fails.
+
+    Conservative by design: only rewrites when NO recipient (unit or group)
+    carries square footage AND at least one carries a percentage. A setup with
+    genuine per-unit square footage is left untouched.
+    """
+    units = extraction.unit_structure.units
+    groups = extraction.unit_structure.groups
+
+    any_square_feet = any(u.square_feet is not None for u in units) or any(
+        g.average_square_feet is not None for g in groups
+    )
+    any_percent = any(u.ownership_percent is not None for u in units) or any(
+        g.ownership_percent is not None for g in groups
+    )
+    if any_square_feet or not any_percent:
+        return extraction
+
+    new_pools: list[AllocationPoolBlock] = []
+    changed = False
+    for pool in extraction.allocation_pools:
+        if pool.allocation_method == "square_footage":
+            logger.info(
+                "promotion: pool %r declared square_footage but no recipient has "
+                "square feet; allocating by ownership_percentage (percentage "
+                "interest is the normalized square-footage share)",
+                pool.pool_key,
+            )
+            new_pools.append(
+                pool.model_copy(update={"allocation_method": "ownership_percentage"})
+            )
+            changed = True
+        else:
+            new_pools.append(pool)
+
+    if not changed:
+        return extraction
+    return extraction.model_copy(update={"allocation_pools": new_pools})
+
+
 def populate_setup_children(
     *,
     setup_id: int,
@@ -294,6 +347,8 @@ def populate_setup_children(
 
     Returns a count summary for the audit trail.
     """
+    extraction = _normalize_proportional_pool_methods(extraction)
+
     counts = {
         "pools": 0, "groups": 0, "units": 0, "unit_pool_allocations": 0,
     }
