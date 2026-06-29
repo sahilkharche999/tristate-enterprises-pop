@@ -381,7 +381,10 @@ def _basis_values_for_ref(ref: Any, *, grain: RecipientGrain) -> dict[str, Any]:
         values["avg_sq_ft" if grain == "group" else "sq_ft"] = _get(ref, "square_feet")
     ownership_percent = _get(ref, "ownership_percent")
     if ownership_percent is not None and _money(ownership_percent) != Decimal("0"):
-        values["percent_of_total"] = ownership_percent
+        # ownership_percent is a normalized fraction (e.g. 0.1315). The
+        # "percent" display formatter appends "%" to the value as-is, so store
+        # the percentage number (13.15) here — otherwise it renders "0.1315%".
+        values["percent_of_total"] = _money(ownership_percent) * Decimal("100")
     if _get(ref, "category"):
         values["category"] = _get(ref, "category")
     if _get(ref, "parking_spaces", 0):
