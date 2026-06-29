@@ -112,7 +112,7 @@ def _unit(wire: ws.WireCCRUnitFactor) -> UnitRow:
         square_feet=_decimal(wire.square_feet),
         ownership_percent=_decimal(wire.ownership_percent),
         source_page=wire.source_page,
-        confidence=0.0,
+        confidence=_confidence(wire.confidence),
     )
 
 
@@ -175,7 +175,7 @@ def to_domain(wire: ws.WireCCRPolicyExtraction) -> DRESetupExtraction:
             interest_assumption=None,
             allocation_method=_text(rp.separate_reserve_basis),
             source_pages=_list(rp.source_pages),
-            confidence=0.0,
+            confidence=_confidence(rp.confidence),
         )
 
     return DRESetupExtraction(

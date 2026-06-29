@@ -152,6 +152,14 @@ class WireCCRUnitFactor(BaseModel):
     source_page: Optional[int] = Field(
         description="The page number of the table this row was read from."
     )
+    confidence: Optional[float] = Field(
+        description=(
+            "0.0–1.0 confidence that this unit's factor values were read "
+            "correctly. Use >= 0.9 for a clearly printed, legible table row; "
+            "< 0.7 only when the cell is faded, handwritten, or ambiguous. "
+            "Do not report 0.0 for a row you read confidently."
+        )
+    )
 
 
 class WireCCRUnitStructure(BaseModel):
@@ -265,6 +273,13 @@ class WireCCRReservePolicy(BaseModel):
     )
     source_pages: Optional[list[int]] = Field(
         description="Pages where reserve funding is addressed."
+    )
+    confidence: Optional[float] = Field(
+        description=(
+            "0.0–1.0 confidence in the reserve-funding policy extraction. "
+            "Use < 0.7 only when the reserve provisions are faded, ambiguous, "
+            "or split across pages you could not fully read."
+        )
     )
 
 

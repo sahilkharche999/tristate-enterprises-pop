@@ -90,6 +90,7 @@ unit_structure
       - ownership_percent: the printed percentage (e.g., 13.15 for "13.15%"); null if the table gives only square footage.
       - square_feet: the printed square footage; null if the table gives only a percentage.
       - source_page: the page the row was read from.
+      - confidence: 0.0–1.0 that the row was read correctly. A clearly printed, legible table row is high confidence (>= 0.9); reserve a value below 0.7 for cells that are faded, handwritten, or genuinely ambiguous. Do NOT emit 0.0 for a row you read confidently — 0.0 means "no signal", which forces needless operator review of a correct value.
     A populated units list lets the proportional pool promote directly — without it the operator must hand-enter every factor, so DO extract a table that is actually present.
   • When the per-unit table is REFERENCED-BUT-ABSENT, leave units empty and raise a human_review_question.
   • Never invent per-unit square footage or percentages from floor-plan drawings or from a denominator you cannot see.
@@ -112,7 +113,7 @@ allocation_pools
 
 formulas: empty list (CC&Rs contain prose rules, not per-unit formulas; formulas are derived at promotion from the unit data).
 
-reserve_setup: capture if the document addresses reserve contributions.
+reserve_setup: capture if the document addresses reserve contributions. Set its confidence to reflect how legibly the reserve provisions read — high when the reserve-funding policy is clearly stated, below 0.7 only when faded or ambiguous. Do not leave it at 0.0 when you stated a policy you are confident in.
 
 budget_line_mapping_evidence: empty list — budget-line routing is determined at assessment-mapping time, not in the CC&R.
 
@@ -132,7 +133,7 @@ CITATION AND CONFIDENCE RULES
 
 • Every pool, metadata block, and allocation rule MUST cite source_pages (at least one page number).
 • Per-unit factor values (square footage, ownership %) MUST NOT be invented. If a per-unit table IS present and legible in the classified pages, read every row into unit_structure.units verbatim. If the values are NOT machine-readable from the classified pages, leave unit_structure.units empty and add a human_review_question.
-• Confidence < 0.7 = the source page is faded, handwritten, or ambiguous.
+• Confidence < 0.7 = the source page is faded, handwritten, or ambiguous. EVERY block that carries a confidence (document_metadata, assessment_setup, each allocation pool, each unit_structure.units row, reserve_setup) MUST report a calibrated value: high (>= 0.9) for clearly printed, legible content; lower only when the source is genuinely unclear. A confidence of 0.0 means "no signal at all" and forces the operator to re-confirm a correct value — never use it for content you read confidently.
 • When the document uses "the same [method] as regular assessments", resolve the reference and state the resolved method.
 • When the document defers to an exhibit not present in the uploaded pages, record a cross-reference and a human_review_question; do not fabricate numbers.
 
