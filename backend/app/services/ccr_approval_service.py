@@ -24,6 +24,10 @@ from typing import Any, Optional
 from pydantic import BaseModel
 
 from app.dre_extraction.promotion import (
+    MissingUnitFactors,
+    apply_review_edits_to_extraction,
+    check_missing_unit_factors,
+    entity_keys_touched_by_edits,
     parse_extraction_payload,
     populate_setup_children,
 )
@@ -33,34 +37,17 @@ from app.services.dre_approval_service import (
     ExtractionRunAlreadyPromoted,
     ExtractionRunNotApprovable,
     ExtractionRunNotFound,
+    ReopenRepromoteResponse,
     SetupTypeLiteral,
     _now_iso,
+    reopen_and_repromote,
 )
 from app.services.assessment_budget_mapping_rule_service import (
     carry_forward_reusable_mapping_rules_across_setups,
     derive_rules_from_dre_extraction,
 )
 from app.services.budget_line_mapping_service import carry_forward_mappings_across_setups
-
-
-# Allocation methods that require per-unit factors to produce correct math.
-_PROPORTIONAL_METHODS = frozenset({"square_footage", "ownership_percentage", "custom_factor"})
-
-
-class MissingUnitFactors(RuntimeError):
-    """Raised when a proportional pool has no per-unit factors.
-
-    The endpoint maps this to HTTP 422 with a structured body naming the
-    pool_keys that need factors and asking the operator to enter them in
-    the review surface before re-promoting.
-    """
-
-    def __init__(self, missing_pool_keys: list[str]) -> None:
-        self.missing_pool_keys = missing_pool_keys
-        super().__init__(
-            f"Cannot promote: proportional pool(s) {missing_pool_keys!r} have no "
-            "per-unit factors. Enter unit factors in the review surface before promoting."
-        )
+from app.services.dre_review_service import list_review_edits
 
 
 class CCRUnitFactor(BaseModel):
@@ -197,19 +184,6 @@ def _merge_operator_factors(
     return extraction.model_copy(update={"unit_structure": unit_structure})
 
 
-def _check_missing_factors(
-    extraction: DRESetupExtraction,
-) -> list[str]:
-    """Return pool_keys of proportional pools that have no per-unit unit data."""
-    has_units = bool(extraction.unit_structure.units)
-    missing: list[str] = []
-    for pool in extraction.allocation_pools:
-        if pool.allocation_method in _PROPORTIONAL_METHODS:
-            if not has_units:
-                missing.append(pool.pool_key)
-    return missing
-
-
 def approve_ccr_extraction_run(
     *,
     property_id: int,
@@ -256,8 +230,21 @@ def approve_ccr_extraction_run(
             f"extraction_run_id={extraction_run_id} is review_status='rejected'."
         )
 
-    # Parse the extraction and merge operator-entered unit factors.
+    # Parse the extraction, apply queued Review Workbench edits, then merge
+    # operator-entered per-unit factors on top (review edits patch first,
+    # CC&R factors merge second — same layering as this pipeline already
+    # uses for missing-data injection).
     extraction: Optional[DRESetupExtraction] = parse_extraction_payload(parsed_json_text)
+    edited_entity_keys: frozenset[str] = frozenset()
+    if extraction is not None:
+        edits = list_review_edits(
+            dre_extraction_run_id=extraction_run_id, connection=connection,
+        )
+        extraction = apply_review_edits_to_extraction(extraction, edits)
+        edited_entity_keys = entity_keys_touched_by_edits(
+            extraction, [edit.field_path for edit in edits]
+        )
+
     operator_factors = get_operator_unit_factors(
         extraction_run_id=extraction_run_id, connection=connection
     )
@@ -266,7 +253,7 @@ def approve_ccr_extraction_run(
 
     # Block promotion if any proportional pool has no unit data (3.3).
     if extraction is not None and setup_type == "per_unit":
-        missing = _check_missing_factors(extraction)
+        missing = check_missing_unit_factors(extraction)
         if missing:
             raise MissingUnitFactors(missing)
 
@@ -312,6 +299,7 @@ def approve_ccr_extraction_run(
             setup_type=setup_type,
             extraction=extraction,
             connection=connection,
+            edited_entity_keys=edited_entity_keys,
         )
         if prior_setup_id is not None:
             carry_forward_mappings_across_setups(
@@ -375,10 +363,46 @@ def approve_ccr_extraction_run(
     )
 
 
+def reopen_and_repromote_ccr_run(
+    *,
+    property_id: int,
+    extraction_run_id: int,
+    setup_type: SetupTypeLiteral,
+    reviewed_by: Optional[str],
+    connection: sqlite3.Connection,
+) -> ReopenRepromoteResponse:
+    """CC&R-aware ``reopen_and_repromote``: layers operator per-unit
+    factors on top of review edits, same as ``approve_ccr_extraction_run``,
+    and re-enforces the missing-unit-factors guard on re-promotion.
+    """
+
+    def _apply_ccr_factors(extraction: DRESetupExtraction) -> DRESetupExtraction:
+        # The missing-unit-factors guard itself now lives in
+        # reopen_and_repromote (shared with the plain DRE path) and runs
+        # right after this transform returns — this only needs to merge
+        # the CC&R-specific operator factors on top of the review edits.
+        operator_factors = get_operator_unit_factors(
+            extraction_run_id=extraction_run_id, connection=connection
+        )
+        if operator_factors:
+            extraction = _merge_operator_factors(extraction, operator_factors)
+        return extraction
+
+    return reopen_and_repromote(
+        property_id=property_id,
+        extraction_run_id=extraction_run_id,
+        setup_type=setup_type,
+        reviewed_by=reviewed_by,
+        connection=connection,
+        extra_extraction_transform=_apply_ccr_factors,
+    )
+
+
 __all__ = [
     "CCRUnitFactor",
     "MissingUnitFactors",
     "save_operator_unit_factors",
     "get_operator_unit_factors",
     "approve_ccr_extraction_run",
+    "reopen_and_repromote_ccr_run",
 ]

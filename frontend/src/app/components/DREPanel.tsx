@@ -17,6 +17,7 @@ import {
 import { FileDropzone } from './fileDropzone';
 import { DREReviewWorkbench } from './DREReviewWorkbench';
 import { CCRPanel } from './CCRPanel';
+import { ManualSetupEntryForm } from './ManualSetupEntryForm';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from './ui/tabs';
 
 type Props = {
@@ -65,6 +66,7 @@ function DREDocumentsTab({ hoaId }: Props) {
   const [uploading, setUploading] = useState(false);
   const [selectedRunId, setSelectedRunId] = useState<number | null>(null);
   const [demotingRunId, setDemotingRunId] = useState<number | null>(null);
+  const [showManualEntry, setShowManualEntry] = useState(false);
   const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pollFailureCount = useRef(0);
 
@@ -224,15 +226,39 @@ function DREDocumentsTab({ hoaId }: Props) {
 
   if (loading) return <div className="p-4 text-gray-500">Loading DRE state…</div>;
 
+  if (showManualEntry) {
+    return (
+      <div className="p-4">
+        <ManualSetupEntryForm
+          hoaId={hoaId}
+          onCancel={() => setShowManualEntry(false)}
+          onCreated={(runId) => {
+            setShowManualEntry(false);
+            setSelectedRunId(runId);
+          }}
+        />
+      </div>
+    );
+  }
+
   return (
     <section className="space-y-4 p-4">
-      <header className="space-y-1">
-        <h2 className="text-lg font-semibold text-[#111111]">DRE documents & extractions</h2>
-        <p className="text-sm text-[#525252]">
-          Upload a DRE PDF to extract its assessment setup via Gemini Vision.
-          Review the extraction in the Workbench, then approve to promote
-          it into a live AssessmentSetup.
-        </p>
+      <header className="flex items-start justify-between gap-4">
+        <div className="space-y-1">
+          <h2 className="text-lg font-semibold text-[#111111]">DRE documents & extractions</h2>
+          <p className="text-sm text-[#525252]">
+            Upload a DRE PDF to extract its assessment setup via Gemini Vision.
+            Review the extraction in the Workbench, then approve to promote
+            it into a live AssessmentSetup.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => setShowManualEntry(true)}
+          className="shrink-0 rounded-md border border-[#d4d4d4] px-3 py-1.5 text-sm text-[#111111] hover:border-[#a3a3a3] hover:bg-[#f5f5f5]"
+        >
+          + Manual entry (no DRE on file)
+        </button>
       </header>
 
       {error && (

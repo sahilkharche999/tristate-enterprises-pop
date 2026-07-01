@@ -35,9 +35,10 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
-from decimal import Decimal
-from typing import Any, Iterable, Optional
+from decimal import Decimal, InvalidOperation
+from typing import Any, Iterable, Optional, Union, get_args, get_origin
 
 from .adapter import map_allocation_method
 from .schemas import (
@@ -49,6 +50,283 @@ from .schemas import (
 
 
 logger = logging.getLogger(__name__)
+
+
+class UnresolvableReviewEdit(RuntimeError):
+    """Raised when one or more ``dre_review_edits`` rows reference a
+    ``field_path`` that cannot be resolved (or type-coerced) against the
+    current parsed extraction — e.g. the pool at that index was removed by
+    a prior edit, or the value can't be coerced to the field's declared
+    type. The operator explicitly made this edit, so dropping or
+    misapplying it silently would produce a wrong assessment with no
+    visible trace; the endpoint maps this to HTTP 422 naming every
+    unresolvable path so the operator can re-enter it.
+    """
+
+    def __init__(self, unresolvable_field_paths: list[str]) -> None:
+        self.unresolvable_field_paths = unresolvable_field_paths
+        super().__init__(
+            f"Cannot promote: review edit(s) reference field_path(s) "
+            f"{unresolvable_field_paths!r} that cannot be resolved against "
+            "the current extraction. Re-enter the edit(s) against the "
+            "current data before re-attempting promotion."
+        )
+
+
+_PROPORTIONAL_ALLOCATION_METHODS = frozenset(
+    {"square_footage", "ownership_percentage", "custom_factor"}
+)
+
+
+class MissingUnitFactors(RuntimeError):
+    """Raised when a ``per_unit`` setup has a proportional-allocation pool
+    (square_footage / ownership_percentage / custom_factor) but no unit
+    carries per-unit data at all.
+
+    Originally a CC&R-only guard, since CC&Rs commonly reference a
+    proportional basis without carrying machine-readable per-unit data —
+    but a manual per_unit setup (and, in principle, a DRE one) has the
+    identical risk: an operator declares ``square_footage`` allocation and
+    forgets to enter square footage for any unit. Shared here so every
+    promotion path that populates units enforces the same guard rather
+    than silently producing an equal-distribution assessment that looks
+    intentional but isn't.
+    """
+
+    def __init__(self, missing_pool_keys: list[str]) -> None:
+        self.missing_pool_keys = missing_pool_keys
+        super().__init__(
+            f"Cannot promote: proportional pool(s) {missing_pool_keys!r} have no "
+            "per-unit factors. Enter unit factors before promoting."
+        )
+
+
+def check_missing_unit_factors(extraction: DRESetupExtraction) -> list[str]:
+    """Return ``pool_key``s of proportional-allocation pools that have no
+    per-unit unit data at all (i.e. ``unit_structure.units`` is empty).
+    """
+    has_units = bool(extraction.unit_structure.units)
+    missing: list[str] = []
+    for pool in extraction.allocation_pools:
+        if pool.allocation_method in _PROPORTIONAL_ALLOCATION_METHODS:
+            if not has_units:
+                missing.append(pool.pool_key)
+    return missing
+
+
+class EditedEntityFailedToPromote(RuntimeError):
+    """Raised when an operator-edited pool/group/unit could not be inserted
+    into the live setup at promotion time (e.g. an edited
+    ``allocation_method`` that ``map_allocation_method`` can't map, or an
+    edited ``unit_count``/``unit_number`` that is still invalid).
+
+    This is distinct from the best-effort skip applied to AI-extracted rows
+    that were never touched by an operator: a malformed *extraction* row is
+    the model's mistake and safe to skip, but a field an *operator*
+    explicitly edited must never silently vanish — that is exactly the
+    "I edited it and got no error, but it had no effect" bug this
+    capability exists to close.
+    """
+
+    def __init__(self, entity_refs: list[str]) -> None:
+        self.entity_refs = entity_refs
+        super().__init__(
+            f"Cannot promote: operator-edited entities {entity_refs!r} could "
+            "not be inserted into the live setup. Correct the edited "
+            "value(s) in the Review Workbench and retry."
+        )
+
+
+_PATH_SEGMENT_RE = re.compile(r"^(\w+)(\[(\d+)\])?$")
+
+
+def _parse_field_path(field_path: str) -> Optional[list[tuple[str, Optional[int]]]]:
+    """Parse a dotted/bracketed ``field_path`` into ``(name, index)`` segments.
+
+    E.g. ``allocation_pools[0].denominator_value`` ->
+    ``[("allocation_pools", 0), ("denominator_value", None)]``. Returns
+    ``None`` if the path doesn't match the expected grammar.
+    """
+    segments: list[tuple[str, Optional[int]]] = []
+    for raw in field_path.split("."):
+        match = _PATH_SEGMENT_RE.match(raw)
+        if not match:
+            return None
+        name, _, idx = match.groups()
+        segments.append((name, int(idx) if idx is not None else None))
+    return segments or None
+
+
+def _resolve_edit_target(
+    root: DRESetupExtraction, segments: list[tuple[str, Optional[int]]]
+) -> tuple[Any, str]:
+    """Walk all but the last path segment and return ``(target_obj, attr_name)``
+    for the leaf field the last segment names.
+
+    Raises ``AttributeError``/``IndexError``/``TypeError`` on an
+    unresolvable path — callers treat any of these as unresolvable.
+    """
+    obj: Any = root
+    for name, idx in segments[:-1]:
+        obj = getattr(obj, name)
+        if idx is not None:
+            obj = obj[idx]
+    last_name, last_idx = segments[-1]
+    if last_idx is not None:
+        # The path names a whole list element as the target, not a field —
+        # unsupported by this resolver (every editable field today is a
+        # leaf scalar on a pool/group/unit/setup object).
+        raise TypeError(f"path segment {last_name}[{last_idx}] is not a leaf field")
+    return obj, last_name
+
+
+def _unwrap_optional(annotation: Any) -> Any:
+    if get_origin(annotation) is Union:
+        non_none = [a for a in get_args(annotation) if a is not type(None)]
+        if len(non_none) == 1:
+            return non_none[0]
+    return annotation
+
+
+def _coerce_edit_value(annotation: Any, raw_new_value: Optional[str]) -> Any:
+    """Coerce a ``dre_review_edits.new_value`` TEXT column back to the
+    target field's declared type.
+
+    ``new_value`` is stored as TEXT (``_stringify_value`` in
+    ``dre_review_service.py``); applying that raw string into a typed
+    ``Decimal``/``bool``/``int`` field is itself a silent-corruption path,
+    not just a type-checker nuisance — same ``Decimal(str(x))`` pattern
+    ``wire_to_domain.py`` uses for Gemini output.
+    """
+    if raw_new_value is None:
+        return None
+    target_type = _unwrap_optional(annotation)
+    if target_type is Decimal:
+        return Decimal(raw_new_value)
+    if target_type is bool:
+        normalized = raw_new_value.strip().lower()
+        if normalized in ("true", "1", "yes"):
+            return True
+        if normalized in ("false", "0", "no"):
+            return False
+        raise ValueError(f"cannot coerce {raw_new_value!r} to bool")
+    if target_type is int:
+        return int(raw_new_value)
+    if target_type is float:
+        return float(raw_new_value)
+    return raw_new_value
+
+
+def _entity_ref_for_segments(
+    extraction: DRESetupExtraction, segments: list[tuple[str, Optional[int]]]
+) -> Optional[str]:
+    """Return a ``"pool:<pool_key>"`` / ``"group:<key>"`` / ``"unit:<unit_number>"``
+    reference for a path's first segment(s), or ``None`` for paths that
+    don't address a pool/group/unit (e.g. top-level ``assessment_setup.*``).
+    """
+    if not segments:
+        return None
+    first_name, first_idx = segments[0]
+    if first_name == "allocation_pools" and first_idx is not None:
+        try:
+            pool = extraction.allocation_pools[first_idx]
+        except IndexError:
+            return None
+        return f"pool:{pool.pool_key}"
+    if first_name == "unit_structure" and len(segments) > 1:
+        second_name, second_idx = segments[1]
+        if second_name == "groups" and second_idx is not None:
+            try:
+                group = extraction.unit_structure.groups[second_idx]
+            except IndexError:
+                return None
+            key = group.group_id or group.label or str(second_idx)
+            return f"group:{key}"
+        if second_name == "units" and second_idx is not None:
+            try:
+                unit = extraction.unit_structure.units[second_idx]
+            except IndexError:
+                return None
+            return f"unit:{unit.unit_number}"
+    return None
+
+
+def apply_review_edits_to_extraction(
+    extraction: DRESetupExtraction,
+    edits: Iterable[Any],
+) -> DRESetupExtraction:
+    """Patch a parsed extraction with the latest Review Workbench edit per
+    ``field_path`` and return the patched extraction.
+
+    ``edits`` is any iterable of objects exposing ``field_path`` and
+    ``new_value`` (the shape ``dre_review_service.list_review_edits``
+    returns), ordered oldest-first — the latest edit per path wins, since
+    ``dre_review_edits`` is append-only.
+
+    Raises ``UnresolvableReviewEdit`` naming every ``field_path`` that
+    can't be resolved against the extraction tree or coerced to its
+    field's declared type — never silently dropped or misapplied.
+    """
+    latest_by_path: dict[str, Any] = {}
+    for edit in edits:
+        latest_by_path[edit.field_path] = edit
+    if not latest_by_path:
+        return extraction
+
+    working = extraction.model_copy(deep=True)
+    unresolvable: list[str] = []
+
+    for field_path, edit in latest_by_path.items():
+        segments = _parse_field_path(field_path)
+        if segments is None:
+            unresolvable.append(field_path)
+            continue
+        try:
+            target_obj, attr_name = _resolve_edit_target(working, segments)
+            model_fields = type(target_obj).model_fields
+            if attr_name not in model_fields:
+                raise AttributeError(attr_name)
+            annotation = model_fields[attr_name].annotation
+            coerced = _coerce_edit_value(annotation, edit.new_value)
+            setattr(target_obj, attr_name, coerced)
+        except (
+            AttributeError,
+            IndexError,
+            TypeError,
+            ValueError,
+            InvalidOperation,
+            KeyError,
+        ):
+            unresolvable.append(field_path)
+            continue
+
+    if unresolvable:
+        raise UnresolvableReviewEdit(unresolvable)
+
+    return working
+
+
+def entity_keys_touched_by_edits(
+    extraction: DRESetupExtraction, field_paths: Iterable[str]
+) -> frozenset[str]:
+    """Return the set of ``"pool:<key>"``/``"group:<key>"``/``"unit:<key>"``
+    refs that the given (already-applied) edit ``field_paths`` touched.
+
+    Called after :func:`apply_review_edits_to_extraction` succeeds, against
+    the *patched* extraction, so ``populate_setup_children`` can tell an
+    edited pool/group/unit apart from one the AI extracted with bad data —
+    the former must raise instead of silently skipping (see
+    ``EditedEntityFailedToPromote``).
+    """
+    keys: set[str] = set()
+    for field_path in field_paths:
+        segments = _parse_field_path(field_path)
+        if segments is None:
+            continue
+        ref = _entity_ref_for_segments(extraction, segments)
+        if ref is not None:
+            keys.add(ref)
+    return frozenset(keys)
 
 
 _VALID_RECIPIENT_SCOPES = {
@@ -114,13 +392,14 @@ def _insert_pool(
             budget_line_derivation,
             residual_after_pool_keys_json,
             residual_exclusions_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, 1, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
         """,
         (
             setup_id, pool.pool_key, pool.pool_name or pool.pool_key,
             mapping.internal_method, scope,
             denom_source,
             str(pool.denominator_value) if pool.denominator_value is not None else None,
+            1 if pool.variable_flag else 0,
             display_order,
             pool.budget_line_derivation,
             json.dumps(pool.residual_after_pool_keys),
@@ -342,8 +621,16 @@ def populate_setup_children(
     setup_type: str,
     extraction: DRESetupExtraction,
     connection: sqlite3.Connection,
+    edited_entity_keys: frozenset[str] = frozenset(),
 ) -> dict[str, int]:
     """Insert AllocationPool / Group / Unit / UnitPoolAllocation rows.
+
+    ``edited_entity_keys`` (from :func:`entity_keys_touched_by_edits`) names
+    the pools/groups/units an operator edited. A row that fails to insert
+    is normally a best-effort skip (the AI extracted something unusable),
+    but if its key is in ``edited_entity_keys`` that means an operator's
+    edit couldn't land — raises ``EditedEntityFailedToPromote`` instead of
+    silently dropping it.
 
     Returns a count summary for the audit trail.
     """
@@ -352,6 +639,7 @@ def populate_setup_children(
     counts = {
         "pools": 0, "groups": 0, "units": 0, "unit_pool_allocations": 0,
     }
+    failed_edited_entities: list[str] = []
 
     pool_id_by_key: dict[str, int] = {}
     for idx, pool in enumerate(extraction.allocation_pools):
@@ -361,14 +649,19 @@ def populate_setup_children(
         if pool_id is not None:
             pool_id_by_key[pool.pool_key] = pool_id
             counts["pools"] += 1
+        elif f"pool:{pool.pool_key}" in edited_entity_keys:
+            failed_edited_entities.append(f"pool:{pool.pool_key}")
 
     if setup_type == "grouped":
         for idx, group in enumerate(extraction.unit_structure.groups):
+            group_key = group.group_id or group.label or str(idx)
             if _insert_group(
                 setup_id=setup_id, group=group,
                 display_order=idx, connection=connection,
             ) is not None:
                 counts["groups"] += 1
+            elif f"group:{group_key}" in edited_entity_keys:
+                failed_edited_entities.append(f"group:{group_key}")
 
     unit_id_by_number: dict[str, int] = {}
     if setup_type == "per_unit":
@@ -379,6 +672,8 @@ def populate_setup_children(
             if unit_id is not None:
                 unit_id_by_number[unit.unit_number] = unit_id
                 counts["units"] += 1
+            elif f"unit:{unit.unit_number}" in edited_entity_keys:
+                failed_edited_entities.append(f"unit:{unit.unit_number}")
 
         # For each specified_value pool, distribute its annual evenly
         # across the inserted unit rows. The operator will overwrite
@@ -398,6 +693,9 @@ def populate_setup_children(
                 connection=connection,
             )
             counts["unit_pool_allocations"] += before
+
+    if failed_edited_entities:
+        raise EditedEntityFailedToPromote(failed_edited_entities)
 
     return counts
 
@@ -426,6 +724,12 @@ def promote_extraction_to_setup(
 
 
 __all__ = [
+    "EditedEntityFailedToPromote",
+    "MissingUnitFactors",
+    "UnresolvableReviewEdit",
+    "apply_review_edits_to_extraction",
+    "check_missing_unit_factors",
+    "entity_keys_touched_by_edits",
     "parse_extraction_payload",
     "populate_setup_children",
     "promote_extraction_to_setup",

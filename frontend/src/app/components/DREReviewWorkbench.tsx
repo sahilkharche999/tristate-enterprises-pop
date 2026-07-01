@@ -16,13 +16,183 @@ import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import {
   type DREExtractionRunDetail,
   type DREReviewEdit,
+  type ReopenRepromoteResponse,
   approveExtractionRun,
   getExtractionRun,
   listReviewEdits,
   recordReviewEdit,
+  reopenAndRepromoteExtractionRun,
 } from '../api/dre';
+import { approveCCRRun, reopenAndRepromoteCCRRun } from '../api/ccr';
 import { formatCurrency } from '../lib/budget';
 import { cn } from './ui/utils';
+
+// ── API error formatting ──────────────────────────────────────────────
+//
+// handleResponse() throws `{ status, message }` where `message` is
+// JSON.stringify(body.detail) whenever the backend sends a structured
+// 422 body (UnresolvableReviewEdit / EditedEntityFailedToPromote /
+// MissingUnitFactors). Parse that back out so the operator sees the
+// specific field paths / entities / pool keys, not a raw JSON blob.
+function describeApiError(exc: unknown): string {
+  const raw =
+    exc && typeof exc === 'object' && 'message' in exc
+      ? String((exc as { message?: unknown }).message ?? '')
+      : String(exc);
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object') {
+      const message = typeof parsed.message === 'string' ? parsed.message : null;
+      if (Array.isArray(parsed.unresolvable_field_paths) && parsed.unresolvable_field_paths.length > 0) {
+        return `${message || 'Unresolvable review edit(s).'} Field path(s): ${parsed.unresolvable_field_paths.join(', ')}`;
+      }
+      if (Array.isArray(parsed.failed_entities) && parsed.failed_entities.length > 0) {
+        return `${message || "These edited items couldn't be promoted."} ${parsed.failed_entities.join(', ')}`;
+      }
+      if (Array.isArray(parsed.missing_pool_keys) && parsed.missing_pool_keys.length > 0) {
+        return `${message || 'Missing per-unit factors.'} Pool(s): ${parsed.missing_pool_keys.join(', ')}`;
+      }
+      if (message) return message;
+    }
+  } catch {
+    // Not JSON — fall through to the raw string.
+  }
+  return raw || 'Unknown error';
+}
+
+const ALLOCATION_METHOD_OPTIONS = [
+  'equal',
+  'square_footage',
+  'ownership_percentage',
+  'category',
+  'specified_value',
+  'parking_space',
+  'custom_factor',
+  'unknown',
+];
+
+const DENOMINATOR_SOURCE_OPTIONS = ['dre_shown', 'calculated', 'unknown'];
+
+// ── Inline-editable value ─────────────────────────────────────────────
+//
+// Every field the Review Workbench renders read-only-with-a-pencil goes
+// through this: click to edit, Save writes a dre_review_edits row via
+// onSave, Cancel discards the draft. editCount surfaces "N edits so far"
+// so last-write-wins isn't silent (list_review_edits already returns full
+// history; this just makes it visible next to the field itself).
+function EditableValue({
+  value,
+  fieldPath,
+  onSave,
+  disabled,
+  editCount,
+  kind = 'text',
+  options,
+  display,
+}: {
+  value: unknown;
+  fieldPath: string;
+  onSave: (fieldPath: string, oldValue: unknown, newValue: unknown) => void;
+  disabled?: boolean;
+  editCount?: number;
+  kind?: 'text' | 'number' | 'select' | 'boolean-select';
+  options?: string[];
+  display?: React.ReactNode;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState('');
+
+  function startEdit() {
+    setDraft(value == null ? '' : String(value));
+    setEditing(true);
+  }
+
+  function commit() {
+    let newValue: unknown = draft;
+    if (kind === 'number') newValue = draft === '' ? null : Number(draft);
+    if (kind === 'boolean-select') newValue = draft === 'true';
+    setEditing(false);
+    if (newValue !== value) onSave(fieldPath, value, newValue);
+  }
+
+  if (editing) {
+    return (
+      <span className="inline-flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+        {kind === 'select' || kind === 'boolean-select' ? (
+          <select
+            autoFocus
+            className="rounded border border-slate-300 px-1 py-0.5 text-xs"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+          >
+            {kind === 'boolean-select'
+              ? ['true', 'false'].map((o) => (
+                  <option key={o} value={o}>
+                    {o === 'true' ? 'Yes' : 'No'}
+                  </option>
+                ))
+              : (options || []).map((o) => (
+                  <option key={o} value={o}>
+                    {o}
+                  </option>
+                ))}
+          </select>
+        ) : (
+          <input
+            autoFocus
+            type={kind === 'number' ? 'number' : 'text'}
+            className="w-24 rounded border border-slate-300 px-1 py-0.5 text-xs"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') commit();
+              if (e.key === 'Escape') setEditing(false);
+            }}
+          />
+        )}
+        <button
+          type="button"
+          className="rounded bg-emerald-600 px-1.5 py-0.5 text-[11px] font-medium text-white hover:bg-emerald-700"
+          onClick={commit}
+        >
+          Save
+        </button>
+        <button
+          type="button"
+          className="rounded border border-slate-300 px-1.5 py-0.5 text-[11px] text-slate-600 hover:bg-slate-50"
+          onClick={() => setEditing(false)}
+        >
+          Cancel
+        </button>
+      </span>
+    );
+  }
+
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <span>{display ?? (value == null || value === '' ? <span className="text-slate-400">—</span> : String(value))}</span>
+      {!disabled && (
+        <button
+          type="button"
+          aria-label={`Edit ${fieldPath}`}
+          title="Edit"
+          className="text-slate-300 hover:text-slate-700"
+          onClick={startEdit}
+        >
+          ✎
+        </button>
+      )}
+      {Boolean(editCount) && (
+        <span
+          title={`${editCount} edit${editCount === 1 ? '' : 's'} to this field — see Edit history below`}
+          className="inline-flex items-center rounded-full bg-indigo-50 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-700 ring-1 ring-inset ring-indigo-600/20"
+        >
+          {editCount}✎
+        </span>
+      )}
+    </span>
+  );
+}
 
 type Props = {
   hoaId: number;
@@ -198,6 +368,25 @@ function ConfidenceBadge({ value }: { value: unknown }) {
   );
 }
 
+function ManualEntryBadge() {
+  return (
+    <span
+      title="Operator-entered — no Gemini extraction or source-page citation exists for this run"
+      className="inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-600 ring-1 ring-inset ring-slate-300/60"
+    >
+      Manually entered
+    </span>
+  );
+}
+
+// Manual entries have confidence=1.0 by construction (operator-asserted,
+// not extracted) — showing a "100%" badge would look like a fabricated
+// AI confidence score, so swap in a plain "Manually entered" pill instead.
+function ManualOrConfidenceBadge({ isManual, value }: { isManual: boolean; value: unknown }) {
+  if (isManual) return <ManualEntryBadge />;
+  return <ConfidenceBadge value={value} />;
+}
+
 function ChipList({
   items,
   emptyLabel,
@@ -252,7 +441,7 @@ function MonoPill({ children }: { children: React.ReactNode }) {
 
 type KVRow = { key: string; value: unknown };
 
-function KeyValueGrid({ rows }: { rows: KVRow[] }) {
+function KeyValueGrid({ rows, isManual = false }: { rows: KVRow[]; isManual?: boolean }) {
   if (rows.length === 0) {
     return <p className="text-sm text-slate-500">No fields extracted.</p>;
   }
@@ -261,7 +450,7 @@ function KeyValueGrid({ rows }: { rows: KVRow[] }) {
       {rows.map(({ key, value }) => (
         <div key={key} className="contents">
           <dt className="text-slate-500">{humanizeKey(key)}</dt>
-          <dd className="text-slate-900">{renderKVValue(key, value)}</dd>
+          <dd className="text-slate-900">{renderKVValue(key, value, isManual)}</dd>
         </div>
       ))}
     </dl>
@@ -271,8 +460,8 @@ function KeyValueGrid({ rows }: { rows: KVRow[] }) {
 const CURRENCY_KEY_PATTERNS = /(contribution|balance|amount|budget|revenue|cost|expense)/i;
 const PERCENT_KEY_PATTERNS = /(assumption|_rate|_percent|inflation|interest)/i;
 
-function renderKVValue(key: string, value: unknown): React.ReactNode {
-  if (key === 'confidence') return <ConfidenceBadge value={value} />;
+function renderKVValue(key: string, value: unknown, isManual = false): React.ReactNode {
+  if (key === 'confidence') return <ManualOrConfidenceBadge isManual={isManual} value={value} />;
   if (key === 'source_pages' || key === 'source_page') {
     const arr = Array.isArray(value) ? value : value != null ? [value] : [];
     return <PageChips pages={arr} />;
@@ -460,6 +649,8 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
   const [chosenSetupType, setChosenSetupType] =
     useState<'fixed' | 'grouped' | 'per_unit'>('fixed');
   const [approving, setApproving] = useState(false);
+  const [repromoting, setRepromoting] = useState(false);
+  const [repromoteResult, setRepromoteResult] = useState<ReopenRepromoteResponse | null>(null);
 
   // Units table pagination
   const UNITS_PAGE_SIZE = 10;
@@ -489,7 +680,7 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
       setChosenSetupType(suggestedInternalSetupType(d.parsed_json));
       setError(null);
     } catch (exc) {
-      setError(String(exc));
+      setError(describeApiError(exc));
     } finally {
       setLoading(false);
     }
@@ -508,6 +699,9 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
     return () => clearInterval(timer);
   }, [detail, refresh]);
 
+  const isCCR = detail?.document_type === 'ccr';
+  const isManual = detail?.model_name === 'manual';
+
   async function onSaveEdit(
     fieldPath: string,
     oldValue: unknown,
@@ -524,7 +718,7 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
       });
       void refresh();
     } catch (exc) {
-      setError(String(exc));
+      setError(describeApiError(exc));
     }
   }
 
@@ -539,15 +733,56 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
       return;
     }
     setApproving(true);
+    setError(null);
     try {
-      await approveExtractionRun(hoaId, runId, chosenSetupType);
+      if (isCCR) {
+        await approveCCRRun(hoaId, runId, chosenSetupType);
+      } else {
+        await approveExtractionRun(hoaId, runId, chosenSetupType);
+      }
       void refresh();
     } catch (exc) {
-      setError(String(exc));
+      setError(describeApiError(exc));
     } finally {
       setApproving(false);
     }
   }
+
+  async function onRepromote() {
+    if (!detail) return;
+    if (
+      !confirm(
+        `Re-promote with corrections using setup_type=${chosenSetupType}? ` +
+          `The current AssessmentSetup will be superseded by a fresh one built from ` +
+          `the original extraction plus every review edit on file now.`,
+      )
+    ) {
+      return;
+    }
+    setRepromoting(true);
+    setError(null);
+    setRepromoteResult(null);
+    try {
+      const resp = isCCR
+        ? await reopenAndRepromoteCCRRun(hoaId, runId, chosenSetupType)
+        : await reopenAndRepromoteExtractionRun(hoaId, runId, chosenSetupType);
+      setRepromoteResult(resp);
+      void refresh();
+    } catch (exc) {
+      setError(describeApiError(exc));
+    } finally {
+      setRepromoting(false);
+    }
+  }
+
+  // field_path -> count of dre_review_edits rows for that path, so any
+  // edited field can show "N edits" without hiding the superseded ones —
+  // the full chronological list is still in the Edit history section below.
+  const editCountByPath = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const e of edits) counts[e.field_path] = (counts[e.field_path] || 0) + 1;
+    return counts;
+  }, [edits]);
 
   const parsed = detail?.parsed_json || {};
   const docMeta = (parsed.document_metadata || {}) as Record<string, unknown>;
@@ -755,7 +990,14 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
           </div>
           {detail.model_name && (
             <p className="text-xs text-slate-400">
-              {detail.model_name} · prompt v{detail.prompt_version}
+              {isManual ? (
+                <ManualEntryBadge />
+              ) : (
+                <>
+                  {detail.model_name} · prompt v{detail.prompt_version}
+                </>
+              )}
+              {isCCR && <span className="ml-2 rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-slate-500">CC&R</span>}
             </p>
           )}
         </div>
@@ -763,7 +1005,7 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
           <select
             className="rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-sm text-slate-700 shadow-sm focus:outline-none focus:ring-2 focus:ring-slate-300 disabled:bg-slate-50"
             value={chosenSetupType}
-            disabled={alreadyPromoted || approving || !reviewReady}
+            disabled={approving || repromoting || !reviewReady}
             onChange={(e) =>
               setChosenSetupType(
                 e.target.value as 'fixed' | 'grouped' | 'per_unit',
@@ -798,6 +1040,23 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
                 ? 'Approving…'
                 : 'Approve → Promote to AssessmentSetup'}
           </button>
+          {alreadyPromoted && (
+            <button
+              type="button"
+              onClick={onRepromote}
+              disabled={repromoting || !reviewReady}
+              title="Re-apply the original extraction plus every review edit on file now, superseding the current AssessmentSetup"
+              className={cn(
+                'inline-flex items-center gap-2 rounded-md border px-3 py-1.5 text-sm font-semibold shadow-sm transition',
+                repromoting
+                  ? 'border-indigo-200 bg-indigo-50 text-indigo-400'
+                  : 'border-indigo-200 bg-white text-indigo-700 hover:bg-indigo-50',
+                'disabled:cursor-not-allowed',
+              )}
+            >
+              {repromoting ? 'Re-promoting…' : '↻ Re-promote with corrections'}
+            </button>
+          )}
         </div>
       </header>
 
@@ -807,6 +1066,24 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
           className="rounded-md border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700"
         >
           {error}
+        </div>
+      )}
+
+      {repromoteResult && (
+        <div className="rounded-md border border-indigo-200 bg-indigo-50 p-3 text-sm text-indigo-900">
+          <p>
+            Re-promoted into setup #{repromoteResult.promoted_setup_id} (superseded setup
+            #{repromoteResult.superseded_setup_id ?? '—'}).
+          </p>
+          {repromoteResult.affected_draft_package_ids.length > 0 && (
+            <p className="mt-1 font-medium">
+              {repromoteResult.affected_draft_package_ids.length} draft annual package
+              {repromoteResult.affected_draft_package_ids.length === 1 ? '' : 's'} (id
+              {repromoteResult.affected_draft_package_ids.length === 1 ? '' : 's'}:{' '}
+              {repromoteResult.affected_draft_package_ids.join(', ')}) still reference the
+              superseded setup and need regeneration.
+            </p>
+          )}
         </div>
       )}
 
@@ -885,13 +1162,13 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
       {/* ── Document metadata ─────────────────────────────────────── */}
       <section className="rounded-md border border-slate-200 bg-white p-4 shadow-sm">
         <h2 className="mb-3 text-sm font-semibold text-slate-900">Document metadata</h2>
-        <KeyValueGrid rows={metadataRows} />
+        <KeyValueGrid rows={metadataRows} isManual={isManual} />
       </section>
 
       {/* ── Assessment setup ──────────────────────────────────────── */}
       <section className="rounded-md border border-slate-200 bg-white p-4 shadow-sm">
         <h2 className="mb-3 text-sm font-semibold text-slate-900">Assessment setup</h2>
-        <KeyValueGrid rows={setupRows} />
+        <KeyValueGrid rows={setupRows} isManual={isManual} />
       </section>
 
       {/* ── Allocation pools ──────────────────────────────────────── */}
@@ -954,21 +1231,43 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
                           <MonoPill>{poolKey}</MonoPill>
                         </td>
                         <td className="py-2 pr-4 text-slate-800">
-                          {String(pool.pool_name || '')}
+                          <EditableValue
+                            value={pool.pool_name || ''}
+                            fieldPath={`allocation_pools[${i}].pool_name`}
+                            onSave={onSaveEdit}
+                            disabled={!reviewReady}
+                            editCount={editCountByPath[`allocation_pools[${i}].pool_name`]}
+                          />
                         </td>
                         <td className="py-2 pr-4">
-                          <MonoPill>
-                            {String(pool.allocation_method || '')}
-                          </MonoPill>
+                          <EditableValue
+                            value={pool.allocation_method || ''}
+                            fieldPath={`allocation_pools[${i}].allocation_method`}
+                            onSave={onSaveEdit}
+                            disabled={!reviewReady}
+                            editCount={editCountByPath[`allocation_pools[${i}].allocation_method`]}
+                            kind="select"
+                            options={ALLOCATION_METHOD_OPTIONS}
+                            display={<MonoPill>{String(pool.allocation_method || '')}</MonoPill>}
+                          />
                         </td>
                         <td className="py-2 pr-4 font-mono text-xs text-slate-600">
                           {String(pool.recipient_scope || '')}
                         </td>
                         <td className="py-2 pr-4 text-right tabular-nums text-slate-800">
-                          {pool.denominator_value !== undefined &&
-                          pool.denominator_value !== null
-                            ? formatNumber(pool.denominator_value)
-                            : '—'}
+                          <EditableValue
+                            value={pool.denominator_value ?? null}
+                            fieldPath={`allocation_pools[${i}].denominator_value`}
+                            onSave={onSaveEdit}
+                            disabled={!reviewReady}
+                            editCount={editCountByPath[`allocation_pools[${i}].denominator_value`]}
+                            kind="number"
+                            display={
+                              pool.denominator_value !== undefined && pool.denominator_value !== null
+                                ? formatNumber(pool.denominator_value)
+                                : undefined
+                            }
+                          />
                         </td>
                         <td className="py-2 pr-4 text-right tabular-nums font-medium text-slate-900">
                           {pool.annual_amount !== undefined &&
@@ -981,7 +1280,7 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
                             type="checkbox"
                             aria-label={`variable flag for pool ${poolKey}`}
                             defaultChecked={Boolean(pool.variable_flag)}
-                            disabled={alreadyPromoted}
+                            disabled={!reviewReady}
                             onChange={(e) =>
                               onSaveEdit(
                                 `allocation_pools[${i}].variable_flag`,
@@ -990,9 +1289,17 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
                               )
                             }
                           />
+                          {Boolean(editCountByPath[`allocation_pools[${i}].variable_flag`]) && (
+                            <span
+                              title={`${editCountByPath[`allocation_pools[${i}].variable_flag`]} edit(s) — see Edit history below`}
+                              className="ml-1 inline-flex items-center rounded-full bg-indigo-50 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-700 ring-1 ring-inset ring-indigo-600/20"
+                            >
+                              {editCountByPath[`allocation_pools[${i}].variable_flag`]}✎
+                            </span>
+                          )}
                         </td>
                         <td className="py-2 pr-4 text-right">
-                          <ConfidenceBadge value={pool.confidence} />
+                          <ManualOrConfidenceBadge isManual={isManual} value={pool.confidence} />
                         </td>
                         <td className="py-2 text-right">
                           <button
@@ -1029,13 +1336,20 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
                               </dd>
                               <dt className="text-slate-500">Denominator source</dt>
                               <dd>
-                                {pool.denominator_source ? (
-                                  <MonoPill>
-                                    {String(pool.denominator_source)}
-                                  </MonoPill>
-                                ) : (
-                                  <span className="text-slate-400">—</span>
-                                )}
+                                <EditableValue
+                                  value={pool.denominator_source || ''}
+                                  fieldPath={`allocation_pools[${i}].denominator_source`}
+                                  onSave={onSaveEdit}
+                                  disabled={!reviewReady}
+                                  editCount={editCountByPath[`allocation_pools[${i}].denominator_source`]}
+                                  kind="select"
+                                  options={DENOMINATOR_SOURCE_OPTIONS}
+                                  display={
+                                    pool.denominator_source ? (
+                                      <MonoPill>{String(pool.denominator_source)}</MonoPill>
+                                    ) : undefined
+                                  }
+                                />
                               </dd>
                               <dt className="text-slate-500">Source pages</dt>
                               <dd>
@@ -1106,29 +1420,67 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
                       {String(g.group_id || i)}
                     </td>
                     <td className="py-2 pr-4 text-slate-800">
-                      {String(g.label || '')}
+                      <EditableValue
+                        value={g.label || ''}
+                        fieldPath={`unit_structure.groups[${i}].label`}
+                        onSave={onSaveEdit}
+                        disabled={!reviewReady}
+                        editCount={editCountByPath[`unit_structure.groups[${i}].label`]}
+                      />
                     </td>
                     <td className="py-2 pr-4 text-right tabular-nums">
-                      {g.unit_count != null ? formatNumber(g.unit_count) : '—'}
+                      <EditableValue
+                        value={g.unit_count ?? null}
+                        fieldPath={`unit_structure.groups[${i}].unit_count`}
+                        onSave={onSaveEdit}
+                        disabled={!reviewReady}
+                        editCount={editCountByPath[`unit_structure.groups[${i}].unit_count`]}
+                        kind="number"
+                        display={g.unit_count != null ? formatNumber(g.unit_count) : undefined}
+                      />
                     </td>
                     <td className="py-2 pr-4 text-right tabular-nums">
-                      {g.average_square_feet != null
-                        ? formatNumber(g.average_square_feet)
-                        : '—'}
+                      <EditableValue
+                        value={g.average_square_feet ?? null}
+                        fieldPath={`unit_structure.groups[${i}].average_square_feet`}
+                        onSave={onSaveEdit}
+                        disabled={!reviewReady}
+                        editCount={editCountByPath[`unit_structure.groups[${i}].average_square_feet`]}
+                        kind="number"
+                        display={
+                          g.average_square_feet != null ? formatNumber(g.average_square_feet) : undefined
+                        }
+                      />
                     </td>
                     <td className="py-2 pr-4 text-right tabular-nums">
-                      {g.ownership_percent != null
-                        ? `${formatNumber(g.ownership_percent, 2)}%`
-                        : '—'}
+                      <EditableValue
+                        value={g.ownership_percent ?? null}
+                        fieldPath={`unit_structure.groups[${i}].ownership_percent`}
+                        onSave={onSaveEdit}
+                        disabled={!reviewReady}
+                        editCount={editCountByPath[`unit_structure.groups[${i}].ownership_percent`]}
+                        kind="number"
+                        display={
+                          g.ownership_percent != null ? `${formatNumber(g.ownership_percent, 2)}%` : undefined
+                        }
+                      />
                     </td>
                     <td className="py-2 pr-4 text-right tabular-nums">
-                      {g.factor != null ? formatNumber(g.factor, 2) : '—'}
+                      <EditableValue
+                        value={g.factor ?? null}
+                        fieldPath={`unit_structure.groups[${i}].factor`}
+                        onSave={onSaveEdit}
+                        disabled={!reviewReady}
+                        editCount={editCountByPath[`unit_structure.groups[${i}].factor`]}
+                        kind="number"
+                        display={g.factor != null ? formatNumber(g.factor, 2) : undefined}
+                      />
                     </td>
                     <td className="py-2 pr-4">
                       <PageChips pages={g.source_page} />
                     </td>
                     <td className="py-2 text-right">
-                      <ConfidenceBadge value={g.confidence} />
+                      <ManualOrConfidenceBadge isManual={isManual} value={g.confidence} />
                     </td>
                   </tr>
                 ))}
@@ -1170,6 +1522,7 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
               <tbody>
                 {pagedUnits.map((u, i) => {
                   const unitId = String(u.unit_number || `${unitsPage}-${i}`);
+                  const originalIndex = (unitsPage - 1) * UNITS_PAGE_SIZE + i;
                   const factors = Array.isArray(u.pool_factors)
                     ? (u.pool_factors as Array<Record<string, unknown>>)
                     : [];
@@ -1183,17 +1536,37 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
                           {String(u.unit_number || '')}
                         </td>
                         <td className="py-2 pr-4 text-right tabular-nums">
-                          {u.square_feet != null
-                            ? formatNumber(u.square_feet)
-                            : '—'}
+                          <EditableValue
+                            value={u.square_feet ?? null}
+                            fieldPath={`unit_structure.units[${originalIndex}].square_feet`}
+                            onSave={onSaveEdit}
+                            disabled={!reviewReady}
+                            editCount={editCountByPath[`unit_structure.units[${originalIndex}].square_feet`]}
+                            kind="number"
+                            display={u.square_feet != null ? formatNumber(u.square_feet) : undefined}
+                          />
                         </td>
                         <td className="py-2 pr-4 text-right tabular-nums">
-                          {u.ownership_percent != null
-                            ? `${formatNumber(u.ownership_percent, 4)}%`
-                            : '—'}
+                          <EditableValue
+                            value={u.ownership_percent ?? null}
+                            fieldPath={`unit_structure.units[${originalIndex}].ownership_percent`}
+                            onSave={onSaveEdit}
+                            disabled={!reviewReady}
+                            editCount={editCountByPath[`unit_structure.units[${originalIndex}].ownership_percent`]}
+                            kind="number"
+                            display={
+                              u.ownership_percent != null ? `${formatNumber(u.ownership_percent, 4)}%` : undefined
+                            }
+                          />
                         </td>
                         <td className="py-2 pr-4 text-slate-800">
-                          {String(u.category || '')}
+                          <EditableValue
+                            value={u.category || ''}
+                            fieldPath={`unit_structure.units[${originalIndex}].category`}
+                            onSave={onSaveEdit}
+                            disabled={!reviewReady}
+                            editCount={editCountByPath[`unit_structure.units[${originalIndex}].category`]}
+                          />
                         </td>
                         <td className="py-2 pr-4">
                           <span className="inline-flex flex-wrap items-center gap-1">
@@ -1209,21 +1582,29 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
                                 {resFlag}
                               </span>
                             )}
-                            {parkFlag && parkFlag.toLowerCase() !== 'no' && (
-                              <span className="inline-flex items-center rounded bg-slate-100 px-1.5 py-0.5 text-[11px] font-medium text-slate-700 ring-1 ring-inset ring-slate-300/60">
-                                parking: {parkFlag}
-                              </span>
-                            )}
-                            {!resFlag && !parkFlag && (
-                              <span className="text-slate-300">—</span>
-                            )}
+                            <EditableValue
+                              value={u.parking_flag || ''}
+                              fieldPath={`unit_structure.units[${originalIndex}].parking_flag`}
+                              onSave={onSaveEdit}
+                              disabled={!reviewReady}
+                              editCount={editCountByPath[`unit_structure.units[${originalIndex}].parking_flag`]}
+                              display={
+                                parkFlag && parkFlag.toLowerCase() !== 'no' ? (
+                                  <span className="inline-flex items-center rounded bg-slate-100 px-1.5 py-0.5 text-[11px] font-medium text-slate-700 ring-1 ring-inset ring-slate-300/60">
+                                    parking: {parkFlag}
+                                  </span>
+                                ) : (
+                                  <span className="text-slate-300">—</span>
+                                )
+                              }
+                            />
                           </span>
                         </td>
                         <td className="py-2 pr-4">
                           <PageChips pages={u.source_page} />
                         </td>
                         <td className="py-2 pr-4 text-right">
-                          <ConfidenceBadge value={u.confidence} />
+                          <ManualOrConfidenceBadge isManual={isManual} value={u.confidence} />
                         </td>
                         <td className="py-2 text-right">
                           {factors.length === 0 ? (

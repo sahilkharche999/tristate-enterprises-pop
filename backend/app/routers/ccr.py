@@ -27,11 +27,16 @@ from sqlalchemy.orm import Session
 
 from app.ai_implementation.db import get_session
 from app.auth.dependencies import get_current_user
+from app.dre_extraction.promotion import (
+    EditedEntityFailedToPromote,
+    UnresolvableReviewEdit,
+)
 from app.services.ccr_approval_service import (
     CCRUnitFactor,
     MissingUnitFactors,
     approve_ccr_extraction_run,
     get_operator_unit_factors,
+    reopen_and_repromote_ccr_run,
     save_operator_unit_factors,
 )
 from app.services.ccr_extraction_service import (
@@ -47,6 +52,7 @@ from app.services.dre_approval_service import (
     ExtractionRunNotApprovable,
     ExtractionRunNotFound,
     ExtractionRunNotPromoted,
+    ReopenRepromoteResponse,
     SetupPinnedByFinalizedPackage,
     SetupTypeLiteral,
     demote_extraction_run,
@@ -314,6 +320,19 @@ def approve_ccr_run(
                 "missing_pool_keys": exc.missing_pool_keys,
             },
         ) from exc
+    except UnresolvableReviewEdit as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": str(exc),
+                "unresolvable_field_paths": exc.unresolvable_field_paths,
+            },
+        ) from exc
+    except EditedEntityFailedToPromote as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"message": str(exc), "failed_entities": exc.entity_refs},
+        ) from exc
 
 
 @router.post(
@@ -350,4 +369,59 @@ def demote_ccr_run(
         raise HTTPException(
             status_code=409,
             detail={"message": str(exc), "package_ids": exc.package_ids},
+        ) from exc
+
+
+@router.post(
+    "/hoa/{hoa_id}/ccr/extraction-runs/{run_id}/repromote",
+    response_model=ReopenRepromoteResponse,
+)
+def repromote_ccr_run(
+    hoa_id: int,
+    run_id: int,
+    payload: CCRApprovalRequest,
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user),
+) -> ReopenRepromoteResponse:
+    """Correct an already-promoted CC&R run without a new extraction/upload.
+
+    Same as the DRE repromote endpoint, but re-merges operator per-unit
+    factors and re-enforces the missing-unit-factors guard on top of the
+    current review edits.
+    """
+    raw_conn = session.connection().connection
+    try:
+        return reopen_and_repromote_ccr_run(
+            property_id=hoa_id,
+            extraction_run_id=run_id,
+            setup_type=payload.setup_type,
+            reviewed_by=_actor_email(current_user),
+            connection=raw_conn,
+        )
+    except ExtractionRunNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ExtractionRunNotPromoted as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ExtractionRunNotApprovable as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except MissingUnitFactors as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": str(exc),
+                "missing_pool_keys": exc.missing_pool_keys,
+            },
+        ) from exc
+    except UnresolvableReviewEdit as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": str(exc),
+                "unresolvable_field_paths": exc.unresolvable_field_paths,
+            },
+        ) from exc
+    except EditedEntityFailedToPromote as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"message": str(exc), "failed_entities": exc.entity_refs},
         ) from exc

@@ -187,6 +187,14 @@ class AllocationPoolBlock(BaseModel):
     residual_exclusions: list[str] = Field(default_factory=list)
     source_pages: list[int] = Field(default_factory=list)
     confidence: float = 0.0
+    # Operator-set metadata, not extracted from the source document (no DRE
+    # states whether a pool's cost is "variable" — this is an accounting
+    # classification the operator applies in the Review Workbench). Lives
+    # on the domain schema (not wire_schemas.py) so review edits can address
+    # it through the same apply_review_edits_to_extraction path as any
+    # extracted field, instead of being a promoted-table-only column that
+    # edits can never reach.
+    variable_flag: bool = False
 
 
 class FormulaBlock(BaseModel):

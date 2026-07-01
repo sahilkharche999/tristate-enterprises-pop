@@ -16,6 +16,7 @@ import type {
   DREDemotionResponse,
   DREDocument,
   DREExtractionRunListItem,
+  ReopenRepromoteResponse,
 } from './dre';
 
 // Re-export DRE types reused by the CC&R panel.
@@ -24,6 +25,7 @@ export type {
   DREExtractionRunListItem,
   DREApprovalResponse,
   DREDemotionResponse,
+  ReopenRepromoteResponse,
 };
 
 export interface CCRUnitFactorEntry {
@@ -129,6 +131,25 @@ export async function demoteCCRRun(
   const res = await fetch(
     `${BASE_URL}/hoa/${hoaId}/ccr/extraction-runs/${runId}/demote`,
     { method: 'POST', headers: authHeaders() },
+  );
+  return handleResponse(res);
+}
+
+// Correct an already-promoted CC&R run without a new extraction/upload.
+// Symmetric with reopenAndRepromoteExtractionRun; also re-merges operator
+// per-unit factors and re-enforces the missing-unit-factors guard.
+export async function reopenAndRepromoteCCRRun(
+  hoaId: number,
+  runId: number,
+  setupType: 'fixed' | 'grouped' | 'per_unit',
+): Promise<ReopenRepromoteResponse> {
+  const res = await fetch(
+    `${BASE_URL}/hoa/${hoaId}/ccr/extraction-runs/${runId}/repromote`,
+    {
+      method: 'POST',
+      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ setup_type: setupType }),
+    },
   );
   return handleResponse(res);
 }

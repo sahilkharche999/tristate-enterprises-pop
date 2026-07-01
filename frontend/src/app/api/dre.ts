@@ -41,6 +41,7 @@ export interface DREExtractionRunListItem {
   prompt_version: string | null;
   repair_attempt_count: number;
   error_message: string;
+  document_type: string;
 }
 
 export interface DREExtractionRunDetail extends DREExtractionRunListItem {
@@ -81,6 +82,17 @@ export interface DREApprovalResponse {
   promoted_at: string;
   reviewed_by: string | null;
   snapshot_counts: Record<string, number>;
+}
+
+export interface ReopenRepromoteResponse {
+  extraction_run_id: number;
+  promoted_setup_id: number;
+  superseded_setup_id: number | null;
+  setup_type: 'fixed' | 'grouped' | 'per_unit';
+  promoted_at: string;
+  reviewed_by: string | null;
+  snapshot_counts: Record<string, number>;
+  affected_draft_package_ids: number[];
 }
 
 export interface DREDemotionResponse {
@@ -221,6 +233,25 @@ export async function demoteExtractionRun(
   const res = await fetch(
     `${BASE_URL}/hoa/${hoaId}/dre/extraction-runs/${runId}/demote`,
     { method: 'POST', headers: authHeaders() },
+  );
+  return handleResponse(res);
+}
+
+// Correct an already-promoted run without a new extraction/upload: re-applies
+// the original extraction plus whatever review edits exist now, supersedes
+// the current AssessmentSetup, and promotes a fresh one.
+export async function reopenAndRepromoteExtractionRun(
+  hoaId: number,
+  runId: number,
+  setupType: 'fixed' | 'grouped' | 'per_unit',
+): Promise<ReopenRepromoteResponse> {
+  const res = await fetch(
+    `${BASE_URL}/hoa/${hoaId}/dre/extraction-runs/${runId}/repromote`,
+    {
+      method: 'POST',
+      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ setup_type: setupType }),
+    },
   );
   return handleResponse(res);
 }

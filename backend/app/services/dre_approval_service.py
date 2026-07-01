@@ -27,14 +27,19 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import datetime, timezone
-from typing import Any, Literal, Optional
+from typing import Any, Callable, Literal, Optional
 
 from pydantic import BaseModel
 
 from app.dre_extraction.promotion import (
+    MissingUnitFactors,
+    apply_review_edits_to_extraction,
+    check_missing_unit_factors,
+    entity_keys_touched_by_edits,
     parse_extraction_payload,
-    promote_extraction_to_setup,
+    populate_setup_children,
 )
+from app.dre_extraction.schemas import DRESetupExtraction
 from app.services.assessment_budget_mapping_rule_service import (
     carry_forward_reusable_mapping_rules_across_setups,
     derive_rules_from_dre_extraction,
@@ -42,6 +47,7 @@ from app.services.assessment_budget_mapping_rule_service import (
 from app.services.budget_line_mapping_service import (
     carry_forward_mappings_across_setups,
 )
+from app.services.dre_review_service import list_review_edits
 
 
 def _resolve_extracted_unit_count(parsed_json_text: str) -> Optional[int]:
@@ -163,6 +169,19 @@ class DREDemotionResponse(BaseModel):
     default_assessment_setup_id: Optional[int]
 
 
+class ReopenRepromoteResponse(BaseModel):
+    """JSON shape returned by the reopen-and-repromote endpoint."""
+
+    extraction_run_id: int
+    promoted_setup_id: int
+    superseded_setup_id: Optional[int]
+    setup_type: SetupTypeLiteral
+    promoted_at: str
+    reviewed_by: Optional[str]
+    snapshot_counts: dict = {}
+    affected_draft_package_ids: list[int] = []
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
@@ -211,6 +230,29 @@ def approve_extraction_run(
             "cannot promote a rejected run."
         )
 
+    # Parse the extraction and apply queued Review Workbench edits before any
+    # writes happen — an unresolvable edit must block promotion with no
+    # partial AssessmentSetup created (see UnresolvableReviewEdit).
+    extraction = parse_extraction_payload(parsed_json_text)
+    edited_entity_keys: frozenset[str] = frozenset()
+    if extraction is not None:
+        edits = list_review_edits(
+            dre_extraction_run_id=extraction_run_id, connection=connection,
+        )
+        extraction = apply_review_edits_to_extraction(extraction, edits)
+        edited_entity_keys = entity_keys_touched_by_edits(
+            extraction, [edit.field_path for edit in edits]
+        )
+
+    # Same missing-unit-factors guard CC&R promotion already enforces: a
+    # per_unit setup with a proportional pool but no per-unit data at all
+    # would otherwise silently produce an equal-distribution assessment
+    # that looks intentional but isn't (see MissingUnitFactors).
+    if extraction is not None and setup_type == "per_unit":
+        missing = check_missing_unit_factors(extraction)
+        if missing:
+            raise MissingUnitFactors(missing)
+
     prior_setup = connection.execute(
         """
         SELECT id
@@ -250,17 +292,20 @@ def approve_extraction_run(
     if new_setup_id is None:
         raise RuntimeError("sqlite did not return a lastrowid for assessment_setups")
 
-    # Snapshot the extraction's parsed_json into AllocationPool / Group /
-    # Unit / UnitPoolAllocation rows so the engine has recipients and
-    # pools to allocate against. Best-effort: bad rows are skipped with
-    # a logger warning so a partially-extracted DRE still produces a
-    # usable setup (the operator can clean up in the Review Workbench).
-    snapshot_counts = promote_extraction_to_setup(
-        setup_id=new_setup_id,
-        setup_type=setup_type,
-        parsed_json_text=parsed_json_text,
-        connection=connection,
-    )
+    # Snapshot the (review-edit-patched) extraction into AllocationPool /
+    # Group / Unit / UnitPoolAllocation rows so the engine has recipients
+    # and pools to allocate against. Best-effort for untouched AI rows
+    # (bad rows are skipped with a logger warning); an edited row that
+    # can't land raises EditedEntityFailedToPromote instead.
+    snapshot_counts = {"pools": 0, "groups": 0, "units": 0, "unit_pool_allocations": 0}
+    if extraction is not None:
+        snapshot_counts = populate_setup_children(
+            setup_id=new_setup_id,
+            setup_type=setup_type,
+            extraction=extraction,
+            connection=connection,
+            edited_entity_keys=edited_entity_keys,
+        )
     if prior_setup_id is not None:
         carry_forward_mappings_across_setups(
             property_id=property_id,
@@ -277,7 +322,6 @@ def approve_extraction_run(
             commit=False,
         )
 
-    extraction = parse_extraction_payload(parsed_json_text)
     if extraction is not None:
         derive_rules_from_dre_extraction(
             property_id=property_id,
@@ -449,4 +493,205 @@ def demote_extraction_run(
         restored_setup_id=restored_setup_id,
         review_status="approved",
         default_assessment_setup_id=restored_setup_id,
+    )
+
+
+def reopen_and_repromote(
+    *,
+    property_id: int,
+    extraction_run_id: int,
+    setup_type: SetupTypeLiteral,
+    reviewed_by: Optional[str],
+    connection: sqlite3.Connection,
+    extra_extraction_transform: Optional[
+        Callable[[DRESetupExtraction], DRESetupExtraction]
+    ] = None,
+) -> ReopenRepromoteResponse:
+    """Correct an already-promoted run without a new extraction/upload.
+
+    Re-parses the run's *original* ``parsed_json`` (never mutated),
+    re-applies whatever ``dre_review_edits`` exist right now (including
+    ones added after the original promotion), supersedes the property's
+    current approved ``AssessmentSetup``, and promotes a fresh one —
+    reusing the same supersede + carry-forward sequence a brand-new run
+    goes through. ``properties.default_assessment_setup_id`` is updated
+    to the new setup, same as the first-time approve flow.
+
+    ``extra_extraction_transform`` lets a document-type-specific caller
+    (CC&R) layer its own extraction adjustments (operator per-unit
+    factors, missing-factor guard) on top of the review edits, after
+    they're applied and before the extraction is promoted — the same
+    layering ``approve_ccr_extraction_run`` already uses.
+
+    Draft ``annual_packages`` still pointing at the superseded setup are
+    NOT auto-regenerated (see ``AnnualPackage`` immutability elsewhere in
+    this codebase) — their ids are returned so the caller can prompt for
+    regeneration instead of leaving it a silent trap.
+
+    Raises:
+        ExtractionRunNotFound: run doesn't exist for the property.
+        ExtractionRunNotPromoted: run has never been promoted — use the
+            plain approve endpoint instead.
+        ExtractionRunNotApprovable: run has no valid parsed_json to
+            re-promote.
+        UnresolvableReviewEdit / EditedEntityFailedToPromote: an
+            operator edit can't be resolved or land (→ 422).
+    """
+    if setup_type not in ("fixed", "grouped", "per_unit"):
+        raise ValueError(
+            f"Unknown setup_type {setup_type!r}; expected fixed | grouped | per_unit"
+        )
+
+    row = connection.execute(
+        "SELECT id, promoted_at, parsed_json "
+        "FROM dre_extraction_runs WHERE id = ? AND property_id = ?",
+        (extraction_run_id, property_id),
+    ).fetchone()
+    if row is None:
+        raise ExtractionRunNotFound(
+            f"extraction_run_id={extraction_run_id} not found for property_id={property_id}"
+        )
+    run_id_db, promoted_at, parsed_json_text = row
+
+    if promoted_at is None:
+        raise ExtractionRunNotPromoted(
+            f"extraction_run_id={extraction_run_id} has never been promoted; "
+            "use the approve endpoint for a first-time promotion."
+        )
+
+    extraction: Optional[DRESetupExtraction] = parse_extraction_payload(parsed_json_text)
+    if extraction is None:
+        raise ExtractionRunNotApprovable(
+            f"extraction_run_id={extraction_run_id} has no valid parsed_json to re-promote."
+        )
+
+    edits = list_review_edits(
+        dre_extraction_run_id=extraction_run_id, connection=connection,
+    )
+    extraction = apply_review_edits_to_extraction(extraction, edits)
+    edited_entity_keys = entity_keys_touched_by_edits(
+        extraction, [edit.field_path for edit in edits]
+    )
+
+    if extra_extraction_transform is not None:
+        extraction = extra_extraction_transform(extraction)
+
+    # Re-run the same missing-unit-factors guard a first-time promotion
+    # enforces — edits (or a setup_type change) since the original
+    # promotion could have removed the only per-unit data a proportional
+    # pool depends on.
+    if setup_type == "per_unit":
+        missing = check_missing_unit_factors(extraction)
+        if missing:
+            raise MissingUnitFactors(missing)
+
+    prior_setup = connection.execute(
+        """
+        SELECT id
+          FROM assessment_setups
+         WHERE property_id = ? AND status = 'approved'
+         ORDER BY id DESC LIMIT 1
+        """,
+        (property_id,),
+    ).fetchone()
+    prior_setup_id = prior_setup[0] if prior_setup else None
+
+    connection.execute(
+        "UPDATE assessment_setups SET status = 'superseded' "
+        "WHERE property_id = ? AND status = 'approved'",
+        (property_id,),
+    )
+
+    cur = connection.execute(
+        """
+        INSERT INTO assessment_setups (
+            property_id, source_dre_document_id, setup_type, display_mode,
+            reviewed_by, reviewed_at, approved_at, status
+        ) VALUES (
+            ?,
+            (SELECT dre_document_id FROM dre_extraction_runs WHERE id = ?),
+            ?, ?, ?, ?, ?, 'approved'
+        )
+        """,
+        (
+            property_id, extraction_run_id,
+            setup_type, setup_type,
+            reviewed_by, _now_iso(), _now_iso(),
+        ),
+    )
+    new_setup_id = cur.lastrowid
+    if new_setup_id is None:
+        raise RuntimeError("sqlite did not return a lastrowid for assessment_setups")
+
+    snapshot_counts = populate_setup_children(
+        setup_id=new_setup_id,
+        setup_type=setup_type,
+        extraction=extraction,
+        connection=connection,
+        edited_entity_keys=edited_entity_keys,
+    )
+
+    if prior_setup_id is not None:
+        carry_forward_mappings_across_setups(
+            property_id=property_id,
+            old_setup_id=prior_setup_id,
+            new_setup_id=new_setup_id,
+            connection=connection,
+            commit=False,
+        )
+        carry_forward_reusable_mapping_rules_across_setups(
+            property_id=property_id,
+            old_setup_id=prior_setup_id,
+            new_setup_id=new_setup_id,
+            connection=connection,
+            commit=False,
+        )
+
+    derive_rules_from_dre_extraction(
+        property_id=property_id,
+        assessment_setup_id=new_setup_id,
+        source_dre_extraction_run_id=extraction_run_id,
+        extraction=extraction,
+        connection=connection,
+        commit=False,
+    )
+
+    connection.execute(
+        "UPDATE properties SET default_assessment_setup_id = ? WHERE id = ?",
+        (new_setup_id, property_id),
+    )
+
+    promoted_at_ts = _now_iso()
+    connection.execute(
+        """
+        UPDATE dre_extraction_runs
+           SET promoted_setup_id = ?,
+               promoted_at = ?,
+               reviewed_by = COALESCE(?, reviewed_by)
+         WHERE id = ?
+        """,
+        (new_setup_id, promoted_at_ts, reviewed_by, extraction_run_id),
+    )
+
+    affected_draft_package_ids: list[int] = []
+    if prior_setup_id is not None:
+        affected_draft_package_ids = [
+            r[0]
+            for r in connection.execute(
+                "SELECT id FROM annual_packages "
+                "WHERE assessment_setup_id = ? AND status = 'draft'",
+                (prior_setup_id,),
+            ).fetchall()
+        ]
+
+    connection.commit()
+    return ReopenRepromoteResponse(
+        extraction_run_id=extraction_run_id,
+        promoted_setup_id=new_setup_id,
+        superseded_setup_id=prior_setup_id,
+        setup_type=setup_type,
+        promoted_at=promoted_at_ts,
+        reviewed_by=reviewed_by,
+        snapshot_counts=snapshot_counts,
+        affected_draft_package_ids=affected_draft_package_ids,
     )

@@ -31,6 +31,7 @@ from .routers.dre_review import router as dre_review_router
 from .routers.ccr import router as ccr_router
 from .routers.assessment_mapping_review import router as assessment_mapping_review_router
 from .routers.hoa_settings import router as hoa_settings_router
+from .routers.manual_setup import router as manual_setup_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -120,6 +121,10 @@ def create_app() -> FastAPI:
     # CC&R / governing-document upload, extraction, factor entry, and approval.
     # Shares dre_extraction_runs table (discriminated by document_type='ccr').
     app.include_router(ccr_router)
+    # Manual assessment setup entry (no DRE/CC&R document at all) — creates
+    # a synthetic extraction run promoted through the same DRE/CC&R approve
+    # endpoints above.
+    app.include_router(manual_setup_router)
     app.include_router(assessment_mapping_review_router)
     # Per-HOA appendix manifest router (Phase 5.4 of
     # dre-driven-assessment-engine). Auth is applied per-route via
