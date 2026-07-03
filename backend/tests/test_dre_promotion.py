@@ -131,7 +131,7 @@ class TestPopulatePools:
         assert counts["pools"] == 1
         row = db.execute(
             "SELECT pool_key, allocation_method, recipient_scope, "
-            "denominator_source, denominator_value "
+            "denominator_source, denominator_value, denominator_label "
             "FROM allocation_pools WHERE assessment_setup_id = ?",
             (setup_id,),
         ).fetchone()
@@ -140,6 +140,7 @@ class TestPopulatePools:
         assert row[2] == "all_units"
         assert row[3] == "dre_value"  # mapped from 'dre_shown'
         assert Decimal(str(row[4])) == Decimal("10000")
+        assert row[5] == "total_sqft"
 
     def test_parking_space_method_collapses_to_equal_parking_scope(self, db):
         pid, setup_id = _seed_property_and_setup(db)

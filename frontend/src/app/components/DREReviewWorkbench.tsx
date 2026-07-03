@@ -73,6 +73,18 @@ const ALLOCATION_METHOD_OPTIONS = [
 
 const DENOMINATOR_SOURCE_OPTIONS = ['dre_shown', 'calculated', 'unknown'];
 
+// Mirrors the allocation_pools.recipient_scope CHECK constraint and
+// promotion.py::_coerce_recipient_scope's recognized values. A select (not
+// free text) so an operator can't type a typo that silently falls back to
+// "all_units" with no error.
+const RECIPIENT_SCOPE_OPTIONS = [
+  'all_units',
+  'residential_only',
+  'commercial_only',
+  'parking_users',
+  'custom_unit_list',
+];
+
 // ── Inline-editable value ─────────────────────────────────────────────
 //
 // Every field the Review Workbench renders read-only-with-a-pencil goes
@@ -1252,7 +1264,15 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
                           />
                         </td>
                         <td className="py-2 pr-4 font-mono text-xs text-slate-600">
-                          {String(pool.recipient_scope || '')}
+                          <EditableValue
+                            value={pool.recipient_scope || ''}
+                            fieldPath={`allocation_pools[${i}].recipient_scope`}
+                            onSave={onSaveEdit}
+                            disabled={!reviewReady}
+                            editCount={editCountByPath[`allocation_pools[${i}].recipient_scope`]}
+                            kind="select"
+                            options={RECIPIENT_SCOPE_OPTIONS}
+                          />
                         </td>
                         <td className="py-2 pr-4 text-right tabular-nums text-slate-800">
                           <EditableValue
@@ -1326,13 +1346,18 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
                               </dd>
                               <dt className="text-slate-500">Denominator label</dt>
                               <dd className="text-slate-900">
-                                {pool.denominator_label ? (
-                                  <span className="font-mono">
-                                    {String(pool.denominator_label)}
-                                  </span>
-                                ) : (
-                                  <span className="text-slate-400">—</span>
-                                )}
+                                <EditableValue
+                                  value={pool.denominator_label || ''}
+                                  fieldPath={`allocation_pools[${i}].denominator_label`}
+                                  onSave={onSaveEdit}
+                                  disabled={!reviewReady}
+                                  editCount={editCountByPath[`allocation_pools[${i}].denominator_label`]}
+                                  display={
+                                    pool.denominator_label ? (
+                                      <span className="font-mono">{String(pool.denominator_label)}</span>
+                                    ) : undefined
+                                  }
+                                />
                               </dd>
                               <dt className="text-slate-500">Denominator source</dt>
                               <dd>

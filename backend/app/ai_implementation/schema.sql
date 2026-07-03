@@ -400,6 +400,7 @@ CREATE TABLE IF NOT EXISTS allocation_pools (
                          REFERENCES assessment_setups(id) ON DELETE CASCADE,
     pool_key             TEXT NOT NULL,
     pool_name            TEXT NOT NULL,
+    denominator_label    TEXT,
     allocation_method    TEXT NOT NULL CHECK (allocation_method IN (
                              'equal','square_footage','ownership_percentage','specified_value'
                          )),

@@ -545,6 +545,7 @@ _ALLOCATION_POOL_COLUMN_DEFINITIONS: dict[str, str] = {
     "derivation_evidence_json": "TEXT",
     "escalation_schedule_json": "TEXT DEFAULT '[]'",
     "starting_monthly_per_unit": "REAL",
+    "denominator_label": "TEXT",
 }
 
 

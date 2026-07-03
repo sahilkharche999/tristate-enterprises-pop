@@ -385,17 +385,18 @@ def _insert_pool(
     cur = connection.execute(
         """
         INSERT INTO allocation_pools (
-            assessment_setup_id, pool_key, pool_name,
+            assessment_setup_id, pool_key, pool_name, denominator_label,
             allocation_method, recipient_scope,
             denominator_source, denominator_value,
             variable_flag, display_order, include_in_pdf,
             budget_line_derivation,
             residual_after_pool_keys_json,
             residual_exclusions_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
         """,
         (
             setup_id, pool.pool_key, pool.pool_name or pool.pool_key,
+            pool.denominator_label or None,
             mapping.internal_method, scope,
             denom_source,
             str(pool.denominator_value) if pool.denominator_value is not None else None,

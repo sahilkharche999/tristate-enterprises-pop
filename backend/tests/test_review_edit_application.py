@@ -269,6 +269,72 @@ class TestApproveExtractionRunAppliesEdits:
         # inserted text "42" as an integer.
         assert row[0] == 42
 
+    def test_recipient_scope_edit_changes_promoted_pool(
+        self, db: sqlite3.Connection
+    ) -> None:
+        pid, rid = _ids(db)
+        db.execute(
+            "UPDATE dre_extraction_runs SET parsed_json = ? WHERE id = ?",
+            (json.dumps(_payload_with_one_pool()), rid),
+        )
+        db.commit()
+
+        record_review_edit(
+            dre_extraction_run_id=rid,
+            field_path="allocation_pools[0].recipient_scope",
+            old_value="all_units",
+            new_value="residential_only",
+            connection=db,
+        )
+
+        resp = approve_extraction_run(
+            property_id=pid,
+            extraction_run_id=rid,
+            setup_type="fixed",
+            reviewed_by="ops@example.com",
+            connection=db,
+        )
+
+        row = db.execute(
+            "SELECT recipient_scope FROM allocation_pools "
+            "WHERE assessment_setup_id = ? AND pool_key = 'operating'",
+            (resp.promoted_setup_id,),
+        ).fetchone()
+        assert row[0] == "residential_only"
+
+    def test_denominator_label_edit_changes_promoted_pool(
+        self, db: sqlite3.Connection
+    ) -> None:
+        pid, rid = _ids(db)
+        db.execute(
+            "UPDATE dre_extraction_runs SET parsed_json = ? WHERE id = ?",
+            (json.dumps(_payload_with_one_pool()), rid),
+        )
+        db.commit()
+
+        record_review_edit(
+            dre_extraction_run_id=rid,
+            field_path="allocation_pools[0].denominator_label",
+            old_value="units",
+            new_value="Total Livable Square Footage",
+            connection=db,
+        )
+
+        resp = approve_extraction_run(
+            property_id=pid,
+            extraction_run_id=rid,
+            setup_type="fixed",
+            reviewed_by="ops@example.com",
+            connection=db,
+        )
+
+        row = db.execute(
+            "SELECT denominator_label FROM allocation_pools "
+            "WHERE assessment_setup_id = ? AND pool_key = 'operating'",
+            (resp.promoted_setup_id,),
+        ).fetchone()
+        assert row[0] == "Total Livable Square Footage"
+
     def test_variable_flag_edit_changes_promoted_pool(
         self, db: sqlite3.Connection
     ) -> None:
