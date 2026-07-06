@@ -539,6 +539,36 @@ def test_large_configured_logo_is_size_constrained_not_full_page():
         doc.close()
 
 
+def test_footer_has_printer_safe_clearance_from_bottom_edge():
+    """Regression: the letterhead footer (management-company contact line)
+    must not render flush against the bottom page edge — printers clip the
+    bottom strip and it gets cut off. It previously sat ~0.1pt from the
+    edge; assert it now clears the edge by a printer-safe margin."""
+    import fitz
+
+    ctx = _build_context()
+    pdf_bytes = render_template(template_name="cover_letter.html", context=ctx)
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        page = doc[0]
+        page_height = page.rect.height
+        # Lowest text on the page = the footer contact line.
+        lowest_bottom = max(
+            span["bbox"][3]
+            for block in page.get_text("dict")["blocks"]
+            if "lines" in block
+            for line in block["lines"]
+            for span in line["spans"]
+        )
+        gap_pt = page_height - lowest_bottom
+        assert gap_pt >= 18, (  # ~0.25in printer-safe minimum
+            f"footer sits {gap_pt:.1f}pt from the bottom edge — too close; "
+            f"printers may clip it"
+        )
+    finally:
+        doc.close()
+
+
 def test_default_hoa_logo_renders_inline_svg_mark_when_unconfigured():
     """Task 2.5: no configured logo -> the existing default inline SVG mark
     renders (no crash, no blank letterhead)."""

@@ -29,7 +29,11 @@
         font-family: "DejaVu Sans Condensed", Tahoma, "Liberation Sans", sans-serif;
         font-size: 7pt;
         color: #000;
+        /* Lift the footer off the very bottom edge for printer safety —
+         * without this it renders ~0.1pt from the page edge, which many
+         * printers cannot reproduce (they clip the bottom strip). */
         vertical-align: bottom;
+        padding-bottom: 0.3in;
     }
     /* @bottom-right intentionally has no content here: counter(page) would
      * reset to 1 on every section (each section is an independent
