@@ -90,7 +90,10 @@ function parseLoan(raw: string | null | undefined): OutstandingLoan | null {
 }
 
 export interface HOADisclosureSettingsFormHandle {
-  save: () => Promise<void>;
+  /** Returns true on a successful save, false if the save errored (the
+   * form shows its own inline error too). Lets the parent Settings header
+   * button surface a success/failure toast + spinner. */
+  save: () => Promise<boolean>;
 }
 
 export const HOADisclosureSettingsForm = forwardRef<
@@ -109,8 +112,8 @@ export const HOADisclosureSettingsForm = forwardRef<
   }, [hoaId]);
 
   // Must be defined before early returns so hook call count is stable per render.
-  const save = useCallback(async () => {
-    if (!settings) return;
+  const save = useCallback(async (): Promise<boolean> => {
+    if (!settings) return false;
     setSaving(true);
     setError(null);
     try {
@@ -121,8 +124,10 @@ export const HOADisclosureSettingsForm = forwardRef<
       const next = await putHOADisclosureSettings(hoaId, writable);
       setSettings(next);
       setSavedAt(new Date().toLocaleTimeString());
+      return true;
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+      return false;
     } finally {
       setSaving(false);
     }

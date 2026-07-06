@@ -255,7 +255,20 @@ export function SettingsScreen() {
     if (!id) return;
 
     if (selectedSection === 'disclosure') {
-      await disclosureFormRef.current?.save();
+      // The disclosure form owns its own state; drive the header button's
+      // spinner + a success/error toast off its save() result so the button
+      // gives visible feedback (previously it silently proxied with none).
+      setIsSaving(true);
+      try {
+        const ok = await disclosureFormRef.current?.save();
+        if (ok) {
+          toast.success('Settings saved.');
+        } else {
+          toast.error('Failed to save settings. Please try again.');
+        }
+      } finally {
+        setIsSaving(false);
+      }
       return;
     }
 
