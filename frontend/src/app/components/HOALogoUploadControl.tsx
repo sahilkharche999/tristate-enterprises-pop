@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { deleteHOALogo, hoaLogoUrl, uploadHOALogo } from '../api/hoaSettings';
 import { authHeaders } from '../api/http';
 import { Button } from './ui/button';
+import { FileDropzone } from './fileDropzone';
 
 const ACCEPTED_TYPES = '.png,.jpg,.jpeg,.svg';
 
@@ -19,7 +20,6 @@ export function HOALogoUploadControl({ hoaId, hasLogo, onChanged }: HOALogoUploa
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     let objectUrl: string | null = null;
@@ -52,7 +52,6 @@ export function HOALogoUploadControl({ hoaId, hasLogo, onChanged }: HOALogoUploa
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
-      if (fileInputRef.current) fileInputRef.current.value = '';
     }
   };
 
@@ -78,36 +77,46 @@ export function HOALogoUploadControl({ hoaId, hasLogo, onChanged }: HOALogoUploa
           the default.
         </p>
       </div>
-      <div className="flex items-center gap-3">
+      <div className="flex items-start gap-3">
         {previewUrl ? (
           <img
             src={previewUrl}
             alt="Configured HOA logo preview"
-            className="h-12 w-12 object-contain border border-[#e5e5e5] rounded"
+            className="h-12 w-12 shrink-0 object-contain border border-[#e5e5e5] rounded"
           />
         ) : (
-          <div className="h-12 w-12 flex items-center justify-center border border-dashed border-[#d4d4d4] rounded text-[10px] text-[#a3a3a3]">
+          <div className="h-12 w-12 shrink-0 flex items-center justify-center border border-dashed border-[#d4d4d4] rounded text-[10px] text-[#a3a3a3]">
             Default
           </div>
         )}
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept={ACCEPTED_TYPES}
-          disabled={busy}
-          onChange={(e) => {
-            const file = e.target.files?.[0];
-            if (file) void handleFile(file);
-          }}
-          className="text-xs"
-        />
-        {hasLogo ? (
-          <Button variant="ghost" disabled={busy} onClick={() => void handleRemove()} className="text-xs text-[#b91c1c]">
-            Remove
-          </Button>
-        ) : null}
+        <div className="min-w-0 flex-1 space-y-2">
+          <FileDropzone
+            title="Logo image"
+            helper="PNG, JPG, or SVG."
+            accept={ACCEPTED_TYPES}
+            fileName={hasLogo ? 'Current logo' : null}
+            disabled={busy}
+            status={error ? 'error' : hasLogo ? 'selected' : 'idle'}
+            statusMessage={busy ? 'Uploading…' : error ?? undefined}
+            actionLabel="Choose logo"
+            onFilesSelected={(files) => {
+              const file = files?.[0];
+              if (file) void handleFile(file);
+            }}
+          />
+          {hasLogo ? (
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={busy}
+              onClick={() => void handleRemove()}
+              className="h-8 px-2 text-xs text-[#b91c1c] hover:bg-[#fef2f2]"
+            >
+              Remove logo
+            </Button>
+          ) : null}
+        </div>
       </div>
-      {error ? <p className="text-xs text-[#b91c1c]">{error}</p> : null}
     </div>
   );
 }

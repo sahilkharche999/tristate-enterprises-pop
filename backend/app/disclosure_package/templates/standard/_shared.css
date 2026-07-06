@@ -105,6 +105,21 @@ p {
 }
 
 .letterhead-logo-cell { width: 56px; }
+/* Hard-constrain the letterhead logo. WeasyPrint does NOT honor the
+   presentational width/height attributes on <img>, so a large uploaded
+   logo (e.g. 1254x1254px) otherwise renders at its full intrinsic size
+   (~940pt) and overflows the whole page, burying the page content. CSS
+   width/height ARE honored; object-fit keeps aspect ratio. Applies to
+   both the per-HOA <img> and the default inline <svg>. */
+.letterhead-logo-cell img,
+.letterhead-logo-cell svg {
+    width: 56px;
+    height: 56px;
+    max-width: 56px;
+    max-height: 56px;
+    object-fit: contain;
+    display: block;
+}
 
 .letterhead-tristate { font-size: 14pt; font-weight: bold; line-height: 1; }
 .letterhead-tri { color: #000; }

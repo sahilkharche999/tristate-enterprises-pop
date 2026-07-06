@@ -498,6 +498,47 @@ def test_configured_hoa_logo_embeds_as_real_image_not_broken_alt_text():
         doc.close()
 
 
+def test_large_configured_logo_is_size_constrained_not_full_page():
+    """Regression: a real uploaded logo is often a large raster (e.g. the
+    Los Altos ship mark was 1254x1254px). WeasyPrint ignores the <img>'s
+    presentational width/height attributes, so without a CSS size
+    constraint the logo renders at its full intrinsic size (~940pt) —
+    larger than the whole 612x792pt page — and paints over the page
+    content, including the table of contents on the letterhead page.
+    Assert the rendered logo box stays small (letterhead-sized), so it
+    can never again bury the page."""
+    import base64
+    from io import BytesIO
+
+    import fitz
+    from PIL import Image
+
+    # Deliberately huge, mirroring the field-reported logo dimensions.
+    img = Image.new("RGB", (1254, 1254), (0, 80, 160))
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    data_uri = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
+    ctx = _build_context()
+    ctx["hoa_logo_data_uri"] = data_uri
+    pdf_bytes = render_template(template_name="annual_budget_report_cover.html", context=ctx)
+
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        page = doc[0]
+        images = page.get_images(full=True)
+        assert images, "configured logo should embed as a real image"
+        bbox = page.get_image_bbox(images[0])
+        # 56px letterhead logo ≈ 42pt; allow generous headroom but assert
+        # it is nowhere near page-filling (page is 612x792pt).
+        assert bbox.width < 100 and bbox.height < 100, (
+            f"logo rendered {bbox.width:.0f}x{bbox.height:.0f}pt — it must be "
+            f"constrained to the letterhead, not fill/overflow the page"
+        )
+    finally:
+        doc.close()
+
+
 def test_default_hoa_logo_renders_inline_svg_mark_when_unconfigured():
     """Task 2.5: no configured logo -> the existing default inline SVG mark
     renders (no crash, no blank letterhead)."""
