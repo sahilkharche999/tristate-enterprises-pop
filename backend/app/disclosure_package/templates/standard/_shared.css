@@ -15,14 +15,20 @@
     size: Letter;
     margin: 1.4in 0.65in 1.1in 0.65in;
 
+    /* padding-top lifts the letterhead off the very top page edge for
+     * printer safety — without it the logo/HOA-name render flush at y=0
+     * (even slightly above it), which printers clip. Mirrors the
+     * @bottom-left footer clearance. */
     @top-left {
         content: element(letterhead-left);
         vertical-align: top;
+        padding-top: 0.4in;
     }
     @top-right {
         content: element(letterhead-right);
         vertical-align: top;
         text-align: right;
+        padding-top: 0.4in;
     }
     @bottom-left {
         content: element(footer-block);

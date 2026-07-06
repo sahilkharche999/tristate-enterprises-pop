@@ -539,6 +539,36 @@ def test_large_configured_logo_is_size_constrained_not_full_page():
         doc.close()
 
 
+def test_header_has_printer_safe_clearance_from_top_edge():
+    """Regression: the letterhead (logo + HOA name) must not render flush
+    against the top page edge — it previously sat at y≈0 (the HOA name was
+    even slightly above the edge at y=-0.8), which printers clip. Assert the
+    topmost content now clears the top edge by a printer-safe margin."""
+    import fitz
+
+    ctx = _build_context()
+    pdf_bytes = render_template(template_name="cover_letter.html", context=ctx)
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        page = doc[0]
+        tops = [
+            span["bbox"][1]
+            for block in page.get_text("dict")["blocks"]
+            if "lines" in block
+            for line in block["lines"]
+            for span in line["spans"]
+        ]
+        for img in page.get_images(full=True):
+            tops.append(page.get_image_bbox(img).y0)
+        topmost = min(tops)
+        assert topmost >= 18, (  # ~0.25in printer-safe minimum
+            f"letterhead starts {topmost:.1f}pt from the top edge — too close; "
+            f"printers may clip it"
+        )
+    finally:
+        doc.close()
+
+
 def test_footer_has_printer_safe_clearance_from_bottom_edge():
     """Regression: the letterhead footer (management-company contact line)
     must not render flush against the bottom page edge — printers clip the
