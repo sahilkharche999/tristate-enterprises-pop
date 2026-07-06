@@ -219,29 +219,38 @@ export const HOADisclosureSettingsForm = forwardRef<
                   className="w-full border border-[#d4d4d4] rounded px-2 py-1 text-sm"
                 />
               </label>
-              <input
-                type="number"
-                step="0.01"
-                placeholder="Amount per unit"
-                value={row.amount_per_unit ?? ''}
-                onChange={(e) => {
-                  const next = [...rows];
-                  next[i] = { ...row, amount_per_unit: Number(e.target.value) };
-                  updateList(key, next);
-                }}
-                className="border border-[#d4d4d4] rounded px-2 py-1 text-sm"
-              />
-              {includePurpose ? (
+              <label className="block">
+                <span className="block text-[10px] text-[#a3a3a3]">Amount per unit ($)</span>
                 <input
-                  placeholder="Purpose"
-                  value={row.purpose}
+                  type="number"
+                  step="0.01"
+                  placeholder="e.g. 250.00"
+                  // Show the placeholder (not a bare "0") for an untouched row:
+                  // a fresh row defaults amount to 0, which would otherwise mask
+                  // the field's meaning. 0 is not a meaningful assessment amount.
+                  value={row.amount_per_unit || ''}
                   onChange={(e) => {
                     const next = [...rows];
-                    next[i] = { ...row, purpose: e.target.value };
+                    next[i] = { ...row, amount_per_unit: Number(e.target.value) };
                     updateList(key, next);
                   }}
-                  className="border border-[#d4d4d4] rounded px-2 py-1 text-sm"
+                  className="w-full border border-[#d4d4d4] rounded px-2 py-1 text-sm"
                 />
+              </label>
+              {includePurpose ? (
+                <label className="block">
+                  <span className="block text-[10px] text-[#a3a3a3]">Purpose</span>
+                  <input
+                    placeholder="e.g. Roof replacement"
+                    value={row.purpose}
+                    onChange={(e) => {
+                      const next = [...rows];
+                      next[i] = { ...row, purpose: e.target.value };
+                      updateList(key, next);
+                    }}
+                    className="w-full border border-[#d4d4d4] rounded px-2 py-1 text-sm"
+                  />
+                </label>
               ) : null}
               <Button
                 variant="ghost"
@@ -252,9 +261,18 @@ export const HOADisclosureSettingsForm = forwardRef<
               </Button>
             </div>
             {/* Phase 4.4 status + display-language fields per dre-driven-assessment-engine.
-                Status drives the cover-letter §5300 + §5570 wording branches. */}
-            <div className="grid gap-2 sm:grid-cols-[1fr_1fr_2fr_auto]">
-              <select
+                Status drives the cover-letter §5300 + §5570 wording branches.
+                Collapsed behind a disclosure toggle so the common case (amount +
+                purpose + date) stays simple; these are the legal-disclosure
+                controls Bob found confusing (June 29 sync). */}
+            <details className="mt-1">
+              <summary className="cursor-pointer text-[11px] text-[#737373] select-none">
+                Advanced — legal disclosure (§5300 / §5570)
+              </summary>
+              <div className="mt-1 grid gap-2 sm:grid-cols-[1fr_1fr_2fr_auto]">
+              <label className="flex flex-col gap-0.5 text-xs">
+                <span className="text-[10px] text-[#a3a3a3]">Status</span>
+                <select
                 value={row.status || 'approved_scheduled'}
                 onChange={(e) => {
                   const next = [...rows];
@@ -266,7 +284,8 @@ export const HOADisclosureSettingsForm = forwardRef<
                 <option value="approved_scheduled">Approved + scheduled</option>
                 <option value="possible_disclosure_only">Possible (disclosure only)</option>
                 <option value="none">None</option>
-              </select>
+                </select>
+              </label>
               <label className="flex flex-col gap-0.5 text-xs" title="Checking this adds the amount to the recipients' regular monthly assessment; unchecked, it's disclosed separately from the regular monthly schedule.">
                 <span className="flex items-center gap-1">
                   <input
@@ -305,7 +324,8 @@ export const HOADisclosureSettingsForm = forwardRef<
                 }}
                 className="border border-[#d4d4d4] rounded px-2 py-1 text-xs"
               />
-            </div>
+              </div>
+            </details>
           </div>
         ))
       )}
