@@ -19,6 +19,14 @@
       <div class="muted small right">---- Page Reference ----</div>
       <table class="pageref-grid">
         <tr><th>Pro Forma<br>Budget</th><th>Disclosure<br>Summary</th></tr>
+        {# Both columns cite this same combined form's own starting page —
+           the Pro Forma Operating Budget and this Disclosure Summary are
+           one page-numbered section in this package's TOC (see
+           annual_budget_report_toc.html). #}
+        <tr>
+          <td class="center">{{ toc_page_numbers.get('pro_forma_disclosure_summary.html', '—') }}</td>
+          <td class="center">{{ toc_page_numbers.get('pro_forma_disclosure_summary.html', '—') }}</td>
+        </tr>
       </table>
     </td>
   </tr>

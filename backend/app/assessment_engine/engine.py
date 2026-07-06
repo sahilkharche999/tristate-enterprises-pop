@@ -215,29 +215,55 @@ def _allocate_pool(
 # -- step 3.5: special-assessment behavior matrix (Phase 4.4) --------------
 
 
+def _resolve_allocation_pool_for_scope(
+    pools: list[PoolDefinition],
+    recipient_scope: str,
+) -> Optional[PoolDefinition]:
+    """Pick the pool whose ``recipient_scope`` matches a special
+    assessment's scope, so its allocation method can be reused.
+
+    If more than one pool shares the scope, the lowest ``display_order``
+    wins (deterministic, matches the pool's on-page ordering). Returns
+    ``None`` if no pool covers this scope at all.
+    """
+    candidates = [p for p in pools if p.recipient_scope == recipient_scope]
+    if not candidates:
+        return None
+    return sorted(candidates, key=lambda p: p.display_order)[0]
+
+
 def _apply_special_assessments(
     pool_allocations: list[PoolAllocationResult],
     special_assessments: list[SpecialAssessmentInput],
     recipient_set,
-) -> list[SpecialAssessmentRendererEvent]:
+    pools: list[PoolDefinition],
+) -> tuple[list[SpecialAssessmentRendererEvent], list[str]]:
     """Apply each SA entry per the Phase 4.4 matrix.
 
     - ``approved_scheduled`` + ``included_in_regular_monthly=True``:
       append one pseudo-pool component row per applicable recipient with
       ``pool_id=None``, ``pool_key='special_assessment'``,
       ``source='special_assessment'``. These flow into the regular
-      recipient_total → reconciliation path.
+      recipient_total → reconciliation path. The per-recipient split
+      uses the HOA's real allocation method (equal / square_footage /
+      ownership_percentage), borrowed from whichever existing pool
+      covers the same ``recipient_scope`` — matching how regular
+      monthly assessments are already split, instead of assigning every
+      recipient the same flat ``amount_per_unit``.
     - ``approved_scheduled`` + ``included_in_regular_monthly=False``:
       emit a ``separate_disclosure_block`` renderer event; engine
-      doesn't touch pool_allocations or reconciliation.
+      doesn't touch pool_allocations or reconciliation. (Unchanged —
+      this one-time-disclosure display path is a separate, deferred
+      piece of work; see design.md.)
     - ``possible_disclosure_only``: emit a ``disclosure_language``
       renderer event; engine takes no financial action.
     - ``none``: ignored.
 
-    Mutates ``pool_allocations`` in place; returns the list of renderer
-    events for inclusion in CalcResultSet.
+    Mutates ``pool_allocations`` in place; returns
+    ``(renderer_events, warnings)``.
     """
     events: list[SpecialAssessmentRendererEvent] = []
+    warnings: list[str] = []
     for entry in special_assessments:
         if entry.status == "none":
             continue
@@ -254,22 +280,91 @@ def _apply_special_assessments(
                 )
                 continue
 
-            # Add one pseudo-pool row per applicable recipient
+            scope = entry.recipient_scope or "all_units"
             recipients = resolve_recipients(
                 recipient_set,
-                entry.recipient_scope or "all_units",
+                scope,
                 custom_unit_ids=entry.custom_unit_ids or None,
             )
-            for r in recipients:
-                pool_allocations.append(
-                    PoolAllocationResult(
-                        recipient_ref=r,
-                        pool_id=None,
-                        pool_key="special_assessment",
-                        unrounded_component_monthly=entry.amount_per_unit,
-                        source="special_assessment",
-                    )
+            total_units = sum((r.unit_count for r in recipients), start=0)
+            if not recipients or total_units <= 0:
+                continue
+
+            # ``amount_per_unit`` has always meant "this much per unit per
+            # month" (mirrors how regular pool totals are annual and get
+            # divided to monthly at the pool boundary). Reconstructing the
+            # scope-wide monthly total this way — instead of taking
+            # ``amount_per_unit`` as gospel per recipient — is what lets a
+            # non-equal method redistribute it correctly while leaving the
+            # equal-allocation, unit-grain case byte-identical to today.
+            monthly_total = entry.amount_per_unit * Decimal(total_units)
+
+            pool = _resolve_allocation_pool_for_scope(pools, scope)
+            method = pool.allocation_method if pool is not None else "equal"
+
+            if pool is None:
+                warnings.append(
+                    f"SpecialAssessmentNoAllocationDataWarning: no allocation_pools "
+                    f"entry found for recipient_scope '{scope}'; special assessment "
+                    f"'{entry.label or ''}' fell back to equal-per-unit allocation"
                 )
+
+            if method == "square_footage" and pool is not None and pool.denominator_value is not None:
+                per_unit_within_group = square_footage_allocation(
+                    monthly_total, pool.denominator_value, recipients
+                )
+                for r in recipients:
+                    pool_allocations.append(
+                        PoolAllocationResult(
+                            recipient_ref=r,
+                            pool_id=None,
+                            pool_key="special_assessment",
+                            unrounded_component_monthly=(
+                                per_unit_within_group[(r.ref_type, r.ref_id)] * Decimal(r.unit_count)
+                            ),
+                            source="special_assessment",
+                        )
+                    )
+            elif method == "ownership_percentage":
+                per_recipient, pct_warnings = ownership_percentage_allocation(
+                    monthly_total, recipients
+                )
+                warnings.extend(pct_warnings)
+                for r in recipients:
+                    pool_allocations.append(
+                        PoolAllocationResult(
+                            recipient_ref=r,
+                            pool_id=None,
+                            pool_key="special_assessment",
+                            unrounded_component_monthly=per_recipient[(r.ref_type, r.ref_id)],
+                            source="special_assessment",
+                        )
+                    )
+            else:
+                # Equal, or a method that can't be generalized to an
+                # arbitrary special-assessment total (specified_value is a
+                # per-budget-line absolute dollar lookup, not a proportional
+                # weight; square_footage without a denominator can't split).
+                # Fall back to equal-per-unit rather than guessing.
+                if method not in ("equal",) and pool is not None:
+                    warnings.append(
+                        f"SpecialAssessmentAllocationFallbackWarning: recipient_scope "
+                        f"'{scope}' resolves to a '{method}' pool, which cannot be "
+                        f"generalized to an arbitrary special-assessment total; special "
+                        f"assessment '{entry.label or ''}' fell back to equal-per-unit "
+                        f"allocation"
+                    )
+                per_unit = equal_allocation(monthly_total, total_units)
+                for r in recipients:
+                    pool_allocations.append(
+                        PoolAllocationResult(
+                            recipient_ref=r,
+                            pool_id=None,
+                            pool_key="special_assessment",
+                            unrounded_component_monthly=per_unit * Decimal(r.unit_count),
+                            source="special_assessment",
+                        )
+                    )
 
         elif entry.status == "possible_disclosure_only":
             events.append(
@@ -280,7 +375,7 @@ def _apply_special_assessments(
                 )
             )
 
-    return events
+    return events, warnings
 
 
 # -- step 3: pool-scope overrides ------------------------------------------
@@ -558,11 +653,13 @@ def run(calc_input: CalcInput) -> CalcResultSet:
     # pseudo-pool rows so they flow through recipient summation +
     # reconciliation just like any other pool component. The other
     # branches emit renderer events that bypass financial math.
-    special_assessment_events = _apply_special_assessments(
+    special_assessment_events, special_assessment_warnings = _apply_special_assessments(
         pool_allocations,
         calc_input.special_assessments,
         calc_input.recipient_set,
+        calc_input.pools,
     )
+    warnings.extend(special_assessment_warnings)
 
     applied_overrides: list[AppliedOverrideEntry] = []
     pool_allocations = _apply_pool_overrides(

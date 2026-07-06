@@ -265,6 +265,292 @@ class TestPossibleDisclosureOnly:
         assert result.rounding_delta_annual == Decimal("0.00")
 
 
+class TestAllocationMethodAwareness:
+    """Task 4.2/4.3/4.5: special assessments now resolve the HOA's real
+    allocation method (borrowed from whichever pool covers the same
+    recipient_scope) instead of assigning every recipient the same flat
+    ``amount_per_unit`` — and correctly scale group recipients by
+    unit_count."""
+
+    def test_group_recipient_scales_by_unit_count(self) -> None:
+        # 2 groups (3 units, 2 units) in an equal-allocation pool.
+        groups = [
+            RecipientReference(ref_type="group", ref_id=1, label="G1", unit_count=3),
+            RecipientReference(ref_type="group", ref_id=2, label="G2", unit_count=2),
+        ]
+        ci = CalcInput(
+            setup_type="grouped",
+            pools=[
+                PoolDefinition(
+                    pool_id=1, pool_key="equal", pool_name="Equal",
+                    allocation_method="equal", recipient_scope="all_units",
+                ),
+            ],
+            recipient_set=RecipientSet(recipients=groups),
+            budget_lines=[
+                BudgetLineInput(
+                    line_id=1, normalized_label="dues",
+                    section="income", category="income",
+                    fund_type="operating", amount=Decimal("6000"),
+                ),
+            ],
+            mappings=[
+                BudgetLineMappingInput(
+                    budget_line_normalized_label="dues",
+                    section="income", category="income",
+                    fund_type="operating", pool_key="equal",
+                ),
+            ],
+            approved_assessment_revenue_annual=Decimal("6000") + Decimal("3000"),
+            special_assessments=[
+                SpecialAssessmentInput(
+                    status="approved_scheduled",
+                    included_in_regular_monthly=True,
+                    amount_per_unit=Decimal("50"),
+                    label="Roof SA",
+                ),
+            ],
+        )
+        result = run(ci)
+        sa_rows = {
+            r.recipient_ref.ref_id: r.unrounded_component_monthly
+            for r in result.pool_allocations
+            if r.pool_key == "special_assessment"
+        }
+        # Before the fix, every group got a flat $50 regardless of unit_count.
+        # Now G1 (3 units) gets 50*3=150, G2 (2 units) gets 50*2=100.
+        assert sa_rows[1] == Decimal("150")
+        assert sa_rows[2] == Decimal("100")
+
+    def test_square_footage_allocation_method_reused(self) -> None:
+        units = [
+            RecipientReference(ref_type="unit", ref_id=1, label="U1", unit_count=1, square_feet=Decimal("1000")),
+            RecipientReference(ref_type="unit", ref_id=2, label="U2", unit_count=1, square_feet=Decimal("2000")),
+            RecipientReference(ref_type="unit", ref_id=3, label="U3", unit_count=1, square_feet=Decimal("3000")),
+        ]
+        ci = CalcInput(
+            setup_type="per_unit",
+            pools=[
+                PoolDefinition(
+                    pool_id=1, pool_key="sqft", pool_name="Sqft",
+                    allocation_method="square_footage", recipient_scope="all_units",
+                    denominator_value=Decimal("6000"),
+                ),
+            ],
+            recipient_set=RecipientSet(recipients=units),
+            budget_lines=[
+                BudgetLineInput(
+                    line_id=1, normalized_label="dues",
+                    section="income", category="income",
+                    fund_type="operating", amount=Decimal("6000"),
+                ),
+            ],
+            mappings=[
+                BudgetLineMappingInput(
+                    budget_line_normalized_label="dues",
+                    section="income", category="income",
+                    fund_type="operating", pool_key="sqft",
+                ),
+            ],
+            # amount_per_unit=100 * 3 units = 300/mo scope-wide -> 3600 annual added
+            approved_assessment_revenue_annual=Decimal("6000") + Decimal("3600"),
+            special_assessments=[
+                SpecialAssessmentInput(
+                    status="approved_scheduled",
+                    included_in_regular_monthly=True,
+                    amount_per_unit=Decimal("100"),
+                    label="Roof SA",
+                ),
+            ],
+        )
+        result = run(ci)
+        sa_rows = {
+            r.recipient_ref.ref_id: r.unrounded_component_monthly
+            for r in result.pool_allocations
+            if r.pool_key == "special_assessment"
+        }
+        # scope-wide monthly total = 100*3 = 300, split by sqft weight (1000:2000:3000 of 6000)
+        assert sa_rows[1] == Decimal("50")
+        assert sa_rows[2] == Decimal("100")
+        assert sa_rows[3] == Decimal("150")
+        assert not any("Fallback" in w or "NoAllocationData" in w for w in result.warnings)
+
+    def test_ownership_percentage_allocation_method_reused(self) -> None:
+        units = [
+            RecipientReference(ref_type="unit", ref_id=1, label="U1", unit_count=1, ownership_percent=Decimal("0.2")),
+            RecipientReference(ref_type="unit", ref_id=2, label="U2", unit_count=1, ownership_percent=Decimal("0.3")),
+            RecipientReference(ref_type="unit", ref_id=3, label="U3", unit_count=1, ownership_percent=Decimal("0.5")),
+        ]
+        ci = CalcInput(
+            setup_type="per_unit",
+            pools=[
+                PoolDefinition(
+                    pool_id=1, pool_key="ownership", pool_name="Ownership",
+                    allocation_method="ownership_percentage", recipient_scope="all_units",
+                ),
+            ],
+            recipient_set=RecipientSet(recipients=units),
+            budget_lines=[
+                BudgetLineInput(
+                    line_id=1, normalized_label="dues",
+                    section="income", category="income",
+                    fund_type="operating", amount=Decimal("6000"),
+                ),
+            ],
+            mappings=[
+                BudgetLineMappingInput(
+                    budget_line_normalized_label="dues",
+                    section="income", category="income",
+                    fund_type="operating", pool_key="ownership",
+                ),
+            ],
+            approved_assessment_revenue_annual=Decimal("6000") + Decimal("3600"),
+            special_assessments=[
+                SpecialAssessmentInput(
+                    status="approved_scheduled",
+                    included_in_regular_monthly=True,
+                    amount_per_unit=Decimal("100"),
+                    label="Roof SA",
+                ),
+            ],
+        )
+        result = run(ci)
+        sa_rows = {
+            r.recipient_ref.ref_id: r.unrounded_component_monthly
+            for r in result.pool_allocations
+            if r.pool_key == "special_assessment"
+        }
+        # scope-wide monthly total = 300, split 20/30/50
+        assert sa_rows[1] == Decimal("60.0")
+        assert sa_rows[2] == Decimal("90.0")
+        assert sa_rows[3] == Decimal("150.0")
+
+    def test_no_matching_pool_falls_back_to_equal_with_warning(self) -> None:
+        # Pool covers "residential_only"; special assessment scope is "all_units" ->
+        # no pool matches, so it must fall back to equal + surface a warning
+        # rather than silently guessing.
+        units = [
+            RecipientReference(ref_type="unit", ref_id=1, label="U1", unit_count=1, category="residential"),
+            RecipientReference(ref_type="unit", ref_id=2, label="U2", unit_count=1, category="commercial"),
+        ]
+        ci = CalcInput(
+            setup_type="per_unit",
+            pools=[
+                PoolDefinition(
+                    pool_id=1, pool_key="equal", pool_name="Equal",
+                    allocation_method="equal", recipient_scope="residential_only",
+                ),
+            ],
+            recipient_set=RecipientSet(recipients=units),
+            budget_lines=[
+                BudgetLineInput(
+                    line_id=1, normalized_label="dues",
+                    section="income", category="income",
+                    fund_type="operating", amount=Decimal("1200"),
+                ),
+            ],
+            mappings=[
+                BudgetLineMappingInput(
+                    budget_line_normalized_label="dues",
+                    section="income", category="income",
+                    fund_type="operating", pool_key="equal",
+                ),
+            ],
+            approved_assessment_revenue_annual=Decimal("1200") + Decimal("2400"),
+            special_assessments=[
+                SpecialAssessmentInput(
+                    status="approved_scheduled",
+                    included_in_regular_monthly=True,
+                    amount_per_unit=Decimal("100"),
+                    recipient_scope="all_units",
+                    label="Roof SA",
+                ),
+            ],
+        )
+        result = run(ci)
+        sa_rows = {
+            r.recipient_ref.ref_id: r.unrounded_component_monthly
+            for r in result.pool_allocations
+            if r.pool_key == "special_assessment"
+        }
+        assert sa_rows[1] == Decimal("100")
+        assert sa_rows[2] == Decimal("100")
+        assert any("NoAllocationDataWarning" in w for w in result.warnings)
+
+    def test_specified_value_pool_falls_back_to_equal_with_warning(self) -> None:
+        # specified_value can't be generalized to an arbitrary new total
+        # (it's an absolute per-budget-line dollar lookup); must fall back
+        # to equal rather than misusing the regular pool's dollar figures.
+        units = [
+            RecipientReference(ref_type="unit", ref_id=1, label="U1", unit_count=1),
+            RecipientReference(ref_type="unit", ref_id=2, label="U2", unit_count=1),
+        ]
+        ci = CalcInput(
+            setup_type="per_unit",
+            pools=[
+                PoolDefinition(
+                    pool_id=1, pool_key="specified", pool_name="Specified",
+                    allocation_method="specified_value", recipient_scope="all_units",
+                ),
+            ],
+            recipient_set=RecipientSet(recipients=units),
+            budget_lines=[
+                BudgetLineInput(
+                    line_id=1, normalized_label="dues",
+                    section="income", category="income",
+                    fund_type="operating", amount=Decimal("1200"),
+                ),
+            ],
+            mappings=[
+                BudgetLineMappingInput(
+                    budget_line_normalized_label="dues",
+                    section="income", category="income",
+                    fund_type="operating", pool_key="specified",
+                ),
+            ],
+            specified_value_lookup={
+                (1, "specified"): Decimal("40"),
+                (2, "specified"): Decimal("60"),
+            },
+            approved_assessment_revenue_annual=Decimal("1200") + Decimal("2400"),
+            special_assessments=[
+                SpecialAssessmentInput(
+                    status="approved_scheduled",
+                    included_in_regular_monthly=True,
+                    amount_per_unit=Decimal("100"),
+                    label="Roof SA",
+                ),
+            ],
+        )
+        result = run(ci)
+        sa_rows = {
+            r.recipient_ref.ref_id: r.unrounded_component_monthly
+            for r in result.pool_allocations
+            if r.pool_key == "special_assessment"
+        }
+        assert sa_rows[1] == Decimal("100")
+        assert sa_rows[2] == Decimal("100")
+        assert any("FallbackWarning" in w for w in result.warnings)
+
+    def test_legacy_style_entry_unit_grain_equal_is_byte_identical(self) -> None:
+        # Confirms the internal total-derivation (amount_per_unit * total_units)
+        # reproduces today's exact per-recipient output for the common
+        # unit-grain equal-allocation case (the shape every existing HOA uses).
+        ci = _baseline()
+        ci.special_assessments = [
+            SpecialAssessmentInput(
+                status="approved_scheduled",
+                included_in_regular_monthly=True,
+                amount_per_unit=Decimal("50"),
+                label="Roof SA 2026",
+            ),
+        ]
+        result = run(ci)
+        sa_rows = [r for r in result.pool_allocations if r.pool_key == "special_assessment"]
+        assert len(sa_rows) == 5
+        assert all(r.unrounded_component_monthly == Decimal("50") for r in sa_rows)
+
+
 class TestMultipleSpecialAssessments:
     def test_mix_of_kinds_handled_independently(self) -> None:
         ci = _baseline()

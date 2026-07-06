@@ -10,14 +10,35 @@ import {
   getHOADisclosureSettings,
   putHOADisclosureSettings,
 } from '../api/hoaSettings';
+import { HOALogoUploadControl } from './HOALogoUploadControl';
 import { Button } from './ui/button';
 
 const EMPTY_ASSESSMENT: SpecialAssessmentEntry = {
   due_date: '',
   amount_per_unit: 0,
-  frequency: 'month',
   purpose: '',
 };
+
+// Special assessments are one-time by definition (see design.md Decision 7),
+// so the form no longer collects/writes a recurring `frequency` — legacy
+// stored values are left untouched and simply ignored on read.
+
+// Native <input type="date"> uses YYYY-MM-DD; the stored/disclosed value is
+// MM/DD/YYYY (task 5.1/5.5) — no third-party date-picker dependency needed,
+// every evergreen browser already renders a calendar popup for type="date".
+function mmddyyyyToInputValue(value: string): string {
+  const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(value);
+  if (!m) return '';
+  const [, mm, dd, yyyy] = m;
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+function inputValueToMmddyyyy(value: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!m) return '';
+  const [, yyyy, mm, dd] = m;
+  return `${mm}/${dd}/${yyyy}`;
+}
 
 const EMPTY_LOAN: OutstandingLoan = {
   balance: 0,
@@ -93,7 +114,10 @@ export const HOADisclosureSettingsForm = forwardRef<
     setSaving(true);
     setError(null);
     try {
-      const { property_id: _propertyId, ...writable } = settings;
+      // property_id and has_logo are derived/read-only fields returned by GET;
+      // the backend's _ALLOWED_FIELDS allowlist rejects unknown keys, so both
+      // must be stripped before resending the full settings blob on save.
+      const { property_id: _propertyId, has_logo: _hasLogo, ...writable } = settings;
       const next = await putHOADisclosureSettings(hoaId, writable);
       setSettings(next);
       setSavedAt(new Date().toLocaleTimeString());
@@ -180,18 +204,21 @@ export const HOADisclosureSettingsForm = forwardRef<
         rows.map((row, i) => (
           <div key={i} className="space-y-1 border-l-2 border-[#e5e5e5] pl-2">
             <div
-              className={`grid gap-2 ${includePurpose ? 'sm:grid-cols-[1fr_1fr_1fr_2fr_auto]' : 'sm:grid-cols-[1fr_1fr_1fr_auto]'}`}
+              className={`grid gap-2 ${includePurpose ? 'sm:grid-cols-[1fr_1fr_2fr_auto]' : 'sm:grid-cols-[1fr_1fr_auto]'}`}
             >
-              <input
-                placeholder="Due date"
-                value={row.due_date}
-                onChange={(e) => {
-                  const next = [...rows];
-                  next[i] = { ...row, due_date: e.target.value };
-                  updateList(key, next);
-                }}
-                className="border border-[#d4d4d4] rounded px-2 py-1 text-sm"
-              />
+              <label className="block">
+                <span className="block text-[10px] text-[#a3a3a3]">Due date</span>
+                <input
+                  type="date"
+                  value={mmddyyyyToInputValue(row.due_date)}
+                  onChange={(e) => {
+                    const next = [...rows];
+                    next[i] = { ...row, due_date: inputValueToMmddyyyy(e.target.value) };
+                    updateList(key, next);
+                  }}
+                  className="w-full border border-[#d4d4d4] rounded px-2 py-1 text-sm"
+                />
+              </label>
               <input
                 type="number"
                 step="0.01"
@@ -200,16 +227,6 @@ export const HOADisclosureSettingsForm = forwardRef<
                 onChange={(e) => {
                   const next = [...rows];
                   next[i] = { ...row, amount_per_unit: Number(e.target.value) };
-                  updateList(key, next);
-                }}
-                className="border border-[#d4d4d4] rounded px-2 py-1 text-sm"
-              />
-              <input
-                placeholder="month / year / one-time"
-                value={row.frequency}
-                onChange={(e) => {
-                  const next = [...rows];
-                  next[i] = { ...row, frequency: e.target.value };
                   updateList(key, next);
                 }}
                 className="border border-[#d4d4d4] rounded px-2 py-1 text-sm"
@@ -250,17 +267,23 @@ export const HOADisclosureSettingsForm = forwardRef<
                 <option value="possible_disclosure_only">Possible (disclosure only)</option>
                 <option value="none">None</option>
               </select>
-              <label className="flex items-center gap-1 text-xs">
-                <input
-                  type="checkbox"
-                  checked={row.included_in_regular_monthly || false}
-                  onChange={(e) => {
-                    const next = [...rows];
-                    next[i] = { ...row, included_in_regular_monthly: e.target.checked };
-                    updateList(key, next);
-                  }}
-                />
-                Included in monthly
+              <label className="flex flex-col gap-0.5 text-xs" title="Checking this adds the amount to the recipients' regular monthly assessment; unchecked, it's disclosed separately from the regular monthly schedule.">
+                <span className="flex items-center gap-1">
+                  <input
+                    type="checkbox"
+                    checked={row.included_in_regular_monthly || false}
+                    onChange={(e) => {
+                      const next = [...rows];
+                      next[i] = { ...row, included_in_regular_monthly: e.target.checked };
+                      updateList(key, next);
+                    }}
+                  />
+                  Included in monthly
+                </span>
+                <span className="text-[10px] text-[#a3a3a3] leading-tight">
+                  Checked: added to the regular monthly assessment.
+                  Unchecked: disclosed as a separate one-time charge.
+                </span>
               </label>
               <input
                 placeholder="Disclosure language (for 'possible' status)"
@@ -352,6 +375,12 @@ export const HOADisclosureSettingsForm = forwardRef<
 
   return (
     <div className="space-y-4">
+      <HOALogoUploadControl
+        hoaId={hoaId}
+        hasLogo={settings.has_logo}
+        onChanged={(hasLogo) => setSettings({ ...settings, has_logo: hasLogo })}
+      />
+
       <p className="text-xs text-[#737373]">
         These values drive the rendered disclosure package PDF — every field below is read at
         generate time. Blank numeric fields mean &ldquo;derive from data&rdquo; (e.g. blank

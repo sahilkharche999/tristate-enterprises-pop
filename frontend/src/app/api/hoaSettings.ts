@@ -14,9 +14,11 @@ export type SpecialAssessmentStatus =
   | 'possible_disclosure_only';
 
 export interface SpecialAssessmentEntry {
-  due_date: string;          // free text or ISO date
+  due_date: string;          // MM/DD/YYYY (task 5.1/5.5)
   amount_per_unit: number;   // dollars; cents preserved
-  frequency: string;         // 'month' | 'year' | 'one-time' | free text
+  // `frequency` removed from the form (task 5.3) — a special assessment is
+  // inherently one-time. Legacy stored entries may still carry a
+  // `frequency` key; the backend ignores it rather than erroring.
   purpose: string;
   // Phase 4.4 extensions — optional for backward compatibility with
   // pre-Phase-4 saved data; backend `infer_special_assessment_status`
@@ -100,6 +102,8 @@ export interface HOADisclosureSettings {
   // 30-year reserve funding study (drifting-puzzling-grove rebuild)
   replacement_fund_monthly_assessment_per_unit: number | null;
   board_deferrals_json: string;                // JSON-encoded BoardDeferralEntry[]
+  // Per-HOA disclosure-package logo (fix-disclosure-layout-toc-special-assessment)
+  has_logo: boolean;
 }
 
 export async function getHOADisclosureSettings(hoaId: number): Promise<HOADisclosureSettings> {
@@ -115,6 +119,32 @@ export async function putHOADisclosureSettings(
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify(payload),
+  });
+  return handleResponse<HOADisclosureSettings>(r);
+}
+
+export function hoaLogoUrl(hoaId: number): string {
+  return `${BASE_URL}/hoa/${hoaId}/settings/logo`;
+}
+
+export async function uploadHOALogo(
+  hoaId: number,
+  file: File,
+): Promise<HOADisclosureSettings> {
+  const form = new FormData();
+  form.append('file', file);
+  const r = await fetch(`${BASE_URL}/hoa/${hoaId}/settings/logo`, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: form,
+  });
+  return handleResponse<HOADisclosureSettings>(r);
+}
+
+export async function deleteHOALogo(hoaId: number): Promise<HOADisclosureSettings> {
+  const r = await fetch(`${BASE_URL}/hoa/${hoaId}/settings/logo`, {
+    method: 'DELETE',
+    headers: authHeaders(),
   });
   return handleResponse<HOADisclosureSettings>(r);
 }

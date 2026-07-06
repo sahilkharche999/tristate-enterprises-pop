@@ -17,6 +17,7 @@ from unittest.mock import patch
 import pytest
 
 from app.disclosure_package.compile_inputs import (
+    resolve_compile_appendix_entries,
     resolve_compile_appendix_paths,
 )
 
@@ -35,8 +36,9 @@ def test_extra_appendix_paths_parameter_exists():
 
 
 def test_run_render_job_resolves_manifest_paths(monkeypatch, tmp_path):
-    """``run_render_job`` calls ``resolve_compile_appendix_paths`` and
-    forwards the result to ``compile_package``."""
+    """``run_render_job`` calls ``resolve_compile_appendix_entries`` and
+    forwards both the resolved paths and their display titles to
+    ``compile_package`` (titles needed for the appendix TOC entries)."""
     from app.disclosure_package import service as dp_service
 
     # Capture call args without actually rendering
@@ -59,11 +61,14 @@ def test_run_render_job_resolves_manifest_paths(monkeypatch, tmp_path):
     # The integration test depends on the SQL+SQLAlchemy session, so we
     # assert the symbol-level fact: the wiring is present in the source.
     src = Path(dp_service.__file__).read_text()
-    assert "resolve_compile_appendix_paths" in src, (
-        "run_render_job should call resolve_compile_appendix_paths"
+    assert "resolve_compile_appendix_entries" in src, (
+        "run_render_job should call resolve_compile_appendix_entries"
     )
     assert "extra_appendix_paths=manifest_paths" in src, (
         "run_render_job should forward the resolved paths"
+    )
+    assert "extra_appendix_titles=manifest_titles" in src, (
+        "run_render_job should forward the resolved display titles"
     )
 
 
@@ -146,11 +151,13 @@ def test_assessment_revenue_uses_legacy_draft_line_item_shape():
 def test_extra_appendix_paths_dedup_by_filename():
     """When the same filename appears in both the static spec entries
     and the DB manifest, the duplicate is silently skipped."""
-    # This is a code-shape assertion: the compile_package logic uses
-    # ``already_merged`` set keyed on Path.name. We test the dedup math
-    # by examining the source for the guard.
+    # This is a code-shape assertion: the compile_package logic uses a
+    # ``seen_appendix_names`` set keyed on filename, built once while
+    # resolving the single appendix merge order (also used for the TOC
+    # page-number computation) — this replaced the old separate
+    # ``already_merged`` set from before appendix TOC entries existed.
     from app.disclosure_package import compiler
 
     src = Path(compiler.__file__).read_text()
-    assert "already_merged = {p.name for p in full_paths}" in src
+    assert "seen_appendix_names" in src
     assert "skipping duplicate manifest appendix" in src

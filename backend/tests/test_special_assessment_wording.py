@@ -34,6 +34,9 @@ def _base_context(special_assessments: list[dict[str, Any]]) -> dict[str, Any]:
         "static_data": spec.static_data,
         "fiscal_year": 2026,
         "hoa": hoa,
+        "toc_page_numbers": {},
+        "appendix_toc_entries": [],
+        "hoa_logo_data_uri": None,
         "hoa_settings": {
             "management_company": "Mgmt Co",
             "management_company_address": "Addr",

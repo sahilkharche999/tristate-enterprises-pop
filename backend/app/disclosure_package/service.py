@@ -644,6 +644,7 @@ def _resolve_preflight_inputs(
         "assessment_increase_schedule_json",
         "replacement_fund_monthly_assessment_per_unit",
         "board_deferrals_json",
+        "logo_filename",
     ):
         val = getattr(settings_row, field, None)
         if val not in (None, ""):
@@ -759,13 +760,15 @@ def run_render_job(
             getattr(property_row, "assessment_mode", None) if property_row else None
         )
 
-        from .compile_inputs import resolve_compile_appendix_paths
+        from .compile_inputs import resolve_compile_appendix_entries
         from .assessment_schedule_matrix import build_matrix_for_assessment_mode
 
         raw_conn = session.connection().connection
-        manifest_paths = resolve_compile_appendix_paths(
+        manifest_entries = resolve_compile_appendix_entries(
             property_id=hoa_id, package_id=None, connection=raw_conn,
         )
+        manifest_paths = [path for path, _title in manifest_entries]
+        manifest_titles = {path.name: title for path, title in manifest_entries}
 
         assessment_mapping_counts = _materialize_assessment_mappings_for_budget_draft(
             connection=raw_conn,
@@ -809,6 +812,7 @@ def run_render_job(
             appendices_root=appendix_dir_for(hoa_id),
             hoa_settings_overrides=bundle.overrides,
             extra_appendix_paths=manifest_paths,
+            extra_appendix_titles=manifest_titles,
             assessment_matrix=assessment_matrix,
         )
 

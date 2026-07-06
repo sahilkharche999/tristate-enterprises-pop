@@ -40,16 +40,24 @@ def _deny_url_fetcher(url: str, timeout: int = 10, ssl_context=None) -> dict:
     css @import). Phase 11 templates use only locally-bundled fonts and no
     remote images. Anything else is treated as a tampering attempt.
 
-    Permits only ``file:`` URLs that resolve inside the templates directory
-    and reject any path that contains ``..`` segments (path-traversal guard,
-    T-11-05). Returns the standard WeasyPrint dict shape via
-    ``weasyprint.urls.default_url_fetcher`` for permitted local files.
+    Permits ``file:`` URLs that resolve inside the templates directory,
+    rejecting any path that contains ``..`` segments (path-traversal guard,
+    T-11-05), and ``data:`` URIs (task 2.3 per-HOA logo: inline base64
+    image data carries no network/file access at all, so it can't be an
+    SSRF vector — T-11-03 only concerns fetching an external resource).
+    Returns the standard WeasyPrint dict shape via
+    ``weasyprint.urls.default_url_fetcher`` for both permitted cases.
     """
     if url.startswith("file:"):
         if ".." in url:
             raise RemoteFetchDenied(
                 f"Path traversal blocked in template URL: {url}"
             )
+        from weasyprint.urls import default_url_fetcher
+
+        return default_url_fetcher(url, timeout=timeout, ssl_context=ssl_context)
+
+    if url.startswith("data:"):
         from weasyprint.urls import default_url_fetcher
 
         return default_url_fetcher(url, timeout=timeout, ssl_context=ssl_context)
@@ -147,6 +155,18 @@ def render_package(
                 "spec": spec,
                 "static_data": spec.static_data,
                 "fiscal_year": spec.fiscal_year,
+                # Default so TOC/page-reference templates can safely call
+                # ``toc_page_numbers.get(...)`` even outside compiler.py's
+                # two-pass render (e.g. standalone/test renders). Real
+                # values are computed and injected by compile_package.
+                "toc_page_numbers": {},
+                # Same reasoning: appendix TOC rows are computed by
+                # compile_package's single-source-of-truth appendix
+                # resolution; standalone/test renders see an empty list.
+                "appendix_toc_entries": [],
+                # Default so _base.html's logo conditional doesn't raise
+                # StrictUndefined outside compile_package. None -> default mark.
+                "hoa_logo_data_uri": None,
                 **computed,
             }
             out[entry.template] = render_template(

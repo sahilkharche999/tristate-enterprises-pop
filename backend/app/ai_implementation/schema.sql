@@ -344,6 +344,7 @@ CREATE TABLE IF NOT EXISTS hoa_settings (
     letter_signed_by                    TEXT DEFAULT 'Board of Directors',
     tenant_id                           INTEGER NOT NULL DEFAULT 1,
     version_int                         INTEGER NOT NULL DEFAULT 0,
+    logo_filename                       TEXT,
     updated_at                          TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

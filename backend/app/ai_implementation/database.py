@@ -126,6 +126,12 @@ _HOA_SETTINGS_COLUMN_DEFINITIONS: dict[str, str] = {
     # dre-driven-assessment-engine).
     "tenant_id": "INTEGER NOT NULL DEFAULT 1",
     "version_int": "INTEGER NOT NULL DEFAULT 0",
+    # Per-HOA disclosure-package letterhead logo (fix-disclosure-layout-toc-
+    # special-assessment). Nullable — HOAs without one render the existing
+    # default inline SVG mark. Stores a relative filename under
+    # BUDGET_STORAGE_ROOT/hoa-logos/, not an absolute path (mirrors how
+    # budget/DRE uploads are stored — see budget_storage_service.py).
+    "logo_filename": "TEXT",
 }
 
 

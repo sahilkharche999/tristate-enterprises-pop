@@ -71,6 +71,28 @@ def should_use_snapshots(
     return all(v is not None for v in (a, b, r, m))
 
 
+def resolve_compile_appendix_entries(
+    *,
+    property_id: int,
+    package_id: Optional[int],
+    connection: sqlite3.Connection,
+) -> list[tuple[Path, str]]:
+    """Resolve the appendix manifest into (path, display_title) pairs.
+
+    Same resolution as :func:`resolve_compile_appendix_paths`, but keeps
+    each entry's ``display_title`` (task: appendix TOC page numbers) so
+    the compiler can label these appendices in the table of contents.
+    """
+    manifest = resolve_appendix_manifest(
+        property_id=property_id, package_id=package_id, connection=connection,
+    )
+    entries: list[tuple[Path, str]] = []
+    for entry in manifest:
+        if appendix_file_exists(entry.file_id):
+            entries.append((appendix_file_path(entry.file_id), entry.display_title))
+    return entries
+
+
 def resolve_compile_appendix_paths(
     *,
     property_id: int,
@@ -85,14 +107,10 @@ def resolve_compile_appendix_paths(
     skip-with-warning behavior); the caller decides whether a missing
     appendix should fail preflight.
     """
-    manifest = resolve_appendix_manifest(
+    entries = resolve_compile_appendix_entries(
         property_id=property_id, package_id=package_id, connection=connection,
     )
-    paths: list[Path] = []
-    for entry in manifest:
-        if appendix_file_exists(entry.file_id):
-            paths.append(appendix_file_path(entry.file_id))
-    return paths
+    return [path for path, _title in entries]
 
 
 def compile_input_summary(
@@ -123,6 +141,7 @@ def compile_input_summary(
 
 __all__ = [
     "compile_input_summary",
+    "resolve_compile_appendix_entries",
     "resolve_compile_appendix_paths",
     "should_use_snapshots",
 ]

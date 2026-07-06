@@ -1,13 +1,14 @@
 """GET / PUT /hoa/{hoa_id}/settings/disclosure for the disclosure-package config."""
 from typing import Any, Dict
 
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, File, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from ..ai_implementation.db import get_session
 from ..ai_implementation.db.models import Property
 from ..auth.dependencies import get_current_user
-from ..services import hoa_settings_service
+from ..services import hoa_logo_storage, hoa_settings_service
 
 router = APIRouter(prefix="/hoa", tags=["HOA Settings"])
 
@@ -52,6 +53,7 @@ def _row_to_dict(row) -> Dict[str, Any]:
         # 30-year reserve funding study (drifting-puzzling-grove rebuild)
         "replacement_fund_monthly_assessment_per_unit": row.replacement_fund_monthly_assessment_per_unit,
         "board_deferrals_json": row.board_deferrals_json or "[]",
+        "has_logo": hoa_logo_storage.hoa_logo_exists(row.logo_filename),
     }
 
 
@@ -81,3 +83,59 @@ async def put_disclosure_settings(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return _row_to_dict(row)
+
+
+@router.post("/{hoa_id}/settings/logo")
+async def upload_hoa_logo(
+    hoa_id: int,
+    file: UploadFile = File(...),
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user),  # noqa: ARG001
+):
+    if not session.query(Property).filter_by(id=hoa_id).one_or_none():
+        raise HTTPException(status_code=404, detail=f"HOA not found: {hoa_id}")
+    row = hoa_settings_service.get_or_create(session, hoa_id=hoa_id)
+    file_bytes = await file.read()
+    try:
+        relative_path = hoa_logo_storage.save_hoa_logo(
+            property_id=hoa_id,
+            file_bytes=file_bytes,
+            original_filename=file.filename or "logo",
+        )
+    except hoa_logo_storage.UnsupportedLogoFileType as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    row.logo_filename = relative_path
+    session.commit()
+    session.refresh(row)
+    return _row_to_dict(row)
+
+
+@router.delete("/{hoa_id}/settings/logo")
+async def delete_hoa_logo(
+    hoa_id: int,
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user),  # noqa: ARG001
+):
+    if not session.query(Property).filter_by(id=hoa_id).one_or_none():
+        raise HTTPException(status_code=404, detail=f"HOA not found: {hoa_id}")
+    row = hoa_settings_service.get_or_create(session, hoa_id=hoa_id)
+    if row.logo_filename:
+        hoa_logo_storage.delete_hoa_logo(row.logo_filename)
+        row.logo_filename = None
+        session.commit()
+        session.refresh(row)
+    return _row_to_dict(row)
+
+
+@router.get("/{hoa_id}/settings/logo")
+async def get_hoa_logo(
+    hoa_id: int,
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user),  # noqa: ARG001
+) -> FileResponse:
+    if not session.query(Property).filter_by(id=hoa_id).one_or_none():
+        raise HTTPException(status_code=404, detail=f"HOA not found: {hoa_id}")
+    row = hoa_settings_service.get_or_create(session, hoa_id=hoa_id)
+    if not row.logo_filename or not hoa_logo_storage.hoa_logo_exists(row.logo_filename):
+        raise HTTPException(status_code=404, detail="No logo configured for this HOA")
+    return FileResponse(path=hoa_logo_storage.hoa_logo_path(row.logo_filename))

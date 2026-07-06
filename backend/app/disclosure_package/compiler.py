@@ -35,8 +35,10 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from decimal import Decimal
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Optional
 
@@ -62,7 +64,12 @@ from .formulas import (
     under_funded_balance_per_unit,
     under_funded_balance_total,
 )
-from .merge import merge_pdfs, qpdf_check, write_atomic_bytes
+from .merge import (
+    merge_pdfs,
+    qpdf_check,
+    stamp_absolute_page_numbers,
+    write_atomic_bytes,
+)
 from .preflight import infer_special_assessment_status, validate_inputs
 from .render import render_template
 from .reconciliation import (
@@ -92,6 +99,73 @@ from .schemas import (
 logger = logging.getLogger(__name__)
 
 APPENDICES_DIR = Path(__file__).parent / "appendices"
+
+# Templates whose content displays a page number belonging to *another*
+# section (TOC entries, the §5570 page-reference grid) — these render
+# twice: once in pass 1 (to get a page-count-accurate placeholder render),
+# then again in pass 2 once every section's real page count is known.
+_PAGE_NUMBER_DEPENDENT_TEMPLATES = {
+    "annual_budget_report_toc.html",
+    "pro_forma_disclosure_summary.html",
+}
+
+
+def _pdf_page_count(pdf_bytes: bytes) -> int:
+    """Real page count of a single rendered-template PDF (task 3.1) —
+    replaces the static ``page_count_hint`` estimate for TOC/page-reference
+    offset computation."""
+    from pypdf import PdfReader
+
+    return len(PdfReader(BytesIO(pdf_bytes)).pages)
+
+
+def _humanize_filename_title(filename: str) -> str:
+    """Fallback TOC label for an appendix with no operator-set display
+    title (static/ad-hoc appendices — DB-manifest appendices always carry
+    a real ``display_title``). Purely mechanical (strip extension,
+    separators -> spaces, title-case); not tuned to any specific file
+    name, so it degrades gracefully for any HOA's uploaded appendix set."""
+    stem = filename.rsplit(".", 1)[0] if "." in filename else filename
+    words = re.split(r"[_\-]+", stem)
+    return " ".join(w for w in words if w).strip().title() or filename
+
+
+_LOGO_MIME_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".svg": "image/svg+xml",
+}
+
+
+def _hoa_logo_data_uri(logo_filename: Optional[str]) -> Optional[str]:
+    """Resolve a stored per-HOA logo to an inline base64 data URI, or
+    ``None`` when unset/missing so ``_base.html`` falls back to the
+    default inline mark (task 2.3). See the "Per-HOA logo" comment at the
+    call site for why this is a data URI rather than a file:// <img src>.
+    """
+    if not logo_filename:
+        return None
+    from app.services import hoa_logo_storage
+
+    if not hoa_logo_storage.hoa_logo_exists(logo_filename):
+        logger.warning(
+            "compiler: hoa_settings.logo_filename=%r does not exist on disk; "
+            "falling back to default logo", logo_filename,
+        )
+        return None
+    import base64
+
+    path = hoa_logo_storage.hoa_logo_path(logo_filename)
+    mime = _LOGO_MIME_TYPES.get(path.suffix.lower())
+    if mime is None:
+        logger.warning(
+            "compiler: unrecognized logo file extension %r; falling back "
+            "to default logo", path.suffix,
+        )
+        return None
+    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f"data:{mime};base64,{encoded}"
 
 
 class CompileError(RuntimeError):
@@ -940,6 +1014,7 @@ def compile_package(
     appendices_root: Optional[Path] = None,
     hoa_settings_overrides: Optional[dict] = None,
     extra_appendix_paths: Optional[list[Path]] = None,
+    extra_appendix_titles: Optional[dict[str, str]] = None,
     assessment_matrix: Optional[AssessmentScheduleMatrix] = None,
 ) -> CompileResult:
     """Run the full disclosure-package compilation pipeline.
@@ -1071,6 +1146,15 @@ def compile_package(
             if value is not None:
                 effective_hoa_settings[key] = value
 
+    # 2b. Per-HOA logo (task 2.3): resolve the stored file to an inline
+    #     base64 data URI rather than a file:// <img src>. render.py's
+    #     url_fetcher (T-11-03/_deny_url_fetcher) only permits local file:
+    #     paths INSIDE the templates directory — a per-HOA upload living
+    #     under BUDGET_STORAGE_ROOT is outside that sandbox by design, so a
+    #     direct file:// reference would be rejected. Embedding as a data
+    #     URI avoids ever needing a network/file fetch during render.
+    hoa_logo_data_uri = _hoa_logo_data_uri(effective_hoa_settings.get("logo_filename"))
+
     # 3. Pre-compute section-grouped expenses/revenues so we can capture
     #    them in the audit input_snapshot (the snapshot is serialized at
     #    audit_context open time, so they cannot be added retroactively
@@ -1163,78 +1247,50 @@ def compile_package(
             "today": datetime.now(timezone.utc).strftime("%A %B %-d, %Y"),
             "today_iso": datetime.now(timezone.utc).date().isoformat(),
             "hoa_settings": effective_hoa_settings,
+            "hoa_logo_data_uri": hoa_logo_data_uri,
             **computed,
         }
 
-        # 4. Render every GeneratedPage entry → per-template PDF on disk.
-        #    Each is written via write_atomic_bytes so a partial render
-        #    cannot leak an inconsistent file at the temp path. The
-        #    intermediate files use a leading "." prefix so they do not
-        #    collide with package.pdf or any user-facing artifact.
+        # 3b. Resolve the appendix merge order + display titles ONCE, before
+        #     any rendering — this is the single source of truth both the
+        #     TOC page-number computation below and the final merge order
+        #     (step 5) read from, so the two can never drift apart.
+        #     Static (spec-declared) appendices keep their position relative
+        #     to spec.entries (interleaving with GeneratedPage entries is
+        #     supported, even though no shipped PackageSpec does this
+        #     today); ad-hoc directory extras and DB-manifest appendices
+        #     always trail after everything else, matching the previous
+        #     5b/5c/5d behavior.
+        extra_appendix_titles = extra_appendix_titles or {}
+        spec_appendix_paths: dict[str, tuple[Path, str]] = {}
+        seen_appendix_names: set[str] = set()
         for entry in spec.entries:
-            if isinstance(entry, GeneratedPage):
-                pdf_bytes = render_template(
-                    template_name=entry.template,
-                    context=ctx_full,
-                )
-                tmp_path = output_dir / f".gen_{entry.template}.pdf"
-                write_atomic_bytes(tmp_path, pdf_bytes)
-                intermediate_pdfs.append(tmp_path)
-
-        # 5a. Concat generated pages into intermediate generated.pdf for
-        #     debugging (kept on disk after compile so an operator can
-        #     inspect just the system-generated portion in isolation).
-        generated_path = output_dir / "generated.pdf"
-        merge_pdfs(intermediate_pdfs, generated_path)
-
-        # 5b. Build full merge order: walk spec.entries; GeneratedPage
-        #     entries always merge in; StaticAppendix entries merge in
-        #     when the file exists on disk and are silently skipped
-        #     otherwise (compile keeps working with 0-N appendix PDFs).
-        full_paths: list[Path] = []
-        spec_appendix_files: set[str] = set()
-        gen_index = 0
-        for entry in spec.entries:
-            if isinstance(entry, GeneratedPage):
-                full_paths.append(intermediate_pdfs[gen_index])
-                gen_index += 1
-            elif isinstance(entry, StaticAppendix):
-                spec_appendix_files.add(entry.file)
+            if isinstance(entry, StaticAppendix):
                 appendix_path = appendices_root / entry.file
                 if appendix_path.exists():
-                    full_paths.append(appendix_path)
+                    title = extra_appendix_titles.get(entry.file) or _humanize_filename_title(entry.file)
+                    spec_appendix_paths[entry.file] = (appendix_path, title)
+                    seen_appendix_names.add(entry.file)
                 else:
                     logger.info(
-                        "compiler: skipping missing static appendix %s",
-                        entry.file,
+                        "compiler: skipping missing static appendix %s", entry.file,
                     )
 
-        # 5c. Append any extra PDFs the operator dropped into the appendix
-        #     directory that aren't named in spec.entries — sorted so the
-        #     order is deterministic across runs. This is the "drop a
-        #     random appendix in and have it included" path.
+        adhoc_appendix_entries: list[tuple[Path, str]] = []
         if appendices_root.is_dir():
-            extras = sorted(
+            for extra in sorted(
                 p for p in appendices_root.glob("*.pdf")
-                if p.name not in spec_appendix_files
-            )
-            for extra in extras:
+                if p.name not in seen_appendix_names
+            ):
+                title = extra_appendix_titles.get(extra.name) or _humanize_filename_title(extra.name)
+                adhoc_appendix_entries.append((extra, title))
+                seen_appendix_names.add(extra.name)
                 logger.info("compiler: appending ad-hoc appendix %s", extra.name)
-                full_paths.append(extra)
 
-        # 5d. Append the DB-driven appendix manifest (Phase 5.4 of
-        #     dre-driven-assessment-engine, task 159). When the caller
-        #     supplies ``extra_appendix_paths`` (built by
-        #     ``compile_inputs.resolve_compile_appendix_paths`` from
-        #     ``annual_package_appendices`` + ``appendix_documents``),
-        #     those files merge in last. Skips files already merged
-        #     above (by file name) to avoid double-merging when the same
-        #     appendix is referenced via both the legacy directory scan
-        #     and the new DB manifest during transition.
+        manifest_appendix_entries: list[tuple[Path, str]] = []
         if extra_appendix_paths:
-            already_merged = {p.name for p in full_paths}
             for extra in extra_appendix_paths:
-                if extra.name in already_merged:
+                if extra.name in seen_appendix_names:
                     logger.info(
                         "compiler: skipping duplicate manifest appendix %s",
                         extra.name,
@@ -1246,16 +1302,129 @@ def compile_package(
                         extra,
                     )
                     continue
-                logger.info(
-                    "compiler: appending manifest appendix %s", extra.name,
+                title = extra_appendix_titles.get(extra.name) or _humanize_filename_title(extra.name)
+                manifest_appendix_entries.append((extra, title))
+                seen_appendix_names.add(extra.name)
+                logger.info("compiler: appending manifest appendix %s", extra.name)
+
+        trailing_appendix_entries = [*adhoc_appendix_entries, *manifest_appendix_entries]
+        appendix_page_counts: dict[str, int] = {
+            str(path): _pdf_page_count(path.read_bytes())
+            for path, _title in [*spec_appendix_paths.values(), *trailing_appendix_entries]
+        }
+
+        # 4. Render every GeneratedPage entry (pass 1), then re-render the
+        #    TOC/page-reference templates with real page numbers computed
+        #    from pass 1's actual output (pass 2) — see design.md Decision
+        #    4. Each section is still rendered as an independent standalone
+        #    PDF (unchanged architecture); only these specific templates
+        #    render twice.
+        #
+        #    ``toc_page_numbers``/``appendix_toc_entries`` are seeded before
+        #    pass 1 so every template (StrictUndefined) can safely reference
+        #    them via ``.get(...)``/iterate them even before real page
+        #    numbers are known. Appendix titles (but not pages) are already
+        #    final at this point, so pass 1 renders the TOC with the correct
+        #    number of appendix rows — critical, since the TOC's own page
+        #    count feeds every later page number; only adding rows in pass 2
+        #    would silently miscount if they spilled onto another page.
+        ctx_full["toc_page_numbers"] = {}
+        ctx_full["appendix_toc_entries"] = [
+            {"title": title, "page": "—"}
+            for _path, title in [*spec_appendix_paths.values(), *trailing_appendix_entries]
+        ]
+        generated_order: list[str] = [
+            entry.template for entry in spec.entries if isinstance(entry, GeneratedPage)
+        ]
+        pdf_bytes_by_template: dict[str, bytes] = {}
+        for template_name in generated_order:
+            pdf_bytes_by_template[template_name] = render_template(
+                template_name=template_name,
+                context=ctx_full,
+            )
+
+        page_counts = {
+            name: _pdf_page_count(b) for name, b in pdf_bytes_by_template.items()
+        }
+
+        # Walk spec.entries in true order (generated pages interleaved with
+        # spec-declared appendices exactly as authored) to compute real
+        # cumulative starting pages, then continue through the always-
+        # trailing ad-hoc/manifest appendices.
+        toc_page_numbers: dict[str, int] = {}
+        appendix_toc_entries: list[dict[str, Any]] = []
+        running_page = 1
+        for entry in spec.entries:
+            if isinstance(entry, GeneratedPage):
+                toc_page_numbers[entry.template] = running_page
+                running_page += page_counts[entry.template]
+            elif isinstance(entry, StaticAppendix) and entry.file in spec_appendix_paths:
+                path, title = spec_appendix_paths[entry.file]
+                appendix_toc_entries.append({"title": title, "page": running_page})
+                running_page += appendix_page_counts[str(path)]
+        for path, title in trailing_appendix_entries:
+            appendix_toc_entries.append({"title": title, "page": running_page})
+            running_page += appendix_page_counts[str(path)]
+
+        ctx_full["toc_page_numbers"] = toc_page_numbers
+        ctx_full["appendix_toc_entries"] = appendix_toc_entries
+        for template_name in _PAGE_NUMBER_DEPENDENT_TEMPLATES & set(generated_order):
+            new_bytes = render_template(template_name=template_name, context=ctx_full)
+            new_count = _pdf_page_count(new_bytes)
+            if new_count != page_counts[template_name]:
+                logger.warning(
+                    "compiler: '%s' page count changed from %d to %d after "
+                    "injecting real page numbers; TOC offsets computed from "
+                    "pass 1 may be off by %d page(s) for later entries",
+                    template_name, page_counts[template_name], new_count,
+                    new_count - page_counts[template_name],
                 )
-                full_paths.append(extra)
-                already_merged.add(extra.name)
+            pdf_bytes_by_template[template_name] = new_bytes
+
+        # Each is written via write_atomic_bytes so a partial render cannot
+        # leak an inconsistent file at the temp path. The intermediate files
+        # use a leading "." prefix so they do not collide with package.pdf
+        # or any user-facing artifact.
+        for entry in spec.entries:
+            if isinstance(entry, GeneratedPage):
+                tmp_path = output_dir / f".gen_{entry.template}.pdf"
+                write_atomic_bytes(tmp_path, pdf_bytes_by_template[entry.template])
+                intermediate_pdfs.append(tmp_path)
+
+        # 5a. Concat generated pages into intermediate generated.pdf for
+        #     debugging (kept on disk after compile so an operator can
+        #     inspect just the system-generated portion in isolation).
+        generated_path = output_dir / "generated.pdf"
+        merge_pdfs(intermediate_pdfs, generated_path)
+
+        # 5b. Build full merge order from the SAME resolved appendix data
+        #     used for the TOC page-number computation above (step 3b) —
+        #     single source of truth, so the merge order and the TOC's
+        #     claimed page numbers can never drift apart. GeneratedPage
+        #     entries and spec-declared appendices merge in spec.entries
+        #     order (interleaved as authored); ad-hoc directory extras and
+        #     DB-manifest appendices always trail after everything else.
+        full_paths: list[Path] = []
+        gen_index = 0
+        for entry in spec.entries:
+            if isinstance(entry, GeneratedPage):
+                full_paths.append(intermediate_pdfs[gen_index])
+                gen_index += 1
+            elif isinstance(entry, StaticAppendix) and entry.file in spec_appendix_paths:
+                full_paths.append(spec_appendix_paths[entry.file][0])
+        for path, _title in trailing_appendix_entries:
+            full_paths.append(path)
 
         package_path = output_dir / "package.pdf"
         merge_pdfs(full_paths, package_path)
 
         # 6. Last-mile structural validator (REQ-D11-007).
+        qpdf_check(package_path)
+
+        # 6b. Stamp the true absolute page number into every page's footer
+        #     (task 3.5) — must run after the merge since it needs the real
+        #     total page count. Re-validate structure after rewriting.
+        stamp_absolute_page_numbers(package_path)
         qpdf_check(package_path)
 
     # 7. Write audit.json beside package.pdf (REQ-D11-011 stub).

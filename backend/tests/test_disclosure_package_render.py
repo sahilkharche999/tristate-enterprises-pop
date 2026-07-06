@@ -362,6 +362,9 @@ def _build_context() -> dict[str, Any]:
         "hoa_settings": hoa_settings,
         "today": "Saturday March 1, 2026",
         "today_iso": "2026-03-01",
+        "toc_page_numbers": {},
+        "appendix_toc_entries": [],
+        "hoa_logo_data_uri": None,
         **_minimal_computed_context(),
     }
 
@@ -454,6 +457,66 @@ def test_render_cover_letter_produces_pdf():
     out = render_template(template_name="cover_letter.html", context=_build_context())
     assert out.startswith(b"%PDF"), "WeasyPrint output must be a PDF"
     assert len(out) > 1000, "Cover letter PDF should be at least 1KB"
+
+
+def test_configured_hoa_logo_embeds_as_real_image_not_broken_alt_text():
+    """Task 2.3/2.5: a configured per-HOA logo must actually decode and
+    embed as a real image in the rendered PDF, not silently degrade to
+    the alt-text fallback WeasyPrint shows for an image it couldn't load.
+    This is a deliverable-level check — a naive fix can produce a correct-
+    looking <img> tag whose data: URI still gets rejected by the
+    render-time url_fetcher, which fails silently (no exception) and only
+    shows up as a visibly broken image."""
+    import base64
+    from io import BytesIO
+
+    import fitz
+    from PIL import Image
+
+    img = Image.new("RGB", (56, 56), (255, 0, 0))
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    data_uri = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
+    ctx = _build_context()
+    ctx["hoa_logo_data_uri"] = data_uri
+    pdf_bytes = render_template(template_name="annual_budget_report_cover.html", context=ctx)
+
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        assert doc[0].get_images(full=True), (
+            "expected a real embedded image on the letterhead; got none — "
+            "the logo likely fell back to broken-image alt text"
+        )
+        pix = doc[0].get_pixmap(dpi=150)
+        assert any(
+            pix.pixel(x, y)[:3] == (255, 0, 0)
+            for y in range(0, 400)
+            for x in range(0, 300)
+        ), "expected the configured red logo pixel to appear on the page"
+    finally:
+        doc.close()
+
+
+def test_default_hoa_logo_renders_inline_svg_mark_when_unconfigured():
+    """Task 2.5: no configured logo -> the existing default inline SVG mark
+    renders (no crash, no blank letterhead)."""
+    import fitz
+
+    ctx = _build_context()
+    ctx["hoa_logo_data_uri"] = None
+    pdf_bytes = render_template(template_name="annual_budget_report_cover.html", context=ctx)
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        # The default mark is vector paths (not a raster <img>), and
+        # 'TriState' brand text sits right next to it either way.
+        assert "TriState" in doc[0].get_text()
+        assert not doc[0].get_images(full=True), (
+            "default (unconfigured) logo should render as vector paths, "
+            "not a raster image"
+        )
+    finally:
+        doc.close()
 
 
 def test_grouped_assessment_wording_does_not_claim_flat_per_unit_amount():
@@ -712,18 +775,32 @@ def test_render_denies_remote_url_fetcher(tmp_path, caplog):
 
 
 def test_deny_url_fetcher_rejects_http_https_and_path_traversal():
-    """Direct unit test on _deny_url_fetcher (T-11-03 + T-11-05)."""
+    """Direct unit test on _deny_url_fetcher (T-11-03 + T-11-05).
+
+    ``data:`` is intentionally NOT in this rejection list (task 2.3 per-HOA
+    logo) — see ``test_deny_url_fetcher_permits_data_uri`` below.
+    """
     from app.disclosure_package.render import _deny_url_fetcher
 
     for url in (
         "https://evil.example.com/font.ttf",
         "http://evil.example.com/font.ttf",
         "ftp://example.com/file",
-        "data:text/plain;base64,SGVsbG8=",
         "file:///tmp/../etc/passwd",
     ):
         with pytest.raises(RemoteFetchDenied):
             _deny_url_fetcher(url)
+
+
+def test_deny_url_fetcher_permits_data_uri():
+    """``data:`` URIs carry no network/file access — allowing them isn't an
+    SSRF vector (T-11-03 only concerns fetching an external resource) — and
+    are needed to embed a per-HOA logo (task 2.3) without a file:// fetch
+    outside the templates directory sandbox."""
+    from app.disclosure_package.render import _deny_url_fetcher
+
+    result = _deny_url_fetcher("data:text/plain;base64,SGVsbG8=")
+    assert result.read() == b"Hello"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

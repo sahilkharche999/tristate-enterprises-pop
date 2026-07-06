@@ -4,6 +4,20 @@ from typing import Any, Dict
 from sqlalchemy.orm import Session
 from ..ai_implementation.db.models import HOASettings
 
+# NOTE on due_date format (task 5.1/5.5): the frontend's date-picker
+# guarantees any special-assessment entry a user actually edits is written
+# as well-formed MM/DD/YYYY — see mmddyyyyToInputValue/inputValueToMmddyyyy
+# in HOADisclosureSettingsForm.tsx. There is deliberately NO hard format
+# validation here at the API boundary: the frontend's save() re-sends the
+# entire settings payload (not a diff) on every save, so a backend
+# rejection here would block an operator from saving ANY unrelated
+# disclosure-settings change the moment one HOA has a pre-existing special
+# assessment whose due_date predates this format (free text or ISO, per
+# the original SpecialAssessmentEntry.due_date comment) — a real
+# backward-compatibility break caught during implementation, not a
+# hypothetical. This matches the same tolerate-legacy-data convention
+# already used for the (now-removed) `frequency` field.
+
 _ALLOWED_FIELDS = {
     "management_company", "management_company_address",
     "management_company_phone", "management_company_fax", "management_company_web",

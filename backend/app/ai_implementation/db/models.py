@@ -132,6 +132,10 @@ class HOASettings(Base):
     # Operator-entered deferrals: list of {year, amount}. Usually [].
     board_deferrals_json = Column(Text, default="[]")
     letter_signed_by = Column(Text, default="Board of Directors")
+    # Per-HOA disclosure-package letterhead logo (fix-disclosure-layout-toc-
+    # special-assessment). Nullable — falls back to the default inline mark
+    # when unset. Stores a storage-root-relative filename, not bytes.
+    logo_filename = Column(Text)
     updated_at = Column(Text, server_default=_CREATED_AT_DEFAULT)
 
 

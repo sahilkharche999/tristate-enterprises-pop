@@ -1376,3 +1376,101 @@ def test_phase1_boilerplate_settings_flow_through_overrides(
     settings_echo = audit["input_snapshot"]["hoa_settings"]
     for k, v in overrides.items():
         assert settings_echo[k] == v, k
+
+
+def test_real_render_toc_and_footer_page_numbers_match_assembled_pdf(
+    tmp_path: Path, qpdf_required,
+) -> None:
+    """Task 3.7: end-to-end, WITHOUT monkeypatching render_template (real
+    WeasyPrint + real merge + real page-number overlay), assert every
+    TOC/page-reference entry's page number matches where that section
+    actually starts in the merged PDF, and every page's footer shows the
+    correct absolute page number — not a hardcoded expected value, but a
+    cross-check against pypdf/fitz-observed positions in the real output.
+    """
+    import fitz
+
+    appendices = tmp_path / "appendices"
+    _seed_appendices(appendices)
+
+    result = compile_package(
+        spec=OLD_MILL_2026,
+        budget_draft=_budget_draft(),
+        reserve_snapshot=_reserve_snapshot(),
+        hoa_metadata=_hoa_metadata(),
+        output_dir=tmp_path / "out",
+        appendices_root=appendices,
+        assessment_matrix=_summary_assessment_matrix(),
+    )
+
+    doc = fitz.open(str(result.output_path))
+    try:
+        total_pages = doc.page_count
+
+        # Footer: every page shows "<absolute position> of <total>", not a
+        # per-section-reset counter (which would repeat "1", "2", ... on
+        # every section boundary instead of counting up monotonically).
+        footer_numbers = []
+        for i in range(total_pages):
+            text = doc[i].get_text()
+            match = None
+            for line in text.splitlines():
+                line = line.strip()
+                if line.endswith(f"of {total_pages}"):
+                    match = line
+            assert match is not None, f"page {i + 1}: no absolute footer page number found"
+            footer_numbers.append(int(match.split(" of ")[0]))
+        assert footer_numbers == list(range(1, total_pages + 1)), (
+            "footer page numbers must count up monotonically across the "
+            "whole assembled PDF, not reset per section"
+        )
+
+        # TOC: each entry's page number must match where a recognizable
+        # string from that section's actual title text appears.
+        toc_text = doc[3].get_text()  # page 4 = annual_budget_report_toc.html
+
+        def _page_number_after(label: str) -> int:
+            for line in toc_text.splitlines():
+                if label in line:
+                    idx = toc_text.splitlines().index(line)
+                    return int(toc_text.splitlines()[idx + 1].strip())
+            raise AssertionError(f"TOC entry not found: {label}")
+
+        pro_forma_page = _page_number_after("Pro Forma Operating Budget")
+        assert "Assessment And Reserve Funding Disclosure Summary" in doc[pro_forma_page - 1].get_text()
+
+        assessment_page = _page_number_after("Assessment Schedule")
+        assert doc[assessment_page - 1].get_text().strip() != ""
+
+        forecasted_page = _page_number_after("Forecasted Statement of Revenues &")
+        assert "FORECASTED STATEMENT" in doc[forecasted_page - 1].get_text().upper()
+
+        note1_page = _page_number_after("Note 1 — The Association")
+        assert "Note 1" in doc[note1_page - 1].get_text()
+
+        note8_page = _page_number_after("Note 8 — Outstanding Loans")
+        assert "Note 8" in doc[note8_page - 1].get_text()
+
+        reserve_sched_page = _page_number_after("Major Component Replacement Provision")
+        assert "Major Component Replacement" in doc[reserve_sched_page - 1].get_text()
+
+        insurance_page = _page_number_after("Insurance Disclosure")
+        assert "Insurance Disclosure" in doc[insurance_page - 1].get_text()
+
+        thirty_year_page = _page_number_after("30-Year Reserve Funding Plan")
+        assert doc[thirty_year_page - 1].get_text().strip() != ""
+
+        # Appendix TOC entries: a seeded static appendix's humanized title
+        # ("insurance_certificate.pdf" -> "Insurance Certificate") must cite
+        # the real page where that appendix's actual content (the stub's
+        # embedded label, seeded by _seed_appendices) begins in the merged
+        # PDF — this is the check that catches a pass-1/pass-2 row-count
+        # mismatch or a merge-order/TOC-order drift for appendices.
+        insurance_cert_page = _page_number_after("Insurance Certificate")
+        assert "insurance_certificate.pdf" in doc[insurance_cert_page - 1].get_text()
+
+        # Pro-forma "Page Reference" grid: both columns populated (not blank).
+        pageref_text = doc[pro_forma_page - 1].get_text()
+        assert "---- Page Reference ----" in pageref_text
+    finally:
+        doc.close()

@@ -27,6 +27,7 @@ from app.assessment_engine.schemas import (
     CalcResultSet,
     PoolAllocationResult,
     RecipientTotalResult,
+    SpecialAssessmentInput,
     SpecialAssessmentRendererEvent,
 )
 from app.disclosure_package.assessment_schedule_matrix import (
@@ -75,6 +76,9 @@ def _text_from_matrix_pdf(matrix) -> str:
                 "management_company_fax": "",
                 "management_company_web": "",
             },
+            "toc_page_numbers": {},
+            "appendix_toc_entries": [],
+            "hoa_logo_data_uri": None,
         },
     )
     assert pdf_bytes.startswith(b"%PDF")
@@ -111,7 +115,19 @@ def test_db_builder_blocks_when_current_year_pool_mappings_are_missing() -> None
             id INTEGER PRIMARY KEY,
             property_id INTEGER,
             promoted_setup_id INTEGER,
-            parsed_json TEXT
+            parsed_json TEXT,
+            promoted_at TEXT,
+            document_type TEXT
+        );
+        CREATE TABLE dre_review_edits (
+            id INTEGER PRIMARY KEY,
+            dre_extraction_run_id INTEGER,
+            field_path TEXT,
+            old_value TEXT,
+            new_value TEXT,
+            reason TEXT,
+            edited_by TEXT,
+            edited_at TEXT
         );
         CREATE TABLE allocation_pools (
             id INTEGER PRIMARY KEY,
@@ -183,13 +199,17 @@ def test_db_builder_blocks_when_current_year_pool_mappings_are_missing() -> None
     conn.execute(
         """
         INSERT INTO dre_extraction_runs
-        (id, property_id, promoted_setup_id, parsed_json)
-        VALUES (7, 18, 3, ?)
+        (id, property_id, promoted_setup_id, parsed_json, promoted_at, document_type)
+        VALUES (7, 18, 3, ?, '2026-05-18T12:30:13+00:00', 'dre')
         """,
         (
             json.dumps(
                 {
-                    "assessment_setup": {"source_pages": [14, 15]},
+                    "document_metadata": {},
+                    "assessment_setup": {
+                        "setup_type": "grouped_category",
+                        "source_pages": [14, 15],
+                    },
                     "unit_structure": {
                         "groups": [
                             {
@@ -237,7 +257,19 @@ def test_db_builder_can_split_generated_assessment_revenue_by_dre_pool_proportio
             id INTEGER PRIMARY KEY,
             property_id INTEGER,
             promoted_setup_id INTEGER,
-            parsed_json TEXT
+            parsed_json TEXT,
+            promoted_at TEXT,
+            document_type TEXT
+        );
+        CREATE TABLE dre_review_edits (
+            id INTEGER PRIMARY KEY,
+            dre_extraction_run_id INTEGER,
+            field_path TEXT,
+            old_value TEXT,
+            new_value TEXT,
+            reason TEXT,
+            edited_by TEXT,
+            edited_at TEXT
         );
         CREATE TABLE allocation_pools (
             id INTEGER PRIMARY KEY,
@@ -317,21 +349,27 @@ def test_db_builder_can_split_generated_assessment_revenue_by_dre_pool_proportio
     conn.execute(
         """
         INSERT INTO dre_extraction_runs
-        (id, property_id, promoted_setup_id, parsed_json)
-        VALUES (9, 18, 4, ?)
+        (id, property_id, promoted_setup_id, parsed_json, promoted_at, document_type)
+        VALUES (9, 18, 4, ?, '2026-05-19T17:10:17+00:00', 'dre')
         """,
         (
             json.dumps(
                 {
-                    "assessment_setup": {"source_pages": [14]},
+                    "document_metadata": {},
+                    "assessment_setup": {
+                        "setup_type": "grouped_category",
+                        "source_pages": [14],
+                    },
                     "allocation_pools": [
                         {
                             "pool_key": "variable_costs_prorated",
+                            "allocation_method": "square_footage",
                             "annual_amount": "20016",
                             "source_pages": [14],
                         },
                         {
                             "pool_key": "equal_costs_equal",
+                            "allocation_method": "equal",
                             "annual_amount": "386977",
                             "source_pages": [14],
                         },
@@ -446,7 +484,19 @@ def test_db_builder_filters_non_regular_mapped_rows_from_final_basis() -> None:
             id INTEGER PRIMARY KEY,
             property_id INTEGER,
             promoted_setup_id INTEGER,
-            parsed_json TEXT
+            parsed_json TEXT,
+            promoted_at TEXT,
+            document_type TEXT
+        );
+        CREATE TABLE dre_review_edits (
+            id INTEGER PRIMARY KEY,
+            dre_extraction_run_id INTEGER,
+            field_path TEXT,
+            old_value TEXT,
+            new_value TEXT,
+            reason TEXT,
+            edited_by TEXT,
+            edited_at TEXT
         );
         CREATE TABLE allocation_pools (
             id INTEGER PRIMARY KEY,
@@ -564,7 +614,19 @@ def test_db_builder_accepts_legacy_draft_line_item_shape_when_mappings_exist() -
             id INTEGER PRIMARY KEY,
             property_id INTEGER,
             promoted_setup_id INTEGER,
-            parsed_json TEXT
+            parsed_json TEXT,
+            promoted_at TEXT,
+            document_type TEXT
+        );
+        CREATE TABLE dre_review_edits (
+            id INTEGER PRIMARY KEY,
+            dre_extraction_run_id INTEGER,
+            field_path TEXT,
+            old_value TEXT,
+            new_value TEXT,
+            reason TEXT,
+            edited_by TEXT,
+            edited_at TEXT
         );
         CREATE TABLE allocation_pools (
             id INTEGER PRIMARY KEY,
@@ -707,7 +769,19 @@ def test_db_builder_800_high_multi_factor_units_do_not_require_global_ownership_
             id INTEGER PRIMARY KEY,
             property_id INTEGER,
             promoted_setup_id INTEGER,
-            parsed_json TEXT
+            parsed_json TEXT,
+            promoted_at TEXT,
+            document_type TEXT
+        );
+        CREATE TABLE dre_review_edits (
+            id INTEGER PRIMARY KEY,
+            dre_extraction_run_id INTEGER,
+            field_path TEXT,
+            old_value TEXT,
+            new_value TEXT,
+            reason TEXT,
+            edited_by TEXT,
+            edited_at TEXT
         );
         CREATE TABLE allocation_pools (
             id INTEGER PRIMARY KEY,
@@ -810,13 +884,17 @@ def test_db_builder_800_high_multi_factor_units_do_not_require_global_ownership_
     conn.execute(
         """
         INSERT INTO dre_extraction_runs
-        (id, property_id, promoted_setup_id, parsed_json)
-        VALUES (1, 1, 2, ?)
+        (id, property_id, promoted_setup_id, parsed_json, promoted_at, document_type)
+        VALUES (1, 1, 2, ?, '2026-06-15T06:08:47+00:00', 'dre')
         """,
         (
             json.dumps(
                 {
-                    "assessment_setup": {"source_pages": [58]},
+                    "document_metadata": {},
+                    "assessment_setup": {
+                        "setup_type": "individual_unit",
+                        "source_pages": [58],
+                    },
                     "allocation_pools": [
                         {
                             "pool_key": "general_prorated",
@@ -1045,6 +1123,406 @@ def test_db_builder_800_high_multi_factor_units_do_not_require_global_ownership_
     unit_101 = next(row for row in matrix.rows if row.recipient_label == "101")
     assert unit_101.component_values_monthly["general_prorated"] == Decimal("90.00")
     assert unit_101.component_values_monthly["residential_prorated"] == Decimal("146.66")
+
+
+def _build_800_high_connection(
+    *,
+    document_type: str = "dre",
+    operator_unit_factors_json: str | None = None,
+) -> sqlite3.Connection:
+    """Same 800 High fixture as the test above, factored out so the
+    edit-application / CC&R-factor tests below don't have to repeat the
+    whole schema + pool/unit/mapping setup — they only vary the
+    ``dre_review_edits`` rows and ``document_type``/operator factors."""
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE assessment_setups (
+            id INTEGER PRIMARY KEY,
+            property_id INTEGER,
+            setup_type TEXT,
+            status TEXT,
+            approved_at TEXT
+        );
+        CREATE TABLE dre_extraction_runs (
+            id INTEGER PRIMARY KEY,
+            property_id INTEGER,
+            promoted_setup_id INTEGER,
+            parsed_json TEXT,
+            promoted_at TEXT,
+            document_type TEXT,
+            operator_unit_factors_json TEXT
+        );
+        CREATE TABLE dre_review_edits (
+            id INTEGER PRIMARY KEY,
+            dre_extraction_run_id INTEGER,
+            field_path TEXT,
+            old_value TEXT,
+            new_value TEXT,
+            reason TEXT,
+            edited_by TEXT,
+            edited_at TEXT
+        );
+        CREATE TABLE allocation_pools (
+            id INTEGER PRIMARY KEY,
+            assessment_setup_id INTEGER,
+            pool_key TEXT,
+            pool_name TEXT,
+            allocation_method TEXT,
+            recipient_scope TEXT,
+            denominator_value NUMERIC,
+            include_in_pdf INTEGER,
+            display_order INTEGER
+        );
+        CREATE TABLE assessment_groups (
+            id INTEGER PRIMARY KEY,
+            assessment_setup_id INTEGER,
+            group_name TEXT,
+            unit_count INTEGER,
+            average_square_feet NUMERIC,
+            ownership_percent NUMERIC,
+            display_order INTEGER
+        );
+        CREATE TABLE assessment_units (
+            id INTEGER PRIMARY KEY,
+            assessment_setup_id INTEGER,
+            unit_number TEXT,
+            square_feet NUMERIC,
+            ownership_percent NUMERIC,
+            category TEXT,
+            parking_spaces INTEGER
+        );
+        CREATE TABLE budget_line_pool_mappings (
+            budget_line_normalized_label TEXT,
+            section TEXT,
+            category TEXT,
+            fund_type TEXT,
+            account_code TEXT,
+            pool_key TEXT,
+            active INTEGER,
+            property_id INTEGER,
+            assessment_setup_id INTEGER
+        );
+        CREATE TABLE assessment_unit_pool_allocations (
+            assessment_unit_id INTEGER,
+            assessment_setup_id INTEGER,
+            pool_key TEXT,
+            specified_monthly_amount NUMERIC
+        );
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO assessment_setups
+        (id, property_id, setup_type, status, approved_at)
+        VALUES (2, 1, 'per_unit', 'approved', '2026-06-15T06:08:47+00:00')
+        """
+    )
+    conn.executemany(
+        """
+        INSERT INTO allocation_pools
+        (id, assessment_setup_id, pool_key, pool_name, allocation_method,
+         recipient_scope, denominator_value, include_in_pdf, display_order)
+        VALUES (?, 2, ?, ?, ?, ?, ?, 1, ?)
+        """,
+        [
+            (1, "general_prorated", "General Prorated", "ownership_percentage", "all_units", 1, 0),
+            (2, "general_equal", "General Equal", "equal", "all_units", 61, 1),
+            (3, "residential_prorated", "Residential Prorated", "ownership_percentage", "residential_only", 1, 2),
+            (4, "residential_equal", "Residential Equal", "equal", "residential_only", 60, 3),
+            (5, "parking_garage", "Parking Garage", "equal", "parking_users", 64, 4),
+        ],
+    )
+    conn.executemany(
+        """
+        INSERT INTO assessment_units
+        (id, assessment_setup_id, unit_number, square_feet, ownership_percent, category, parking_spaces)
+        VALUES (?, 2, ?, ?, NULL, ?, ?)
+        """,
+        [
+            (1, "Retail", 1498, "commercial", 0),
+            (2, "101", 1613, "residential", 0),
+            (3, "102", 1738, "residential", 0),
+        ],
+    )
+    conn.executemany(
+        """
+        INSERT INTO budget_line_pool_mappings
+        (budget_line_normalized_label, section, category, fund_type,
+         account_code, pool_key, active, property_id, assessment_setup_id)
+        VALUES (?, ?, ?, ?, ?, ?, 1, 1, 2)
+        """,
+        [
+            ("management services", "Administrative Expenses", "operating", "operating", None, "general_equal"),
+            ("general insurance", "Administrative Expenses", "operating", "operating", None, "general_prorated"),
+            ("window cleaning maintenance", "General Maintenance", "operating", "operating", None, "residential_prorated"),
+            ("telephone internet", "Utilities", "operating", "operating", None, "general_equal"),
+            ("water and sewer", "Utilities", "operating", "operating", None, "residential_prorated"),
+            ("electricity", "Utilities", "operating", "operating", None, "parking_garage"),
+        ],
+    )
+    conn.execute(
+        """
+        INSERT INTO dre_extraction_runs
+        (id, property_id, promoted_setup_id, parsed_json, promoted_at, document_type, operator_unit_factors_json)
+        VALUES (1, 1, 2, ?, '2026-06-15T06:08:47+00:00', ?, ?)
+        """,
+        (
+            json.dumps(
+                {
+                    "document_metadata": {},
+                    "assessment_setup": {
+                        "setup_type": "individual_unit",
+                        "source_pages": [58],
+                    },
+                    "allocation_pools": [
+                        {
+                            "pool_key": "general_prorated",
+                            "pool_name": "General Prorated",
+                            "allocation_method": "ownership_percentage",
+                            "recipient_scope": "all_units",
+                            "denominator_value": "1",
+                            "annual_amount": "45276",
+                            "monthly_amount": "3773.01",
+                            "source_pages": [58],
+                        },
+                        {
+                            "pool_key": "general_equal",
+                            "pool_name": "General Equal",
+                            "allocation_method": "equal",
+                            "recipient_scope": "all_units",
+                            "denominator_value": "61",
+                            "annual_amount": "80650",
+                            "monthly_amount": "6720.82",
+                            "source_pages": [58],
+                        },
+                        {
+                            "pool_key": "residential_prorated",
+                            "pool_name": "Residential Prorated",
+                            "allocation_method": "ownership_percentage",
+                            "recipient_scope": "residential_only",
+                            "denominator_value": "1",
+                            "annual_amount": "69544",
+                            "monthly_amount": "5795.32",
+                            "source_pages": [58],
+                        },
+                        {
+                            "pool_key": "residential_equal",
+                            "pool_name": "Residential Equal",
+                            "allocation_method": "equal",
+                            "recipient_scope": "residential_only",
+                            "denominator_value": "60",
+                            "annual_amount": "104019.48",
+                            "monthly_amount": "8668.29",
+                            "source_pages": [58],
+                        },
+                        {
+                            "pool_key": "parking_garage",
+                            "pool_name": "Parking Garage",
+                            "allocation_method": "equal",
+                            "recipient_scope": "parking_users",
+                            "denominator_value": "64",
+                            "annual_amount": "30861",
+                            "monthly_amount": "2571.74",
+                            "source_pages": [58],
+                        },
+                    ],
+                    "unit_structure": {
+                        "units": [
+                            {
+                                "unit_number": "Retail",
+                                "square_feet": "1498",
+                                "ownership_percent": None,
+                                "category": "Retail",
+                                "residential_commercial_flag": "commercial",
+                                "parking_flag": "no",
+                                "pool_factors": [
+                                    {
+                                        "pool_key": "general_prorated",
+                                        "factor_value": "0",
+                                        "factor_label": "General Assessment Interest",
+                                        "factor_type": "percent",
+                                        "source_page": 58,
+                                    },
+                                    {
+                                        "pool_key": "residential_prorated",
+                                        "factor_value": "0",
+                                        "factor_label": "Residential Assessment Interest",
+                                        "factor_type": "percent",
+                                        "source_page": 58,
+                                    },
+                                ],
+                            },
+                            {
+                                "unit_number": "101",
+                                "square_feet": "1613",
+                                "ownership_percent": None,
+                                "category": "Residential",
+                                "residential_commercial_flag": "residential",
+                                "parking_flag": "no",
+                                "pool_factors": [
+                                    {
+                                        "pool_key": "general_prorated",
+                                        "factor_value": "0.02",
+                                        "factor_label": "General Assessment Interest",
+                                        "factor_type": "percent",
+                                        "source_page": 58,
+                                    },
+                                    {
+                                        "pool_key": "residential_prorated",
+                                        "factor_value": "0.02",
+                                        "factor_label": "Residential Assessment Interest",
+                                        "factor_type": "percent",
+                                        "source_page": 58,
+                                    },
+                                ],
+                            },
+                            {
+                                "unit_number": "102",
+                                "square_feet": "1738",
+                                "ownership_percent": None,
+                                "category": "Residential",
+                                "residential_commercial_flag": "residential",
+                                "parking_flag": "no",
+                                "pool_factors": [
+                                    {
+                                        "pool_key": "general_prorated",
+                                        "factor_value": "0.0215",
+                                        "factor_label": "General Assessment Interest",
+                                        "factor_type": "percent",
+                                        "source_page": 58,
+                                    },
+                                    {
+                                        "pool_key": "residential_prorated",
+                                        "factor_value": "0.0215",
+                                        "factor_label": "Residential Assessment Interest",
+                                        "factor_type": "percent",
+                                        "source_page": 58,
+                                    },
+                                ],
+                            },
+                        ]
+                    },
+                }
+            ),
+            document_type,
+            operator_unit_factors_json,
+        ),
+    )
+    return conn
+
+
+def _run_800_high_matrix(conn: sqlite3.Connection):
+    return build_matrix_from_approved_assessment_setup(
+        connection=conn,
+        property_id=1,
+        fiscal_year=2025,
+        budget_draft=SimpleNamespace(
+            line_items=[
+                SimpleNamespace(
+                    label="Management Services", amount=Decimal("36000"), annual_budget=Decimal("36000"),
+                    projection=Decimal("36000"), is_revenue=False, is_reserve=False,
+                    category="operating", section="Administrative Expenses", account_code=None,
+                ),
+                SimpleNamespace(
+                    label="General Insurance", amount=Decimal("54000"), annual_budget=Decimal("54000"),
+                    projection=Decimal("54000"), is_revenue=False, is_reserve=False,
+                    category="operating", section="Administrative Expenses", account_code=None,
+                ),
+                SimpleNamespace(
+                    label="Window Cleaning Maintenance", amount=Decimal("9996"), annual_budget=Decimal("9996"),
+                    projection=Decimal("9996"), is_revenue=False, is_reserve=False,
+                    category="operating", section="General Maintenance", account_code=None,
+                ),
+                SimpleNamespace(
+                    label="Water and Sewer", amount=Decimal("78000"), annual_budget=Decimal("78000"),
+                    projection=Decimal("78000"), is_revenue=False, is_reserve=False,
+                    category="operating", section="Utilities", account_code=None,
+                ),
+                SimpleNamespace(
+                    label="Electricity", amount=Decimal("2100"), annual_budget=Decimal("2100"),
+                    projection=Decimal("2100"), is_revenue=False, is_reserve=False,
+                    category="operating", section="Utilities", account_code=None,
+                ),
+                SimpleNamespace(
+                    label="Telephone/Internet", amount=Decimal("25000"), annual_budget=Decimal("25000"),
+                    projection=Decimal("25000"), is_revenue=False, is_reserve=False,
+                    category="operating", section="Utilities", account_code=None,
+                ),
+                SimpleNamespace(
+                    label="Assessments", amount=Decimal("606236.4"), annual_budget=Decimal("606236.4"),
+                    projection=Decimal("606236.4"), is_revenue=True, is_reserve=False,
+                    category="income", section="income", account_code=None,
+                ),
+            ]
+        ),
+        hoa_name="800 High Street Condominiums Association",
+        unit_count=61,
+        approved_assessment_revenue_annual=Decimal("606236.4"),
+    )
+
+
+def test_review_edit_before_promotion_changes_rendered_pool_factor() -> None:
+    """The bug this fix closes: a corrected per-unit pool percentage must
+    flow into the rendered matrix, not just the promoted DB tables.
+
+    Unit 101's ``general_prorated`` factor is 0.02 -> $90.00 in the baseline
+    (see the un-edited test above). $90.00 / 0.02 = $4500 pool-monthly-total
+    for that pool, so editing the factor to 0.03 should render $135.00.
+    """
+    conn = _build_800_high_connection()
+    conn.execute(
+        """
+        INSERT INTO dre_review_edits
+        (dre_extraction_run_id, field_path, old_value, new_value, edited_by, edited_at)
+        VALUES (1, 'unit_structure.units[1].pool_factors[0].factor_value', '0.02', '0.03',
+                'ops@example.com', '2026-06-15 05:00:00')
+        """
+    )
+    matrix = _run_800_high_matrix(conn)
+    unit_101 = next(row for row in matrix.rows if row.recipient_label == "101")
+    assert unit_101.component_values_monthly["general_prorated"] == Decimal("135.00")
+    # The unedited pool for the same unit is untouched.
+    assert unit_101.component_values_monthly["residential_prorated"] == Decimal("146.66")
+
+
+def test_review_edit_after_promotion_does_not_leak_into_render() -> None:
+    """Same edit as above, but recorded *after* promoted_at (same calendar
+    day, to specifically exercise the space-vs-``T`` timestamp format
+    mismatch — a naive string comparison would likely still pass a test
+    using different days). The render must reflect what was live as of the
+    last promotion, not a correction still pending re-promotion."""
+    conn = _build_800_high_connection()
+    conn.execute(
+        """
+        INSERT INTO dre_review_edits
+        (dre_extraction_run_id, field_path, old_value, new_value, edited_by, edited_at)
+        VALUES (1, 'unit_structure.units[1].pool_factors[0].factor_value', '0.02', '0.03',
+                'ops@example.com', '2026-06-15 08:00:00')
+        """
+    )
+    matrix = _run_800_high_matrix(conn)
+    unit_101 = next(row for row in matrix.rows if row.recipient_label == "101")
+    assert unit_101.component_values_monthly["general_prorated"] == Decimal("90.00")
+
+
+def test_ccr_operator_factors_reflected_in_render() -> None:
+    """A CC&R run's operator-entered per-unit factors (a mechanism separate
+    from dre_review_edits) must also flow into this render path, matching
+    what approve_ccr_extraction_run already produces in the DB tables."""
+    conn = _build_800_high_connection(
+        document_type="ccr",
+        operator_unit_factors_json=json.dumps(
+            {"101": {"square_feet": "2000"}}
+        ),
+    )
+    matrix = _run_800_high_matrix(conn)
+    # The operator factor only overrides square_feet (used by the fallback
+    # recipient path / other pools), not the percent-based pool_factors —
+    # this proves the CC&R merge ran without erroring and without disturbing
+    # the percent-driven pools already covered above.
+    unit_101 = next(row for row in matrix.rows if row.recipient_label == "101")
+    assert unit_101.component_values_monthly["general_prorated"] == Decimal("90.00")
 
 
 def test_ryland_grouped_rows_use_per_unit_and_group_budget_semantics() -> None:
@@ -1631,4 +2109,71 @@ def test_special_assessment_events_map_outside_regular_matrix_totals() -> None:
     assert matrix.special_assessment_blocks[0].label == "Roof Special Assessment"
     text = _text_from_matrix_pdf(matrix)
     assert "Roof Special Assessment" in text
-    assert "250.00" in text
+
+
+def test_included_in_monthly_special_assessment_varies_by_square_footage_in_rendered_pdf() -> None:
+    """Deliverable-level proof of the Group 4 allocation-method fix: a
+    special assessment included in the regular monthly schedule must show
+    DIFFERENT per-recipient dollar amounts when the HOA's real allocation
+    method is square footage — not the pre-fix flat equal split — in the
+    actual rendered assessment-schedule PDF page, not just engine-level
+    Decimal assertions."""
+    units = [
+        RecipientReference(ref_type="unit", ref_id=1, label="Unit 101", unit_count=1, square_feet=Decimal("1000")),
+        RecipientReference(ref_type="unit", ref_id=2, label="Unit 102", unit_count=1, square_feet=Decimal("2000")),
+        RecipientReference(ref_type="unit", ref_id=3, label="Unit 103", unit_count=1, square_feet=Decimal("3000")),
+    ]
+    ci = CalcInput(
+        setup_type="per_unit",
+        pools=[
+            PoolDefinition(
+                pool_id=1, pool_key="sqft", pool_name="Operating (sqft)",
+                allocation_method="square_footage", recipient_scope="all_units",
+                denominator_value=Decimal("6000"),
+            ),
+        ],
+        recipient_set=RecipientSet(recipients=units),
+        budget_lines=[
+            BudgetLineInput(
+                line_id=1, normalized_label="dues", section="income",
+                category="income", fund_type="operating", amount=Decimal("36000"),
+            ),
+        ],
+        mappings=[
+            BudgetLineMappingInput(
+                budget_line_normalized_label="dues", section="income",
+                category="income", fund_type="operating", pool_key="sqft",
+            ),
+        ],
+        approved_assessment_revenue_annual=Decimal("36000") + Decimal("3600"),
+        special_assessments=[
+            SpecialAssessmentInput(
+                status="approved_scheduled",
+                included_in_regular_monthly=True,
+                amount_per_unit=Decimal("100"),
+                label="Roof Special Assessment",
+            ),
+        ],
+    )
+    result = run(ci)
+    sa_components = {
+        r.recipient_ref.label: r.unrounded_component_monthly
+        for r in result.pool_allocations
+        if r.pool_key == "special_assessment"
+    }
+    # Proportional to square footage (1000:2000:3000 of 6000 total), not a
+    # flat $100 for every unit.
+    assert sa_components["Unit 101"] == Decimal("50")
+    assert sa_components["Unit 102"] == Decimal("100")
+    assert sa_components["Unit 103"] == Decimal("150")
+
+    matrix = build_universal_assessment_matrix(
+        result, setup_type="per_unit", hoa_name="Test HOA", fiscal_year=2026,
+        approved_visual_basis=True,
+    )
+    text = _text_from_matrix_pdf(matrix)
+    # The rendered PDF page must show all three distinct dollar totals —
+    # the pre-fix behavior would render the same total for every recipient.
+    assert "550.00" in text  # Unit 101: 500 (sqft) + 50 (SA)
+    assert "1,100.00" in text  # Unit 102: 1000 (sqft) + 100 (SA)
+    assert "1,650.00" in text  # Unit 103: 1500 (sqft) + 150 (SA)

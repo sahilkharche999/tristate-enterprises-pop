@@ -9,8 +9,8 @@ that a single HTML template can loop over.
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+from datetime import datetime, timezone
 from decimal import Decimal
-import json
 import sqlite3
 from typing import Any, Literal, Optional, Union
 
@@ -33,6 +33,10 @@ from app.assessment_engine import (
 from app.assessment_engine.engine import run as run_assessment_engine
 from app.assessment_engine.errors import NeedsHumanReview
 from app.assessment_engine.schemas import BudgetLineMappingInput
+from app.dre_extraction.promotion import (
+    apply_review_edits_to_extraction,
+    parse_extraction_payload,
+)
 from app.services.assessment_budget_mapping_rule_service import (
     build_assessment_mapping_review_blockers,
     build_assessment_mapping_review_rows,
@@ -40,6 +44,11 @@ from app.services.assessment_budget_mapping_rule_service import (
     normalize_budget_label,
     select_assessment_mapping_amount,
 )
+from app.services.ccr_approval_service import (
+    get_operator_unit_factors,
+    merge_operator_factors,
+)
+from app.services.dre_review_service import list_review_edits
 
 from .schemas import PreflightError
 
@@ -1309,28 +1318,90 @@ def build_matrix_for_assessment_mode(
     )
 
 
+def _parse_sql_timestamp(value: Optional[str]) -> Optional[datetime]:
+    """Parse either timestamp format this codebase stores, as UTC.
+
+    ``dre_review_edits.edited_at`` defaults to sqlite's ``datetime('now')``
+    (``"YYYY-MM-DD HH:MM:SS"``, naive, implicitly UTC); ``dre_extraction_runs
+    .promoted_at`` is set via Python's ``_now_iso()`` (``"YYYY-MM-DDTHH:MM:SS
+    +00:00"``, explicit UTC). Comparing these as raw strings is wrong — the
+    space-vs-``T`` separator byte makes ``edited_at`` sort as "less than"
+    ``promoted_at`` for same-day timestamps almost by accident, which would
+    mask exactly the case this comparison exists to catch (an edit added
+    *after* promotion, same day). Parse both into comparable datetimes.
+    """
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
 def _payload_for_promoted_setup(
     *,
     connection: sqlite3.Connection,
     property_id: int,
     setup_id: int,
 ) -> dict[str, Any]:
+    """Reconstruct the extraction as it was at this setup's last promotion.
+
+    Re-parsing ``dre_extraction_runs.parsed_json`` alone would return the
+    original, never-mutated extraction — Review Workbench edits are applied
+    to ``allocation_pools``/``assessment_units`` at promotion time via
+    ``apply_review_edits_to_extraction``, but this render path previously
+    never applied them, so a corrected unit percentage would land in the
+    promoted DB tables while the rendered PDF kept computing off the stale
+    original value (see ``_per_unit_factor_value_lookup_from_payload``,
+    which reads this payload's ``pool_factors`` for pools the DB tables
+    can't represent — multiple ``ownership_percentage`` pools needing
+    different per-unit percentages).
+
+    Edits are filtered to ``edited_at <= promoted_at`` so this matches what
+    was actually live as of the last (re-)promotion — a newer, not-yet-
+    promoted edit shouldn't leak into the render when the rest of it
+    (``allocation_pools``/``assessment_units``) doesn't reflect that edit
+    either until the operator re-promotes.
+    """
     row = connection.execute(
         """
-        SELECT parsed_json
+        SELECT id, parsed_json, promoted_at, document_type
           FROM dre_extraction_runs
          WHERE property_id = ? AND promoted_setup_id = ?
          ORDER BY id DESC LIMIT 1
         """,
         (property_id, setup_id),
     ).fetchone()
-    if row is None or not row[0]:
+    if row is None or not row[1]:
         return {}
-    try:
-        payload = json.loads(row[0])
-    except (TypeError, json.JSONDecodeError):
+    run_id, parsed_json_text, promoted_at, document_type = row
+
+    extraction = parse_extraction_payload(parsed_json_text)
+    if extraction is None:
         return {}
-    return payload if isinstance(payload, dict) else {}
+
+    promoted_at_dt = _parse_sql_timestamp(promoted_at)
+    edits = [
+        edit
+        for edit in list_review_edits(dre_extraction_run_id=run_id, connection=connection)
+        if promoted_at_dt is None
+        or (_parse_sql_timestamp(edit.edited_at) or promoted_at_dt) <= promoted_at_dt
+    ]
+    # Deliberately not caught: if the same edits that already succeeded once
+    # at promotion fail to reapply here against the same immutable original,
+    # that is a real data-consistency anomaly worth surfacing loudly, not a
+    # reason to silently fall back to stale data.
+    extraction = apply_review_edits_to_extraction(extraction, edits)
+
+    if document_type == "ccr":
+        operator_factors = get_operator_unit_factors(
+            extraction_run_id=run_id, connection=connection
+        )
+        if operator_factors:
+            extraction = merge_operator_factors(extraction, operator_factors)
+
+    return extraction.model_dump(mode="json")
 
 
 def _source_pages_from_payload(payload: dict[str, Any]) -> list[int]:

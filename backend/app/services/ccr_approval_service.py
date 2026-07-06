@@ -114,7 +114,7 @@ def get_operator_unit_factors(
         return {}
 
 
-def _merge_operator_factors(
+def merge_operator_factors(
     extraction: DRESetupExtraction,
     operator_factors: dict[str, dict],
 ) -> DRESetupExtraction:
@@ -249,7 +249,7 @@ def approve_ccr_extraction_run(
         extraction_run_id=extraction_run_id, connection=connection
     )
     if extraction is not None and operator_factors:
-        extraction = _merge_operator_factors(extraction, operator_factors)
+        extraction = merge_operator_factors(extraction, operator_factors)
 
     # Block promotion if any proportional pool has no unit data (3.3).
     if extraction is not None and setup_type == "per_unit":
@@ -385,7 +385,7 @@ def reopen_and_repromote_ccr_run(
             extraction_run_id=extraction_run_id, connection=connection
         )
         if operator_factors:
-            extraction = _merge_operator_factors(extraction, operator_factors)
+            extraction = merge_operator_factors(extraction, operator_factors)
         return extraction
 
     return reopen_and_repromote(
@@ -403,6 +403,7 @@ __all__ = [
     "MissingUnitFactors",
     "save_operator_unit_factors",
     "get_operator_unit_factors",
+    "merge_operator_factors",
     "approve_ccr_extraction_run",
     "reopen_and_repromote_ccr_run",
 ]

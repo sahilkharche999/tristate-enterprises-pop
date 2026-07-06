@@ -71,7 +71,6 @@ _STANDARD_ENTRIES = [
     GeneratedPage(template="pro_forma_disclosure_summary.html", page_count_hint=4),
     GeneratedPage(template="assessment_schedule/universal.html", page_count_hint=2),
     GeneratedPage(template="forecasted_statement_title.html", page_count_hint=1),
-    GeneratedPage(template="forecasted_statement_toc.html", page_count_hint=1),
     GeneratedPage(template="compilation_report.html", page_count_hint=1),
     GeneratedPage(template="forecasted_income_statement.html", page_count_hint=2),
     GeneratedPage(template="notes_1_to_3.html", page_count_hint=2),
