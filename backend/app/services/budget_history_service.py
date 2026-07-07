@@ -3715,6 +3715,12 @@ def _render_sheet_html(worksheet) -> str:
     empty (spreadsheets exported from `.xls` are riddled with merged-cell spacer columns that
     would otherwise make the preview absurdly wide and sparse). Numeric cells are right-aligned.
     This is a visual reference only — no header detection or semantic interpretation."""
+    def is_empty(value) -> bool:
+        # Treat None AND whitespace-only strings as empty. Real HOA .xls exports use
+        # blank/whitespace spacer columns between value columns; counting those as content
+        # would keep dozens of empty columns and make the preview absurdly wide.
+        return value is None or (isinstance(value, str) and not value.strip())
+
     rows = [row for row in worksheet.iter_rows(values_only=True)]
     if not rows:
         return "<table></table>"
@@ -3723,26 +3729,26 @@ def _render_sheet_html(worksheet) -> str:
     keep_columns = [
         col
         for col in range(width)
-        if any(col < len(row) and row[col] is not None for row in rows)
+        if any(col < len(row) and not is_empty(row[col]) for row in rows)
     ]
     if not keep_columns:
         return "<table></table>"
 
     rows_html = []
     for row in rows:
-        if all(value is None for value in row):
+        if all(is_empty(value) for value in row):
             continue
         cells_html = []
         for col in keep_columns:
             value = row[col] if col < len(row) else None
-            if value is None:
+            if is_empty(value):
                 cells_html.append("<td></td>")
             elif isinstance(value, bool):
                 cells_html.append(f"<td>{html.escape(str(value))}</td>")
             elif isinstance(value, (int, float)):
                 cells_html.append(f'<td class="num">{html.escape(str(value))}</td>')
             else:
-                cells_html.append(f"<td>{html.escape(str(value))}</td>")
+                cells_html.append(f"<td>{html.escape(str(value).strip())}</td>")
         rows_html.append(f"<tr>{''.join(cells_html)}</tr>")
     return f"<table>{''.join(rows_html)}</table>"
 
