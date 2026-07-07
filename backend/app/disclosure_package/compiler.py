@@ -590,6 +590,38 @@ def _build_thirty_year_plan(
     }
 
 
+def _normalize_special_assessment_for_render(entry: dict[str, Any]) -> dict[str, Any]:
+    """Give a special-assessment entry every field the disclosure templates read.
+
+    The disclosure templates (cover_letter.html, pro_forma_disclosure_summary.html)
+    run under Jinja StrictUndefined, so a *missing* key raises rather than rendering
+    blank. Operators may enter a basic row with only some fields, and may use alternate
+    key names (``description``/``purpose`` for the label, ``per_unit``/``amount`` for the
+    amount). Normalize by meaning — derive the canonical keys from any alias and default
+    the rest — so a minimally-filled row never crashes the render.
+    """
+    normalized = dict(entry)
+    normalized["status"] = infer_special_assessment_status(normalized)
+    normalized["label"] = entry.get("label") or entry.get("description") or entry.get("purpose")
+
+    amount = entry.get("amount_per_unit")
+    if amount is None:
+        amount = entry.get("per_unit")
+    if amount is None:
+        amount = entry.get("amount")
+    try:
+        normalized["amount_per_unit"] = float(amount) if amount is not None else 0.0
+    except (TypeError, ValueError):
+        normalized["amount_per_unit"] = 0.0
+
+    normalized.setdefault("due_date", None)
+    normalized.setdefault("display_language", None)
+    normalized.setdefault("purpose", None)
+    normalized.setdefault("frequency", None)
+    normalized.setdefault("included_in_regular_monthly", False)
+    return normalized
+
+
 def _compute_all(
     spec: PackageSpec,
     budget_draft: BudgetDraft,
@@ -795,9 +827,7 @@ def _compute_all(
     for entry in _parse_json_list("special_assessments_json"):
         if not isinstance(entry, dict):
             continue
-        normalized_entry = dict(entry)
-        normalized_entry["status"] = infer_special_assessment_status(normalized_entry)
-        special_assessments.append(normalized_entry)
+        special_assessments.append(_normalize_special_assessment_for_render(entry))
     additional_assessments_needed = _parse_json_list("additional_assessments_needed_json")
     outstanding_loan = _parse_json_object("outstanding_loan_json")
 
