@@ -10,9 +10,13 @@
 //   GET    /hoa/{hoa_id}/dre/extraction-runs/{run_id}/field-sources          → source citations
 //   POST   /hoa/{hoa_id}/dre/extraction-runs/{run_id}/edits                  → record edit
 //   POST   /hoa/{hoa_id}/dre/extraction-runs/{run_id}/approve                → promote to AssessmentSetup
+//   GET    /hoa/{hoa_id}/dre/documents/{document_id}/file                    → raw source PDF bytes
 
 import { BASE_URL } from './config';
+import { dreDocumentFileUrl } from './dreDocumentFileUrl';
 import { authHeaders, handleResponse } from './http';
+
+export { dreDocumentFileUrl };
 
 export interface DREDocument {
   document_id: number;

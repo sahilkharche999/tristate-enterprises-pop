@@ -12,7 +12,15 @@
 // Path: ``/hoa/{hoaId}/dre/review/{runId}`` — wired via routes (TODO when
 // the app router lands; for now exported as a standalone panel).
 
-import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  Fragment,
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+} from 'react';
 import {
   type DREExtractionRunDetail,
   type DREReviewEdit,
@@ -26,6 +34,13 @@ import {
 import { approveCCRRun, reopenAndRepromoteCCRRun } from '../api/ccr';
 import { formatCurrency } from '../lib/budget';
 import { cn } from './ui/utils';
+import { DrePdfCompareView } from './DrePdfCompareView';
+
+// Lets the shared PageChips component (used ~10x across this file) call
+// into whatever owns compare-view state without prop-drilling through every
+// intermediate renderer (pools, groups, units, factors, categories, ...).
+// See openspec/changes/add-dre-review-pdf-compare-view design.md Decision 1b.
+const PdfJumpContext = createContext<((page: number) => void) | null>(null);
 
 // ── API error formatting ──────────────────────────────────────────────
 //
@@ -428,17 +443,30 @@ function ChipList({
 
 function PageChips({ pages }: { pages: unknown }) {
   const list = formatPageList(pages);
+  const jumpToPage = useContext(PdfJumpContext);
   if (list.length === 0) return <span className="text-slate-400">—</span>;
   return (
     <span className="inline-flex flex-wrap items-center gap-1">
-      {list.map((p) => (
-        <span
-          key={p}
-          className="inline-flex items-center rounded bg-slate-100 px-1.5 py-0.5 text-[11px] font-medium text-slate-700 ring-1 ring-inset ring-slate-300/60"
-        >
-          Page {p}
-        </span>
-      ))}
+      {list.map((p) =>
+        jumpToPage ? (
+          <button
+            key={p}
+            type="button"
+            onClick={() => jumpToPage(p)}
+            title={`Jump to page ${p} in the source PDF`}
+            className="inline-flex items-center rounded bg-slate-100 px-1.5 py-0.5 text-[11px] font-medium text-slate-700 ring-1 ring-inset ring-slate-300/60 hover:bg-slate-200 hover:ring-slate-400"
+          >
+            Page {p}
+          </button>
+        ) : (
+          <span
+            key={p}
+            className="inline-flex items-center rounded bg-slate-100 px-1.5 py-0.5 text-[11px] font-medium text-slate-700 ring-1 ring-inset ring-slate-300/60"
+          >
+            Page {p}
+          </span>
+        ),
+      )}
     </span>
   );
 }
@@ -663,6 +691,14 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
   const [approving, setApproving] = useState(false);
   const [repromoting, setRepromoting] = useState(false);
   const [repromoteResult, setRepromoteResult] = useState<ReopenRepromoteResponse | null>(null);
+
+  // "Compare with PDF" full-screen split view (add-dre-review-pdf-compare-view).
+  const [isCompareOpen, setIsCompareOpen] = useState(false);
+  const [targetPage, setTargetPage] = useState<number | undefined>(undefined);
+  const jumpToPage = useCallback((page: number) => {
+    setTargetPage(page);
+    setIsCompareOpen(true);
+  }, []);
 
   // Units table pagination
   const UNITS_PAGE_SIZE = 10;
@@ -986,7 +1022,7 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
         .map((k) => ({ key: k, value: recommendedSetup[k] }))
     : [];
 
-  return (
+  const mainContent = (
     <section className="space-y-6 p-4">
       {/* ── Header ────────────────────────────────────────────────── */}
       <header className="flex flex-wrap items-start justify-between gap-4">
@@ -1014,6 +1050,13 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
           )}
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setIsCompareOpen(true)}
+            className="inline-flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 shadow-sm hover:bg-slate-50"
+          >
+            Compare with PDF
+          </button>
           <select
             className="rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-sm text-slate-700 shadow-sm focus:outline-none focus:ring-2 focus:ring-slate-300 disabled:bg-slate-50"
             value={chosenSetupType}
@@ -1909,5 +1952,22 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
         </section>
       )}
     </section>
+  );
+
+  return (
+    <PdfJumpContext.Provider value={jumpToPage}>
+      {isCompareOpen ? (
+        <DrePdfCompareView
+          hoaId={hoaId}
+          documentId={detail.dre_document_id}
+          targetPage={targetPage}
+          onClose={() => setIsCompareOpen(false)}
+        >
+          {mainContent}
+        </DrePdfCompareView>
+      ) : (
+        mainContent
+      )}
+    </PdfJumpContext.Provider>
   );
 }

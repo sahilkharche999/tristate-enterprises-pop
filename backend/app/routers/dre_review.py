@@ -11,16 +11,20 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..ai_implementation.db import get_session
 from ..auth.dependencies import get_current_user
+from ..dre_extraction.storage import dre_file_exists, dre_file_path
 from ..services.dre_query_service import (
+    DREDocumentNotFound,
     DREDocumentResponse,
     DREExtractionRunDetail,
     DREExtractionRunListItem,
     DREExtractionRunNotFound,
+    get_dre_document,
     get_extraction_run,
     list_dre_documents,
     list_extraction_runs,
@@ -62,6 +66,32 @@ def list_hoa_extraction_runs(
 ) -> list[DREExtractionRunListItem]:
     return list_extraction_runs(
         property_id=hoa_id, connection=session.connection().connection,
+    )
+
+
+@router.get("/hoa/{hoa_id}/dre/documents/{document_id}/file")
+def get_hoa_dre_document_file(
+    hoa_id: int,
+    document_id: int,
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user),  # noqa: ARG001
+) -> FileResponse:
+    """Stream the raw uploaded DRE/CC&R PDF for the Review Workbench's
+    "Compare with PDF" split view (add-dre-review-pdf-compare-view).
+    """
+    raw_conn = session.connection().connection
+    try:
+        doc = get_dre_document(
+            property_id=hoa_id, document_id=document_id, connection=raw_conn,
+        )
+    except DREDocumentNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if not dre_file_exists(doc.file_id):
+        raise HTTPException(status_code=404, detail="Document file not found on disk")
+    return FileResponse(
+        path=dre_file_path(doc.file_id),
+        filename=doc.file_name,
+        media_type="application/pdf",
     )
 
 

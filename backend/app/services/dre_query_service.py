@@ -77,6 +77,41 @@ class DREExtractionRunNotFound(LookupError):
     """Raised when the run isn't found for the property."""
 
 
+class DREDocumentNotFound(LookupError):
+    """Raised when the document isn't found for the property."""
+
+
+def get_dre_document(
+    *, property_id: int, document_id: int, connection: sqlite3.Connection,
+) -> DREDocumentResponse:
+    """Fetch one document row scoped to ``property_id`` (cross-HOA safe).
+
+    Used by the source-file-serving endpoint backing the Review
+    Workbench "Compare with PDF" view — covers both document_type
+    values, since a DRE document and a CC&R document are served the
+    same way.
+    """
+    row = connection.execute(
+        """
+        SELECT id, property_id, file_id, file_name, page_count,
+               status, uploaded_by, uploaded_at, supersedes_id,
+               COALESCE(document_type, 'dre')
+          FROM dre_documents
+         WHERE id = ? AND property_id = ?
+        """,
+        (document_id, property_id),
+    ).fetchone()
+    if row is None:
+        raise DREDocumentNotFound(
+            f"document_id={document_id} not found for property_id={property_id}"
+        )
+    return DREDocumentResponse(
+        document_id=row[0], property_id=row[1], file_id=row[2], file_name=row[3],
+        page_count=row[4], status=row[5], uploaded_by=row[6], uploaded_at=row[7],
+        supersedes_id=row[8], document_type=row[9],
+    )
+
+
 def _list_documents_by_type(
     *, property_id: int, document_type: str, connection: sqlite3.Connection,
 ) -> list[DREDocumentResponse]:

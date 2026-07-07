@@ -1114,7 +1114,6 @@ def init_db() -> None:
     ensure_budget_upload_columns()
     ensure_budget_draft_columns()
     ensure_budget_version_columns()
-    ensure_suggestion_run_columns()
     ensure_dre_extraction_runs_columns()
     ensure_dre_documents_columns()
     raw_conn = engine.raw_connection()
@@ -1124,6 +1123,7 @@ def init_db() -> None:
         logger.info("Database schema initialized.")
     finally:
         raw_conn.close()
+    ensure_suggestion_run_columns()
     ensure_property_columns()
     ensure_hoa_settings_columns()
     ensure_annual_package_columns()
