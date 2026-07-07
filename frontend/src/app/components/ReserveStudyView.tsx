@@ -230,8 +230,11 @@ export function ReserveStudyView({
             <Plus className="h-3.5 w-3.5" />
           </Button>
         </div>
+        {/* This table is wider than the viewport (min-w 1540px), so it needs its own scroll
+            box for both axes. That box is the sticky containing block, so the <thead> sticks to
+            its top (top-0) as rows scroll within it — the standard wide-data-grid pattern. */}
         <div className="mt-2 overflow-hidden rounded-2xl border border-[#e5e5e5]">
-          <div className="overflow-x-auto" style={{ zoom: tableZoomPercent / 100 }}>
+          <div className="max-h-[70vh] overflow-auto" style={{ zoom: tableZoomPercent / 100 }}>
             <table className="min-w-[1540px] bg-white">
               <colgroup>
                 <col className="w-[72px]" />
@@ -246,8 +249,7 @@ export function ReserveStudyView({
                 <col className="w-[96px]" />
               </colgroup>
               <thead
-                className="sticky z-10 bg-[#f7f7f7]"
-                style={{ top: compact ? 0 : stickyHeaderOffset }}
+                className="sticky top-0 z-10 bg-[#f7f7f7] shadow-sm"
               >
                 <tr className="text-left text-xs uppercase tracking-[0.18em] text-[#737373]">
                   <th className="px-4 py-3">Move</th>

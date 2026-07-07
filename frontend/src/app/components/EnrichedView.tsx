@@ -225,12 +225,16 @@ export function EnrichedView({
           </Button>
         </div>
       </div>
-      {/* Table */}
-      <div className="bg-white border border-[#e5e5e5] rounded-lg overflow-hidden shadow-sm">
-        <div className="overflow-x-auto" style={{ zoom: tableZoomPercent / 100 }}>
+      {/* Table. No `overflow-hidden`/`overflow-x-auto` on the wrappers: per the CSS spec an
+          `overflow` value other than `visible` makes that element the sticky containing block,
+          which would scope the sticky <thead> to the table box (sticking it partway *into* the
+          table) instead of to the page. The table is `w-full` so it fits without horizontal
+          scroll; the header then sticks relative to the page, flush under the tab bar. */}
+      <div className="bg-white border border-[#e5e5e5] rounded-lg shadow-sm">
+        <div style={{ zoom: tableZoomPercent / 100 }}>
           <table className="w-full">
             <thead
-              className="sticky z-10 bg-[#fafafa] border-b border-[#e5e5e5]"
+              className="sticky z-10 bg-[#fafafa] border-b border-[#e5e5e5] shadow-sm"
               style={{ top: compact ? 0 : stickyHeaderOffset }}
             >
               <tr>

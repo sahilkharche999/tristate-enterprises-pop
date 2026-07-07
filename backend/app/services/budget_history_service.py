@@ -1547,6 +1547,11 @@ def _serialize_draft(draft: BudgetDraft, upload: Optional[BudgetUpload] = None) 
             or (getattr(upload, "assessment_mode", None) if upload else None)
             or ASSESSMENT_MODE_VARIABLE
         ),
+        source_document_is_pdf=bool(upload)
+        and choose_financial_document_route(
+            upload.original_filename, upload.content_type
+        ).path
+        == "pdf_vlm",
     )
 
 

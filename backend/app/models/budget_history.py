@@ -101,6 +101,11 @@ class BudgetDraftPayload(BaseModel):
     enriched_file_available: bool = False
     source_mode: BudgetSourceMode = "income_statement"
     assessment_mode: AssessmentMode = ASSESSMENT_MODE_VARIABLE
+    # True when the source upload is PDF-family (per choose_financial_document_route). The
+    # Enriched compare view uses this to pick the PDF file endpoint vs. the Excel-as-HTML
+    # endpoint. Defaults False (non-breaking); computed in _serialize_draft when an upload
+    # is available.
+    source_document_is_pdf: bool = False
 
 
 class BudgetDraftSummary(BaseModel):

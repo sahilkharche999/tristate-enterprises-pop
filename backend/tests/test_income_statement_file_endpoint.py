@@ -68,6 +68,18 @@ def _upload_pdf_income_statement(client, monkeypatch, tmp_path, hoa_id: int = 1)
     return upload_id
 
 
+def test_pdf_draft_reports_source_document_is_pdf_true(
+    client, budget_history_test_harness, monkeypatch, tmp_path
+):
+    """Regression guard: the draft payload must expose source_document_is_pdf so the compare
+    view routes a PDF source to the PDF endpoint (not the Excel-as-HTML one)."""
+    _upload_pdf_income_statement(client, monkeypatch, tmp_path)
+
+    response = client.get("/hoa/1/budget/draft")
+    assert response.status_code == 200, response.text
+    assert response.json()["source_document_is_pdf"] is True
+
+
 def test_get_income_statement_file_returns_pdf_bytes(
     client, budget_history_test_harness, monkeypatch, tmp_path
 ):
