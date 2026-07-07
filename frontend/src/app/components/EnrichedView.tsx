@@ -1,11 +1,13 @@
 import { useState } from 'react';
-import { GitMerge, Lock, MessageSquare, ChevronDown, Percent, DollarSign, Unlock } from 'lucide-react';
+import { GitMerge, Lock, MessageSquare, ChevronDown, Percent, DollarSign, Unlock, Minus, Plus } from 'lucide-react';
 import { toast } from 'sonner';
 import { Input } from './ui/input';
 import { Button } from './ui/button';
 import { saveBudgetNote } from '../api/budgetHistory';
 import { type LineItem } from '../data/mockData';
 import { mergedBadgeLabel, mergedBadgeTooltip } from '../lib/glMerge.ts';
+import { clampTableZoomPercent, TABLE_ZOOM_STEP } from './tableZoom.ts';
+import { parseSourcePage } from '../lib/incomeStatementSourcePage.ts';
 import {
   formatCurrency,
   getCategoryLabel,
@@ -33,6 +35,18 @@ interface EnrichedViewProps {
   units: number;
   reserveInflationRate: number;
   hasUnsavedChanges?: boolean;
+  // Jumps the compare-view's source pane to a row's cited page (PDF-sourced drafts only —
+  // add-income-statement-pdf-compare-view). A plain callback prop, mirroring ReserveStudyView's
+  // single flat table pattern.
+  onJumpToPage?: (page: number) => void;
+  // Opens the full-screen compare view. Undefined when there's no source upload to compare
+  // against at all; whether it points at a PDF or an Excel-rendered-as-HTML endpoint is decided
+  // by the caller, not this component.
+  onOpenCompare?: () => void;
+  // True when rendered inside the compare view's left pane rather than as the full page —
+  // mirrors ReserveStudyView's compact prop (tightens spacing; this view has no intro-text
+  // block to suppress).
+  compact?: boolean;
 }
 
 export function EnrichedView({
@@ -47,11 +61,15 @@ export function EnrichedView({
   units,
   reserveInflationRate,
   hasUnsavedChanges = false,
+  onJumpToPage,
+  onOpenCompare,
+  compact = false,
 }: EnrichedViewProps) {
   const [expandedNote, setExpandedNote] = useState<string | null>(null);
   const [noteEdits, setNoteEdits] = useState<Record<string, { title: string; body: string }>>({});
   const [inputMode, setInputMode] = useState<Record<string, 'percent' | 'dollar'>>({});
   const [savingNoteId, setSavingNoteId] = useState<string | null>(null);
+  const [tableZoomPercent, setTableZoomPercent] = useState(100);
 
 
   const handlePercentChangeInput = (itemId: string, value: string) => {
@@ -147,17 +165,61 @@ export function EnrichedView({
   const perUnitMonthly = units > 0 ? totalAnnualBudget / 12 / units : null;
 
   return (
-    <div className="space-y-8">
-      {hasUnsavedChanges ? (
-        <div className="flex items-center">
-          <span className="whitespace-nowrap rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-medium text-amber-900">
-            Unsaved changes
-          </span>
+    <div className={compact ? 'space-y-3' : 'space-y-8'}>
+      {hasUnsavedChanges || onOpenCompare ? (
+        <div className="flex flex-wrap items-center gap-2">
+          {hasUnsavedChanges ? (
+            <span className="whitespace-nowrap rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-medium text-amber-900">
+              Unsaved changes
+            </span>
+          ) : null}
+          {onOpenCompare ? (
+            <Button
+              type="button"
+              variant="outline"
+              onClick={onOpenCompare}
+              className="whitespace-nowrap border-[#d4d4d4] text-[#525252] hover:bg-[#f5f5f5]"
+            >
+              Compare with source
+            </Button>
+          ) : null}
         </div>
       ) : null}
+      <div className="flex items-center justify-end gap-1.5">
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          onClick={() => setTableZoomPercent((z) => clampTableZoomPercent(z - TABLE_ZOOM_STEP))}
+          disabled={tableZoomPercent <= 50}
+          className="h-7 w-7 text-[#525252] hover:bg-[#f5f5f5]"
+          aria-label="Zoom out"
+        >
+          <Minus className="h-3.5 w-3.5" />
+        </Button>
+        <button
+          type="button"
+          onClick={() => setTableZoomPercent(100)}
+          title="Reset zoom"
+          className="w-12 text-center text-xs font-medium text-[#737373] hover:text-[#111111]"
+        >
+          {tableZoomPercent}%
+        </button>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          onClick={() => setTableZoomPercent((z) => clampTableZoomPercent(z + TABLE_ZOOM_STEP))}
+          disabled={tableZoomPercent >= 150}
+          className="h-7 w-7 text-[#525252] hover:bg-[#f5f5f5]"
+          aria-label="Zoom in"
+        >
+          <Plus className="h-3.5 w-3.5" />
+        </Button>
+      </div>
       {/* Table */}
       <div className="bg-white border border-[#e5e5e5] rounded-lg overflow-hidden shadow-sm">
-        <div className="overflow-x-auto">
+        <div className="overflow-x-auto" style={{ zoom: tableZoomPercent / 100 }}>
           <table className="w-full">
             <thead className="bg-[#fafafa] border-b border-[#e5e5e5]">
               <tr>
@@ -332,6 +394,24 @@ export function EnrichedView({
                             onChange={(e) => onFieldChange(item.id, 'name', e.target.value)}
                             className="w-full min-w-[220px] border-[#e5e5e5] bg-white text-sm text-[#111111] focus:border-[#737373] focus:ring-1 focus:ring-[#737373]"
                           />
+                          {(() => {
+                            const page = parseSourcePage(item.sourcePageOrCell);
+                            if (page === null) return null;
+                            return onJumpToPage ? (
+                              <button
+                                type="button"
+                                onClick={() => onJumpToPage(page)}
+                                title={`Jump to page ${page} in the source document`}
+                                className="mt-1 inline-flex w-fit items-center rounded bg-slate-100 px-1.5 py-0.5 text-[11px] font-medium text-slate-700 ring-1 ring-inset ring-slate-300/60 hover:bg-slate-200 hover:ring-slate-400"
+                              >
+                                Page {page}
+                              </button>
+                            ) : (
+                              <span className="mt-1 inline-flex w-fit items-center rounded bg-slate-100 px-1.5 py-0.5 text-[11px] font-medium text-slate-700 ring-1 ring-inset ring-slate-300/60">
+                                Page {page}
+                              </span>
+                            );
+                          })()}
                           {wasUnlocked ? (
                             <span className="text-[10px] text-amber-600 font-medium">
                               Unlocked — stays in reserve bucket; won't change operating total

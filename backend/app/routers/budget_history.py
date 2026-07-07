@@ -1,7 +1,7 @@
 """Protected HOA-scoped budget history endpoints."""
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from sqlalchemy.orm import Session
 
 from ..assessment_mode import AssessmentMode
@@ -306,6 +306,46 @@ async def get_reserve_study_upload_file(
             filename=filename,
             media_type="application/pdf",
         )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.get("/hoa/{hoa_id}/budget/uploads/{upload_id}/income-statement-file")
+async def get_income_statement_upload_file(
+    hoa_id: int,
+    upload_id: int,
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user),  # noqa: ARG001
+) -> FileResponse:
+    try:
+        file_path, filename, media_type = budget_history_service.get_income_statement_upload_file(
+            session,
+            hoa_id=hoa_id,
+            upload_id=upload_id,
+        )
+        return FileResponse(
+            path=file_path,
+            filename=filename,
+            media_type=media_type,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.get("/hoa/{hoa_id}/budget/uploads/{upload_id}/income-statement-file-html")
+async def get_income_statement_upload_as_html(
+    hoa_id: int,
+    upload_id: int,
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user),  # noqa: ARG001
+) -> HTMLResponse:
+    try:
+        html_document, _filename = budget_history_service.get_income_statement_upload_as_html(
+            session,
+            hoa_id=hoa_id,
+            upload_id=upload_id,
+        )
+        return HTMLResponse(content=html_document)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
 

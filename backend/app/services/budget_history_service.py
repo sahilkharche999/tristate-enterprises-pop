@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import html
 import json
 import logging
 import os
@@ -1726,6 +1727,17 @@ def _get_reserve_study_upload(session: Session, hoa_id: int, upload_id: int) -> 
         or upload.document_role != "reserve_study"
     ):
         raise LookupError("Reserve study upload not found")
+    return upload
+
+
+def _get_income_statement_upload(session: Session, hoa_id: int, upload_id: int) -> BudgetUpload:
+    upload = session.get(BudgetUpload, upload_id)
+    if (
+        upload is None
+        or upload.property_id != hoa_id
+        or upload.document_role != "budget_source"
+    ):
+        raise LookupError("Income statement upload not found")
     return upload
 
 
@@ -3614,6 +3626,85 @@ def get_reserve_study_upload_file(
     if not file_path.exists():
         raise LookupError("Reserve study file not found on disk")
     return file_path, upload.original_filename
+
+
+def get_income_statement_upload_file(
+    session: Session,
+    *,
+    hoa_id: int,
+    upload_id: int,
+) -> tuple[Path, str, str]:
+    upload = _get_income_statement_upload(session, hoa_id, upload_id)
+    file_path = _budget_storage_path(upload.storage_key)
+    if not file_path.exists():
+        raise LookupError("Income statement file not found on disk")
+    if upload.content_type:
+        media_type = upload.content_type
+    elif choose_financial_document_route(upload.original_filename, upload.content_type).path == "pdf_vlm":
+        media_type = "application/pdf"
+    else:
+        media_type = "application/octet-stream"
+    return file_path, upload.original_filename, media_type
+
+
+def get_income_statement_upload_as_html(
+    session: Session,
+    *,
+    hoa_id: int,
+    upload_id: int,
+) -> tuple[str, str]:
+    """Render every sheet of an Excel-family income-statement upload as plain HTML.
+
+    No header-row detection, no attempt to identify a single "relevant" sheet — this
+    is a visual reference for the compare view, not a parser. `.xls` (which openpyxl
+    cannot open) is normalized to `.xlsx` first via the same `_ensure_xlsx` conversion
+    the upload pipeline already uses.
+    """
+    from openpyxl import load_workbook
+
+    upload = _get_income_statement_upload(session, hoa_id, upload_id)
+    file_path = _budget_storage_path(upload.storage_key)
+    if not file_path.exists():
+        raise LookupError("Income statement file not found on disk")
+
+    temp_path: Optional[str] = None
+    workbook_path = str(file_path)
+    try:
+        if Path(upload.original_filename).suffix.lower() == ".xls":
+            temp_path = _write_temp_workbook(file_path.read_bytes(), upload.original_filename)
+            workbook_path = _ensure_xlsx(temp_path)
+
+        workbook = load_workbook(workbook_path, data_only=True)
+        try:
+            sheet_sections = []
+            for sheet_name in workbook.sheetnames:
+                worksheet = workbook[sheet_name]
+                rows_html = []
+                for row in worksheet.iter_rows(values_only=True):
+                    cells_html = "".join(
+                        f"<td>{html.escape(str(value))}</td>" if value is not None else "<td></td>"
+                        for value in row
+                    )
+                    rows_html.append(f"<tr>{cells_html}</tr>")
+                sheet_sections.append(
+                    f"<h2>{html.escape(sheet_name)}</h2><table>{''.join(rows_html)}</table>"
+                )
+        finally:
+            workbook.close()
+    finally:
+        if temp_path is not None:
+            Path(temp_path).unlink(missing_ok=True)
+        if workbook_path != str(file_path) and workbook_path != temp_path:
+            Path(workbook_path).unlink(missing_ok=True)
+
+    document = (
+        "<html><head><meta charset=\"utf-8\">"
+        "<style>table { border-collapse: collapse; } td { border: 1px solid #ddd; "
+        "padding: 4px 8px; font-family: sans-serif; font-size: 13px; white-space: nowrap; } "
+        "h2 { font-family: sans-serif; font-size: 14px; }</style>"
+        f"</head><body>{''.join(sheet_sections)}</body></html>"
+    )
+    return document, upload.original_filename
 
 
 def record_draft_enriched_download(

@@ -13,6 +13,11 @@ import { pdfPageAnchorUrl } from './pdfPageAnchor.ts';
 interface DrePdfCompareViewProps {
   fileUrl: string;
   targetPage?: number;
+  /** Label used in the header/iframe-title/status text ("Compare with source
+   * {sourceLabel}", etc). Defaults to 'PDF' so existing PDF-only call sites
+   * (Reserve Study, DRE) are unaffected; the income-statement Excel case
+   * passes 'workbook' since the rendered content isn't a PDF. */
+  sourceLabel?: string;
   onClose: () => void;
   children: React.ReactNode;
 }
@@ -27,6 +32,7 @@ interface DrePdfCompareViewProps {
 export function DrePdfCompareView({
   fileUrl,
   targetPage,
+  sourceLabel = 'PDF',
   onClose,
   children,
 }: DrePdfCompareViewProps) {
@@ -41,7 +47,7 @@ export function DrePdfCompareView({
     let cancelled = false;
     setStatus('loading');
     void fetch(fileUrl, { headers: authHeaders() })
-      .then((r) => (r.ok ? r.blob() : Promise.reject(new Error('Failed to load source PDF'))))
+      .then((r) => (r.ok ? r.blob() : Promise.reject(new Error('Failed to load source file'))))
       .then((blob) => {
         if (cancelled) return;
         url = URL.createObjectURL(blob);
@@ -74,12 +80,12 @@ export function DrePdfCompareView({
     setIsDragging(false);
   };
 
-  const message = comparePdfPaneMessage(status);
+  const message = comparePdfPaneMessage(status, sourceLabel);
 
   return (
     <div className="fixed inset-0 z-50 flex flex-col bg-black/40" role="dialog" aria-modal="true">
       <div className="flex items-center justify-between border-b border-[#e5e5e5] bg-white px-4 py-2.5">
-        <p className="text-sm font-medium text-[#111111]">Compare with source PDF</p>
+        <p className="text-sm font-medium text-[#111111]">Compare with source {sourceLabel}</p>
         <Button variant="ghost" size="icon" onClick={onClose} aria-label="Close compare view">
           <X className="h-5 w-5 text-[#525252]" />
         </Button>
@@ -120,7 +126,7 @@ export function DrePdfCompareView({
                 // Remounting on every targetPage change (not just updating src)
                 // is required — see pdfPageAnchor.ts / design.md Decision 1a.
                 key={targetPage ?? 0}
-                title="Source PDF"
+                title={`Source ${sourceLabel}`}
                 src={pdfPageAnchorUrl(objectUrl ?? '', targetPage)}
                 className="h-full w-full border-0"
               />

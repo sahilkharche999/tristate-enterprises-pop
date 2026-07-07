@@ -34,6 +34,8 @@ import {
   mapBudgetHistoryLineItems,
   mapEditorLineItemsToBudgetHistory,
   reserveStudyFileUrl,
+  incomeStatementFileUrl,
+  incomeStatementHtmlFileUrl,
   saveBudgetDraft,
   saveReserveStudyRows,
   unmergeBudgetGlMergeApplication,
@@ -85,6 +87,7 @@ import { getErrorMessage } from '../lib/errors';
 import { computeTimingInputs } from '../lib/fiscalYear';
 import { formatFiscalYearRangeLabel } from '../lib/hoa';
 import { earliestReserveStudyPage } from '../lib/reserveStudyDerived';
+import { earliestSourcePage } from '../lib/incomeStatementDerived';
 
 interface GenerateBudgetRequest {
   draftId: number;
@@ -255,6 +258,19 @@ export function BudgetScreen({
   const jumpToReservePage = useCallback((page: number) => {
     setReserveTargetPage(page);
     setIsReserveCompareOpen(true);
+  }, []);
+
+  // "Compare with source" full-screen split view for the Enriched income-statement
+  // tab (add-income-statement-pdf-compare-view). Unlike reserveStudyUploadId above,
+  // read straight off `activeDraft` rather than mirrored into local state: there is
+  // no "replace income statement" re-upload flow that could desync it the way
+  // Replace PDF can for the reserve study upload — the income statement upload is
+  // what creates the draft in the first place.
+  const [isEnrichedCompareOpen, setIsEnrichedCompareOpen] = useState(false);
+  const [enrichedTargetPage, setEnrichedTargetPage] = useState<number | undefined>(undefined);
+  const jumpToEnrichedPage = useCallback((page: number) => {
+    setEnrichedTargetPage(page);
+    setIsEnrichedCompareOpen(true);
   }, []);
   const reserveRowsRef = useRef<ReserveStudyRow[]>([]);
   const reserveWarningsRef = useRef<string[]>([]);
@@ -1763,36 +1779,8 @@ export function BudgetScreen({
       </div>
 
       <main className="px-8 py-8">
-        {currentView === 'enriched' && (
-          <>
-            {draftId && isComparePanelOpen ? (
-              <div className="mb-8 rounded-xl border border-[#e5e5e5] bg-white p-4 shadow-sm">
-                <DraftBaselineComparePanel
-                  hoaId={hoaId}
-                  draftId={draftId}
-                  onPersistDraftSnapshot={ensurePersistedDraftSnapshot}
-                  isPersistingDraft={isSavingDraft}
-                  isGenerating={isGenerating}
-                />
-              </div>
-            ) : null}
-            {draftId ? (
-              <div className="mb-8">
-                <GLMergeSuggestions
-                  suggestions={visibleGlMergeSuggestions}
-                  merges={glMerges}
-                  loading={glMergeSuggestionsLoading}
-                  error={glMergeSuggestionsError}
-                  actionLoading={glMergeActionLoading}
-                  unmergingApplicationId={unmergingApplicationId}
-                  onSuggest={() => void handleFetchGlMergeSuggestions()}
-                  onApplySuggestion={(suggestion) => void handleApplyMergeSuggestion(suggestion)}
-                  onModifySuggestion={handleModifyMergeSuggestion}
-                  onDismissSuggestion={handleDismissMergeSuggestion}
-                  onUnmerge={(merge) => void handleUnmergeMerge(merge)}
-                />
-              </div>
-            ) : null}
+        {currentView === 'enriched' && (() => {
+          const enrichedTable = (
             <EnrichedView
               hoaId={hoaId}
               draftId={draftId}
@@ -1805,9 +1793,75 @@ export function BudgetScreen({
               units={hoa.units}
               reserveInflationRate={activeReserveInflationRate}
               hasUnsavedChanges={hasUnsavedDraftChanges}
+              onJumpToPage={jumpToEnrichedPage}
+              compact={isEnrichedCompareOpen}
+              onOpenCompare={
+                activeDraft?.source_upload_id && !isEnrichedCompareOpen
+                  ? () => {
+                      setEnrichedTargetPage(
+                        activeDraft?.source_document_is_pdf
+                          ? earliestSourcePage(lineItems)
+                          : undefined,
+                      );
+                      setIsEnrichedCompareOpen(true);
+                    }
+                  : undefined
+              }
             />
-          </>
-        )}
+          );
+
+          if (isEnrichedCompareOpen && activeDraft?.source_upload_id) {
+            const isPdf = activeDraft.source_document_is_pdf ?? false;
+            return (
+              <DrePdfCompareView
+                fileUrl={
+                  isPdf
+                    ? incomeStatementFileUrl(hoaId, activeDraft.source_upload_id)
+                    : incomeStatementHtmlFileUrl(hoaId, activeDraft.source_upload_id)
+                }
+                targetPage={isPdf ? enrichedTargetPage : undefined}
+                sourceLabel={isPdf ? undefined : 'workbook'}
+                onClose={() => setIsEnrichedCompareOpen(false)}
+              >
+                {enrichedTable}
+              </DrePdfCompareView>
+            );
+          }
+
+          return (
+            <>
+              {draftId && isComparePanelOpen ? (
+                <div className="mb-8 rounded-xl border border-[#e5e5e5] bg-white p-4 shadow-sm">
+                  <DraftBaselineComparePanel
+                    hoaId={hoaId}
+                    draftId={draftId}
+                    onPersistDraftSnapshot={ensurePersistedDraftSnapshot}
+                    isPersistingDraft={isSavingDraft}
+                    isGenerating={isGenerating}
+                  />
+                </div>
+              ) : null}
+              {draftId ? (
+                <div className="mb-8">
+                  <GLMergeSuggestions
+                    suggestions={visibleGlMergeSuggestions}
+                    merges={glMerges}
+                    loading={glMergeSuggestionsLoading}
+                    error={glMergeSuggestionsError}
+                    actionLoading={glMergeActionLoading}
+                    unmergingApplicationId={unmergingApplicationId}
+                    onSuggest={() => void handleFetchGlMergeSuggestions()}
+                    onApplySuggestion={(suggestion) => void handleApplyMergeSuggestion(suggestion)}
+                    onModifySuggestion={handleModifyMergeSuggestion}
+                    onDismissSuggestion={handleDismissMergeSuggestion}
+                    onUnmerge={(merge) => void handleUnmergeMerge(merge)}
+                  />
+                </div>
+              ) : null}
+              {enrichedTable}
+            </>
+          );
+        })()}
         {currentView === 'budget' && (
           <BudgetView
             lineItems={lineItems}

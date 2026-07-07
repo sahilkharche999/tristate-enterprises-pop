@@ -14,3 +14,8 @@ test('comparePdfPaneMessage shows an error message on fetch failure', () => {
 test('comparePdfPaneMessage has no message once the PDF is ready to render', () => {
   assert.equal(comparePdfPaneMessage('ready'), null);
 });
+
+test('comparePdfPaneMessage uses a custom sourceLabel when given one', () => {
+  assert.match(comparePdfPaneMessage('loading', 'workbook') ?? '', /loading source workbook/i);
+  assert.match(comparePdfPaneMessage('error', 'workbook') ?? '', /could not load the source workbook/i);
+});

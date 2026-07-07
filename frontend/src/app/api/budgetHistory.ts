@@ -1,6 +1,7 @@
 import { BASE_URL } from './config.ts';
 import { authHeaders, handleBlobResponse, handleResponse } from './http.ts';
 import { reserveStudyFileUrl } from './reserveStudyFileUrl.ts';
+import { incomeStatementFileUrl, incomeStatementHtmlFileUrl } from './incomeStatementFileUrl.ts';
 import type { LineItem } from '../data/mockData.ts';
 import {
   createBudgetBundleFormData,
@@ -11,6 +12,9 @@ import type { AssessmentMode } from '../lib/assessmentMode.ts';
 
 // Reserve-study source PDF, for the compare-view split (add-reserve-study-pdf-compare-view).
 export { reserveStudyFileUrl };
+// Income-statement source (PDF or Excel-rendered-as-HTML), for the Enriched tab's
+// compare-view split (add-income-statement-pdf-compare-view).
+export { incomeStatementFileUrl, incomeStatementHtmlFileUrl };
 
 type JsonValue = string | number | boolean | null | JsonObject | JsonValue[];
 type JsonObject = Record<string, JsonValue>;
@@ -99,6 +103,7 @@ export interface BudgetDraftPayload {
   enriched_file_available?: boolean | null;
   source_mode?: BudgetSourceMode | null;
   assessment_mode?: AssessmentMode | null;
+  source_document_is_pdf?: boolean;
 }
 
 export interface BudgetDraftSummary {
