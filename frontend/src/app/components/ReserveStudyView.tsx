@@ -230,11 +230,16 @@ export function ReserveStudyView({
             <Plus className="h-3.5 w-3.5" />
           </Button>
         </div>
-        {/* This table is wider than the viewport (min-w 1540px), so it needs its own scroll
-            box for both axes. That box is the sticky containing block, so the <thead> sticks to
-            its top (top-0) as rows scroll within it — the standard wide-data-grid pattern. */}
-        <div className="mt-2 overflow-hidden rounded-2xl border border-[#e5e5e5]">
-          <div className="max-h-[70vh] overflow-auto" style={{ zoom: tableZoomPercent / 100 }}>
+        {/* Full page: the table gets its own bounded scroll box (max-h-70vh + overflow-auto) so
+            the <thead> sticks to the box top as rows scroll — the standard wide-data-grid pattern.
+            In compact mode (the compare view's left pane) the pane itself already scrolls both
+            axes, so we drop the cap and the inner overflow/clip — otherwise the 70vh box leaves a
+            large empty gap below it inside the full-height pane. */}
+        <div className={`mt-2 rounded-2xl border border-[#e5e5e5] ${compact ? '' : 'overflow-hidden'}`}>
+          <div
+            className={compact ? undefined : 'max-h-[70vh] overflow-auto'}
+            style={{ zoom: tableZoomPercent / 100 }}
+          >
             <table className="min-w-[1540px] bg-white">
               <colgroup>
                 <col className="w-[72px]" />
