@@ -184,6 +184,10 @@ function renderExtractionDebug(debugInfo?: ExtractionDebugInfo | null) {
   );
 }
 
+// Must match the `top-[140px]` class on the sticky view-switch tab bar below — used to
+// compute where the Enriched/Reserve Study tables' own sticky header should land.
+const TAB_BAR_STICKY_TOP = 140;
+
 export function BudgetScreen({
   hoa,
   hoaId,
@@ -202,16 +206,23 @@ export function BudgetScreen({
   const [uploadState, setUploadState] = useState<'initial' | 'uploading' | 'complete'>(
     activeDraft ? 'complete' : 'initial',
   );
-  // Table thead sticky offset: measured (not hardcoded) height of the page's own sticky
-  // chrome (header + view-switch tab bar) so the Enriched/Reserve Study tables' sticky
-  // headers land flush below it instead of overlapping — a hardcoded pixel guess would be
-  // wrong the moment the header's height changes (e.g. its Context Note details expands).
+  // Table thead sticky offset: the tab bar's own `top-[140px]` (its sticky CSS offset, a
+  // constant regardless of scroll position) plus its *measured* rendered height, so the
+  // Enriched/Reserve Study tables' sticky headers land flush below it. Deliberately NOT
+  // `getBoundingClientRect().bottom` — at initial mount (scroll position 0) a sticky element
+  // hasn't necessarily "stuck" yet if its natural in-flow position sits further down the page
+  // than its sticky threshold (true here: the header above it is taller than 140px), so
+  // `.bottom` would capture its unstuck natural position instead of its eventual stuck one —
+  // wildly too large, which is exactly what produced the mid-table overlap reported live.
+  // `.height` has no such scroll dependency, so combining it with the known constant is correct
+  // regardless of scroll position at measurement time.
   const tabBarRef = useRef<HTMLDivElement>(null);
   const [tableStickyTop, setTableStickyTop] = useState(0);
   useEffect(() => {
     const element = tabBarRef.current;
     if (!element) return;
-    const updateOffset = () => setTableStickyTop(element.getBoundingClientRect().bottom);
+    const updateOffset = () =>
+      setTableStickyTop(TAB_BAR_STICKY_TOP + element.getBoundingClientRect().height);
     updateOffset();
     const observer = new ResizeObserver(updateOffset);
     observer.observe(element);
