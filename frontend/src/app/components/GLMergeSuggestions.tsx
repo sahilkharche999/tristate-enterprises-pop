@@ -1,4 +1,5 @@
-import { AlertTriangle, Sparkles, Undo2 } from 'lucide-react';
+import { useState } from 'react';
+import { AlertTriangle, ChevronDown, Sparkles, Undo2 } from 'lucide-react';
 
 import type {
   BudgetGlMergeListItem,
@@ -43,22 +44,43 @@ export function GLMergeSuggestions({
   onDismissSuggestion,
   onUnmerge,
 }: GLMergeSuggestionsProps) {
+  const [isOpen, setIsOpen] = useState(false);
   const appliedMerges = merges.filter((merge) => merge.application_status === 'applied');
+  const pendingCount = suggestions.length + appliedMerges.length;
 
   return (
     <section className="space-y-4">
       <div className="rounded-2xl border border-[#e5e5e5] bg-white p-6 shadow-sm">
         <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
-          <div className="space-y-2">
-            <p className="text-xs font-medium uppercase tracking-[0.2em] text-[#737373]">
-              Similar Rows
-            </p>
-            <h2 className="text-xl font-semibold text-[#111111]">GL Merge Review</h2>
-            <p className="max-w-3xl text-sm text-[#666666]">
-              Combine duplicate or near-duplicate budget rows before mapping. Merges rewrite the
-              active draft and lock when you generate a new immutable version.
-            </p>
-          </div>
+          <button
+            type="button"
+            onClick={() => setIsOpen((open) => !open)}
+            className="flex items-start gap-3 text-left"
+            aria-expanded={isOpen}
+          >
+            <ChevronDown
+              className={`mt-1 h-4 w-4 shrink-0 text-[#737373] transition-transform ${isOpen ? 'rotate-180' : ''}`}
+            />
+            <div className="space-y-2">
+              <p className="text-xs font-medium uppercase tracking-[0.2em] text-[#737373]">
+                Similar Rows
+              </p>
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 className="text-xl font-semibold text-[#111111]">GL Merge Review</h2>
+                {!isOpen && pendingCount > 0 ? (
+                  <span className="rounded-full bg-[#f5f5f5] px-2.5 py-0.5 text-xs font-medium text-[#525252]">
+                    {pendingCount}
+                  </span>
+                ) : null}
+              </div>
+              {isOpen ? (
+                <p className="max-w-3xl text-sm text-[#666666]">
+                  Combine duplicate or near-duplicate budget rows before mapping. Merges rewrite the
+                  active draft and lock when you generate a new immutable version.
+                </p>
+              ) : null}
+            </div>
+          </button>
           <Button
             type="button"
             onClick={onSuggest}
@@ -70,7 +92,7 @@ export function GLMergeSuggestions({
           </Button>
         </div>
 
-        {appliedMerges.length > 0 ? (
+        {isOpen && appliedMerges.length > 0 ? (
           <div className="mt-5 rounded-xl border border-amber-200 bg-amber-50 p-4">
             <div className="mb-2 flex items-center gap-2 text-sm font-medium text-amber-900">
               <AlertTriangle className="h-4 w-4" />
@@ -114,12 +136,13 @@ export function GLMergeSuggestions({
           </div>
         ) : null}
 
-        {error ? (
+        {isOpen && error ? (
           <div className="mt-5 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-900">
             {error}
           </div>
         ) : null}
 
+        {isOpen ? (
         <div className="mt-5 space-y-3">
           {suggestions.length === 0 ? (
             <div className="rounded-xl border border-dashed border-[#d4d4d4] bg-[#fafafa] px-4 py-5 text-sm text-[#737373]">
@@ -188,6 +211,7 @@ export function GLMergeSuggestions({
             ))
           )}
         </div>
+        ) : null}
       </div>
     </section>
   );

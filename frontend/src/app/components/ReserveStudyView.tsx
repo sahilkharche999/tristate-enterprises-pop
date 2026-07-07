@@ -225,7 +225,7 @@ export function ReserveStudyView({
           </Button>
         </div>
         <div className="mt-2 overflow-hidden rounded-2xl border border-[#e5e5e5]">
-          <div className="overflow-x-auto" style={{ zoom: tableZoomPercent / 100 }}>
+          <div className="max-h-[70vh] overflow-auto" style={{ zoom: tableZoomPercent / 100 }}>
             <table className="min-w-[1540px] bg-white">
               <colgroup>
                 <col className="w-[72px]" />
@@ -239,7 +239,7 @@ export function ReserveStudyView({
                 <col className="w-[200px]" />
                 <col className="w-[96px]" />
               </colgroup>
-              <thead className="bg-[#f7f7f7]">
+              <thead className="sticky top-0 z-10 bg-[#f7f7f7]">
                 <tr className="text-left text-xs uppercase tracking-[0.18em] text-[#737373]">
                   <th className="px-4 py-3">Move</th>
                   <th className="px-4 py-3">Line Item</th>

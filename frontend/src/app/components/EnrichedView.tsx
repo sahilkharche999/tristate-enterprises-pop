@@ -219,9 +219,9 @@ export function EnrichedView({
       </div>
       {/* Table */}
       <div className="bg-white border border-[#e5e5e5] rounded-lg overflow-hidden shadow-sm">
-        <div className="overflow-x-auto" style={{ zoom: tableZoomPercent / 100 }}>
+        <div className="max-h-[70vh] overflow-auto" style={{ zoom: tableZoomPercent / 100 }}>
           <table className="w-full">
-            <thead className="bg-[#fafafa] border-b border-[#e5e5e5]">
+            <thead className="sticky top-0 z-10 bg-[#fafafa] border-b border-[#e5e5e5]">
               <tr>
                 <th className="text-left px-6 py-4 text-xs font-semibold text-[#525252] uppercase tracking-wider min-w-[260px] w-[260px]">Line Item</th>
                 <th className="text-right px-6 py-4 text-xs font-semibold text-[#525252] uppercase tracking-wider">YTD Actual</th>
