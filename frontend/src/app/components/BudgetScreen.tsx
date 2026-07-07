@@ -1844,6 +1844,7 @@ export function BudgetScreen({
               isApplying={isApplyingReserveStudy}
               applyMessage={reserveStudyApplyMessage}
               onJumpToPage={jumpToReservePage}
+              compact={isReserveCompareOpen}
               onOpenCompare={
                 reserveStudyUploadId && !isReserveCompareOpen
                   ? () => {

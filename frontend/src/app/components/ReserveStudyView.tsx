@@ -43,6 +43,12 @@ interface ReserveStudyViewProps {
   // PDF to compare against (e.g. rows entered manually with no upload) — same conditional-prop
   // convention this file already uses for onReplaceFile.
   onOpenCompare?: () => void;
+  // True when rendered inside the compare view's left pane rather than as the full page. That
+  // pane can be a fraction of the viewport width, but Tailwind's `md:` breakpoints below key off
+  // the browser viewport, not the pane — so the intro heading/paragraph (sized for a full-width
+  // page) wrap onto many lines and push the table down. Compact mode drops that intro block and
+  // lets the action row wrap normally instead of forcing a single line via `md:flex-nowrap`.
+  compact?: boolean;
 }
 
 export function ReserveStudyView({
@@ -63,6 +69,7 @@ export function ReserveStudyView({
   applyMessage,
   onJumpToPage,
   onOpenCompare,
+  compact = false,
 }: ReserveStudyViewProps) {
   const [deleteIndex, setDeleteIndex] = useState<number | null>(null);
   const [isReplacing, setIsReplacing] = useState(false);
@@ -89,20 +96,22 @@ export function ReserveStudyView({
   };
 
   return (
-    <section className="space-y-6">
-      <div className="rounded-2xl border border-[#e5e5e5] bg-white p-6 shadow-sm">
-        <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
-          <div className="space-y-2">
-            <p className="text-xs font-medium uppercase tracking-[0.2em] text-[#737373]">
-              Reserve Study Review
-            </p>
-            <h2 className="text-xl font-semibold text-[#111111]">Editable Reserve Components</h2>
-            <p className="max-w-2xl text-sm text-[#666666]">
-              Review the parsed reserve-study rows here, fix blanks manually, then apply only the
-              due-this-year items into the budget draft.
-            </p>
-          </div>
-          <div className="flex flex-wrap items-center gap-2 md:flex-nowrap md:justify-end">
+    <section className={compact ? '' : 'space-y-6'}>
+      <div className={compact ? 'p-4' : 'rounded-2xl border border-[#e5e5e5] bg-white p-6 shadow-sm'}>
+        <div className={compact ? 'flex flex-col gap-3' : 'flex flex-col gap-4 md:flex-row md:items-start md:justify-between'}>
+          {compact ? null : (
+            <div className="space-y-2">
+              <p className="text-xs font-medium uppercase tracking-[0.2em] text-[#737373]">
+                Reserve Study Review
+              </p>
+              <h2 className="text-xl font-semibold text-[#111111]">Editable Reserve Components</h2>
+              <p className="max-w-2xl text-sm text-[#666666]">
+                Review the parsed reserve-study rows here, fix blanks manually, then apply only the
+                due-this-year items into the budget draft.
+              </p>
+            </div>
+          )}
+          <div className={compact ? 'flex flex-wrap items-center gap-2' : 'flex flex-wrap items-center gap-2 md:flex-nowrap md:justify-end'}>
             <span className="whitespace-nowrap rounded-full bg-[#f5f5f5] px-3 py-1 text-xs font-medium text-[#525252]">
               {status || 'none'}
             </span>
@@ -181,7 +190,7 @@ export function ReserveStudyView({
           </div>
         ) : null}
 
-        <div className="mt-6 overflow-hidden rounded-2xl border border-[#e5e5e5]">
+        <div className={`${compact ? 'mt-3' : 'mt-6'} overflow-hidden rounded-2xl border border-[#e5e5e5]`}>
           <div className="overflow-x-auto">
             <table className="min-w-[1540px] bg-white">
               <colgroup>
