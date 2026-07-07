@@ -3684,15 +3684,8 @@ def get_income_statement_upload_as_html(
             sheet_sections = []
             for sheet_name in workbook.sheetnames:
                 worksheet = workbook[sheet_name]
-                rows_html = []
-                for row in worksheet.iter_rows(values_only=True):
-                    cells_html = "".join(
-                        f"<td>{html.escape(str(value))}</td>" if value is not None else "<td></td>"
-                        for value in row
-                    )
-                    rows_html.append(f"<tr>{cells_html}</tr>")
                 sheet_sections.append(
-                    f"<h2>{html.escape(sheet_name)}</h2><table>{''.join(rows_html)}</table>"
+                    f"<h2>{html.escape(sheet_name)}</h2>{_render_sheet_html(worksheet)}"
                 )
         finally:
             workbook.close()
@@ -3704,12 +3697,54 @@ def get_income_statement_upload_as_html(
 
     document = (
         "<html><head><meta charset=\"utf-8\">"
-        "<style>table { border-collapse: collapse; } td { border: 1px solid #ddd; "
-        "padding: 4px 8px; font-family: sans-serif; font-size: 13px; white-space: nowrap; } "
-        "h2 { font-family: sans-serif; font-size: 14px; }</style>"
+        "<style>"
+        "body { margin: 0; padding: 20px; background: #fff; }"
+        "h2 { font-family: sans-serif; font-size: 14px; color: #111; margin: 20px 0 8px; }"
+        "table { border-collapse: collapse; margin-bottom: 24px; }"
+        "td { border: 1px solid #e5e5e5; padding: 6px 10px; font-family: sans-serif;"
+        " font-size: 13px; white-space: nowrap; vertical-align: top; color: #262626; }"
+        "td.num { text-align: right; font-variant-numeric: tabular-nums; }"
+        "</style>"
         f"</head><body>{''.join(sheet_sections)}</body></html>"
     )
     return document, upload.original_filename
+
+
+def _render_sheet_html(worksheet) -> str:
+    """Render one worksheet as an HTML <table>, dropping rows and columns that are entirely
+    empty (spreadsheets exported from `.xls` are riddled with merged-cell spacer columns that
+    would otherwise make the preview absurdly wide and sparse). Numeric cells are right-aligned.
+    This is a visual reference only — no header detection or semantic interpretation."""
+    rows = [row for row in worksheet.iter_rows(values_only=True)]
+    if not rows:
+        return "<table></table>"
+
+    width = max(len(row) for row in rows)
+    keep_columns = [
+        col
+        for col in range(width)
+        if any(col < len(row) and row[col] is not None for row in rows)
+    ]
+    if not keep_columns:
+        return "<table></table>"
+
+    rows_html = []
+    for row in rows:
+        if all(value is None for value in row):
+            continue
+        cells_html = []
+        for col in keep_columns:
+            value = row[col] if col < len(row) else None
+            if value is None:
+                cells_html.append("<td></td>")
+            elif isinstance(value, bool):
+                cells_html.append(f"<td>{html.escape(str(value))}</td>")
+            elif isinstance(value, (int, float)):
+                cells_html.append(f'<td class="num">{html.escape(str(value))}</td>')
+            else:
+                cells_html.append(f"<td>{html.escape(str(value))}</td>")
+        rows_html.append(f"<tr>{''.join(cells_html)}</tr>")
+    return f"<table>{''.join(rows_html)}</table>"
 
 
 def record_draft_enriched_download(

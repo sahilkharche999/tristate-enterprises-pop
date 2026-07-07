@@ -98,6 +98,30 @@ def test_get_income_statement_html_renders_legacy_xls(client, budget_history_tes
     assert "Assessment Income" in response.text
 
 
+def test_get_income_statement_html_drops_empty_columns_and_aligns_numbers(
+    client, budget_history_test_harness
+):
+    # Columns B and D are entirely empty (merged-cell spacers common in real .xls exports);
+    # they should be dropped so the preview isn't absurdly wide. Numeric cells right-align.
+    file_bytes = _xlsx_bytes(
+        {
+            "Sheet1": [
+                ["Label", None, "Amount", None],
+                ["Assessment Income", None, 150000, None],
+                ["Late Fees", None, 2500, None],
+            ]
+        }
+    )
+    upload_id = _upload_excel_income_statement(
+        client, filename="income.xlsx", content_type=_XLSX_CONTENT_TYPE, file_bytes=file_bytes
+    )
+
+    body = client.get(f"/hoa/1/budget/uploads/{upload_id}/income-statement-file-html").text
+
+    # Two non-empty columns kept -> exactly two <td> per row (no empty spacer columns).
+    assert '<tr><td>Assessment Income</td><td class="num">150000</td></tr>' in body
+
+
 def test_get_income_statement_html_escapes_cell_values(client, budget_history_test_harness):
     file_bytes = _xlsx_bytes({"Sheet1": [["<script>alert(1)</script>"]]})
     upload_id = _upload_excel_income_statement(
