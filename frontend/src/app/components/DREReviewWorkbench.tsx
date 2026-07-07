@@ -1051,13 +1051,15 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
           )}
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onClick={() => setIsCompareOpen(true)}
-            className="inline-flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 shadow-sm hover:bg-slate-50"
-          >
-            Compare with PDF
-          </button>
+          {!isCompareOpen && (
+            <button
+              type="button"
+              onClick={() => setIsCompareOpen(true)}
+              className="inline-flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 shadow-sm hover:bg-slate-50"
+            >
+              Compare with PDF
+            </button>
+          )}
           <select
             className="rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-sm text-slate-700 shadow-sm focus:outline-none focus:ring-2 focus:ring-slate-300 disabled:bg-slate-50"
             value={chosenSetupType}

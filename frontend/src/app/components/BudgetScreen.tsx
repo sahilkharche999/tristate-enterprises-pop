@@ -84,6 +84,7 @@ import {
 import { getErrorMessage } from '../lib/errors';
 import { computeTimingInputs } from '../lib/fiscalYear';
 import { formatFiscalYearRangeLabel } from '../lib/hoa';
+import { earliestReserveStudyPage } from '../lib/reserveStudyDerived';
 
 interface GenerateBudgetRequest {
   draftId: number;
@@ -1843,7 +1844,14 @@ export function BudgetScreen({
               isApplying={isApplyingReserveStudy}
               applyMessage={reserveStudyApplyMessage}
               onJumpToPage={jumpToReservePage}
-              onOpenCompare={reserveStudyUploadId ? () => setIsReserveCompareOpen(true) : undefined}
+              onOpenCompare={
+                reserveStudyUploadId && !isReserveCompareOpen
+                  ? () => {
+                      setReserveTargetPage(earliestReserveStudyPage(reserveStudyRows));
+                      setIsReserveCompareOpen(true);
+                    }
+                  : undefined
+              }
             />
           );
           return isReserveCompareOpen && reserveStudyUploadId ? (

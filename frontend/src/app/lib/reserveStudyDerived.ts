@@ -51,3 +51,19 @@ export function getDisplayEstimatedLiability(row: ReserveStudyRow): number | nul
     row.replacement_cost * ((row.useful_life - remainingLife) / row.useful_life),
   );
 }
+
+// The lowest per-row source_page across all rows approximates where the
+// reserve-table content actually starts in the PDF (Gemini's discovery pass
+// records page_spans.start_page for this, but that document-level value
+// isn't persisted anywhere the frontend can read today — the per-row
+// source_page it derives from already is, and its minimum is equivalent).
+export function earliestReserveStudyPage(rows: ReserveStudyRow[]): number | undefined {
+  let earliest: number | undefined;
+  for (const row of rows) {
+    if (typeof row.source_page !== 'number') continue;
+    if (earliest === undefined || row.source_page < earliest) {
+      earliest = row.source_page;
+    }
+  }
+  return earliest;
+}

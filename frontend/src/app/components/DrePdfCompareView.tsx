@@ -77,52 +77,55 @@ export function DrePdfCompareView({
   const message = comparePdfPaneMessage(status);
 
   return (
-    <div
-      ref={containerRef}
-      className="fixed inset-0 z-50 flex bg-black/40"
-      role="dialog"
-      aria-modal="true"
-    >
-      <div
-        className="flex min-h-0 shrink-0 flex-col overflow-auto bg-white"
-        style={{ width: `${leftWidthPercent}%` }}
-      >
-        {children}
+    <div className="fixed inset-0 z-50 flex flex-col bg-black/40" role="dialog" aria-modal="true">
+      <div className="flex items-center justify-between border-b border-[#e5e5e5] bg-white px-4 py-2.5">
+        <p className="text-sm font-medium text-[#111111]">Compare with source PDF</p>
+        <Button variant="ghost" size="icon" onClick={onClose} aria-label="Close compare view">
+          <X className="h-5 w-5 text-[#525252]" />
+        </Button>
       </div>
-      <div
-        role="separator"
-        aria-orientation="vertical"
-        aria-label="Resize compare panels"
-        tabIndex={0}
-        onPointerDown={handleDividerPointerDown}
-        onPointerMove={handleDividerPointerMove}
-        onPointerUp={stopDragging}
-        onPointerCancel={stopDragging}
-        className={`relative w-1.5 shrink-0 cursor-col-resize bg-[#e5e5e5] transition-colors hover:bg-[#a3a3a3] ${
-          isDragging ? 'bg-[#737373]' : ''
-        }`}
-      >
-        <div className="absolute inset-y-0 left-1/2 w-4 -translate-x-1/2" />
-      </div>
-      <div className="flex min-h-0 flex-1 flex-col border-l border-[#e5e5e5] bg-[#fafafa]">
-        <div className="flex items-center justify-end border-b border-[#e5e5e5] bg-white px-3 py-2">
-          <Button variant="ghost" size="icon" onClick={onClose} aria-label="Close compare view">
-            <X className="h-5 w-5 text-[#525252]" />
-          </Button>
+      <div ref={containerRef} className="flex min-h-0 flex-1">
+        <div
+          className="flex min-h-0 shrink-0 flex-col overflow-auto bg-white"
+          style={{ width: `${leftWidthPercent}%` }}
+        >
+          {children}
         </div>
-        <div className="flex min-h-0 flex-1 items-center justify-center">
-          {message ? (
-            <p className="text-sm text-[#737373]">{message}</p>
-          ) : (
-            <iframe
-              // Remounting on every targetPage change (not just updating src)
-              // is required — see pdfPageAnchor.ts / design.md Decision 1a.
-              key={targetPage ?? 0}
-              title="Source PDF"
-              src={pdfPageAnchorUrl(objectUrl ?? '', targetPage)}
-              className="h-full w-full border-0"
-            />
-          )}
+        <div
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize compare panels"
+          tabIndex={0}
+          onPointerDown={handleDividerPointerDown}
+          onPointerMove={handleDividerPointerMove}
+          onPointerUp={stopDragging}
+          onPointerCancel={stopDragging}
+          className={`group relative w-2 shrink-0 cursor-col-resize bg-[#e5e5e5] transition-colors hover:bg-[#a3a3a3] ${
+            isDragging ? 'bg-[#737373]' : ''
+          }`}
+        >
+          <div className="absolute inset-y-0 left-1/2 w-4 -translate-x-1/2" />
+          <div
+            className={`pointer-events-none absolute left-1/2 top-1/2 h-10 w-1 -translate-x-1/2 -translate-y-1/2 rounded-full bg-white/70 transition-opacity ${
+              isDragging ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
+            }`}
+          />
+        </div>
+        <div className="flex min-h-0 flex-1 flex-col bg-[#fafafa]">
+          <div className="flex min-h-0 flex-1 items-center justify-center">
+            {message ? (
+              <p className="text-sm text-[#737373]">{message}</p>
+            ) : (
+              <iframe
+                // Remounting on every targetPage change (not just updating src)
+                // is required — see pdfPageAnchor.ts / design.md Decision 1a.
+                key={targetPage ?? 0}
+                title="Source PDF"
+                src={pdfPageAnchorUrl(objectUrl ?? '', targetPage)}
+                className="h-full w-full border-0"
+              />
+            )}
+          </div>
         </div>
       </div>
     </div>
