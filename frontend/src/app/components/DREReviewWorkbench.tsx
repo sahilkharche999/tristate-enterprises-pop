@@ -1929,7 +1929,18 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
                       className="border-b border-slate-200/60 last:border-b-0"
                     >
                       <td className="py-1 pr-3 font-mono tabular-nums text-slate-700">
-                        {entry.page_number ?? '—'}
+                        {entry.page_number != null ? (
+                          <button
+                            type="button"
+                            onClick={() => jumpToPage(entry.page_number as number)}
+                            title={`Jump to page ${entry.page_number} in the source PDF`}
+                            className="rounded px-1 hover:bg-slate-200 hover:text-slate-900"
+                          >
+                            {entry.page_number}
+                          </button>
+                        ) : (
+                          '—'
+                        )}
                       </td>
                       <td className="py-1 pr-3">
                         <MonoPill>{String(entry.page_type || '')}</MonoPill>
