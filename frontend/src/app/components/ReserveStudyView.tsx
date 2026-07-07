@@ -35,6 +35,14 @@ interface ReserveStudyViewProps {
   isSaving: boolean;
   isApplying: boolean;
   applyMessage: string | null;
+  // Jumps the compare-view PDF pane to a row's cited page (add-reserve-study-pdf-compare-view).
+  // A single flat table with one row-rendering loop — a plain callback prop is enough here,
+  // unlike DRE's PdfJumpContext (needed there for ~10 nested PageChips call sites).
+  onJumpToPage?: (page: number) => void;
+  // Opens the full-screen compare view. Undefined (not just disabled) when there's no source
+  // PDF to compare against (e.g. rows entered manually with no upload) — same conditional-prop
+  // convention this file already uses for onReplaceFile.
+  onOpenCompare?: () => void;
 }
 
 export function ReserveStudyView({
@@ -53,6 +61,8 @@ export function ReserveStudyView({
   isSaving,
   isApplying,
   applyMessage,
+  onJumpToPage,
+  onOpenCompare,
 }: ReserveStudyViewProps) {
   const [deleteIndex, setDeleteIndex] = useState<number | null>(null);
   const [isReplacing, setIsReplacing] = useState(false);
@@ -100,6 +110,16 @@ export function ReserveStudyView({
               <span className="whitespace-nowrap rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-medium text-amber-900">
                 Unsaved changes
               </span>
+            ) : null}
+            {onOpenCompare ? (
+              <Button
+                type="button"
+                variant="outline"
+                onClick={onOpenCompare}
+                className="whitespace-nowrap border-[#d4d4d4] text-[#525252] hover:bg-[#f5f5f5]"
+              >
+                Compare with PDF
+              </Button>
             ) : null}
             {onReplaceFile ? (
               <>
@@ -287,6 +307,22 @@ export function ReserveStudyView({
                           onChange={(event) => onRowChange(index, 'line_item', event.target.value)}
                           className="min-w-[220px] border-[#e5e5e5] bg-white"
                         />
+                        {row.source_page != null ? (
+                          onJumpToPage ? (
+                            <button
+                              type="button"
+                              onClick={() => onJumpToPage(row.source_page as number)}
+                              title={`Jump to page ${row.source_page} in the source PDF`}
+                              className="mt-1 inline-flex items-center rounded bg-slate-100 px-1.5 py-0.5 text-[11px] font-medium text-slate-700 ring-1 ring-inset ring-slate-300/60 hover:bg-slate-200 hover:ring-slate-400"
+                            >
+                              Page {row.source_page}
+                            </button>
+                          ) : (
+                            <span className="mt-1 inline-flex items-center rounded bg-slate-100 px-1.5 py-0.5 text-[11px] font-medium text-slate-700 ring-1 ring-inset ring-slate-300/60">
+                              Page {row.source_page}
+                            </span>
+                          )
+                        ) : null}
                       </td>
                       <td className="px-4 py-3">
                         <Input

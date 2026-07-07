@@ -26,6 +26,7 @@ import {
   type DREReviewEdit,
   type ReopenRepromoteResponse,
   approveExtractionRun,
+  dreDocumentFileUrl,
   getExtractionRun,
   listReviewEdits,
   recordReviewEdit,
@@ -1969,8 +1970,7 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
     <PdfJumpContext.Provider value={jumpToPage}>
       {isCompareOpen ? (
         <DrePdfCompareView
-          hoaId={hoaId}
-          documentId={detail.dre_document_id}
+          fileUrl={dreDocumentFileUrl(hoaId, detail.dre_document_id)}
           targetPage={targetPage}
           onClose={() => setIsCompareOpen(false)}
         >

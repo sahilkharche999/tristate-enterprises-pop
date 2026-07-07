@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router';
 import { AlertTriangle, ArrowLeft, Download, FileText, PackageCheck, Settings, Trash2, Upload } from 'lucide-react';
 import { toast } from 'sonner';
@@ -33,6 +33,7 @@ import {
   listBudgetGlMerges,
   mapBudgetHistoryLineItems,
   mapEditorLineItemsToBudgetHistory,
+  reserveStudyFileUrl,
   saveBudgetDraft,
   saveReserveStudyRows,
   unmergeBudgetGlMergeApplication,
@@ -47,6 +48,7 @@ import {
   type ExtractionQualityWarning,
   type ReserveStudyRow,
 } from '../api/budgetHistory';
+import { DrePdfCompareView } from './DrePdfCompareView';
 import { type AISuggestion, type AISuggestionResponse, type FeedbackDecision, type LineItem } from '../data/mockData';
 import type { HOARecord } from '../api/hoa';
 import { formatCurrency, formatTimestamp } from '../lib/budget';
@@ -238,6 +240,21 @@ export function BudgetScreen({
   const [isSavingReserveStudy, setIsSavingReserveStudy] = useState(false);
   const [isApplyingReserveStudy, setIsApplyingReserveStudy] = useState(false);
   const reserveSavePromiseRef = useRef<Promise<BudgetDraftPayload> | null>(null);
+
+  // "Compare with PDF" full-screen split view for the reserve study table
+  // (add-reserve-study-pdf-compare-view). Tracked as local state (not read live
+  // off the `activeDraft` prop) because it must stay current after a reserve
+  // study replace/generate flow, the same reason `draftId` above is local state
+  // rather than derived from `activeDraft` on every render.
+  const [reserveStudyUploadId, setReserveStudyUploadId] = useState<number | null>(
+    activeDraft?.reserve_study_upload_id ?? null,
+  );
+  const [isReserveCompareOpen, setIsReserveCompareOpen] = useState(false);
+  const [reserveTargetPage, setReserveTargetPage] = useState<number | undefined>(undefined);
+  const jumpToReservePage = useCallback((page: number) => {
+    setReserveTargetPage(page);
+    setIsReserveCompareOpen(true);
+  }, []);
   const reserveRowsRef = useRef<ReserveStudyRow[]>([]);
   const reserveWarningsRef = useRef<string[]>([]);
   const autoSaveInFlightRef = useRef(false);
@@ -326,6 +343,7 @@ export function BudgetScreen({
     setReserveStudyRows((draft.reserve_study_rows ?? []) as ReserveStudyRow[]);
     setReserveStudyWarnings(draft.reserve_study_warnings ?? []);
     setReserveStudyStatus(draft.reserve_study_status ?? 'none');
+    setReserveStudyUploadId(draft.reserve_study_upload_id ?? null);
     lastPersistedReserveSnapshotRef.current = reserveSnapshotFromDraft(draft);
   };
 
@@ -1806,25 +1824,40 @@ export function BudgetScreen({
             onRefetch={handleFetchAISuggestions}
           />
         )}
-        {currentView === 'reserve' && (
-          <ReserveStudyView
-            rows={reserveStudyRows}
-            warnings={reserveStudyWarnings}
-            status={reserveStudyStatus}
-            onRowChange={handleReserveStudyRowChange}
-            onAddRow={handleAddReserveStudyRow}
-            onAddHeader={handleAddReserveStudyHeader}
-            onMoveRow={handleMoveReserveStudyRow}
-            onDeleteRow={handleDeleteReserveStudyRow}
-            onSave={handleSaveReserveStudy}
-            onApply={handleApplyReserveStudy}
-            onReplaceFile={draftId ? handleReplaceReserveFile : undefined}
-            hasUnsavedChanges={hasUnsavedReserveStudyChanges}
-            isSaving={isSavingReserveStudy}
-            isApplying={isApplyingReserveStudy}
-            applyMessage={reserveStudyApplyMessage}
-          />
-        )}
+        {currentView === 'reserve' && (() => {
+          const reserveStudyTable = (
+            <ReserveStudyView
+              rows={reserveStudyRows}
+              warnings={reserveStudyWarnings}
+              status={reserveStudyStatus}
+              onRowChange={handleReserveStudyRowChange}
+              onAddRow={handleAddReserveStudyRow}
+              onAddHeader={handleAddReserveStudyHeader}
+              onMoveRow={handleMoveReserveStudyRow}
+              onDeleteRow={handleDeleteReserveStudyRow}
+              onSave={handleSaveReserveStudy}
+              onApply={handleApplyReserveStudy}
+              onReplaceFile={draftId ? handleReplaceReserveFile : undefined}
+              hasUnsavedChanges={hasUnsavedReserveStudyChanges}
+              isSaving={isSavingReserveStudy}
+              isApplying={isApplyingReserveStudy}
+              applyMessage={reserveStudyApplyMessage}
+              onJumpToPage={jumpToReservePage}
+              onOpenCompare={reserveStudyUploadId ? () => setIsReserveCompareOpen(true) : undefined}
+            />
+          );
+          return isReserveCompareOpen && reserveStudyUploadId ? (
+            <DrePdfCompareView
+              fileUrl={reserveStudyFileUrl(hoaId, reserveStudyUploadId)}
+              targetPage={reserveTargetPage}
+              onClose={() => setIsReserveCompareOpen(false)}
+            >
+              {reserveStudyTable}
+            </DrePdfCompareView>
+          ) : (
+            reserveStudyTable
+          );
+        })()}
       </main>
       <AlertDialog
         open={glMergeDialog.primaryId !== null}

@@ -1718,6 +1718,17 @@ def _get_upload(session: Session, upload_id: Optional[int]) -> Optional[BudgetUp
     return session.get(BudgetUpload, upload_id)
 
 
+def _get_reserve_study_upload(session: Session, hoa_id: int, upload_id: int) -> BudgetUpload:
+    upload = session.get(BudgetUpload, upload_id)
+    if (
+        upload is None
+        or upload.property_id != hoa_id
+        or upload.document_role != "reserve_study"
+    ):
+        raise LookupError("Reserve study upload not found")
+    return upload
+
+
 def _replace_active_draft(session: Session, hoa_id: int, timestamp: str) -> None:
     active_drafts = session.scalars(
         select(BudgetDraft).where(
@@ -3590,6 +3601,19 @@ def record_version_download(
     )
     session.commit()
     return file_path, f"{version.version_code}-budget.xlsx"
+
+
+def get_reserve_study_upload_file(
+    session: Session,
+    *,
+    hoa_id: int,
+    upload_id: int,
+) -> tuple[Path, str]:
+    upload = _get_reserve_study_upload(session, hoa_id, upload_id)
+    file_path = _budget_storage_path(upload.storage_key)
+    if not file_path.exists():
+        raise LookupError("Reserve study file not found on disk")
+    return file_path, upload.original_filename
 
 
 def record_draft_enriched_download(

@@ -2,7 +2,6 @@ import { useEffect, useState } from 'react';
 import { X } from 'lucide-react';
 
 import { authHeaders } from '../api/http';
-import { dreDocumentFileUrl } from '../api/dreDocumentFileUrl.ts';
 import { Button } from './ui/button';
 import {
   comparePdfPaneMessage,
@@ -11,20 +10,21 @@ import {
 import { pdfPageAnchorUrl } from './pdfPageAnchor.ts';
 
 interface DrePdfCompareViewProps {
-  hoaId: number;
-  documentId: number;
+  fileUrl: string;
   targetPage?: number;
   onClose: () => void;
   children: React.ReactNode;
 }
 
 /** Full-screen split view: review panel on one half, original source PDF on
- * the other (add-dre-review-pdf-compare-view). Fetches the PDF as an
- * authenticated blob (same recipe as HOALogoUploadControl.tsx) since the
- * file endpoint requires auth and a bare <iframe src> can't attach headers. */
+ * the other (add-dre-review-pdf-compare-view, generalized for reuse by
+ * add-reserve-study-pdf-compare-view). Fetches the PDF as an authenticated
+ * blob (same recipe as HOALogoUploadControl.tsx) since the file endpoint
+ * requires auth and a bare <iframe src> can't attach headers. Callers supply
+ * the fully-built, document-type-specific file URL (e.g. dreDocumentFileUrl
+ * or reserveStudyFileUrl) rather than this component constructing one itself. */
 export function DrePdfCompareView({
-  hoaId,
-  documentId,
+  fileUrl,
   targetPage,
   onClose,
   children,
@@ -36,7 +36,7 @@ export function DrePdfCompareView({
     let url: string | null = null;
     let cancelled = false;
     setStatus('loading');
-    void fetch(dreDocumentFileUrl(hoaId, documentId), { headers: authHeaders() })
+    void fetch(fileUrl, { headers: authHeaders() })
       .then((r) => (r.ok ? r.blob() : Promise.reject(new Error('Failed to load source PDF'))))
       .then((blob) => {
         if (cancelled) return;
@@ -51,7 +51,7 @@ export function DrePdfCompareView({
       cancelled = true;
       if (url) URL.revokeObjectURL(url);
     };
-  }, [hoaId, documentId]);
+  }, [fileUrl]);
 
   const message = comparePdfPaneMessage(status);
 

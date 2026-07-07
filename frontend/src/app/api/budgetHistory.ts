@@ -1,5 +1,6 @@
 import { BASE_URL } from './config.ts';
 import { authHeaders, handleBlobResponse, handleResponse } from './http.ts';
+import { reserveStudyFileUrl } from './reserveStudyFileUrl.ts';
 import type { LineItem } from '../data/mockData.ts';
 import {
   createBudgetBundleFormData,
@@ -7,6 +8,9 @@ import {
   type BudgetSourceMode,
 } from '../lib/budgetSourceMode.ts';
 import type { AssessmentMode } from '../lib/assessmentMode.ts';
+
+// Reserve-study source PDF, for the compare-view split (add-reserve-study-pdf-compare-view).
+export { reserveStudyFileUrl };
 
 type JsonValue = string | number | boolean | null | JsonObject | JsonValue[];
 type JsonObject = Record<string, JsonValue>;
