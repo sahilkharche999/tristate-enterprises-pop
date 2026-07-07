@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react';
-import { AlertTriangle, ArrowDown, ArrowUp, Heading2, Plus, Save, Trash2, Upload } from 'lucide-react';
+import { AlertTriangle, ArrowDown, ArrowUp, Heading2, Minus, Plus, Save, Trash2, Upload } from 'lucide-react';
 
 import { Button } from './ui/button';
 import { Input } from './ui/input';
@@ -18,6 +18,7 @@ import {
   getDisplayEstimatedLiability,
   getDisplayYearReplacementProvision,
 } from '../lib/reserveStudyDerived';
+import { clampTableZoomPercent, TABLE_ZOOM_STEP } from './tableZoom.ts';
 
 interface ReserveStudyViewProps {
   rows: ReserveStudyRow[];
@@ -73,6 +74,7 @@ export function ReserveStudyView({
 }: ReserveStudyViewProps) {
   const [deleteIndex, setDeleteIndex] = useState<number | null>(null);
   const [isReplacing, setIsReplacing] = useState(false);
+  const [tableZoomPercent, setTableZoomPercent] = useState(100);
   const replaceInputRef = useRef<HTMLInputElement>(null);
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -190,8 +192,40 @@ export function ReserveStudyView({
           </div>
         ) : null}
 
-        <div className={`${compact ? 'mt-3' : 'mt-6'} overflow-hidden rounded-2xl border border-[#e5e5e5]`}>
-          <div className="overflow-x-auto">
+        <div className={`${compact ? 'mt-3' : 'mt-6'} flex items-center justify-end gap-1.5`}>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            onClick={() => setTableZoomPercent((z) => clampTableZoomPercent(z - TABLE_ZOOM_STEP))}
+            disabled={tableZoomPercent <= 50}
+            className="h-7 w-7 text-[#525252] hover:bg-[#f5f5f5]"
+            aria-label="Zoom out"
+          >
+            <Minus className="h-3.5 w-3.5" />
+          </Button>
+          <button
+            type="button"
+            onClick={() => setTableZoomPercent(100)}
+            title="Reset zoom"
+            className="w-12 text-center text-xs font-medium text-[#737373] hover:text-[#111111]"
+          >
+            {tableZoomPercent}%
+          </button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            onClick={() => setTableZoomPercent((z) => clampTableZoomPercent(z + TABLE_ZOOM_STEP))}
+            disabled={tableZoomPercent >= 150}
+            className="h-7 w-7 text-[#525252] hover:bg-[#f5f5f5]"
+            aria-label="Zoom in"
+          >
+            <Plus className="h-3.5 w-3.5" />
+          </Button>
+        </div>
+        <div className="mt-2 overflow-hidden rounded-2xl border border-[#e5e5e5]">
+          <div className="overflow-x-auto" style={{ zoom: tableZoomPercent / 100 }}>
             <table className="min-w-[1540px] bg-white">
               <colgroup>
                 <col className="w-[72px]" />
