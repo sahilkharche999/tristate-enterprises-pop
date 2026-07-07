@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { X } from 'lucide-react';
 
 import { authHeaders } from '../api/http';
@@ -7,6 +7,7 @@ import {
   comparePdfPaneMessage,
   type ComparePdfPaneStatus,
 } from './drePdfCompareViewStyles.ts';
+import { clampSplitPercent } from './resizableSplitPane.ts';
 import { pdfPageAnchorUrl } from './pdfPageAnchor.ts';
 
 interface DrePdfCompareViewProps {
@@ -31,6 +32,9 @@ export function DrePdfCompareView({
 }: DrePdfCompareViewProps) {
   const [objectUrl, setObjectUrl] = useState<string | null>(null);
   const [status, setStatus] = useState<ComparePdfPaneStatus>('loading');
+  const [leftWidthPercent, setLeftWidthPercent] = useState(50);
+  const [isDragging, setIsDragging] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     let url: string | null = null;
@@ -53,11 +57,53 @@ export function DrePdfCompareView({
     };
   }, [fileUrl]);
 
+  const handleDividerPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setIsDragging(true);
+  };
+
+  const handleDividerPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!isDragging || !containerRef.current) return;
+    const rect = containerRef.current.getBoundingClientRect();
+    const percent = ((event.clientX - rect.left) / rect.width) * 100;
+    setLeftWidthPercent(clampSplitPercent(percent));
+  };
+
+  const stopDragging = (event: React.PointerEvent<HTMLDivElement>) => {
+    event.currentTarget.releasePointerCapture(event.pointerId);
+    setIsDragging(false);
+  };
+
   const message = comparePdfPaneMessage(status);
 
   return (
-    <div className="fixed inset-0 z-50 flex bg-black/40" role="dialog" aria-modal="true">
-      <div className="flex min-h-0 flex-1 flex-col overflow-auto bg-white">{children}</div>
+    <div
+      ref={containerRef}
+      className="fixed inset-0 z-50 flex bg-black/40"
+      role="dialog"
+      aria-modal="true"
+    >
+      <div
+        className="flex min-h-0 shrink-0 flex-col overflow-auto bg-white"
+        style={{ width: `${leftWidthPercent}%` }}
+      >
+        {children}
+      </div>
+      <div
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize compare panels"
+        tabIndex={0}
+        onPointerDown={handleDividerPointerDown}
+        onPointerMove={handleDividerPointerMove}
+        onPointerUp={stopDragging}
+        onPointerCancel={stopDragging}
+        className={`relative w-1.5 shrink-0 cursor-col-resize bg-[#e5e5e5] transition-colors hover:bg-[#a3a3a3] ${
+          isDragging ? 'bg-[#737373]' : ''
+        }`}
+      >
+        <div className="absolute inset-y-0 left-1/2 w-4 -translate-x-1/2" />
+      </div>
       <div className="flex min-h-0 flex-1 flex-col border-l border-[#e5e5e5] bg-[#fafafa]">
         <div className="flex items-center justify-end border-b border-[#e5e5e5] bg-white px-3 py-2">
           <Button variant="ghost" size="icon" onClick={onClose} aria-label="Close compare view">
