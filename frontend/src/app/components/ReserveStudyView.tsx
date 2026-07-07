@@ -50,6 +50,11 @@ interface ReserveStudyViewProps {
   // page) wrap onto many lines and push the table down. Compact mode drops that intro block and
   // lets the action row wrap normally instead of forcing a single line via `md:flex-nowrap`.
   compact?: boolean;
+  // Pixel offset (measured by BudgetScreen from the page's own sticky header + tab bar) that
+  // the table's sticky header row should sit below on the full page. Ignored when `compact` is
+  // true — inside the compare view's left pane, the table's nearest scrolling ancestor is that
+  // pane itself, so the header sticks to plain `top: 0` instead.
+  stickyHeaderOffset?: number;
 }
 
 export function ReserveStudyView({
@@ -71,6 +76,7 @@ export function ReserveStudyView({
   onJumpToPage,
   onOpenCompare,
   compact = false,
+  stickyHeaderOffset = 0,
 }: ReserveStudyViewProps) {
   const [deleteIndex, setDeleteIndex] = useState<number | null>(null);
   const [isReplacing, setIsReplacing] = useState(false);
@@ -225,7 +231,7 @@ export function ReserveStudyView({
           </Button>
         </div>
         <div className="mt-2 overflow-hidden rounded-2xl border border-[#e5e5e5]">
-          <div className="max-h-[70vh] overflow-auto" style={{ zoom: tableZoomPercent / 100 }}>
+          <div className="overflow-x-auto" style={{ zoom: tableZoomPercent / 100 }}>
             <table className="min-w-[1540px] bg-white">
               <colgroup>
                 <col className="w-[72px]" />
@@ -239,7 +245,10 @@ export function ReserveStudyView({
                 <col className="w-[200px]" />
                 <col className="w-[96px]" />
               </colgroup>
-              <thead className="sticky top-0 z-10 bg-[#f7f7f7]">
+              <thead
+                className="sticky z-10 bg-[#f7f7f7]"
+                style={{ top: compact ? 0 : stickyHeaderOffset }}
+              >
                 <tr className="text-left text-xs uppercase tracking-[0.18em] text-[#737373]">
                   <th className="px-4 py-3">Move</th>
                   <th className="px-4 py-3">Line Item</th>

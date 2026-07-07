@@ -202,6 +202,25 @@ export function BudgetScreen({
   const [uploadState, setUploadState] = useState<'initial' | 'uploading' | 'complete'>(
     activeDraft ? 'complete' : 'initial',
   );
+  // Table thead sticky offset: measured (not hardcoded) height of the page's own sticky
+  // chrome (header + view-switch tab bar) so the Enriched/Reserve Study tables' sticky
+  // headers land flush below it instead of overlapping — a hardcoded pixel guess would be
+  // wrong the moment the header's height changes (e.g. its Context Note details expands).
+  const tabBarRef = useRef<HTMLDivElement>(null);
+  const [tableStickyTop, setTableStickyTop] = useState(0);
+  useEffect(() => {
+    const element = tabBarRef.current;
+    if (!element) return;
+    const updateOffset = () => setTableStickyTop(element.getBoundingClientRect().bottom);
+    updateOffset();
+    const observer = new ResizeObserver(updateOffset);
+    observer.observe(element);
+    window.addEventListener('resize', updateOffset);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', updateOffset);
+    };
+  }, []);
   const [currentView, setCurrentView] = useState<'enriched' | 'budget' | 'ai' | 'reserve'>(initialView);
   const [draftId, setDraftId] = useState<number | null>(activeDraft?.id ?? null);
   const [globalNote, setGlobalNote] = useState(activeDraft?.global_note ?? '');
@@ -1696,7 +1715,7 @@ export function BudgetScreen({
         </div>
       </header>
 
-      <div className="sticky top-[140px] z-20 border-b border-[#e5e5e5] bg-white shadow-md">
+      <div ref={tabBarRef} className="sticky top-[140px] z-20 border-b border-[#e5e5e5] bg-white shadow-md">
         <div className="flex items-center justify-between gap-4 bg-white/95 px-8 py-5 backdrop-blur-sm">
           <div className="flex flex-wrap items-center gap-2">
             <Button
@@ -1795,6 +1814,7 @@ export function BudgetScreen({
               hasUnsavedChanges={hasUnsavedDraftChanges}
               onJumpToPage={jumpToEnrichedPage}
               compact={isEnrichedCompareOpen}
+              stickyHeaderOffset={tableStickyTop}
               onOpenCompare={
                 activeDraft?.source_upload_id && !isEnrichedCompareOpen
                   ? () => {
@@ -1899,6 +1919,7 @@ export function BudgetScreen({
               applyMessage={reserveStudyApplyMessage}
               onJumpToPage={jumpToReservePage}
               compact={isReserveCompareOpen}
+              stickyHeaderOffset={tableStickyTop}
               onOpenCompare={
                 reserveStudyUploadId && !isReserveCompareOpen
                   ? () => {

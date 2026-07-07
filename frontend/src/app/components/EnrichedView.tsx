@@ -47,6 +47,11 @@ interface EnrichedViewProps {
   // mirrors ReserveStudyView's compact prop (tightens spacing; this view has no intro-text
   // block to suppress).
   compact?: boolean;
+  // Pixel offset (measured by BudgetScreen from the page's own sticky header + tab bar) that
+  // the table's sticky header row should sit below on the full page. Ignored when `compact` is
+  // true — inside the compare view's left pane, the table's nearest scrolling ancestor is that
+  // pane itself (no page chrome above it there), so the header sticks to plain `top: 0` instead.
+  stickyHeaderOffset?: number;
 }
 
 export function EnrichedView({
@@ -64,6 +69,7 @@ export function EnrichedView({
   onJumpToPage,
   onOpenCompare,
   compact = false,
+  stickyHeaderOffset = 0,
 }: EnrichedViewProps) {
   const [expandedNote, setExpandedNote] = useState<string | null>(null);
   const [noteEdits, setNoteEdits] = useState<Record<string, { title: string; body: string }>>({});
@@ -219,9 +225,12 @@ export function EnrichedView({
       </div>
       {/* Table */}
       <div className="bg-white border border-[#e5e5e5] rounded-lg overflow-hidden shadow-sm">
-        <div className="max-h-[70vh] overflow-auto" style={{ zoom: tableZoomPercent / 100 }}>
+        <div className="overflow-x-auto" style={{ zoom: tableZoomPercent / 100 }}>
           <table className="w-full">
-            <thead className="sticky top-0 z-10 bg-[#fafafa] border-b border-[#e5e5e5]">
+            <thead
+              className="sticky z-10 bg-[#fafafa] border-b border-[#e5e5e5]"
+              style={{ top: compact ? 0 : stickyHeaderOffset }}
+            >
               <tr>
                 <th className="text-left px-6 py-4 text-xs font-semibold text-[#525252] uppercase tracking-wider min-w-[260px] w-[260px]">Line Item</th>
                 <th className="text-right px-6 py-4 text-xs font-semibold text-[#525252] uppercase tracking-wider">YTD Actual</th>
