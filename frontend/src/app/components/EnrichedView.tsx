@@ -171,8 +171,10 @@ export function EnrichedView({
   const perUnitMonthly = units > 0 ? totalAnnualBudget / 12 / units : null;
 
   return (
-    <div className={compact ? 'space-y-3' : 'space-y-8'}>
-      {hasUnsavedChanges || onOpenCompare ? (
+    <div className={compact ? 'space-y-2' : 'space-y-3'}>
+      {/* Single action row: compare/unsaved on the left, zoom on the right — kept on one line
+          so there's no stacked vertical gap between the controls and the table below. */}
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-wrap items-center gap-2">
           {hasUnsavedChanges ? (
             <span className="whitespace-nowrap rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-medium text-amber-900">
@@ -190,38 +192,38 @@ export function EnrichedView({
             </Button>
           ) : null}
         </div>
-      ) : null}
-      <div className="flex items-center justify-end gap-1.5">
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          onClick={() => setTableZoomPercent((z) => clampTableZoomPercent(z - TABLE_ZOOM_STEP))}
-          disabled={tableZoomPercent <= 50}
-          className="h-7 w-7 text-[#525252] hover:bg-[#f5f5f5]"
-          aria-label="Zoom out"
-        >
-          <Minus className="h-3.5 w-3.5" />
-        </Button>
-        <button
-          type="button"
-          onClick={() => setTableZoomPercent(100)}
-          title="Reset zoom"
-          className="w-12 text-center text-xs font-medium text-[#737373] hover:text-[#111111]"
-        >
-          {tableZoomPercent}%
-        </button>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          onClick={() => setTableZoomPercent((z) => clampTableZoomPercent(z + TABLE_ZOOM_STEP))}
-          disabled={tableZoomPercent >= 150}
-          className="h-7 w-7 text-[#525252] hover:bg-[#f5f5f5]"
-          aria-label="Zoom in"
-        >
-          <Plus className="h-3.5 w-3.5" />
-        </Button>
+        <div className="flex items-center gap-1.5">
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            onClick={() => setTableZoomPercent((z) => clampTableZoomPercent(z - TABLE_ZOOM_STEP))}
+            disabled={tableZoomPercent <= 50}
+            className="h-7 w-7 text-[#525252] hover:bg-[#f5f5f5]"
+            aria-label="Zoom out"
+          >
+            <Minus className="h-3.5 w-3.5" />
+          </Button>
+          <button
+            type="button"
+            onClick={() => setTableZoomPercent(100)}
+            title="Reset zoom"
+            className="w-12 text-center text-xs font-medium text-[#737373] hover:text-[#111111]"
+          >
+            {tableZoomPercent}%
+          </button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            onClick={() => setTableZoomPercent((z) => clampTableZoomPercent(z + TABLE_ZOOM_STEP))}
+            disabled={tableZoomPercent >= 150}
+            className="h-7 w-7 text-[#525252] hover:bg-[#f5f5f5]"
+            aria-label="Zoom in"
+          >
+            <Plus className="h-3.5 w-3.5" />
+          </Button>
+        </div>
       </div>
       {/* Table */}
       <div className="bg-white border border-[#e5e5e5] rounded-lg overflow-hidden shadow-sm">
