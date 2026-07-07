@@ -235,7 +235,11 @@ export function EnrichedView({
           <table className="w-full">
             <thead
               className="sticky z-10 bg-[#fafafa] border-b border-[#e5e5e5] shadow-sm"
-              style={{ top: compact ? 0 : stickyHeaderOffset }}
+              // The thead lives inside the `zoom`ed div, which scales its sticky `top` too. Divide
+              // the (unzoomed, viewport-measured) offset by the zoom factor so it still lands flush
+              // under the tab bar at any zoom level (at 90% a raw 222px would render at ~200px and
+              // tuck under the bar).
+              style={{ top: compact ? 0 : stickyHeaderOffset / (tableZoomPercent / 100) }}
             >
               <tr>
                 <th className="text-left px-6 py-4 text-xs font-semibold text-[#525252] uppercase tracking-wider min-w-[260px] w-[260px]">Line Item</th>
