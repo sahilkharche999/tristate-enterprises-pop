@@ -165,6 +165,13 @@ class UnitStructure(BaseModel):
     group_count: Optional[int] = None
     groups: list[GroupRow] = Field(default_factory=list)
     units: list[UnitRow] = Field(default_factory=list)
+    # Operator-set metadata, not extracted (C8): the printed form of the
+    # ownership_percent column when the column-sum test cannot resolve it —
+    # 'fraction' (values sum to ~1.0) or 'points' (sum to ~100). Lives on
+    # the domain schema (not wire_schemas.py) so the operator's decision
+    # flows through the same audited apply_review_edits_to_extraction path
+    # as any other review edit (field_path 'unit_structure.ownership_percent_form').
+    ownership_percent_form: Literal["unknown", "fraction", "points"] = "unknown"
 
 
 class AllocationPoolBlock(BaseModel):

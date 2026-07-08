@@ -266,20 +266,17 @@ class IncomeStatementEnricher:
 
     @staticmethod
     def _safe_float(value) -> float:
-        """Convert cell value to float. Handles '-', None, strings."""
-        if value is None:
-            return 0.0
-        if isinstance(value, (int, float)):
-            return float(value)
-        if isinstance(value, str):
-            cleaned = value.strip().replace(',', '').replace('$', '')
-            if cleaned in ('-', '', '--'):
-                return 0.0
-            try:
-                return float(cleaned)
-            except ValueError:
-                return 0.0
-        return 0.0
+        """Convert a cell value to float via the shared normalizer (C5).
+
+        Routes through :func:`parse_financial_cell` so parenthesized and
+        trailing-minus negatives parse WITH sign, matching the other parser
+        entry points. Empty / dash / unparseable collapse to ``0.0`` to
+        preserve this pipeline's arithmetic behavior.
+        """
+        from .services.income_statement_parser import parse_financial_cell
+
+        cell = parse_financial_cell(value)
+        return cell.value if cell.value is not None else 0.0
 
     @staticmethod
     def _evaluate_column_formulas(ws_formula, col, value_maps):

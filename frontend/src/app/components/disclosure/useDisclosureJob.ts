@@ -94,7 +94,9 @@ export function useDisclosureJob(): UseDisclosureJobValue {
   }, [stopPolling]);
 
   const generate = useCallback(
-    async (hoaId: number, fiscalYear: number) => {
+    // C1: packageId targets a specific annual package; a finalized target
+    // with valid frozen snapshots renders from the snapshots, not live state.
+    async (hoaId: number, fiscalYear: number, packageId?: number) => {
       // Reset to a clean baseline (UI-SPEC §7.1: panel transitions through
       // running → terminal; clicking Generate from `failed` re-enters running).
       stopPolling();
@@ -111,7 +113,7 @@ export function useDisclosureJob(): UseDisclosureJobValue {
 
       let initial: DisclosurePackageJob;
       try {
-        initial = await generateDisclosurePackage(hoaId, fiscalYear);
+        initial = await generateDisclosurePackage(hoaId, fiscalYear, packageId);
       } catch (err) {
         if (!isMountedRef.current) return;
         const message =

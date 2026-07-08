@@ -115,12 +115,19 @@ def validate_extracted_statement(statement: ExtractedFinancialStatement) -> list
             }
         )
 
-    totals_by_section: dict[str, float] = {}
+    # C6: cross-check parsed line items against stated totals. Entries
+    # tagged source='document' were captured verbatim from the document's
+    # own "Total …" rows (ground truth); untagged entries come from the
+    # model extraction and are only a self-consistency check — the tag lets
+    # operators tell the two apart. Tolerance is $1.00 per section to
+    # absorb source-document rounding of individual lines.
+    totals_by_section: dict[str, tuple[float, str]] = {}
     for total in statement.totals:
         section_kind = str(total.get("section_kind") or total.get("section") or "").strip().lower()
         amount = total.get("amount")
+        source = str(total.get("source") or "model")
         if section_kind and amount is not None:
-            totals_by_section[section_kind] = float(amount)
+            totals_by_section[section_kind] = (float(amount), source)
 
     if totals_by_section:
         sum_by_section: dict[str, float] = defaultdict(float)
@@ -129,18 +136,28 @@ def validate_extracted_statement(statement: ExtractedFinancialStatement) -> list
             if section_kind and item.annual_budget is not None:
                 sum_by_section[section_kind] += float(item.annual_budget)
 
-        for section_kind, expected_total in totals_by_section.items():
+        for section_kind, (expected_total, source) in totals_by_section.items():
             actual_total = sum_by_section.get(section_kind, 0.0)
-            if abs(actual_total - expected_total) > 0.01:
+            if abs(actual_total - expected_total) > 1.00:
+                stated_by = (
+                    "the document states"
+                    if source == "document"
+                    else "the extraction reported"
+                )
                 issues.append(
                     {
                         "code": "subtotal_mismatch",
                         "severity": "error",
-                        "message": f"Subtotal mismatch for section '{section_kind}'.",
+                        "message": (
+                            f"Subtotal mismatch for section '{section_kind}': "
+                            f"line items sum to {actual_total:,.2f} but "
+                            f"{stated_by} {expected_total:,.2f}."
+                        ),
                         "details": {
                             "section_kind": section_kind,
                             "expected_total": expected_total,
                             "actual_total": actual_total,
+                            "totals_source": source,
                         },
                     }
                 )

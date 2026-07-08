@@ -103,6 +103,7 @@ async def generate_disclosure_package(
             hoa_id=payload.hoa_id,
             fiscal_year=payload.fiscal_year,
             current_user=current_user,
+            annual_package_id=payload.package_id,
         )
 
         background_tasks.add_task(
@@ -111,6 +112,7 @@ async def generate_disclosure_package(
             payload.hoa_id,
             payload.fiscal_year,
             session_factory=_session_factory_from(session),
+            annual_package_id=payload.package_id,
         )
         return JSONResponse(
             status_code=HTTP_202_ACCEPTED,

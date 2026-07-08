@@ -27,12 +27,43 @@ boundary only.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 from typing import Optional
 
 from .appendix_manifest import ResolvedAppendix, resolve_appendix_manifest
 from .appendix_storage import appendix_file_path, appendix_file_exists
+
+
+def _is_stub_snapshot(raw_json: Optional[str]) -> bool:
+    """True when a snapshot column holds no usable payload.
+
+    Legacy packages were finalized with client-sent empty stubs (``{}``
+    for all four columns), so 'non-null' is not a sufficient validity
+    test — a stub column must read as "no snapshot" and route the render
+    to the live branch WITH a loud warning, not silently render an empty
+    package.
+
+    An empty LIST is NOT a stub: the server-side assembler emits lists
+    for collections (e.g. an appendix manifest for an HOA with no
+    appendix documents is legitimately ``[]``). Only null / unparseable /
+    empty-dict columns read as stubs — and the new assembler can emit
+    none of those (`freeze` injects ``assessment_mode`` into dict
+    payloads, and budget/reserve/compile_context are non-empty by
+    construction).
+    """
+    if raw_json is None:
+        return True
+    try:
+        value = json.loads(raw_json)
+    except (TypeError, ValueError):
+        return True
+    if value is None:
+        return True
+    if isinstance(value, dict) and not value:
+        return True
+    return False
 
 
 def should_use_snapshots(
@@ -42,12 +73,14 @@ def should_use_snapshots(
 ) -> bool:
     """Return True when the compile MUST load from frozen snapshots.
 
-    True when ``annual_packages.status='finalized'`` and all four
-    snapshot columns are non-null. False otherwise (draft/approved/
-    rendered all read live state).
-
-    ``package_id=None`` is permitted for ad-hoc previews — returns
-    False so the compile reads live state.
+    True when ``annual_packages.status='finalized'`` and all five
+    snapshot columns (four Phase-4.8 columns + ``compile_context``) hold
+    real payloads — non-null AND non-stub (see :func:`_is_stub_snapshot`;
+    legacy packages froze client-sent ``{}`` stubs). False otherwise:
+    draft/approved/rendered packages, ad-hoc previews
+    (``package_id=None``), and stub-finalized legacy packages all read
+    live state — the caller is responsible for surfacing the legacy-stub
+    warning.
     """
     if package_id is None:
         return False
@@ -57,7 +90,8 @@ def should_use_snapshots(
                assessment_setup_snapshot_json,
                budget_snapshot_json,
                reserve_snapshot_json,
-               appendix_manifest_snapshot_json
+               appendix_manifest_snapshot_json,
+               compile_context_snapshot_json
           FROM annual_packages
          WHERE id = ?
         """,
@@ -65,10 +99,10 @@ def should_use_snapshots(
     ).fetchone()
     if row is None:
         return False
-    status, a, b, r, m = row
+    status, *snapshot_columns = row
     if status != "finalized":
         return False
-    return all(v is not None for v in (a, b, r, m))
+    return not any(_is_stub_snapshot(v) for v in snapshot_columns)
 
 
 def resolve_compile_appendix_entries(

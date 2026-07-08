@@ -39,6 +39,7 @@ from app.services.ccr_approval_service import (
     reopen_and_repromote_ccr_run,
     save_operator_unit_factors,
 )
+from app.dre_extraction.promotion import AmbiguousOwnershipPercentForm
 from app.services.ccr_extraction_service import (
     CCRExtractionPreconditionError,
     lookup_ccr_document,
@@ -320,6 +321,16 @@ def approve_ccr_run(
                 "missing_pool_keys": exc.missing_pool_keys,
             },
         ) from exc
+    except AmbiguousOwnershipPercentForm as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": str(exc),
+                "column_label": exc.column_label,
+                "column_total": str(exc.total),
+                "sample_values": [str(v) for v in exc.sample_values],
+            },
+        ) from exc
     except UnresolvableReviewEdit as exc:
         raise HTTPException(
             status_code=422,
@@ -410,6 +421,16 @@ def repromote_ccr_run(
             detail={
                 "message": str(exc),
                 "missing_pool_keys": exc.missing_pool_keys,
+            },
+        ) from exc
+    except AmbiguousOwnershipPercentForm as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": str(exc),
+                "column_label": exc.column_label,
+                "column_total": str(exc.total),
+                "sample_values": [str(v) for v in exc.sample_values],
             },
         ) from exc
     except UnresolvableReviewEdit as exc:

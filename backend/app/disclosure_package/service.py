@@ -51,7 +51,13 @@ from .adapters import (
 from .compiler import CompileError, compile_package
 from .package_specs import SPECS
 from .preflight import partition_errors, validate_inputs
-from .schemas import PreflightError
+from .appendix_storage import appendix_file_exists, appendix_file_path
+from .schemas import (
+    BudgetDraft,
+    HOAMetadata,
+    PreflightError,
+    ReserveStudySnapshot,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -314,6 +320,7 @@ def create_job(
     hoa_id: int,
     fiscal_year: int,
     current_user: dict,
+    annual_package_id: Optional[int] = None,
 ) -> DisclosurePackageJob:
     """Insert a new disclosure_package_jobs row in 'pending' state. Concurrent-call safe.
 
@@ -346,6 +353,7 @@ def create_job(
         fiscal_year=fiscal_year,
         status=DISCLOSURE_JOB_PENDING,
         created_by_user_id=user_id,
+        annual_package_id=annual_package_id,
     )
     session.add(job)
     session.commit()
@@ -706,7 +714,147 @@ def run_preflight(
         appendices_root=appendix_dir_for(hoa_id),
         hoa_settings_overrides=bundle.overrides,
     )
+    # C7 gate: unresolved equal-split placeholders on specified_value pools
+    # block generation — a synthetic split must never render as DRE data.
+    from .preflight import check_specified_value_placeholders
+
+    errors = errors + check_specified_value_placeholders(
+        property_id=hoa_id,
+        connection=session.connection().connection,
+    )
     return partition_errors(errors)
+
+
+def _serialize_assessment_setup_snapshot(
+    *,
+    connection,
+    property_id: int,
+) -> dict:
+    """Dump the property's default assessment setup + children for the
+    finalize snapshot (C2). Audit-record shape: the finalized render reads
+    the frozen COMPUTED matrix from the compile-context snapshot, not this
+    payload — this preserves what the setup rows said at finalize time.
+    """
+    setup_row = connection.execute(
+        """
+        SELECT s.id, s.setup_type, s.display_mode, s.status, s.approved_at
+          FROM assessment_setups s
+          JOIN properties p ON p.default_assessment_setup_id = s.id
+         WHERE p.id = ?
+        """,
+        (property_id,),
+    ).fetchone()
+    if setup_row is None:
+        return {}
+    setup_id = setup_row[0]
+
+    def _rows(query: str) -> list[dict]:
+        cursor = connection.execute(query, (setup_id,))
+        columns = [c[0] for c in cursor.description]
+        return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+    return {
+        "setup": {
+            "id": setup_row[0],
+            "setup_type": setup_row[1],
+            "display_mode": setup_row[2],
+            "status": setup_row[3],
+            "approved_at": setup_row[4],
+        },
+        "pools": _rows(
+            "SELECT * FROM allocation_pools WHERE assessment_setup_id = ? "
+            "ORDER BY display_order, id"
+        ),
+        "groups": _rows(
+            "SELECT * FROM assessment_groups WHERE assessment_setup_id = ? "
+            "ORDER BY display_order, id"
+        ),
+        "units": _rows(
+            "SELECT * FROM assessment_units WHERE assessment_setup_id = ? "
+            "ORDER BY id"
+        ),
+        "unit_pool_allocations": _rows(
+            "SELECT * FROM assessment_unit_pool_allocations "
+            "WHERE assessment_setup_id = ? ORDER BY assessment_unit_id, pool_key"
+        ),
+    }
+
+
+def assemble_finalize_snapshots(
+    session: Session,
+    *,
+    hoa_id: int,
+    fiscal_year: int,
+    package_id: int,
+) -> dict[str, Any]:
+    """Assemble ALL finalize snapshot payloads server-side from canonical
+    DB state (C2). The client can no longer influence the frozen record —
+    the finalize endpoint ignores any request body and freezes exactly what
+    this function returns, which is by construction the same data the
+    render pipeline itself reads.
+
+    Returns the five payloads:
+    ``assessment_setup``, ``budget``, ``reserve``, ``appendix_manifest``,
+    ``compile_context`` ({assessment_matrix, hoa_metadata,
+    hoa_settings_overrides, assessment_revenue_annual}).
+    """
+    from .appendix_manifest import resolve_appendix_manifest
+    from .assessment_schedule_matrix import build_matrix_for_assessment_mode
+
+    bundle = _resolve_preflight_inputs(session, hoa_id, fiscal_year)
+    # resolve_appendix_manifest / matrix builder take the raw sqlite3
+    # connection (same as run_render_job).
+    raw_conn = session.connection().connection
+
+    manifest = resolve_appendix_manifest(
+        property_id=hoa_id, package_id=package_id, connection=raw_conn,
+    )
+
+    property_row = (
+        session.query(Property).filter(Property.id == hoa_id).one_or_none()
+    )
+    assessment_mode = normalize_assessment_mode(
+        getattr(property_row, "assessment_mode", None) if property_row else None
+    )
+
+    assessment_revenue = _assessment_revenue_for_budget_draft(bundle.budget_draft)
+    if assessment_revenue == Decimal("0"):
+        monthly_raw = bundle.overrides.get("approved_monthly_assessment_per_unit")
+        if monthly_raw not in (None, ""):
+            assessment_revenue = (
+                Decimal(str(monthly_raw))
+                * Decimal(bundle.hoa_metadata.units)
+                * Decimal("12")
+            ).quantize(Decimal("0.01"))
+
+    assessment_matrix = build_matrix_for_assessment_mode(
+        connection=raw_conn,
+        property_id=hoa_id,
+        fiscal_year=fiscal_year,
+        budget_draft=bundle.budget_draft,
+        hoa_name=bundle.hoa_metadata.name,
+        unit_count=bundle.hoa_metadata.units,
+        approved_assessment_revenue_annual=assessment_revenue,
+        assessment_mode=assessment_mode,
+    )
+
+    return {
+        "assessment_setup": _serialize_assessment_setup_snapshot(
+            connection=raw_conn, property_id=hoa_id,
+        ),
+        "budget": bundle.budget_draft.model_dump(mode="json"),
+        "reserve": bundle.reserve_snapshot.model_dump(mode="json"),
+        "appendix_manifest": [
+            entry.model_dump(mode="json") for entry in manifest
+        ],
+        "compile_context": {
+            "assessment_matrix": assessment_matrix.model_dump(mode="json"),
+            "hoa_metadata": bundle.hoa_metadata.model_dump(mode="json"),
+            "hoa_settings_overrides": bundle.overrides,
+            "assessment_revenue_annual": str(assessment_revenue),
+            "assessment_mode": assessment_mode,
+        },
+    }
 
 
 def run_render_job(
@@ -717,6 +865,7 @@ def run_render_job(
     session_factory,
     budget_history_service_module: Any = None,
     hoa_service_module: Any = None,
+    annual_package_id: Optional[int] = None,
 ) -> None:
     """BackgroundTask entry point. NEVER raises; records failure in the job row.
 
@@ -728,6 +877,11 @@ def run_render_job(
         budget_history_service_module: optional DI for tests; default to
             the real module at call time
         hoa_service_module: optional DI for tests; default at call time
+        annual_package_id: optional target package (C1). When it is
+            finalized with valid snapshots the compile reads ONLY the
+            frozen snapshot columns for snapshot-covered inputs; a
+            finalized package with legacy stub snapshots renders live
+            WITH a persistent warning instead of failing.
     """
     if budget_history_service_module is None:
         from ..services import budget_history_service as budget_history_service_module
@@ -743,77 +897,179 @@ def run_render_job(
             stage=DISCLOSURE_STAGE_VALIDATING,
         )
 
-        bundle = _resolve_preflight_inputs(
-            session,
-            hoa_id,
-            fiscal_year,
-            budget_history_service_module=budget_history_service_module,
+        from .compile_inputs import (
+            resolve_compile_appendix_entries,
+            should_use_snapshots,
         )
-
-        _set_status(session, job_id, stage=DISCLOSURE_STAGE_COMPUTING)
-
-        # Fetch assessment_mode from the property row for the matrix builder.
-        property_row = (
-            session.query(Property).filter(Property.id == hoa_id).one_or_none()
-        )
-        assessment_mode = normalize_assessment_mode(
-            getattr(property_row, "assessment_mode", None) if property_row else None
-        )
-
-        from .compile_inputs import resolve_compile_appendix_entries
         from .assessment_schedule_matrix import build_matrix_for_assessment_mode
+        from .preflight import check_specified_value_placeholders
 
         raw_conn = session.connection().connection
-        manifest_entries = resolve_compile_appendix_entries(
-            property_id=hoa_id, package_id=None, connection=raw_conn,
-        )
-        manifest_paths = [path for path, _title in manifest_entries]
-        manifest_titles = {path.name: title for path, title in manifest_entries}
 
-        assessment_mapping_counts = _materialize_assessment_mappings_for_budget_draft(
-            connection=raw_conn,
-            hoa_id=hoa_id,
-            budget_draft=bundle.budget_draft,
+        use_snapshots = annual_package_id is not None and should_use_snapshots(
+            package_id=annual_package_id, connection=raw_conn,
         )
-        logger.info(
-            "Materialized assessment mappings for disclosure job %s: %s",
-            job_id,
-            assessment_mapping_counts,
-        )
+        snapshot_warning: Optional[str] = None
+        if annual_package_id is not None and not use_snapshots:
+            status_row = raw_conn.execute(
+                "SELECT status FROM annual_packages WHERE id = ?",
+                (annual_package_id,),
+            ).fetchone()
+            if status_row is not None and status_row[0] == "finalized":
+                snapshot_warning = (
+                    f"Finalized package {annual_package_id} has no valid frozen "
+                    "snapshots (legacy stub finalization) — this render used "
+                    "LIVE data. Re-finalize the package to freeze real snapshots."
+                )
+                logger.warning("job %s: %s", job_id, snapshot_warning)
 
-        assessment_revenue = _assessment_revenue_for_budget_draft(bundle.budget_draft)
-        if assessment_revenue == Decimal("0"):
-            monthly_raw = bundle.overrides.get("approved_monthly_assessment_per_unit")
-            if monthly_raw not in (None, ""):
-                assessment_revenue = (
-                    Decimal(str(monthly_raw))
-                    * Decimal(bundle.hoa_metadata.units)
-                    * Decimal("12")
-                ).quantize(Decimal("0.01"))
+        if use_snapshots:
+            # ── Frozen-snapshot branch (C1) ────────────────────────────
+            # NO live reads or writes for snapshot-covered inputs: no
+            # preflight-input resolution, no assessment-mapping
+            # materialization (it mutates live state), no live appendix
+            # resolution, no C7 placeholder gate (the package passed all
+            # gates when it was finalized — that state is frozen).
+            from .snapshots import load_package_snapshots
 
-        assessment_matrix = build_matrix_for_assessment_mode(
-            connection=raw_conn,
-            property_id=hoa_id,
-            fiscal_year=fiscal_year,
-            budget_draft=bundle.budget_draft,
-            hoa_name=bundle.hoa_metadata.name,
-            unit_count=bundle.hoa_metadata.units,
-            approved_assessment_revenue_annual=assessment_revenue,
-            assessment_mode=assessment_mode,
-        )
+            snaps = load_package_snapshots(
+                package_id=annual_package_id, connection=raw_conn,
+            )
+            context = snaps["compile_context"]
+
+            spec = _resolve_spec_for_property(hoa_id, fiscal_year)
+            if spec is None:
+                raise CompileError(f"No package spec for HOA {hoa_id}")
+            budget_draft = BudgetDraft.model_validate(snaps["budget"])
+            reserve_snapshot = ReserveStudySnapshot.model_validate(snaps["reserve"])
+            hoa_metadata = HOAMetadata.model_validate(context["hoa_metadata"])
+            overrides = dict(context.get("hoa_settings_overrides") or {})
+
+            from .assessment_schedule_matrix import AssessmentScheduleMatrix
+
+            assessment_matrix = AssessmentScheduleMatrix.model_validate(
+                context["assessment_matrix"]
+            )
+
+            _set_status(session, job_id, stage=DISCLOSURE_STAGE_COMPUTING)
+
+            # Appendix paths come from the FROZEN manifest. A missing file
+            # hard-fails: a finalized package must never silently shrink.
+            manifest_paths = []
+            manifest_titles = {}
+            for entry in snaps["appendix_manifest"] or []:
+                file_id = entry["file_id"]
+                if not appendix_file_exists(file_id):
+                    raise CompileError(
+                        "Finalized package appendix is missing from storage: "
+                        f"{entry.get('display_title') or file_id!r}. Restore the "
+                        "file or re-finalize the package with a corrected "
+                        "appendix set."
+                    )
+                path = appendix_file_path(file_id)
+                manifest_paths.append(path)
+                manifest_titles[path.name] = entry.get("display_title") or path.name
+
+            compile_branch_audit = {
+                "compile_branch": "snapshot",
+                "annual_package_id": annual_package_id,
+                "snapshot_finalized_at": snaps.get("finalized_at"),
+            }
+        else:
+            # ── Live branch (pre-change behavior + C7 gate) ────────────
+            bundle = _resolve_preflight_inputs(
+                session,
+                hoa_id,
+                fiscal_year,
+                budget_history_service_module=budget_history_service_module,
+            )
+            spec = bundle.spec
+            budget_draft = bundle.budget_draft
+            reserve_snapshot = bundle.reserve_snapshot
+            hoa_metadata = bundle.hoa_metadata
+            overrides = bundle.overrides
+
+            _set_status(session, job_id, stage=DISCLOSURE_STAGE_COMPUTING)
+
+            # Fetch assessment_mode from the property row for the matrix builder.
+            property_row = (
+                session.query(Property).filter(Property.id == hoa_id).one_or_none()
+            )
+            assessment_mode = normalize_assessment_mode(
+                getattr(property_row, "assessment_mode", None) if property_row else None
+            )
+
+            # C7 gate: block the render while any specified_value pool still
+            # carries auto-generated equal-split placeholder rows — a synthetic
+            # split must never render as each unit's DRE-specified amount.
+            placeholder_errors = check_specified_value_placeholders(
+                property_id=hoa_id, connection=raw_conn,
+            )
+            if placeholder_errors:
+                raise CompileError(
+                    f"Preflight blocked compilation: {len(placeholder_errors)} error(s)",
+                    errors=placeholder_errors,
+                )
+
+            manifest_entries = resolve_compile_appendix_entries(
+                property_id=hoa_id,
+                package_id=annual_package_id,
+                connection=raw_conn,
+            )
+            manifest_paths = [path for path, _title in manifest_entries]
+            manifest_titles = {path.name: title for path, title in manifest_entries}
+
+            assessment_mapping_counts = _materialize_assessment_mappings_for_budget_draft(
+                connection=raw_conn,
+                hoa_id=hoa_id,
+                budget_draft=budget_draft,
+            )
+            logger.info(
+                "Materialized assessment mappings for disclosure job %s: %s",
+                job_id,
+                assessment_mapping_counts,
+            )
+
+            assessment_revenue = _assessment_revenue_for_budget_draft(budget_draft)
+            if assessment_revenue == Decimal("0"):
+                monthly_raw = overrides.get("approved_monthly_assessment_per_unit")
+                if monthly_raw not in (None, ""):
+                    assessment_revenue = (
+                        Decimal(str(monthly_raw))
+                        * Decimal(hoa_metadata.units)
+                        * Decimal("12")
+                    ).quantize(Decimal("0.01"))
+
+            assessment_matrix = build_matrix_for_assessment_mode(
+                connection=raw_conn,
+                property_id=hoa_id,
+                fiscal_year=fiscal_year,
+                budget_draft=budget_draft,
+                hoa_name=hoa_metadata.name,
+                unit_count=hoa_metadata.units,
+                approved_assessment_revenue_annual=assessment_revenue,
+                assessment_mode=assessment_mode,
+            )
+
+            compile_branch_audit = {
+                "compile_branch": "live",
+                "annual_package_id": annual_package_id,
+                "snapshot_warning": snapshot_warning,
+            }
 
         output_dir = _output_dir_for(hoa_id, fiscal_year, job_id)
         result = compile_package(
-            spec=bundle.spec,
-            budget_draft=bundle.budget_draft,
-            reserve_snapshot=bundle.reserve_snapshot,
-            hoa_metadata=bundle.hoa_metadata,
+            spec=spec,
+            budget_draft=budget_draft,
+            reserve_snapshot=reserve_snapshot,
+            hoa_metadata=hoa_metadata,
             output_dir=output_dir,
             appendices_root=appendix_dir_for(hoa_id),
-            hoa_settings_overrides=bundle.overrides,
+            hoa_settings_overrides=overrides,
             extra_appendix_paths=manifest_paths,
             extra_appendix_titles=manifest_titles,
             assessment_matrix=assessment_matrix,
+            audit_extra=compile_branch_audit,
         )
 
         _set_status(
@@ -823,6 +1079,11 @@ def run_render_job(
             stage=None,
             output_path=str(result.output_path),
             audit_path=str(result.audit_path),
+            # Surface the legacy-stub warning on the completed job so the
+            # operator sees it in the job status UI, not only in logs.
+            error_message=(
+                f"WARNING: {snapshot_warning}" if snapshot_warning else None
+            ),
         )
     except CompileError as exc:
         error_message = _compile_error_status_message(exc)

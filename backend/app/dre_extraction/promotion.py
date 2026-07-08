@@ -40,6 +40,11 @@ import sqlite3
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Optional, Union, get_args, get_origin
 
+from ..assessment_engine.percent_form import (
+    AmbiguousPercentColumn,
+    normalize_percent_value,
+    resolve_percent_divisor,
+)
 from .adapter import map_allocation_method
 from .schemas import (
     AllocationPoolBlock,
@@ -112,6 +117,31 @@ def check_missing_unit_factors(extraction: DRESetupExtraction) -> list[str]:
             if not has_units:
                 missing.append(pool.pool_key)
     return missing
+
+
+class AmbiguousOwnershipPercentForm(RuntimeError):
+    """Raised at promotion when the ownership-percent column's sum resolves
+    to neither fraction form (~1.0) nor points form (~100) AND a pool
+    actually allocates by ownership percentage — so the ambiguity would
+    poison homeowner-visible math.
+
+    The operator resolves it with an audited review edit setting
+    ``unit_structure.ownership_percent_form`` to ``'fraction'`` or
+    ``'points'``, then re-approves. Mapped to HTTP 422 by the approval
+    routers. Columns that are ambiguous but display-only (no
+    ownership_percentage pool) do NOT raise — they store verbatim and the
+    render-side column resolver guards the display.
+    """
+
+    def __init__(self, cause: AmbiguousPercentColumn) -> None:
+        self.column_label = cause.column_label
+        self.total = cause.total
+        self.sample_values = cause.sample_values
+        super().__init__(
+            str(cause)
+            + " Set unit_structure.ownership_percent_form to 'fraction' or "
+            "'points' as a review edit, then re-approve."
+        )
 
 
 class EditedEntityFailedToPromote(RuntimeError):
@@ -416,14 +446,21 @@ def _insert_group(
     group: GroupRow,
     display_order: int,
     connection: sqlite3.Connection,
+    percent_divisor: Optional[Decimal] = None,
 ) -> Optional[int]:
-    """Insert one assessment_groups row. Returns row id, or None on bad data."""
+    """Insert one assessment_groups row. Returns row id, or None on bad data.
+
+    ``percent_divisor`` (C8) is the column-level resolution from
+    ``resolve_percent_divisor`` — the stored ``ownership_percent`` is always
+    the normalized FRACTION (printed value ÷ divisor).
+    """
     if group.unit_count is None or group.unit_count <= 0:
         logger.warning(
             "promotion: skipping group %r — unit_count missing/invalid",
             group.group_id or group.label,
         )
         return None
+    ownership = normalize_percent_value(group.ownership_percent, percent_divisor)
     cur = connection.execute(
         """
         INSERT INTO assessment_groups (
@@ -436,7 +473,7 @@ def _insert_group(
             group.label or group.group_id or f"group-{display_order}",
             int(group.unit_count),
             str(group.average_square_feet) if group.average_square_feet is not None else None,
-            str(group.ownership_percent) if group.ownership_percent is not None else None,
+            str(ownership) if ownership is not None else None,
             str(group.factor) if group.factor is not None else None,
             display_order,
         ),
@@ -481,10 +518,19 @@ def _insert_unit(
     setup_id: int,
     unit: UnitRow,
     connection: sqlite3.Connection,
+    percent_divisor: Optional[Decimal] = None,
 ) -> Optional[int]:
+    """Insert one assessment_units row.
+
+    ``percent_divisor`` (C8) is the column-level resolution from
+    ``resolve_percent_divisor`` — the stored ``ownership_percent`` is always
+    the normalized FRACTION (printed value ÷ divisor). The verbatim printed
+    value stays in the immutable ``parsed_json`` payload for audit.
+    """
     if not unit.unit_number:
         logger.warning("promotion: skipping unit — unit_number empty")
         return None
+    ownership = normalize_percent_value(unit.ownership_percent, percent_divisor)
     cur = connection.execute(
         """
         INSERT INTO assessment_units (
@@ -496,12 +542,52 @@ def _insert_unit(
         (
             setup_id, unit.unit_number,
             str(unit.square_feet) if unit.square_feet is not None else None,
-            str(unit.ownership_percent) if unit.ownership_percent is not None else None,
+            str(ownership) if ownership is not None else None,
             _coerce_category(unit.category, unit.residential_commercial_flag),
             _parking_count(unit.parking_flag),
         ),
     )
     return cur.lastrowid
+
+
+# Source value for auto-generated equal splits on specified_value pools.
+# NEVER 'dre': a 'dre' source on a unit-pool allocation must always mean the
+# value was extracted from the document. Preflight blocks package generation
+# and finalize while any specified_value pool still carries placeholder rows.
+EQUAL_SPLIT_PLACEHOLDER_SOURCE = "equal_split_placeholder"
+
+# Sum-test tolerance for disambiguating extracted per-unit dollar factors
+# (monthly form vs annual form) against the pool's stated totals.
+_DOLLAR_FACTOR_SUM_TOLERANCE = Decimal("0.005")  # 0.5%
+
+
+def _within_tolerance(total: Decimal, target: Optional[Decimal]) -> bool:
+    if target is None or target == 0:
+        return False
+    return abs(total - target) / abs(target) <= _DOLLAR_FACTOR_SUM_TOLERANCE
+
+
+def _dollar_factors_for_pool(
+    units: list[UnitRow],
+    pool_key: str,
+) -> dict[str, Decimal]:
+    """Per-unit ``factor_type='dollar_amount'`` values for one pool.
+
+    Returns ``{unit_number: value}`` including only units that carry exactly
+    one non-null dollar factor for the pool.
+    """
+    out: dict[str, Decimal] = {}
+    for unit in units:
+        matches = [
+            f.factor_value
+            for f in unit.pool_factors
+            if f.pool_key == pool_key
+            and f.factor_type == "dollar_amount"
+            and f.factor_value is not None
+        ]
+        if len(matches) == 1:
+            out[unit.unit_number] = matches[0]
+    return out
 
 
 def _insert_specified_value_allocations(
@@ -511,20 +597,105 @@ def _insert_specified_value_allocations(
     pool_id: int,
     unit_id_by_number: dict[str, int],
     annual_amount: Optional[Decimal],
+    monthly_amount: Optional[Decimal],
+    units: list[UnitRow],
     unit_count: int,
     connection: sqlite3.Connection,
-) -> None:
-    """For each unit, insert one assessment_unit_pool_allocations row.
+    edited_entity_keys: frozenset[str] = frozenset(),
+) -> dict[str, Any]:
+    """Insert one assessment_unit_pool_allocations row per unit (C7).
 
-    The extraction prompt only gives us a pool-level ``annual_amount``;
-    the per-unit specified value isn't broken out (that's the operator's
-    job in the Review Workbench). As a placeholder we distribute the
-    pool's annual evenly across units → monthly = annual / 12 / units.
-    The operator will overwrite these in Review before promotion is
-    "done" for per-unit setups.
+    Extraction captures real per-unit specified values as
+    ``pool_factors`` entries with ``factor_type='dollar_amount'``. When
+    every inserted unit carries one and the sum passes the 0.5% test
+    against a pool total, those values are promoted verbatim with
+    ``source='dre'``:
+
+    - sum ≈ pool ``monthly_amount``  → values are monthly, used directly
+    - sum×12 ≈ pool ``annual_amount`` → same monthly-form evidence
+    - sum ≈ pool ``annual_amount``   → values are annual, divided by 12
+
+    Anything else — no factors, partial coverage, or a failed/contradictory
+    sum test — falls back to an equal split tagged
+    ``source='equal_split_placeholder'`` (never ``'dre'``), which blocks
+    package generation and finalize until the operator enters real values
+    in the Review Workbench. Extracted and synthetic values are never mixed
+    within one pool.
+
+    Returns an audit dict: ``{"mode": "dre_dollar_factors"|"placeholder",
+    "form": "monthly"|"annual"|None, "reason": str|None}``.
     """
-    if not unit_id_by_number or annual_amount is None or unit_count <= 0:
-        return
+    if not unit_id_by_number:
+        return {"mode": "skipped", "form": None, "reason": "no units inserted"}
+
+    factors = _dollar_factors_for_pool(units, pool_key)
+    covered = set(factors) >= set(unit_id_by_number)
+
+    form: Optional[str] = None
+    reason: Optional[str] = None
+    if covered:
+        total = sum(factors[n] for n in unit_id_by_number)
+        monthly_match = _within_tolerance(total, monthly_amount) or (
+            _within_tolerance(total * Decimal(12), annual_amount)
+        )
+        annual_match = _within_tolerance(total, annual_amount)
+        if monthly_match and not annual_match:
+            form = "monthly"
+        elif annual_match and not monthly_match:
+            form = "annual"
+        else:
+            reason = (
+                f"per-unit dollar factors sum to {total} which matches "
+                f"{'both' if (monthly_match and annual_match) else 'neither'} "
+                f"pool total (monthly={monthly_amount}, annual={annual_amount})"
+            )
+    elif factors:
+        reason = (
+            f"only {len(factors)}/{len(unit_id_by_number)} units carry a "
+            "dollar_amount factor for this pool"
+        )
+    else:
+        reason = "extraction carried no per-unit dollar_amount factors"
+
+    if form is not None:
+        for unit_number, unit_id in unit_id_by_number.items():
+            value = factors[unit_number]
+            monthly = (
+                value if form == "monthly" else value / Decimal(12)
+            ).quantize(Decimal("0.01"))
+            # Provenance: values flowing from an operator-edited unit are
+            # operator data (the workbench edit path applies edits to the
+            # extraction's pool_factors, then re-promotes through here).
+            # 'manual' is this schema's existing vocabulary for
+            # operator-entered unit-pool values.
+            source = (
+                "manual"
+                if f"unit:{unit_number}" in edited_entity_keys
+                else "dre"
+            )
+            connection.execute(
+                """
+                INSERT INTO assessment_unit_pool_allocations (
+                    assessment_unit_id, assessment_setup_id,
+                    pool_key, pool_id, specified_monthly_amount, source
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (unit_id, setup_id, pool_key, pool_id, str(monthly), source),
+            )
+        return {"mode": "dre_dollar_factors", "form": form, "reason": None}
+
+    # Placeholder fallback: equal split, explicitly tagged. Blocked by
+    # preflight until the operator resolves it — never a guess shipped
+    # as document data.
+    if annual_amount is None or unit_count <= 0:
+        return {"mode": "skipped", "form": None, "reason": reason}
+    logger.warning(
+        "promotion: specified_value pool %r fell back to equal-split "
+        "placeholder (%s); operator must enter per-unit values before "
+        "package generation",
+        pool_key,
+        reason,
+    )
     monthly = (annual_amount / Decimal(12) / Decimal(unit_count)).quantize(
         Decimal("0.01")
     )
@@ -534,10 +705,12 @@ def _insert_specified_value_allocations(
             INSERT INTO assessment_unit_pool_allocations (
                 assessment_unit_id, assessment_setup_id,
                 pool_key, pool_id, specified_monthly_amount, source
-            ) VALUES (?, ?, ?, ?, ?, 'dre')
+            ) VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (unit_id, setup_id, pool_key, pool_id, str(monthly)),
+            (unit_id, setup_id, pool_key, pool_id, str(monthly),
+             EQUAL_SPLIT_PLACEHOLDER_SOURCE),
         )
+    return {"mode": "placeholder", "form": None, "reason": reason}
 
 
 def parse_extraction_payload(
@@ -623,7 +796,7 @@ def populate_setup_children(
     extraction: DRESetupExtraction,
     connection: sqlite3.Connection,
     edited_entity_keys: frozenset[str] = frozenset(),
-) -> dict[str, int]:
+) -> dict[str, Any]:
     """Insert AllocationPool / Group / Unit / UnitPoolAllocation rows.
 
     ``edited_entity_keys`` (from :func:`entity_keys_touched_by_edits`) names
@@ -642,6 +815,44 @@ def populate_setup_children(
     }
     failed_edited_entities: list[str] = []
 
+    # C8: resolve the ownership-percent column form ONCE, column-level,
+    # before any row insert — the stored value is always the normalized
+    # fraction. The operator's audited review decision
+    # (unit_structure.ownership_percent_form) short-circuits the sum test.
+    # An ambiguous column blocks promotion only when a pool actually
+    # allocates by ownership percentage; display-only columns store
+    # verbatim and the render-side resolver guards them.
+    has_ownership_pool = any(
+        pool.allocation_method == "ownership_percentage"
+        for pool in extraction.allocation_pools
+    )
+    forced_form = extraction.unit_structure.ownership_percent_form
+
+    def _percent_divisor_for(rows, label: str) -> Optional[Decimal]:
+        try:
+            return resolve_percent_divisor(
+                [row.ownership_percent for row in rows],
+                column_label=label,
+                forced_form=forced_form,
+            )
+        except AmbiguousPercentColumn as exc:
+            if has_ownership_pool:
+                raise AmbiguousOwnershipPercentForm(exc) from exc
+            logger.warning(
+                "promotion: %s is ambiguous (%s) but no ownership_percentage "
+                "pool exists; storing verbatim for the read-side resolver",
+                label,
+                exc,
+            )
+            return None
+
+    group_percent_divisor = _percent_divisor_for(
+        extraction.unit_structure.groups, "assessment_groups.ownership_percent"
+    )
+    unit_percent_divisor = _percent_divisor_for(
+        extraction.unit_structure.units, "assessment_units.ownership_percent"
+    )
+
     pool_id_by_key: dict[str, int] = {}
     for idx, pool in enumerate(extraction.allocation_pools):
         pool_id = _insert_pool(
@@ -659,6 +870,7 @@ def populate_setup_children(
             if _insert_group(
                 setup_id=setup_id, group=group,
                 display_order=idx, connection=connection,
+                percent_divisor=group_percent_divisor,
             ) is not None:
                 counts["groups"] += 1
             elif f"group:{group_key}" in edited_entity_keys:
@@ -669,6 +881,7 @@ def populate_setup_children(
         for unit in extraction.unit_structure.units:
             unit_id = _insert_unit(
                 setup_id=setup_id, unit=unit, connection=connection,
+                percent_divisor=unit_percent_divisor,
             )
             if unit_id is not None:
                 unit_id_by_number[unit.unit_number] = unit_id
@@ -676,9 +889,11 @@ def populate_setup_children(
             elif f"unit:{unit.unit_number}" in edited_entity_keys:
                 failed_edited_entities.append(f"unit:{unit.unit_number}")
 
-        # For each specified_value pool, distribute its annual evenly
-        # across the inserted unit rows. The operator will overwrite
-        # the per-unit specifics in the Review Workbench.
+        # For each specified_value pool (C7): promote the extraction's
+        # per-unit dollar_amount factors when they pass the sum test;
+        # otherwise fall back to an equal split explicitly tagged
+        # 'equal_split_placeholder' so preflight blocks until the operator
+        # resolves it. Never an equal split masquerading as 'dre' data.
         for pool in extraction.allocation_pools:
             if pool.allocation_method != "specified_value":
                 continue
@@ -686,14 +901,22 @@ def populate_setup_children(
             if pool_id is None:
                 continue
             before = sum(1 for _ in unit_id_by_number)
-            _insert_specified_value_allocations(
+            outcome = _insert_specified_value_allocations(
                 setup_id=setup_id, pool_key=pool.pool_key,
                 pool_id=pool_id, unit_id_by_number=unit_id_by_number,
                 annual_amount=pool.annual_amount,
+                monthly_amount=pool.monthly_amount,
+                units=extraction.unit_structure.units,
                 unit_count=len(unit_id_by_number),
                 connection=connection,
+                edited_entity_keys=edited_entity_keys,
             )
-            counts["unit_pool_allocations"] += before
+            if outcome["mode"] != "skipped":
+                counts["unit_pool_allocations"] += before
+            if outcome["mode"] == "placeholder":
+                counts.setdefault("specified_value_placeholders", []).append(
+                    {"pool_key": pool.pool_key, "reason": outcome["reason"]}
+                )
 
     if failed_edited_entities:
         raise EditedEntityFailedToPromote(failed_edited_entities)
@@ -707,7 +930,7 @@ def promote_extraction_to_setup(
     setup_type: str,
     parsed_json_text: Optional[str],
     connection: sqlite3.Connection,
-) -> dict[str, int]:
+) -> dict[str, Any]:
     """Full snapshot pipeline: parse parsed_json + populate child rows.
 
     Called inside the approval transaction so the AssessmentSetup row

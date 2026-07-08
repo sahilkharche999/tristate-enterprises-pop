@@ -32,6 +32,11 @@ from app.assessment_engine import (
 )
 from app.assessment_engine.engine import run as run_assessment_engine
 from app.assessment_engine.errors import NeedsHumanReview
+from app.assessment_engine.percent_form import (
+    AmbiguousPercentColumn,
+    normalize_percent_value,
+    resolve_percent_divisor,
+)
 from app.assessment_engine.schemas import BudgetLineMappingInput
 from app.dre_extraction.promotion import (
     apply_review_edits_to_extraction,
@@ -250,13 +255,12 @@ def _money(value: Any) -> Decimal:
     return Decimal(str(value))
 
 
-def _percentage(value: Any) -> Optional[Decimal]:
-    if value is None:
-        return None
-    pct = _money(value)
-    if pct > Decimal("1"):
-        return pct / Decimal("100")
-    return pct
+# C8: the per-value `>1 → points` heuristic that used to live here
+# (`_percentage`) is retired from every calculation path. Percent form is
+# resolved COLUMN-level via assessment_engine.percent_form — a points-form
+# column whose individual values are below 1 (e.g. 150 units × ~0.667)
+# is exactly the case the per-value guess mis-read as fractions (~100×
+# over-assessment). Do not reintroduce per-value magnitude guessing.
 
 
 def _monthly(value: Decimal) -> Decimal:
@@ -1425,8 +1429,23 @@ def _fallback_recipients_from_payload(
     payload: dict[str, Any],
 ) -> tuple[SetupType | None, list[RecipientReference]]:
     unit_structure = payload.get("unit_structure") or {}
+    # C8: payload values are verbatim printed form — resolve the column's
+    # form once (honoring the operator's audited decision) instead of
+    # guessing per value. AmbiguousPercentColumn propagates to the caller,
+    # which degrades to the operator-review fallback matrix.
+    forced_form = str(unit_structure.get("ownership_percent_form") or "unknown")
+
+    def _raw_percent(row: dict[str, Any]) -> Optional[Decimal]:
+        value = row.get("ownership_percent")
+        return _money(value) if value is not None else None
+
     groups = unit_structure.get("groups") or []
     if groups:
+        divisor = resolve_percent_divisor(
+            [_raw_percent(g) for g in groups],
+            column_label="payload.groups.ownership_percent",
+            forced_form=forced_form,
+        )
         recipients = [
             RecipientReference(
                 ref_type="group",
@@ -1438,7 +1457,7 @@ def _fallback_recipients_from_payload(
                     if group.get("average_square_feet") is not None
                     else None
                 ),
-                ownership_percent=_percentage(group.get("ownership_percent")),
+                ownership_percent=normalize_percent_value(_raw_percent(group), divisor),
             )
             for idx, group in enumerate(groups, start=1)
             if int(group.get("unit_count") or 0) > 0
@@ -1448,6 +1467,11 @@ def _fallback_recipients_from_payload(
 
     units = unit_structure.get("units") or []
     if units:
+        divisor = resolve_percent_divisor(
+            [_raw_percent(u) for u in units],
+            column_label="payload.units.ownership_percent",
+            forced_form=forced_form,
+        )
         recipients = [
             RecipientReference(
                 ref_type="unit",
@@ -1458,7 +1482,7 @@ def _fallback_recipients_from_payload(
                     if unit.get("square_feet") is not None
                     else None
                 ),
-                ownership_percent=_percentage(unit.get("ownership_percent")),
+                ownership_percent=normalize_percent_value(_raw_percent(unit), divisor),
                 category=unit.get("category") or None,
                 parking_spaces=int(unit.get("parking_spaces") or 0),
             )
@@ -1586,8 +1610,13 @@ def _per_unit_factor_value_lookup_from_payload(
         if pool_monthly_total <= Decimal("0"):
             continue
 
-        pool_values: dict[int, Decimal] = {}
-        saw_factor = False
+        # C8: collect the pool's percent-factor column FIRST, resolve its
+        # form once (fraction vs points) by column sum, THEN convert. The
+        # previous code multiplied by the raw printed value — a points-form
+        # factor column (e.g. "13.15" meaning 13.15%) produced a 100×
+        # over-assessment. AmbiguousPercentColumn propagates to the caller,
+        # which degrades to the operator-review fallback matrix.
+        raw_shares: dict[int, Decimal] = {}
         for unit in ((payload.get("unit_structure") or {}).get("units") or []):
             unit_number = str(unit.get("unit_number") or "")
             unit_id = unit_id_by_number.get(unit_number)
@@ -1601,18 +1630,25 @@ def _per_unit_factor_value_lookup_from_payload(
                 factor_value = factor.get("factor_value")
                 if factor_value in (None, ""):
                     continue
-                saw_factor = True
                 try:
-                    share = _money(factor_value)
+                    raw_shares[unit_id] = _money(factor_value)
                 except Exception:
                     continue
-                pool_values[unit_id] = (
-                    pool_monthly_total * share
-                ).quantize(Decimal("0.01"))
                 break
-        if saw_factor and pool_values:
-            converted_pool_keys.add(pool.pool_key)
-            lookup.update({(unit_id, pool.pool_key): value for unit_id, value in pool_values.items()})
+        if not raw_shares:
+            continue
+        divisor = resolve_percent_divisor(
+            list(raw_shares.values()),
+            column_label=f"pool_factors[{pool.pool_key}].percent",
+        )
+        pool_values = {
+            unit_id: (
+                pool_monthly_total * normalize_percent_value(share, divisor)
+            ).quantize(Decimal("0.01"))
+            for unit_id, share in raw_shares.items()
+        }
+        converted_pool_keys.add(pool.pool_key)
+        lookup.update({(unit_id, pool.pool_key): value for unit_id, value in pool_values.items()})
 
     return lookup, converted_pool_keys
 
@@ -1780,61 +1816,97 @@ def build_matrix_from_approved_assessment_setup(
 
     effective_setup_type: SetupType = setup_type
     recipients: list[RecipientReference] = []
-    if setup_type == "fixed":
-        recipients = [
-            RecipientReference(ref_type="unit", ref_id=i, label=f"Unit {i}")
-            for i in range(1, max(int(unit_count or 0), 0) + 1)
-        ]
-    elif setup_type == "grouped":
-        rows = connection.execute(
-            """
-            SELECT id, group_name, unit_count, average_square_feet,
-                   ownership_percent
-              FROM assessment_groups
-             WHERE assessment_setup_id = ?
-             ORDER BY display_order, id
-            """,
-            (setup_id,),
-        ).fetchall()
-        recipients = [
-            RecipientReference(
-                ref_type="group",
-                ref_id=row[0],
-                label=row[1],
-                unit_count=int(row[2] or 1),
-                square_feet=_money(row[3]) if row[3] is not None else None,
-                ownership_percent=_percentage(row[4]),
+    # C8: the operator's audited form decision travels in the (edited)
+    # extraction payload; the read-side resolver honors it for both DB rows
+    # and payload fallbacks.
+    percent_form_decision = str(
+        (payload.get("unit_structure") or {}).get("ownership_percent_form")
+        or "unknown"
+    )
+    try:
+        if setup_type == "fixed":
+            recipients = [
+                RecipientReference(ref_type="unit", ref_id=i, label=f"Unit {i}")
+                for i in range(1, max(int(unit_count or 0), 0) + 1)
+            ]
+        elif setup_type == "grouped":
+            rows = connection.execute(
+                """
+                SELECT id, group_name, unit_count, average_square_feet,
+                       ownership_percent
+                  FROM assessment_groups
+                 WHERE assessment_setup_id = ?
+                 ORDER BY display_order, id
+                """,
+                (setup_id,),
+            ).fetchall()
+            # C8: column-level form resolution — robust to legacy
+            # verbatim-stored points rows (sum≈100 → ÷100) AND rows
+            # normalized at promotion (sum≈1 → no-op). Never per-value.
+            divisor = resolve_percent_divisor(
+                [_money(row[4]) if row[4] is not None else None for row in rows],
+                column_label="assessment_groups.ownership_percent",
+                forced_form=percent_form_decision,
             )
-            for row in rows
-        ]
-    else:
-        rows = connection.execute(
-            """
-            SELECT id, unit_number, square_feet, ownership_percent, category,
-                   parking_spaces
-              FROM assessment_units
-             WHERE assessment_setup_id = ?
-             ORDER BY id
-            """,
-            (setup_id,),
-        ).fetchall()
-        recipients = [
-            RecipientReference(
-                ref_type="unit",
-                ref_id=row[0],
-                label=row[1],
-                square_feet=_money(row[2]) if row[2] is not None else None,
-                ownership_percent=_percentage(row[3]),
-                category=row[4],
-                parking_spaces=int(row[5] or 0),
+            recipients = [
+                RecipientReference(
+                    ref_type="group",
+                    ref_id=row[0],
+                    label=row[1],
+                    unit_count=int(row[2] or 1),
+                    square_feet=_money(row[3]) if row[3] is not None else None,
+                    ownership_percent=normalize_percent_value(
+                        _money(row[4]) if row[4] is not None else None, divisor
+                    ),
+                )
+                for row in rows
+            ]
+        else:
+            rows = connection.execute(
+                """
+                SELECT id, unit_number, square_feet, ownership_percent, category,
+                       parking_spaces
+                  FROM assessment_units
+                 WHERE assessment_setup_id = ?
+                 ORDER BY id
+                """,
+                (setup_id,),
+            ).fetchall()
+            divisor = resolve_percent_divisor(
+                [_money(row[3]) if row[3] is not None else None for row in rows],
+                column_label="assessment_units.ownership_percent",
+                forced_form=percent_form_decision,
             )
-            for row in rows
-        ]
-    if not recipients:
-        fallback_setup_type, fallback_recipients = _fallback_recipients_from_payload(payload)
-        if fallback_setup_type and fallback_recipients:
-            effective_setup_type = fallback_setup_type
-            recipients = fallback_recipients
+            recipients = [
+                RecipientReference(
+                    ref_type="unit",
+                    ref_id=row[0],
+                    label=row[1],
+                    square_feet=_money(row[2]) if row[2] is not None else None,
+                    ownership_percent=normalize_percent_value(
+                        _money(row[3]) if row[3] is not None else None, divisor
+                    ),
+                    category=row[4],
+                    parking_spaces=int(row[5] or 0),
+                )
+                for row in rows
+            ]
+        if not recipients:
+            fallback_setup_type, fallback_recipients = _fallback_recipients_from_payload(
+                payload
+            )
+            if fallback_setup_type and fallback_recipients:
+                effective_setup_type = fallback_setup_type
+                recipients = fallback_recipients
+    except AmbiguousPercentColumn as exc:
+        # Never render a guessed percent form into a legal disclosure —
+        # degrade to the operator-review fallback matrix.
+        return _fallback_matrix_for_db_issue(
+            hoa_name=hoa_name,
+            fiscal_year=fiscal_year,
+            reason=f"Assessment matrix needs operator review before rendering: {exc}",
+            approved_at=approved_at,
+        )
 
     if not recipients:
         return _fallback_matrix_for_db_issue(
@@ -1986,12 +2058,20 @@ def build_matrix_from_approved_assessment_setup(
         budget_lines=budget_lines,
         mappings=mappings,
     )
-    payload_factor_lookup, payload_factor_pool_keys = _per_unit_factor_value_lookup_from_payload(
-        payload=payload,
-        pools=pools,
-        unit_id_by_number=unit_id_by_number,
-        pool_totals_annual=pool_totals_annual,
-    )
+    try:
+        payload_factor_lookup, payload_factor_pool_keys = _per_unit_factor_value_lookup_from_payload(
+            payload=payload,
+            pools=pools,
+            unit_id_by_number=unit_id_by_number,
+            pool_totals_annual=pool_totals_annual,
+        )
+    except AmbiguousPercentColumn as exc:
+        return _fallback_matrix_for_db_issue(
+            hoa_name=hoa_name,
+            fiscal_year=fiscal_year,
+            reason=f"Assessment matrix needs operator review before rendering: {exc}",
+            approved_at=approved_at,
+        )
 
     specified_lookup = {
         (row[0], row[1]): _money(row[2])

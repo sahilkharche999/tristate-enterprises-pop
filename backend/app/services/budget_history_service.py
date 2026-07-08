@@ -38,6 +38,7 @@ from ..models.reserve_study_extraction import ExtractedReserveStudyDocument
 from ..services.income_statement_parser import (
     parse_rows_with_sections,
     detect_columns,
+    parse_financial_cell as _parse_financial_cell,
     _parse_financial_float as _parse_financial_float_new,
     _match_section_header,
     _classify_by_account_code,
@@ -793,7 +794,19 @@ def _canonical_statement_from_line_items(
     line_items: list[dict[str, Any]],
     *,
     family: str,
+    stated_totals: Optional[list[dict[str, Any]]] = None,
 ) -> ExtractedFinancialStatement:
+    """Build the canonical statement the validator consumes.
+
+    ``stated_totals`` (C6) carries the document's own "Total …" rows as
+    captured by the parser. Mapping them onto ``statement.totals`` is what
+    makes ``validate_extracted_statement``'s ``subtotal_mismatch`` gate
+    reachable on the deterministic path — previously the statement was
+    always built with no totals, so the only value-correctness cross-check
+    never ran. Entries are tagged ``source='document'`` so operators can
+    distinguish a document-ground-truth check from a model self-consistency
+    check (Gemini-path totals).
+    """
     canonical_items: list[ExtractedStatementLineItem] = []
 
     def _opt_float(value: Any) -> Optional[float]:
@@ -821,10 +834,31 @@ def _canonical_statement_from_line_items(
                 annual_budget=_opt_float(item.get("annual_budget")),
             )
         )
+    # One totals entry per section: documents interleave sub-totals ("Total
+    # Utilities") with the section grand total ("Total Operating Expense").
+    # Sub-totals partition the section, so the grand total is the max-|amount|
+    # "Total …" row — picking it avoids a false subtotal_mismatch against a
+    # sub-total. (Corpus calibration: tasks.md 2.4.)
+    best_by_section: dict[str, dict[str, Any]] = {}
+    for entry in stated_totals or []:
+        amount = entry.get("annual_budget")
+        section = entry.get("section")
+        if amount is None or not section:
+            continue
+        current = best_by_section.get(section)
+        if current is None or abs(amount) > abs(current["amount"]):
+            best_by_section[section] = {
+                "section_kind": section,
+                "label": entry.get("label"),
+                "amount": amount,
+                "source": "document",
+            }
+    totals: list[dict[str, Any]] = list(best_by_section.values())
     return ExtractedFinancialStatement(
         document_family=family,
         report_type="income_statement",
         line_items=canonical_items,
+        totals=totals,
         confidence=1.0,
     )
 
@@ -1063,20 +1097,16 @@ def _extract_reserve_study_sync(path: str) -> ExtractedReserveStudyDocument | Do
 
 
 def _parse_float(value: Any) -> float:
-    if value is None:
-        return 0.0
-    if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
-        text = value.strip()
-        if not text or text in {"-", "—"}:
-            return 0.0
-        text = text.replace(",", "").replace("$", "")
-        try:
-            return float(text)
-        except ValueError:
-            return 0.0
-    return 0.0
+    """Delegate to the shared financial-cell normalizer (C5).
+
+    Routes through :func:`parse_financial_cell` so parenthesized and
+    trailing-minus negatives parse WITH sign (previously silently ``0``),
+    and so all three parser entry points agree. Empty / dash / unparseable
+    still collapse to ``0.0`` here to preserve arithmetic call-site
+    behavior; the promoted-column path uses the tagged cell directly.
+    """
+    cell = _parse_financial_cell(value)
+    return cell.value if cell.value is not None else 0.0
 
 
 def _statement_to_budget_line_items(
@@ -1367,8 +1397,16 @@ def _line_items_to_percent_changes(line_items: list[dict[str, Any]]) -> dict[str
     return changes
 
 
-def _table_to_line_items(table: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
-    """Returns (line_items, warnings)."""
+def _table_to_line_items(
+    table: dict[str, Any],
+    capture: Optional[dict] = None,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Returns (line_items, warnings).
+
+    ``capture`` (C5/C6) is forwarded to ``parse_rows_with_sections`` on the
+    raw-layout branch so the caller receives the document's stated totals
+    and any unparseable promoted-cell review questions.
+    """
     warnings: list[str] = []
     headers = [str(header or f"column_{index}") for index, header in enumerate(table.get("headers", []), start=1)]
 
@@ -1393,7 +1431,7 @@ def _table_to_line_items(table: dict[str, Any]) -> tuple[list[dict[str, Any]], l
                     col_indices["percent_change"] = ci
         col_indices.setdefault("projection", _COL_PROJECTION_INDEX)
         col_indices.setdefault("percent_change", _COL_PERCENT_CHANGE_INDEX)
-        return parse_rows_with_sections(rows, col_indices), warnings
+        return parse_rows_with_sections(rows, col_indices, capture=capture), warnings
 
     # Pre-processed table with "Label" header (from enriched/generated workbook)
     line_items: list[dict[str, Any]] = []
@@ -2312,7 +2350,8 @@ def create_upload(
         pipeline.run()
         enriched = macros_service.read_sheet_as_table(intermediate_path, "Income Statement")
         preview = macros_service.read_first_sheet_preview(output_path, settings.MAX_PREVIEW_ROWS)
-        line_items, parse_warnings = _table_to_line_items(enriched)
+        parse_capture: dict[str, Any] = {}
+        line_items, parse_warnings = _table_to_line_items(enriched, capture=parse_capture)
         # Diagnostic: log a sample of items AFTER the XLSX round-trip.
         # Compare against the post-Gemini sample logged earlier to see
         # whether numerics survived BudgetPipeline column detection and
@@ -2345,8 +2384,26 @@ def create_upload(
         canonical_statement = _canonical_statement_from_line_items(
             line_items,
             family=route.family or ("pdf_visual_document" if route.path == "pdf_vlm" else "known_clean_excel_workbook"),
+            stated_totals=parse_capture.get("stated_totals"),
         )
         canonical_issues = validate_extracted_statement(canonical_statement)
+        # C5: an unparseable cell in the PROMOTED (annual) column is a
+        # blocking issue — the operator must resolve the raw text before the
+        # draft can feed assessment math. Never silently promoted as $0.
+        for question in parse_capture.get("review_questions", []):
+            canonical_issues.append(
+                {
+                    "code": "unparseable_promoted_cell",
+                    "severity": "error",
+                    "message": (
+                        f"Could not read the Annual Budget value for "
+                        f"'{question.get('label')}' (cell text: "
+                        f"{question.get('raw_text')!r}). Please correct the "
+                        "source document or enter the value manually."
+                    ),
+                    "details": question,
+                }
+            )
         if has_blocking_validation_issues(canonical_issues):
             review_reason, validation_warnings = _build_income_statement_validation_feedback(
                 original_filename=original_filename,

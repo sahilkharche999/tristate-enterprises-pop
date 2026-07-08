@@ -76,6 +76,18 @@ _BUDGET_VERSION_COLUMN_DEFINITIONS: dict[str, str] = {
 
 _ANNUAL_PACKAGE_COLUMN_DEFINITIONS: dict[str, str] = {
     "assessment_mode": "TEXT NOT NULL DEFAULT 'variable'",
+    # C2/C1 (fix-critical-disclosure-integrity): fifth snapshot column —
+    # {assessment_matrix, hoa_metadata, hoa_settings_overrides,
+    #  assessment_revenue_annual} frozen at finalize so a finalized render
+    # needs no live reads beyond the snapshot columns themselves.
+    "compile_context_snapshot_json": "TEXT",
+}
+
+_DISCLOSURE_JOB_COLUMN_DEFINITIONS: dict[str, str] = {
+    # C1: links a render job to the annual package it targets so the
+    # compile can take the frozen-snapshot branch for finalized packages.
+    # NULL = ad-hoc live render (pre-change behavior).
+    "annual_package_id": "INTEGER REFERENCES annual_packages(id)",
 }
 
 _HOA_SETTINGS_COLUMN_DEFINITIONS: dict[str, str] = {
@@ -508,6 +520,32 @@ def ensure_annual_package_columns() -> None:
                 id_column="id",
                 force_overwrite=force_assessment_mode_backfill,
             )
+        raw_conn.commit()
+    finally:
+        raw_conn.close()
+
+
+def ensure_disclosure_job_columns() -> None:
+    """Brownfield migration for disclosure_package_jobs columns (C1)."""
+    raw_conn = engine.raw_connection()
+    try:
+        if not _table_exists(raw_conn, "disclosure_package_jobs"):
+            return
+        existing = {
+            row[1]
+            for row in raw_conn.execute(
+                "PRAGMA table_info(disclosure_package_jobs)"
+            ).fetchall()
+        }
+        for column_name, column_sql in _DISCLOSURE_JOB_COLUMN_DEFINITIONS.items():
+            if column_name not in existing:
+                logger.info(
+                    "Adding missing disclosure_package_jobs.%s column", column_name
+                )
+                raw_conn.execute(
+                    f"ALTER TABLE disclosure_package_jobs "
+                    f"ADD COLUMN {column_name} {column_sql}"
+                )
         raw_conn.commit()
     finally:
         raw_conn.close()
@@ -946,6 +984,83 @@ def ensure_allocation_pool_columns() -> None:
         raw_conn.close()
 
 
+def rebuild_aupa_source_check(conn) -> bool:
+    """Widen the ``source`` CHECK on ``assessment_unit_pool_allocations`` to
+    accept ``'equal_split_placeholder'`` (C7). Returns True when a rebuild
+    ran, False when the table was already new-shape (or absent).
+
+    SQLite cannot ALTER a CHECK constraint, so pre-change DBs get the
+    standard table rebuild: create the new-shape table, copy rows, drop the
+    old table, rename, recreate the index. Detection is by inspecting the
+    stored DDL in ``sqlite_master`` — run-twice safe (the rebuilt table's
+    DDL contains the new value, so subsequent runs no-op).
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master "
+        "WHERE type='table' AND name='assessment_unit_pool_allocations'"
+    ).fetchone()
+    if row is None or "equal_split_placeholder" in (row[0] or ""):
+        return False
+    logger.info(
+        "Rebuilding assessment_unit_pool_allocations to widen the "
+        "source CHECK (adding 'equal_split_placeholder')"
+    )
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        conn.execute(
+            """
+            CREATE TABLE assessment_unit_pool_allocations_new (
+                id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+                assessment_unit_id       INTEGER NOT NULL
+                                         REFERENCES assessment_units(id) ON DELETE CASCADE,
+                assessment_setup_id      INTEGER NOT NULL
+                                         REFERENCES assessment_setups(id) ON DELETE CASCADE,
+                pool_key                 TEXT NOT NULL,
+                pool_id                  INTEGER REFERENCES allocation_pools(id) ON DELETE SET NULL,
+                specified_monthly_amount NUMERIC NOT NULL,
+                source                   TEXT NOT NULL DEFAULT 'dre'
+                                         CHECK (source IN ('dre','manual','equal_split_placeholder')),
+                source_page              INTEGER,
+                notes                    TEXT,
+                UNIQUE (assessment_unit_id, pool_key)
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO assessment_unit_pool_allocations_new "
+            "(id, assessment_unit_id, assessment_setup_id, pool_key, "
+            " pool_id, specified_monthly_amount, source, source_page, notes) "
+            "SELECT id, assessment_unit_id, assessment_setup_id, pool_key, "
+            "       pool_id, specified_monthly_amount, source, source_page, notes "
+            "FROM assessment_unit_pool_allocations"
+        )
+        conn.execute("DROP TABLE assessment_unit_pool_allocations")
+        conn.execute(
+            "ALTER TABLE assessment_unit_pool_allocations_new "
+            "RENAME TO assessment_unit_pool_allocations"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_assessment_unit_pool_alloc_setup "
+            "ON assessment_unit_pool_allocations(assessment_setup_id)"
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
+    return True
+
+
+def ensure_assessment_unit_pool_allocations_source_check() -> None:
+    """Brownfield entry point for :func:`rebuild_aupa_source_check`."""
+    raw_conn = engine.raw_connection()
+    try:
+        rebuild_aupa_source_check(raw_conn)
+    finally:
+        raw_conn.close()
+
+
 def _seed_tri_state_disclosure_defaults() -> None:
     """One-time seed for Tri-State Enterprises-managed HOAs.
 
@@ -1132,6 +1247,8 @@ def init_db() -> None:
     ensure_budget_line_pool_mapping_columns()
     ensure_budget_line_merges_columns()
     ensure_budget_line_merge_applications_columns()
+    ensure_assessment_unit_pool_allocations_source_check()
+    ensure_disclosure_job_columns()
     _seed_tri_state_disclosure_defaults()
     _seed_old_mill_assessment_setup()
 

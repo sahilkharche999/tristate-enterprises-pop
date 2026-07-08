@@ -316,6 +316,10 @@ class GenerateDisclosurePackageRequest(BaseModel):
 
     hoa_id: int = Field(ge=1)
     fiscal_year: int = Field(ge=1900, le=3000)
+    # C1: optional target package. When it is finalized with valid
+    # snapshots, the render compiles from the frozen snapshot columns
+    # instead of live state. None = ad-hoc live render (legacy behavior).
+    package_id: Optional[int] = Field(default=None, ge=1)
 
 
 class PreflightErrorResponse(BaseModel):

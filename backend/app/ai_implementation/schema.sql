@@ -297,6 +297,10 @@ CREATE TABLE IF NOT EXISTS disclosure_package_jobs (
     output_path     TEXT,
     audit_path      TEXT,
     created_by_user_id INTEGER REFERENCES users(id),
+    -- C1: links a render job to its target annual package so the compile
+    -- takes the frozen-snapshot branch for finalized packages. NULL =
+    -- ad-hoc live render.
+    annual_package_id INTEGER REFERENCES annual_packages(id),
     created_at      TEXT DEFAULT (datetime('now')),
     completed_at    TEXT
 );
@@ -487,7 +491,11 @@ CREATE TABLE IF NOT EXISTS assessment_unit_pool_allocations (
     pool_id                  INTEGER REFERENCES allocation_pools(id) ON DELETE SET NULL,
     specified_monthly_amount NUMERIC NOT NULL,
     source                   TEXT NOT NULL DEFAULT 'dre'
-                             CHECK (source IN ('dre','manual')),
+                             -- 'dre': extracted from the document; 'manual':
+                             -- operator-entered; 'equal_split_placeholder':
+                             -- auto-generated equal split awaiting operator
+                             -- resolution (blocks package generation, C7).
+                             CHECK (source IN ('dre','manual','equal_split_placeholder')),
     source_page              INTEGER,
     notes                    TEXT,
     UNIQUE (assessment_unit_id, pool_key)
@@ -951,6 +959,10 @@ CREATE TABLE IF NOT EXISTS annual_packages (
     budget_snapshot_json            TEXT,
     reserve_snapshot_json           TEXT,
     appendix_manifest_snapshot_json TEXT,
+    -- Fifth snapshot (C2/C1): {assessment_matrix, hoa_metadata,
+    -- hoa_settings_overrides, assessment_revenue_annual} so a finalized
+    -- render reads NO live state beyond the snapshot columns.
+    compile_context_snapshot_json   TEXT,
     finalized_at                    TEXT,
     regen_of_package_id             INTEGER REFERENCES annual_packages(id) ON DELETE SET NULL,
     version_int                     INTEGER NOT NULL DEFAULT 0,

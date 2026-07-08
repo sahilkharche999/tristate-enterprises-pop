@@ -426,6 +426,12 @@ class DisclosurePackageJob(Base):
     output_path = Column(Text, nullable=True)
     audit_path = Column(Text, nullable=True)
     created_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    # C1: target annual package; NULL = ad-hoc live render. When the target
+    # is finalized with valid snapshots, the render takes the frozen-
+    # snapshot branch instead of reading live state. Plain Integer here
+    # (no ORM ForeignKey): annual_packages is a raw-SQL table with no
+    # mapped model; the REFERENCES clause lives in schema.sql + migration.
+    annual_package_id = Column(Integer, nullable=True)
     created_at = Column(Text, server_default=_CREATED_AT_DEFAULT)
     completed_at = Column(Text, nullable=True)
 

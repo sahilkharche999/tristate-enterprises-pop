@@ -116,26 +116,16 @@ export function AnnualPackagesPanel({ hoaId, liveAssessmentMode }: Props) {
   async function onFinalize(pkg: AnnualPackage) {
     if (!confirm(
       `Finalize package for fiscal ${pkg.fiscal_year}? ` +
-      `This freezes all four snapshot JSONs and the package becomes immutable.`,
+      `The server freezes the budget, reserve, assessment, appendix, and ` +
+      `compile-context snapshots from current data, and the package becomes immutable.`,
     )) {
       return;
     }
     try {
-      // Caller normally builds these from the live compile state. For
-      // operator-driven finalization without a compile-side resolver,
-      // we send empty stubs; the production compile job will populate
-      // these via the snapshot-freezing helpers.
-      await finalizeAnnualPackage(
-        hoaId,
-        pkg.package_id,
-        {
-          assessment_setup: {},
-          budget: {},
-          reserve: {},
-          appendix_manifest: {},
-        },
-        pkg.version_int,
-      );
+      // C2: snapshot content is assembled SERVER-SIDE from canonical DB
+      // state — the client sends nothing. A blocking preflight failure
+      // (stale reserve study, unresolved placeholders, …) returns 422.
+      await finalizeAnnualPackage(hoaId, pkg.package_id, pkg.version_int);
       refresh();
     } catch (exc) {
       setError(String(exc));

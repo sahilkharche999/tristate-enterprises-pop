@@ -15,6 +15,7 @@ from ..optimistic_lock import optional_if_match
 from ..services.annual_package_service import (
     AnnualPackageNotFound,
     AnnualPackageResponse,
+    FinalizeBlockedByPreflight,
     InvalidPackageStateTransition,
     PackageVersionMismatch,
     approve_annual_package,
@@ -40,15 +41,19 @@ class ApprovePackageRequest(BaseModel):
 
 
 class FinalizePackageRequest(BaseModel):
-    """Snapshots captured at finalization — the four inputs the
-    rendered package depends on. Caller (typically the compile job)
-    assembles these from live state before calling finalize.
+    """Finalize request body (C2 — fix-critical-disclosure-integrity).
+
+    Snapshot content is now assembled SERVER-SIDE from canonical DB state
+    (``disclosure_package.service.assemble_finalize_snapshots``); the client
+    cannot influence the frozen record. The legacy four payload fields are
+    accepted-and-IGNORED so an older frontend keeps working during rollout —
+    they are never read, never persisted.
     """
 
-    assessment_setup: Any
-    budget: Any
-    reserve: Any
-    appendix_manifest: Any
+    assessment_setup: Any = None
+    budget: Any = None
+    reserve: Any = None
+    appendix_manifest: Any = None
 
 
 def _actor_email(actor: dict) -> str:
@@ -141,25 +146,44 @@ def approve_hoa_package(
 def finalize_hoa_package(
     hoa_id: int,
     package_id: int,
-    payload: FinalizePackageRequest,
+    payload: Optional[FinalizePackageRequest] = None,  # legacy body ignored
     session: Session = Depends(get_session),
     current_user: dict = Depends(get_current_user),
     if_match: Optional[int] = Depends(optional_if_match),
 ) -> AnnualPackageResponse:
-    """Freeze all four snapshot JSONs and transition to finalized.
+    """Freeze all five snapshot JSONs and transition to finalized (C2/C3).
 
-    Caller is the compile job that has already gathered the live
-    state into the four payload fields. After this call the package
-    is immutable — re-renders load from snapshots, not live state.
+    Snapshot content is assembled server-side from canonical DB state, and
+    the blocking preflight gate (§5550 reserve-study age, §5570 special
+    assessments, appendix cadence, specified-value placeholders) runs
+    before anything is frozen — a failing gate returns HTTP 422 with the
+    field paths and writes nothing. Any legacy request body is ignored.
+    After this call the package is immutable; re-renders load from the
+    frozen snapshots, not live state.
     """
+    _ = payload  # legacy clients still send the retired four-field body
+    from ..disclosure_package import service as dp_service
+
+    def _blocking_preflight(fiscal_year: int) -> list:
+        blocking, _warnings = dp_service.run_preflight(
+            session, hoa_id, fiscal_year,
+        )
+        return blocking
+
+    def _assemble(fiscal_year: int) -> dict:
+        return dp_service.assemble_finalize_snapshots(
+            session,
+            hoa_id=hoa_id,
+            fiscal_year=fiscal_year,
+            package_id=package_id,
+        )
+
     try:
         return finalize_annual_package(
             property_id=hoa_id, package_id=package_id,
-            assessment_setup=payload.assessment_setup,
-            budget=payload.budget,
-            reserve=payload.reserve,
-            appendix_manifest=payload.appendix_manifest,
             connection=session.connection().connection,
+            preflight=_blocking_preflight,
+            assemble=_assemble,
             expected_version=if_match,
         )
     except AnnualPackageNotFound as exc:
@@ -168,3 +192,11 @@ def finalize_hoa_package(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except InvalidPackageStateTransition as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except FinalizeBlockedByPreflight as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": str(exc),
+                "field_paths": exc.field_paths,
+            },
+        ) from exc

@@ -643,3 +643,57 @@ def check_special_assessments(
                 )
 
     return out
+
+
+def check_specified_value_placeholders(
+    *,
+    property_id: int,
+    connection,
+) -> list[PreflightError]:
+    """Blocking gate for unresolved specified-value placeholders (C7).
+
+    Promotion tags auto-generated equal splits on ``specified_value`` pools
+    with ``source='equal_split_placeholder'`` (never ``'dre'``). Those rows
+    are synthetic — presenting them in a disclosure as each unit's
+    DRE-specified amount would be wrong for any HOA whose real per-unit
+    values are not equal. This check blocks package generation (and, via
+    the finalize preflight, finalization) until the operator resolves every
+    placeholder in the Review Workbench.
+
+    Scopes to the property's default (active) assessment setup.
+    """
+    rows = connection.execute(
+        """
+        SELECT aupa.pool_key,
+               COUNT(*) AS placeholder_count
+          FROM assessment_unit_pool_allocations aupa
+          JOIN properties p
+            ON p.default_assessment_setup_id = aupa.assessment_setup_id
+         WHERE p.id = ?
+           AND aupa.source = 'equal_split_placeholder'
+         GROUP BY aupa.pool_key
+         ORDER BY aupa.pool_key
+        """,
+        (property_id,),
+    ).fetchall()
+
+    out: list[PreflightError] = []
+    for pool_key, placeholder_count in rows:
+        out.append(
+            PreflightError(
+                field_path=f"assessment_setup.pools.{pool_key}.unit_allocations",
+                message=(
+                    f"Pool {pool_key!r} uses specified per-unit values, but "
+                    f"{placeholder_count} unit(s) still carry the auto-generated "
+                    "equal-split placeholder. Enter each unit's actual amount "
+                    "in the Review Workbench before generating the package."
+                ),
+                severity="blocking",
+                code="specified_value_placeholder",
+                suggested_fix=(
+                    "Open the DRE Review Workbench and enter the per-unit "
+                    "specified amounts for this pool, then re-approve."
+                ),
+            )
+        )
+    return out

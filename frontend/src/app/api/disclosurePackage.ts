@@ -53,6 +53,9 @@ export interface AuditLogResponse {
 export async function generateDisclosurePackage(
   hoaId: number,
   fiscalYear: number,
+  // C1: optional target package. When it is finalized with valid frozen
+  // snapshots, the backend renders from the snapshots instead of live state.
+  packageId?: number,
 ): Promise<DisclosurePackageJob> {
   const res = await fetch(`${BASE_URL}/api/disclosure-package/generate`, {
     method: 'POST',
@@ -60,7 +63,11 @@ export async function generateDisclosurePackage(
       'Content-Type': 'application/json',
       ...authHeaders(),
     },
-    body: JSON.stringify({ hoa_id: hoaId, fiscal_year: fiscalYear }),
+    body: JSON.stringify({
+      hoa_id: hoaId,
+      fiscal_year: fiscalYear,
+      ...(packageId != null ? { package_id: packageId } : {}),
+    }),
   });
   return handleResponse<DisclosurePackageJob>(res);
 }

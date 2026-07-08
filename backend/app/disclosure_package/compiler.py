@@ -1046,6 +1046,7 @@ def compile_package(
     extra_appendix_paths: Optional[list[Path]] = None,
     extra_appendix_titles: Optional[dict[str, str]] = None,
     assessment_matrix: Optional[AssessmentScheduleMatrix] = None,
+    audit_extra: Optional[dict] = None,
 ) -> CompileResult:
     """Run the full disclosure-package compilation pipeline.
 
@@ -1228,6 +1229,9 @@ def compile_package(
         ),
         "expenses_by_section": _expenses_by_section,
         "revenues_by_section": _revenues_by_section,
+        # C1: which input branch the render took (snapshot vs live) and why
+        # — lets the operator audit a re-render's provenance.
+        **(audit_extra or {}),
     }
 
     audit_log_ref = None

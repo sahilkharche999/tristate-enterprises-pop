@@ -53,12 +53,8 @@ export interface ApprovePackageRequest {
   approved_assessment_revenue_annual: string;
 }
 
-export interface FinalizePackageRequest {
-  assessment_setup: unknown;
-  budget: unknown;
-  reserve: unknown;
-  appendix_manifest: unknown;
-}
+// C2 (fix-critical-disclosure-integrity): finalize snapshots are assembled
+// SERVER-SIDE from canonical DB state — the client sends no snapshot content.
 
 function ifMatchHeader(version: number | undefined): HeadersInit {
   return version != null ? { 'If-Match': String(version) } : {};
@@ -117,7 +113,6 @@ export async function approveAnnualPackage(
 export async function finalizeAnnualPackage(
   hoaId: number,
   packageId: number,
-  body: FinalizePackageRequest,
   expectedVersion?: number,
 ): Promise<AnnualPackage> {
   const res = await fetch(
@@ -129,7 +124,8 @@ export async function finalizeAnnualPackage(
         ...ifMatchHeader(expectedVersion),
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify(body),
+      // Snapshot content is assembled server-side (C2); the body is empty.
+      body: JSON.stringify({}),
     },
   );
   return handleResponse<AnnualPackage>(res);

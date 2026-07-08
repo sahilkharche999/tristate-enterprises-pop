@@ -32,7 +32,7 @@ import logging
 import re
 import unicodedata
 from pathlib import Path
-from typing import Any, Literal, Optional, get_args
+from typing import Any, Literal, NamedTuple, Optional, get_args
 
 logger = logging.getLogger(__name__)
 
@@ -291,35 +291,100 @@ def _validate_llm_columns_against_data(col_map: Optional[dict], data_rows: list)
 # ---------------------------------------------------------------------------
 
 def _parse_financial_float(value: Any) -> float:
-    """Parse a financial value to float.
+    """Backward-compatible float wrapper over :func:`parse_financial_cell`.
 
-    Handles:
-    - Parentheses negatives: "(133.86)" -> -133.86
-    - Dollar signs: "$1,500.00" -> 1500.0
-    - Commas: "1,043,706.24" -> 1043706.24
-    - Dashes / em-dashes: "-", "—" -> 0.0
-    - None, empty string -> 0.0
-    - Numeric types: pass through as float
+    Empty / dash / unparseable all collapse to ``0.0`` here so existing
+    arithmetic call sites (display columns, coverage heuristics) keep their
+    numeric behavior. Callers that must distinguish "no value" or
+    "unparseable" from a real zero — notably the promoted annual column —
+    call :func:`parse_financial_cell` directly and act on ``kind``.
 
-    Does NOT misinterpret "-" as a negative number (it means zero in financial docs).
+    Negative forms ("(1,234)", "1,234-", "-1234") now parse WITH sign; that
+    is a strict correctness improvement over the previous silent ``0``.
+    """
+    cell = parse_financial_cell(value)
+    return cell.value if cell.value is not None else 0.0
+
+
+class ParsedCell(NamedTuple):
+    """Outcome of parsing one financial cell (C5).
+
+    ``kind`` distinguishes states the legacy ``-> float`` parsers collapsed
+    into ``0.0``:
+
+    - ``ok``: a real numeric value is in ``value``.
+    - ``empty``: blank / None \u2014 "no value present".
+    - ``dash``: only a dash / em-dash \u2014 "no value stated" (explicit
+      not-applicable, distinct from a true ``0``).
+    - ``unparseable``: text we could not turn into a number (OCR noise,
+      European decimals, malformed input). ``value`` is ``None``; this MUST
+      surface for operator review rather than silently become ``0``.
+
+    ``value`` is ``None`` for every kind except ``ok``. Zero is only ever
+    produced by a cell that actually states zero.
+    """
+
+    value: Optional[float]
+    kind: str
+    raw: str
+
+
+def parse_financial_cell(value: Any) -> ParsedCell:
+    """Shared numeric normalizer for every financial-cell parse path (C5).
+
+    Normalization order is fixed so sign survives currency/thousands
+    formatting: strip ``$``, commas, and spaces FIRST, then detect the
+    negative forms. Fixes the class of defects where ``($1,234)`` and
+    ``1,234-`` silently became ``0`` (sign AND magnitude lost).
+
+    Never returns ``0`` as a fallback \u2014 unreadable input yields
+    ``kind='unparseable'`` with ``value=None``.
     """
     if value is None:
-        return 0.0
+        return ParsedCell(None, "empty", "")
+    # bool is an int subclass \u2014 never a financial amount.
+    if isinstance(value, bool):
+        return ParsedCell(None, "unparseable", str(value))
     if isinstance(value, (int, float)):
-        return float(value)
+        return ParsedCell(float(value), "ok", str(value))
+
     text = str(value).strip()
-    if not text or text in {"-", "\u2014", "\u2013", ""}:
-        return 0.0
-    # Strip currency symbols
-    # Parentheses negative: "(1,500)" -> -1500.0
-    m = _PAREN_PATTERN.match(text)
-    if m:
-        return -float(m.group(1).replace(",", ""))
-    text = text.replace("$", "").replace(",", "").strip()
+    if not text:
+        return ParsedCell(None, "empty", str(value))
+    if text in {"-", "\u2014", "\u2013"}:
+        return ParsedCell(None, "dash", text)
+
+    # Strip currency, thousands separators, and spaces BEFORE detecting
+    # negative forms, so a currency symbol inside parens ("($1,234)") no
+    # longer defeats the negative match.
+    cleaned = (
+        text.replace("$", "")
+        .replace(",", "")
+        .replace(" ", "")
+        .replace("\u00a0", "")
+        .strip()
+    )
+
+    negative = False
+    if cleaned.startswith("(") and cleaned.endswith(")"):
+        negative = True
+        cleaned = cleaned[1:-1].strip()
+    elif cleaned.endswith("-"):  # trailing-minus accounting negative
+        negative = True
+        cleaned = cleaned[:-1].strip()
+    elif cleaned.startswith("-"):
+        negative = True
+        cleaned = cleaned[1:].strip()
+    elif cleaned.startswith("+"):
+        cleaned = cleaned[1:].strip()
+
+    if not cleaned:
+        return ParsedCell(None, "unparseable", text)
     try:
-        return float(text)
+        num = float(cleaned)
     except ValueError:
-        return 0.0
+        return ParsedCell(None, "unparseable", text)
+    return ParsedCell(-num if negative else num, "ok", text)
 
 
 # ---------------------------------------------------------------------------
@@ -664,6 +729,7 @@ def detect_columns(rows: list) -> dict:
 def parse_rows_with_sections(
     rows: list,
     col_indices: dict,
+    capture: Optional[dict] = None,
 ) -> list:
     """Walk rows top-to-bottom, track section state, classify each line item.
 
@@ -674,6 +740,22 @@ def parse_rows_with_sections(
     Args:
         rows: Normalized rows (list of lists), 0-based columns.
         col_indices: 0-based column indices from detect_columns().
+        capture: Optional out-dict (C5/C6). When provided, two lists are
+            appended to in place:
+
+            - ``capture["stated_totals"]``: one entry per recognized
+              "Total …" row — ``{section, label, ytd_actual, annual_budget}``
+              — the document's own stated totals, captured instead of
+              discarded so the subtotal cross-check can run downstream.
+            - ``capture["review_questions"]``: one entry per line item whose
+              PROMOTED (annual-budget) cell was unparseable —
+              ``{label, account_code, raw_text, column}`` — so the caller
+              can raise a blocking review issue instead of silently
+              promoting a fake ``0``.
+
+            When ``capture`` is None behavior is unchanged except that an
+            unparseable annual cell now yields ``annual_budget=None``
+            (previously a silent ``0.0``).
 
     Returns:
         List of line item dicts with keys:
@@ -684,6 +766,22 @@ def parse_rows_with_sections(
     real_matched_keys = col_indices.get("_real_matched_keys") if col_indices else None
     # Pop metadata key so it doesn't interfere with column lookups
     col_indices = {k: v for k, v in col_indices.items() if not k.startswith("_")}
+
+    def _capture_total_row(row: list, label: str, section: str) -> None:
+        if capture is None:
+            return
+        ytd_idx = col_indices.get("ytd_actual", _FALLBACK_COLUMNS["ytd_actual"])
+        annual_idx = col_indices.get("annual_budget", _FALLBACK_COLUMNS["annual_budget"])
+        ytd_cell = parse_financial_cell(_safe_get(row, ytd_idx))
+        annual_cell = parse_financial_cell(_safe_get(row, annual_idx))
+        capture.setdefault("stated_totals", []).append(
+            {
+                "section": section,
+                "label": label.strip(),
+                "ytd_actual": ytd_cell.value,
+                "annual_budget": annual_cell.value,
+            }
+        )
 
     current_section = "operating"  # safe default per spec
     in_reserve_study_block = False
@@ -698,8 +796,10 @@ def parse_rows_with_sections(
         if col_a and not col_b:
             label_norm = _normalize(col_a)
 
-            # Skip "Total X" section rows
+            # "Total X" section rows: captured as the document's stated
+            # totals (C6) — still excluded from line items.
             if label_norm.startswith("total "):
+                _capture_total_row(row, col_a, current_section)
                 continue
 
             # Check for a major section transition
@@ -720,8 +820,9 @@ def parse_rows_with_sections(
         if not label:
             continue
 
-        # Skip "Total X" data rows
+        # "Total X" data rows: captured as stated totals (C6), not line items.
         if _normalize(label).startswith("total "):
+            _capture_total_row(row, label, current_section)
             continue
 
         account_code = _extract_account_code(label)
@@ -734,7 +835,21 @@ def parse_rows_with_sections(
         pct_change_idx = col_indices.get("percent_change", 38)
 
         ytd_actual = _parse_financial_float(_safe_get(row, ytd_idx))
-        annual_budget = _parse_financial_float(_safe_get(row, annual_idx))
+        # The annual column feeds BudgetLineInput.amount (the legally-binding
+        # assessment basis), so it uses the tagged parse (C5): a dash/empty
+        # cell is "no value stated" (None, non-blocking) and an unparseable
+        # cell is None PLUS a review question — never a silent 0.
+        annual_cell = parse_financial_cell(_safe_get(row, annual_idx))
+        annual_budget = annual_cell.value
+        if annual_cell.kind == "unparseable" and capture is not None:
+            capture.setdefault("review_questions", []).append(
+                {
+                    "label": label.strip(),
+                    "account_code": account_code,
+                    "raw_text": annual_cell.raw,
+                    "column": "annual_budget",
+                }
+            )
         variance = _parse_financial_float(_safe_get(row, variance_idx))
 
         # Per the DRE-driven assessment engine invariant

@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from ..ai_implementation.db import get_session
 from ..auth.dependencies import get_current_user
 from ..dre_extraction.promotion import (
+    AmbiguousOwnershipPercentForm,
     EditedEntityFailedToPromote,
     MissingUnitFactors,
     UnresolvableReviewEdit,
@@ -91,6 +92,16 @@ def approve_dre_extraction_run(
         raise HTTPException(
             status_code=422,
             detail={"message": str(exc), "missing_pool_keys": exc.missing_pool_keys},
+        ) from exc
+    except AmbiguousOwnershipPercentForm as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": str(exc),
+                "column_label": exc.column_label,
+                "column_total": str(exc.total),
+                "sample_values": [str(v) for v in exc.sample_values],
+            },
         ) from exc
 
 
@@ -182,4 +193,14 @@ def repromote_dre_extraction_run(
         raise HTTPException(
             status_code=422,
             detail={"message": str(exc), "missing_pool_keys": exc.missing_pool_keys},
+        ) from exc
+    except AmbiguousOwnershipPercentForm as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": str(exc),
+                "column_label": exc.column_label,
+                "column_total": str(exc.total),
+                "sample_values": [str(v) for v in exc.sample_values],
+            },
         ) from exc

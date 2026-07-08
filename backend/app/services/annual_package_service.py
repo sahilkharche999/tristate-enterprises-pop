@@ -21,7 +21,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, Literal, Optional
+from typing import Any, Callable, Literal, Optional
 
 from pydantic import BaseModel
 
@@ -32,7 +32,10 @@ from app.assessment_mode import (
     normalize_assessment_mode,
     package_impact_for_mode_drift,
 )
-from app.disclosure_package.snapshots import freeze_package_snapshots
+from app.disclosure_package.snapshots import (
+    SnapshotWriteConflict,
+    freeze_package_snapshots,
+)
 
 
 PackageStatus = Literal[
@@ -305,22 +308,35 @@ def finalize_annual_package(
     *,
     property_id: int,
     package_id: int,
-    assessment_setup: Any,
-    budget: Any,
-    reserve: Any,
-    appendix_manifest: Any,
     connection: sqlite3.Connection,
+    preflight: Callable[[int], list],
+    assemble: Callable[[int], dict],
     expected_version: Optional[int] = None,
 ) -> AnnualPackageResponse:
     """Transition an approved/rendered package to ``finalized`` and
-    freeze all four snapshot JSONs atomically.
+    freeze all five snapshot JSONs atomically (C2/C3).
 
-    Pre-condition: status must be ``approved`` or ``rendered``. After
-    finalization the package is immutable — re-renders MUST load from
-    the snapshot JSONs, not live state.
+    - ``preflight(fiscal_year)`` MUST return the list of BLOCKING
+      preflight errors (each carrying a ``field_path``). Any non-empty
+      result raises :class:`FinalizeBlockedByPreflight` (→ HTTP 422) —
+      the §5550/§5570/placeholder gates are enforced HERE, in the
+      service, so every caller inherits them (review finding C3).
+    - ``assemble(fiscal_year)`` MUST return the five server-assembled
+      snapshot payloads (``assessment_setup``, ``budget``, ``reserve``,
+      ``appendix_manifest``, ``compile_context``) built from canonical
+      DB state. The client can no longer supply snapshot content
+      (review finding C2). Both callables are REQUIRED so no future
+      caller can silently skip either step; the HTTP router wires them
+      to ``disclosure_package.service.run_preflight`` /
+      ``assemble_finalize_snapshots``.
+
+    Ordering: preflight runs BEFORE assembly; assembly runs only on a
+    clean pass; the freeze UPDATE carries ``AND version_int = ?`` so a
+    concurrent finalize loses with a 409 instead of last-writer-wins
+    (finalize half of review finding H4).
 
     Pass ``expected_version`` (from the If-Match header) for
-    optimistic-lock enforcement.
+    request-level optimistic-lock enforcement.
     """
     current = _fetch_package(
         property_id=property_id, package_id=package_id, connection=connection,
@@ -337,6 +353,17 @@ def finalize_annual_package(
             "finalize requires approved or rendered."
         )
 
+    blocking = preflight(current.fiscal_year)
+    if blocking:
+        raise FinalizeBlockedByPreflight(
+            package_id=package_id,
+            field_paths=[
+                getattr(error, "field_path", str(error)) for error in blocking
+            ],
+        )
+
+    snapshots = assemble(current.fiscal_year)
+
     live_assessment_mode = _property_assessment_mode(
         property_id=property_id,
         connection=connection,
@@ -350,15 +377,24 @@ def finalize_annual_package(
         (live_assessment_mode, package_id),
     )
 
-    freeze_package_snapshots(
-        package_id=package_id,
-        assessment_setup=assessment_setup,
-        budget=budget,
-        reserve=reserve,
-        appendix_manifest=appendix_manifest,
-        assessment_mode=live_assessment_mode,
-        connection=connection,
-    )
+    try:
+        freeze_package_snapshots(
+            package_id=package_id,
+            assessment_setup=snapshots["assessment_setup"],
+            budget=snapshots["budget"],
+            reserve=snapshots["reserve"],
+            appendix_manifest=snapshots["appendix_manifest"],
+            compile_context=snapshots.get("compile_context"),
+            assessment_mode=live_assessment_mode,
+            expected_version_int=current.version_int,
+            connection=connection,
+        )
+    except SnapshotWriteConflict as exc:
+        raise PackageVersionMismatch(
+            package_id=package_id,
+            expected=current.version_int,
+            actual=-1,  # unknown — a concurrent writer moved it
+        ) from exc
     return _fetch_package(
         property_id=property_id, package_id=package_id, connection=connection,
     )

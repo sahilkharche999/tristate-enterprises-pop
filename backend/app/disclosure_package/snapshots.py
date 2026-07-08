@@ -31,7 +31,7 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any
+from typing import Any, Optional
 
 
 def _json_default(value: Any) -> Any:
@@ -69,6 +69,14 @@ def serialize_snapshot(value: Any) -> str:
     )
 
 
+class SnapshotWriteConflict(RuntimeError):
+    """The freeze UPDATE matched no row — a concurrent writer bumped
+    ``version_int`` (or changed status) between the caller's read and
+    this write. The caller maps this to its optimistic-lock error
+    (HTTP 409). Closes the finalize half of review finding H4: two
+    concurrent finalizes can no longer both freeze."""
+
+
 def freeze_package_snapshots(
     *,
     package_id: int,
@@ -76,15 +84,23 @@ def freeze_package_snapshots(
     budget: Any,
     reserve: Any,
     appendix_manifest: Any,
+    compile_context: Any = None,
     assessment_mode: str = "variable",
+    expected_version_int: Optional[int] = None,
     connection: sqlite3.Connection,
 ) -> None:
-    """Atomic UPDATE: write all four snapshots + ``finalized_at`` +
+    """Atomic UPDATE: write all five snapshots + ``finalized_at`` +
     transition ``status`` to ``'finalized'`` in a single statement.
 
-    Caller is responsible for the transaction boundary; this function
-    issues one UPDATE and commits. Pre-conditions (package must exist
-    and be in a finalizable status) are enforced by the caller.
+    ``expected_version_int`` puts the optimistic-lock compare into the SQL
+    predicate (``AND version_int = ?``); a zero-row UPDATE raises
+    :class:`SnapshotWriteConflict` and commits nothing, so concurrent
+    finalizes cannot both win. ``None`` preserves the legacy unguarded
+    write for callers that manage their own locking.
+
+    Pre-conditions (package exists, finalizable status, preflight clean,
+    payloads assembled server-side) are enforced by the caller
+    (``annual_package_service.finalize_annual_package``).
     """
     assessment_setup_snapshot = assessment_setup
     if isinstance(assessment_setup, dict):
@@ -97,30 +113,47 @@ def freeze_package_snapshots(
         "budget_snapshot_json": serialize_snapshot(budget),
         "reserve_snapshot_json": serialize_snapshot(reserve),
         "appendix_manifest_snapshot_json": serialize_snapshot(appendix_manifest),
+        "compile_context_snapshot_json": (
+            serialize_snapshot(compile_context) if compile_context is not None else None
+        ),
     }
     finalized_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
-    connection.execute(
-        """
+    version_guard = "" if expected_version_int is None else " AND version_int = ?"
+    params: list[Any] = [
+        snapshots["assessment_setup_snapshot_json"],
+        snapshots["budget_snapshot_json"],
+        snapshots["reserve_snapshot_json"],
+        snapshots["appendix_manifest_snapshot_json"],
+        snapshots["compile_context_snapshot_json"],
+        finalized_at,
+        package_id,
+    ]
+    if expected_version_int is not None:
+        params.append(expected_version_int)
+
+    cursor = connection.execute(
+        f"""
         UPDATE annual_packages
            SET assessment_setup_snapshot_json = ?,
                budget_snapshot_json = ?,
                reserve_snapshot_json = ?,
                appendix_manifest_snapshot_json = ?,
+               compile_context_snapshot_json = ?,
                finalized_at = ?,
                status = 'finalized',
                version_int = version_int + 1
-         WHERE id = ?
+         WHERE id = ?{version_guard}
         """,
-        (
-            snapshots["assessment_setup_snapshot_json"],
-            snapshots["budget_snapshot_json"],
-            snapshots["reserve_snapshot_json"],
-            snapshots["appendix_manifest_snapshot_json"],
-            finalized_at,
-            package_id,
-        ),
+        params,
     )
+    if cursor.rowcount == 0:
+        connection.rollback()
+        raise SnapshotWriteConflict(
+            f"freeze_package_snapshots: annual_packages id={package_id} "
+            f"was not updated (expected version_int={expected_version_int}); "
+            "a concurrent write won."
+        )
     connection.commit()
 
 
@@ -140,6 +173,7 @@ def load_package_snapshots(
         """
         SELECT assessment_setup_snapshot_json, budget_snapshot_json,
                reserve_snapshot_json, appendix_manifest_snapshot_json,
+               compile_context_snapshot_json,
                finalized_at, status
           FROM annual_packages
          WHERE id = ?
@@ -157,6 +191,7 @@ def load_package_snapshots(
         "budget": _load(row[1]),
         "reserve": _load(row[2]),
         "appendix_manifest": _load(row[3]),
-        "finalized_at": row[4],
-        "status": row[5],
+        "compile_context": _load(row[4]),
+        "finalized_at": row[5],
+        "status": row[6],
     }
