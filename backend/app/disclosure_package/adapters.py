@@ -108,13 +108,32 @@ def from_budget_history_record(record: Any) -> BudgetDraft:
         )
     items: list[LineItem] = []
     for raw in raw_items:
-        # Money: try proposed → annual_budget → amount, first non-None wins.
+        # Money resolution, in priority order:
+        #   1. proposed_amount — an explicit operator-approved override.
+        #   2. annual_budget adjusted by the operator's percent_change — the
+        #      SAME "Proposed Change" the budget editor shows
+        #      (annual_budget × (1 + percent_change/100)). The derived proposed
+        #      value is never persisted (the grid computes it live), so the
+        #      disclosure must recompute it here or the forecast silently
+        #      ignores every proposed increase.
+        #   3. amount — legacy synonym for direct-payload callers/tests.
         money_value: Any = None
-        for field in ("proposed_amount", "annual_budget", "amount"):
-            candidate = _attr_or_key(raw, field)
-            if candidate is not None:
-                money_value = candidate
-                break
+        proposed = _attr_or_key(raw, "proposed_amount")
+        if proposed is None:
+            proposed = _attr_or_key(raw, "proposedAmount")
+        annual = _attr_or_key(raw, "annual_budget")
+        if proposed is not None:
+            money_value = proposed
+        elif annual is not None:
+            pct = _attr_or_key(raw, "percent_change")
+            if pct in (None, ""):
+                money_value = annual
+            else:
+                money_value = _to_decimal(annual) * (
+                    Decimal(1) + _to_decimal(pct) / Decimal(100)
+                )
+        else:
+            money_value = _attr_or_key(raw, "amount")
 
         explicit_revenue = _attr_or_key(raw, "is_revenue")
         explicit_reserve = _attr_or_key(raw, "is_reserve")
