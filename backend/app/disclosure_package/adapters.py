@@ -137,6 +137,13 @@ def from_budget_history_record(record: Any) -> BudgetDraft:
                 else derived_revenue
             ),
             read_only=bool(_attr_or_key(raw, "read_only", False)),
+            # Preserve account_code (LineItem is extra="allow") so the render's
+            # assessment-mapping review-match keys off the SAME account_code the
+            # operator mappings were stored with. When the source statement has
+            # no account codes this is None on both sides, so the match is
+            # unaffected; when codes exist, dropping it here silently orphaned
+            # every mapping and blocked the render.
+            account_code=_attr_or_key(raw, "account_code"),
         ))
     return BudgetDraft(line_items=items)
 
