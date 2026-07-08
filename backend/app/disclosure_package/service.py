@@ -991,6 +991,13 @@ def run_render_job(
 
             _set_status(session, job_id, stage=DISCLOSURE_STAGE_COMPUTING)
 
+            # _set_status committed the session, which releases the pooled
+            # connection captured as `raw_conn` at the top of run_render_job
+            # (its DBAPI handle becomes None). Re-acquire a live connection for
+            # the raw-SQL work below: the C7 placeholder gate, appendix manifest
+            # resolution, assessment-mapping materialization, and matrix build.
+            raw_conn = session.connection().connection
+
             # Fetch assessment_mode from the property row for the matrix builder.
             property_row = (
                 session.query(Property).filter(Property.id == hoa_id).one_or_none()
