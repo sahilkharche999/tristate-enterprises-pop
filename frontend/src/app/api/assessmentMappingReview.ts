@@ -83,6 +83,7 @@ export interface ReviewRow {
   disposition_note: string;
   pool_key: string | null;
   current_pool_key: string | null;
+  stale_pool_mapping?: boolean;
   mapping_source: string | null;
   review_state: string | null;
   valid_pool_options: ReviewRowPoolOption[];

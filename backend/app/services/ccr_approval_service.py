@@ -340,7 +340,12 @@ def approve_ccr_extraction_run(
     )
 
     promoted_at_ts = _now_iso()
-    connection.execute(
+    # H5: atomic claim — identical to the DRE approve path. The early
+    # ``promoted_at IS NULL`` read is a fast-path; this predicate is the
+    # authoritative guard so two concurrent CC&R approves cannot both promote
+    # (duplicated pools/units, double default-setup repoint). The loser rolls
+    # back its half-built setup and gets a 409.
+    cursor = connection.execute(
         """
         UPDATE dre_extraction_runs
            SET review_status = 'promoted',
@@ -348,9 +353,20 @@ def approve_ccr_extraction_run(
                promoted_at = ?,
                reviewed_by = COALESCE(?, reviewed_by)
          WHERE id = ?
+           AND promoted_at IS NULL
         """,
         (new_setup_id, promoted_at_ts, reviewed_by, extraction_run_id),
     )
+    if cursor.rowcount == 0:
+        connection.rollback()
+        winner = connection.execute(
+            "SELECT promoted_setup_id FROM dre_extraction_runs WHERE id = ?",
+            (extraction_run_id,),
+        ).fetchone()
+        raise ExtractionRunAlreadyPromoted(
+            extraction_run_id=extraction_run_id,
+            promoted_setup_id=winner[0] if winner else None,
+        )
     connection.commit()
 
     return DREApprovalResponse(

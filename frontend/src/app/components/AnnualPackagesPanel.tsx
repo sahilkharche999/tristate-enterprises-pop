@@ -109,7 +109,7 @@ export function AnnualPackagesPanel({ hoaId, liveAssessmentMode }: Props) {
       );
       refresh();
     } catch (exc) {
-      setError(String(exc));
+      handleMutationError(exc, 'approve');
     }
   }
 
@@ -128,8 +128,24 @@ export function AnnualPackagesPanel({ hoaId, liveAssessmentMode }: Props) {
       await finalizeAnnualPackage(hoaId, pkg.package_id, pkg.version_int);
       refresh();
     } catch (exc) {
-      setError(String(exc));
+      handleMutationError(exc, 'finalize');
     }
+  }
+
+  // H4: a 409 (version mismatch) or 428 (missing If-Match) means the package
+  // changed under us. Reload so the row shows the fresh version, and tell the
+  // operator to retry — a resolvable prompt, not a dead end.
+  function handleMutationError(exc: unknown, action: string) {
+    const status = (exc as { status?: number } | null)?.status;
+    if (status === 409 || status === 428) {
+      setError(
+        `This package changed since it was loaded — reloading. ` +
+        `Please review the refreshed state and ${action} again.`,
+      );
+      refresh();
+      return;
+    }
+    setError(String((exc as { message?: string } | null)?.message ?? exc));
   }
 
   if (loading) return <div className="p-4 text-gray-500">Loading packages…</div>;

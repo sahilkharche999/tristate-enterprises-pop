@@ -353,7 +353,13 @@ def approve_extraction_run(
         )
 
     promoted_at_ts = _now_iso()
-    connection.execute(
+    # H5: claim the run atomically. The early ``promoted_at IS NULL`` read
+    # above is only a fast-path; the authoritative guard is this predicate.
+    # Two concurrent approves both build their setup rows, but only the first
+    # to reach here matches (rowcount == 1); the loser matches 0 rows, so we
+    # roll back its half-built setup / pools / units / default-setup repoint
+    # and surface the winner as a 409 instead of duplicating everything.
+    cursor = connection.execute(
         """
         UPDATE dre_extraction_runs
            SET review_status = 'promoted',
@@ -361,9 +367,20 @@ def approve_extraction_run(
                promoted_at = ?,
                reviewed_by = COALESCE(?, reviewed_by)
          WHERE id = ?
+           AND promoted_at IS NULL
         """,
         (new_setup_id, promoted_at_ts, reviewed_by, extraction_run_id),
     )
+    if cursor.rowcount == 0:
+        connection.rollback()
+        winner = connection.execute(
+            "SELECT promoted_setup_id FROM dre_extraction_runs WHERE id = ?",
+            (extraction_run_id,),
+        ).fetchone()
+        raise ExtractionRunAlreadyPromoted(
+            extraction_run_id=extraction_run_id,
+            promoted_setup_id=winner[0] if winner else None,
+        )
 
     connection.commit()
     return DREApprovalResponse(

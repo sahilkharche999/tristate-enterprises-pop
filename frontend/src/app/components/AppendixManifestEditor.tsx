@@ -199,6 +199,14 @@ export function AppendixManifestEditor({ hoaId }: Props) {
                     Cadence?
                   </span>
                 )}
+                {row.file_missing && (
+                  <span
+                    className="ml-2 inline-block rounded bg-rose-100 px-1 text-xs text-rose-800"
+                    title="This appendix's file is missing from storage. Re-upload it or deselect it before generating, or the render will fail."
+                  >
+                    File missing
+                  </span>
+                )}
               </td>
               <td className="text-[#737373]">{row.file_name}</td>
               <td>

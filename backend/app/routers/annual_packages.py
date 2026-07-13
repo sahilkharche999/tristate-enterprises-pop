@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from ..ai_implementation.db import get_session
 from ..auth.dependencies import get_current_user
-from ..optimistic_lock import optional_if_match
+from ..optimistic_lock import require_if_match
 from ..services.annual_package_service import (
     AnnualPackageNotFound,
     AnnualPackageResponse,
@@ -121,7 +121,7 @@ def approve_hoa_package(
     payload: ApprovePackageRequest,
     session: Session = Depends(get_session),
     current_user: dict = Depends(get_current_user),
-    if_match: Optional[int] = Depends(optional_if_match),
+    if_match: int = Depends(require_if_match),
 ) -> AnnualPackageResponse:
     try:
         return approve_annual_package(
@@ -149,7 +149,7 @@ def finalize_hoa_package(
     payload: Optional[FinalizePackageRequest] = None,  # legacy body ignored
     session: Session = Depends(get_session),
     current_user: dict = Depends(get_current_user),
-    if_match: Optional[int] = Depends(optional_if_match),
+    if_match: int = Depends(require_if_match),
 ) -> AnnualPackageResponse:
     """Freeze all five snapshot JSONs and transition to finalized (C2/C3).
 

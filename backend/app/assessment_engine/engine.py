@@ -42,12 +42,14 @@ from .schemas import (
     BudgetLineMappingInput,
     CalcInput,
     CalcResultSet,
+    OrphanedPoolReport,
     PoolAllocationResult,
     PoolDefinition,
     RecipientReference,
     RecipientTotalResult,
     SpecialAssessmentInput,
     SpecialAssessmentRendererEvent,
+    ZeroRecipientPoolReport,
 )
 
 
@@ -71,11 +73,17 @@ def _mapping_key(
 def _aggregate_by_pool(
     budget_lines: Iterable[BudgetLineInput],
     mappings: Iterable[BudgetLineMappingInput],
-) -> dict[str, Decimal]:
+) -> tuple[dict[str, Decimal], dict[str, list[str]]]:
     """Sum annual budget-line amounts by ``pool_key``.
 
     Raises ``NeedsHumanReview`` for any line lacking an ``active=True``
     BudgetLinePoolMapping. Inactive mappings are ignored.
+
+    Returns ``(pool_totals, contributing_labels)`` where
+    ``contributing_labels`` maps each ``pool_key`` to the normalized labels
+    of the budget lines that fed it — used to name the specific lines when
+    a pool_key turns out to be orphaned (H1) or its pool has zero recipients
+    (H2).
     """
     routing: dict[tuple, str] = {}
     for m in mappings:
@@ -91,6 +99,7 @@ def _aggregate_by_pool(
         routing[key] = m.pool_key
 
     pool_totals: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
+    contributing_labels: dict[str, list[str]] = defaultdict(list)
     for line in budget_lines:
         key = _mapping_key(
             line.normalized_label,
@@ -101,9 +110,11 @@ def _aggregate_by_pool(
         )
         if key not in routing:
             raise NeedsHumanReview(line)
-        pool_totals[routing[key]] += line.amount
+        pool_key = routing[key]
+        pool_totals[pool_key] += line.amount
+        contributing_labels[pool_key].append(line.normalized_label)
 
-    return dict(pool_totals)
+    return dict(pool_totals), dict(contributing_labels)
 
 
 # -- step 2: per-pool dispatch ---------------------------------------------
@@ -617,13 +628,16 @@ def run(calc_input: CalcInput) -> CalcResultSet:
     Returns a ``CalcResultSet`` with pool_allocations, recipient_totals,
     rounding deltas, pool_sum diagnostic, and warnings.
     """
-    pool_totals_annual = _aggregate_by_pool(
+    pool_totals_annual, contributing_labels = _aggregate_by_pool(
         calc_input.budget_lines, calc_input.mappings
     )
 
     pool_allocations: list[PoolAllocationResult] = []
     warnings: list[str] = []
     pool_sum_annual = Decimal("0")
+    zero_recipient_pools: list[ZeroRecipientPoolReport] = []
+
+    defined_pool_keys = {pool.pool_key for pool in calc_input.pools}
 
     for pool in sorted(calc_input.pools, key=lambda p: p.display_order):
         annual_total = pool_totals_annual.get(pool.pool_key, Decimal("0"))
@@ -637,6 +651,23 @@ def run(calc_input: CalcInput) -> CalcResultSet:
             custom_unit_ids=custom_ids,
         )
         if not recipients:
+            # H2: a pool with nonzero mapped dollars but zero resolved
+            # recipients. Skipping allocation is still correct (there is
+            # nobody to bill), but do it loudly — record the pool, its
+            # scope, its dollar total, and the lines feeding it so the
+            # caller can surface a resolvable review row instead of the
+            # money vanishing silently.
+            if annual_total != 0:
+                zero_recipient_pools.append(
+                    ZeroRecipientPoolReport(
+                        pool_key=pool.pool_key,
+                        recipient_scope=pool.recipient_scope,
+                        annual_total=annual_total,
+                        contributing_line_labels=contributing_labels.get(
+                            pool.pool_key, []
+                        ),
+                    )
+                )
             continue
 
         rows, pool_warnings = _allocate_pool(
@@ -647,6 +678,20 @@ def run(calc_input: CalcInput) -> CalcResultSet:
         )
         pool_allocations.extend(rows)
         warnings.extend(pool_warnings)
+
+    # H1: pool_keys that budget lines route dollars to but which have no
+    # PoolDefinition in this setup. Their dollars never entered the loop
+    # above (never allocated, never in pool_sum_annual). Report them so the
+    # caller can name the exact lines and offer remap/exclude.
+    orphaned_pool_lines: list[OrphanedPoolReport] = [
+        OrphanedPoolReport(
+            pool_key=pool_key,
+            annual_total=annual_total,
+            contributing_line_labels=contributing_labels.get(pool_key, []),
+        )
+        for pool_key, annual_total in pool_totals_annual.items()
+        if pool_key not in defined_pool_keys
+    ]
 
     # Step 3.5: special-assessment behavior matrix (Phase 4.4).
     # ``approved_scheduled`` + ``included_in_regular_monthly`` adds
@@ -685,4 +730,6 @@ def run(calc_input: CalcInput) -> CalcResultSet:
         warnings=warnings,
         special_assessment_events=special_assessment_events,
         applied_overrides=applied_overrides,
+        orphaned_pool_lines=orphaned_pool_lines,
+        zero_recipient_pools=zero_recipient_pools,
     )

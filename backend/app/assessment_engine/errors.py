@@ -10,6 +10,19 @@ from __future__ import annotations
 from typing import Any
 
 
+class EngineSetupError(Exception):
+    """Base class for "the engine cannot proceed with this setup" errors.
+
+    These signal a bad/incomplete AssessmentSetup (unsupported allocation
+    method, missing denominator, missing specified value) — as opposed to a
+    software fault. Callers catch this base at the matrix/render boundary so
+    ANY setup error degrades to the operator-review fallback matrix with a
+    named reason, instead of failing the render job with an unhandled
+    exception. New engine setup errors should subclass this so call sites
+    don't need to enumerate concrete types.
+    """
+
+
 class NeedsHumanReview(Exception):
     """Raised when a budget line has no active BudgetLinePoolMapping.
 
@@ -27,14 +40,14 @@ class NeedsHumanReview(Exception):
         )
 
 
-class IncompleteSetupError(Exception):
+class IncompleteSetupError(EngineSetupError):
     """Raised when an AssessmentSetup references a pool method or
     denominator the engine can't fulfil — typically a draft setup that
     slipped past approval. Preflight should have caught it.
     """
 
 
-class UnsupportedAllocationMethod(Exception):
+class UnsupportedAllocationMethod(EngineSetupError):
     """Raised when ``AllocationPool.allocation_method`` is a value the
     engine doesn't know (e.g. an unmapped prompt-vocab value that wasn't
     collapsed by the adapter).

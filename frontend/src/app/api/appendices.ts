@@ -28,6 +28,9 @@ export interface AppendixDocument {
   needs_cadence_review: boolean;
   status: AppendixStatus;
   version_int: number;
+  // H7: backing file is gone from storage — re-upload or deselect before it
+  // blocks a render.
+  file_missing?: boolean;
 }
 
 export interface AppendixUpdateRequest {

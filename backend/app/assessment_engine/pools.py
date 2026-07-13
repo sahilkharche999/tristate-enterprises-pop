@@ -17,6 +17,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Mapping, Sequence
 
+from .errors import EngineSetupError
 from .schemas import RecipientReference
 
 
@@ -25,7 +26,7 @@ OWNERSHIP_PERCENT_TOLERANCE = Decimal("0.001")
 RecipientKey = tuple[str, int]
 
 
-class MissingSpecifiedValue(Exception):
+class MissingSpecifiedValue(EngineSetupError):
     """Raised when a ``specified_value`` pool lacks an
     ``AssessmentUnitPoolAllocation`` row for a recipient in its scope.
 

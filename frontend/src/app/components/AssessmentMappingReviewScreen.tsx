@@ -75,7 +75,7 @@ type InlineAnalysisHint = {
   badge: string;
 };
 
-const MAIN_BLOCKER_CATEGORIES = new Set(['unresolved_eligible_lines', 'pending_split']);
+const MAIN_BLOCKER_CATEGORIES = new Set(['unresolved_eligible_lines', 'pending_split', 'stale_pool_mapping']);
 
 function analysisCacheKey(hoaId: number) {
   return `assessment-mapping-analysis-${hoaId}`;

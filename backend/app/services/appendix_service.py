@@ -41,14 +41,19 @@ class AppendixDocumentResponse(BaseModel):
     needs_cadence_review: bool
     status: Literal["active", "retired"]
     version_int: int
+    # H7: True when this appendix's backing file is gone from storage. The UI
+    # badges it so the operator can re-upload or deselect BEFORE a render fails
+    # naming this file — the two are the same resolvable fix.
+    file_missing: bool = False
 
 
 def _row_to_response(row: sqlite3.Row | tuple) -> AppendixDocumentResponse:
     # Tuple positional access (works for both raw cursors and Row objects)
+    file_id = row[2]
     return AppendixDocumentResponse(
         appendix_id=row[0],
         property_id=row[1],
-        file_id=row[2],
+        file_id=file_id,
         file_name=row[3],
         display_title=row[4],
         default_display_order=row[5],
@@ -60,6 +65,7 @@ def _row_to_response(row: sqlite3.Row | tuple) -> AppendixDocumentResponse:
         needs_cadence_review=bool(row[11]),
         status=row[12],
         version_int=row[13],
+        file_missing=not appendix_storage.appendix_file_exists(file_id),
     )
 
 

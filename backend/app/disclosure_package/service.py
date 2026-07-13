@@ -906,6 +906,24 @@ def run_render_job(
 
         raw_conn = session.connection().connection
 
+        # H6: when the caller didn't name a package, resolve the current one
+        # for this (hoa, fiscal_year) so the operator's per-package appendix
+        # overrides (exclude/reorder/retitle) actually reach the shipped PDF.
+        # Highest id wins — matching annual_package_service
+        # ._is_latest_for_fiscal_year — so a newer regeneration draft is used
+        # over an older finalized package (there is no per-FY uniqueness).
+        # Runs BEFORE should_use_snapshots so a resolved finalized package
+        # still renders from its frozen snapshots (C1).
+        if annual_package_id is None:
+            latest_pkg = raw_conn.execute(
+                "SELECT id FROM annual_packages "
+                "WHERE property_id = ? AND fiscal_year = ? "
+                "ORDER BY id DESC LIMIT 1",
+                (hoa_id, fiscal_year),
+            ).fetchone()
+            if latest_pkg is not None:
+                annual_package_id = int(latest_pkg[0])
+
         use_snapshots = annual_package_id is not None and should_use_snapshots(
             package_id=annual_package_id, connection=raw_conn,
         )

@@ -1271,6 +1271,7 @@ def build_assessment_mapping_review_rows(
         {"pool_key": str(row[0]), "pool_name": str(row[1])}
         for row in pool_rows
     ]
+    valid_pool_keys = {str(row[0]) for row in pool_rows}
 
     rows: list[dict[str, object]] = []
     for idx, line in enumerate(budget_lines):
@@ -1297,6 +1298,17 @@ def build_assessment_mapping_review_rows(
             row_role == _REGULAR_REVIEW_ROW_ROLE
             and disposition_state == "clear"
         )
+        current_pool_key = str(mapped[5]) if mapped else None
+        # H1: the line's active mapping points at a pool_key that no longer
+        # exists in the current setup (e.g. setup supersession removed the
+        # pool but left the mapping active). Without this, the row reads as
+        # "mapped" and its dollars silently vanish in the engine. Flag it so
+        # the operator remaps to a current pool (valid_pool_options) or
+        # excludes the line — the same in-place action unmapped rows already
+        # offer.
+        stale_pool_mapping = bool(
+            current_pool_key and current_pool_key not in valid_pool_keys
+        )
         candidates: list[LineReviewCandidate] = []
         status = "mapped" if mapped else "needs_disposition"
         if disposition_state == "pending_split":
@@ -1305,6 +1317,14 @@ def build_assessment_mapping_review_rows(
             status = "excluded_non_regular"
         elif disposition_state == "reserve_detail":
             status = "reserve_detail"
+        elif stale_pool_mapping and included_in_regular_basis:
+            candidates = _rank_line_review_candidates(
+                line=line,
+                classification=classification,
+                rules=rules,
+                pool_names=pool_names,
+            )
+            status = "stale_pool_mapping"
         elif included_in_regular_basis and not mapped:
             candidates = _rank_line_review_candidates(
                 line=line,
@@ -1334,8 +1354,9 @@ def build_assessment_mapping_review_rows(
                 "current_status": status,
                 "disposition_state": disposition_state,
                 "disposition_note": str(disposition.get("notes") or ""),
-                "pool_key": str(mapped[5]) if mapped else None,
-                "current_pool_key": str(mapped[5]) if mapped else None,
+                "pool_key": current_pool_key,
+                "current_pool_key": current_pool_key,
+                "stale_pool_mapping": stale_pool_mapping,
                 "mapping_source": str(mapped[6] or "") if mapped else None,
                 "review_state": str(mapped[7] or "") if mapped else None,
                 "valid_pool_options": valid_pool_options,
@@ -1417,10 +1438,15 @@ def build_assessment_mapping_review_summary(
         disposition_state = str(row.get("disposition_state") or "clear")
         included_in_regular_basis = bool(row.get("included_in_regular_basis"))
         current_pool_key = row.get("current_pool_key")
+        # H1: a stale-mapped row has a current_pool_key, but it points at a
+        # pool that no longer exists — so it must NOT count toward the mapped
+        # total; treat it as unresolved so reconciliation blocks until the
+        # operator remaps or excludes it.
+        stale_pool_mapping = bool(row.get("stale_pool_mapping"))
 
         if included_in_regular_basis:
             target_regular_assessment_basis += amount
-            if current_pool_key:
+            if current_pool_key and not stale_pool_mapping:
                 mapped_regular_total += amount
             else:
                 unresolved_required_rows.append(str(row.get("line_label") or ""))
@@ -1459,10 +1485,23 @@ def build_assessment_mapping_review_blockers(
     unresolved_regular_rows = [
         str(row["line_label"])
         for row in review_rows
-        if bool(row["included_in_regular_basis"]) and not row.get("current_pool_key")
+        if bool(row["included_in_regular_basis"])
+        and not row.get("current_pool_key")
     ]
     if unresolved_regular_rows:
         blockers["unresolved_eligible_lines"] = unresolved_regular_rows
+
+    # H1: lines whose active mapping targets a pool that no longer exists.
+    # Name the line and the stale pool so the operator knows exactly what to
+    # remap (or exclude) on the review screen — not a generic "review needed".
+    stale_mapping_rows = [
+        f"{row.get('line_label')} (mapped to removed pool "
+        f"'{row.get('current_pool_key')}' — remap to a current pool or exclude)"
+        for row in review_rows
+        if row.get("stale_pool_mapping")
+    ]
+    if stale_mapping_rows:
+        blockers["stale_pool_mapping"] = stale_mapping_rows
 
     pending_split_rows = [
         str(row["line_label"])

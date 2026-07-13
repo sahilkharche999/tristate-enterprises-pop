@@ -930,16 +930,65 @@ def _read_xlsx_rows(path: str, sheet_name: str = "Income Statement") -> list:
 
     Uses openpyxl data_only=True to read cached values (not formulas).
     Returns rows as list of lists with None for blank cells.
+
+    H13: hidden rows and hidden columns are MASKED (blanked to None) rather
+    than deleted, so hidden subtotal/scratch rows can't become phantom line
+    items and a hidden column can't shift positional column detection — while
+    original row/column indices stay aligned for any position-keyed consumer
+    (e.g. the Excel source preview). Exclusions are logged; a sheet that is
+    mostly hidden is logged prominently so an accidental hide is visible.
     """
     from openpyxl import load_workbook
+    from openpyxl.utils import get_column_letter
 
     wb = load_workbook(path, data_only=True)
     try:
         ws = wb[sheet_name] if sheet_name in wb.sheetnames else wb[wb.sheetnames[0]]
+
+        hidden_cols = {
+            c
+            for c in range(1, ws.max_column + 1)
+            if get_column_letter(c) in ws.column_dimensions
+            and ws.column_dimensions[get_column_letter(c)].hidden
+        }
+        hidden_rows_seen = 0
+        nonempty_rows = 0
         rows = []
         for r in range(1, ws.max_row + 1):
-            row = [ws.cell(row=r, column=c).value for c in range(1, ws.max_column + 1)]
+            raw = [ws.cell(row=r, column=c).value for c in range(1, ws.max_column + 1)]
+            row_has_data = any(v is not None and str(v).strip() != "" for v in raw)
+            row_hidden = (
+                r in ws.row_dimensions and ws.row_dimensions[r].hidden
+            )
+            if row_has_data:
+                nonempty_rows += 1
+            if row_hidden:
+                if row_has_data:
+                    hidden_rows_seen += 1
+                # Blank the whole hidden row (preserves index alignment).
+                rows.append([None] * len(raw))
+                continue
+            # Mask hidden columns within a visible row.
+            row = [
+                None if (c + 1) in hidden_cols else v
+                for c, v in enumerate(raw)
+            ]
             rows.append(row)
+
+        if hidden_rows_seen or hidden_cols:
+            logger.warning(
+                "H13: excluded %d hidden data row(s) and %d hidden column(s) "
+                "from %s while parsing", hidden_rows_seen, len(hidden_cols),
+                Path(path).name,
+            )
+        # A mostly-hidden sheet is almost always an accidental hide — surface
+        # it prominently rather than importing a near-empty statement.
+        if nonempty_rows and hidden_rows_seen > nonempty_rows / 2:
+            logger.warning(
+                "H13: %d of %d non-empty rows in %s are HIDDEN — the parsed "
+                "statement may be nearly empty; operator should unhide and "
+                "re-upload.", hidden_rows_seen, nonempty_rows, Path(path).name,
+            )
         return rows
     finally:
         wb.close()
@@ -952,23 +1001,54 @@ def _read_xls_rows(path: str, sheet_name: str = "Income Statement") -> list:
     """
     import xlrd
 
+    # H13: formatting_info=True is what exposes xlrd's rowinfo_map/colinfo_map
+    # hidden flags. When it's unavailable (some .xls variants), we cannot see
+    # hidden state — proceed as before and note the limitation.
+    have_formatting = True
     try:
         wb = xlrd.open_workbook(path, formatting_info=True)
     except Exception:
         wb = xlrd.open_workbook(path)
+        have_formatting = False
     try:
         ws = wb.sheet_by_name(sheet_name)
     except xlrd.XLRDError:
         ws = wb.sheet_by_index(0)
 
+    # Hidden rows/columns from the format info (empty sets when unavailable).
+    hidden_rows = set()
+    hidden_cols = set()
+    if have_formatting:
+        for r, info in (getattr(ws, "rowinfo_map", {}) or {}).items():
+            if getattr(info, "hidden", 0):
+                hidden_rows.add(r)
+        for c, info in (getattr(ws, "colinfo_map", {}) or {}).items():
+            if getattr(info, "hidden", 0):
+                hidden_cols.add(c)
+    elif Path(path).suffix.lower() == ".xls":
+        logger.warning(
+            "H13: could not read hidden-cell formatting for %s; hidden rows/"
+            "columns (if any) were NOT excluded.", Path(path).name,
+        )
+
     rows = []
     for r in range(ws.nrows):
         row = []
         for c in range(ws.ncols):
+            # Mask hidden rows/columns to None (same as the xlsx path).
+            if r in hidden_rows or c in hidden_cols:
+                row.append(None)
+                continue
             v = ws.cell_value(r, c)
             # Normalize blank cells to None (openpyxl convention)
             row.append(None if v == "" else v)
         rows.append(row)
+
+    if hidden_rows or hidden_cols:
+        logger.warning(
+            "H13: excluded %d hidden row(s) and %d hidden column(s) from %s",
+            len(hidden_rows), len(hidden_cols), Path(path).name,
+        )
 
     # Propagate merged cell values to the leftmost column of each merge.
     # xlrd stores merged_cells as (row_lo, row_hi, col_lo, col_hi) ranges.

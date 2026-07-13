@@ -34,6 +34,7 @@ from typing import Optional
 
 from .appendix_manifest import ResolvedAppendix, resolve_appendix_manifest
 from .appendix_storage import appendix_file_path, appendix_file_exists
+from .schemas import PreflightError
 
 
 def _is_stub_snapshot(raw_json: Optional[str]) -> bool:
@@ -121,9 +122,40 @@ def resolve_compile_appendix_entries(
         property_id=property_id, package_id=package_id, connection=connection,
     )
     entries: list[tuple[Path, str]] = []
+    missing: list[PreflightError] = []
     for entry in manifest:
         if appendix_file_exists(entry.file_id):
             entries.append((appendix_file_path(entry.file_id), entry.display_title))
+        else:
+            # H7: the operator selected this appendix, but its file is gone
+            # from storage. NEVER silently drop it — the shipped PDF would
+            # quietly shrink with the TOC renumbered around the gap. Fail
+            # with the file named and both in-app fixes offered.
+            missing.append(
+                PreflightError(
+                    field_path=f"appendix_manifest.{entry.file_id}",
+                    message=(
+                        f"Selected appendix '{entry.display_title}' "
+                        f"({entry.file_name}) is missing from storage."
+                    ),
+                    severity="blocking",
+                    code="appendix_file_missing",
+                    affected_value=entry.file_id,
+                    suggested_fix=(
+                        "Re-upload the file, or deselect this appendix from the "
+                        "package's appendix set, then generate again."
+                    ),
+                )
+            )
+    if missing:
+        # Imported lazily to keep the compiler↔compile_inputs boundary clean.
+        from .compiler import CompileError
+
+        raise CompileError(
+            f"Preflight blocked compilation: {len(missing)} missing appendix "
+            "file(s)",
+            errors=missing,
+        )
     return entries
 
 

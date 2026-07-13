@@ -242,6 +242,41 @@ class AppliedOverrideEntry(BaseModel):
     approved_by: Optional[str] = None
 
 
+class OrphanedPoolReport(BaseModel):
+    """A ``pool_key`` that budget-line mappings route dollars to, but which
+    has no ``PoolDefinition`` in the current setup (H1).
+
+    Without this report those dollars would be aggregated into the routing
+    dict and then never read back out by ``run()``'s pool loop — silently
+    dropped from both distribution and the ``pool_sum_annual`` diagnostic.
+    The caller surfaces this as a resolvable Assessment Mapping Review row
+    (remap the line to a current pool, or exclude it).
+    """
+
+    pool_key: str
+    annual_total: Decimal
+    contributing_line_labels: list[str] = []
+
+
+class ZeroRecipientPoolReport(BaseModel):
+    """A pool that receives nonzero mapped dollars but whose
+    ``recipient_scope`` resolves to zero recipients (H2) — e.g. a
+    ``residential_only`` pool in an all-commercial building, or a
+    ``parking_users`` pool where no unit has parking.
+
+    Without this report the money is counted into ``pool_sum_annual`` and
+    then the pool is skipped with a silent ``continue`` — the dollars
+    disappear from distribution on a plausibly-valid setup. The caller
+    surfaces this so the operator can remap/exclude the feeding lines, or
+    fix the unit roster in the Review Workbench and repromote.
+    """
+
+    pool_key: str
+    recipient_scope: str
+    annual_total: Decimal
+    contributing_line_labels: list[str] = []
+
+
 class CalcResultSet(BaseModel):
     """Full engine output. Templates that need per-pool columns read
     ``pool_allocations``; templates that need bottom-line dues read
@@ -256,3 +291,7 @@ class CalcResultSet(BaseModel):
     warnings: list[str] = []
     special_assessment_events: list[SpecialAssessmentRendererEvent] = []
     applied_overrides: list[AppliedOverrideEntry] = []
+    # Money-routing integrity reports (H1/H2). Empty on a clean run, so
+    # output bytes are unchanged for setups with no routing issues.
+    orphaned_pool_lines: list[OrphanedPoolReport] = []
+    zero_recipient_pools: list[ZeroRecipientPoolReport] = []

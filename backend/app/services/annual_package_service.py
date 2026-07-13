@@ -279,7 +279,16 @@ def approve_annual_package(
         property_id=property_id,
         connection=connection,
     )
-    connection.execute(
+    # H4: enforce the version guard in the SQL predicate (not just the Python
+    # pre-check above) so two concurrent approves cannot both win — the
+    # UPDATE matches at most one row and the loser gets 0 rowcount → 409.
+    # When the caller sent no If-Match, bind to the version just read
+    # (compare-and-swap on read), matching finalize's freeze behavior; the
+    # guard is never skipped.
+    guard_version = (
+        expected_version if expected_version is not None else current.version_int
+    )
+    cursor = connection.execute(
         """
         UPDATE annual_packages
            SET status = 'approved',
@@ -289,6 +298,7 @@ def approve_annual_package(
                approved_at = ?,
                version_int = version_int + 1
          WHERE id = ?
+           AND version_int = ?
         """,
         (
             live_assessment_mode,
@@ -296,8 +306,19 @@ def approve_annual_package(
             approved_by,
             _now_iso(),
             package_id,
+            guard_version,
         ),
     )
+    if cursor.rowcount == 0:
+        connection.rollback()
+        refreshed = _fetch_package(
+            property_id=property_id, package_id=package_id, connection=connection,
+        )
+        raise PackageVersionMismatch(
+            package_id=package_id,
+            expected=guard_version,
+            actual=refreshed.version_int,
+        )
     connection.commit()
     return _fetch_package(
         property_id=property_id, package_id=package_id, connection=connection,

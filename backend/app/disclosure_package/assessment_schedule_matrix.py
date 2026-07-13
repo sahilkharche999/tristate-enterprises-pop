@@ -31,7 +31,7 @@ from app.assessment_engine import (
     SetupType,
 )
 from app.assessment_engine.engine import run as run_assessment_engine
-from app.assessment_engine.errors import NeedsHumanReview
+from app.assessment_engine.errors import EngineSetupError, NeedsHumanReview
 from app.assessment_engine.percent_form import (
     AmbiguousPercentColumn,
     normalize_percent_value,
@@ -714,6 +714,36 @@ def _build_evidence_refs(source_pages: list[int]) -> list[EvidenceRef]:
         EvidenceRef(field="component_columns", source_type="visual_page", page=first),
         EvidenceRef(field="optional_columns", source_type="visual_page", page=first),
     ]
+
+
+def _money_routing_issue_messages(result: Any) -> list[str]:
+    """Turn the engine's H1/H2 money-routing reports into named,
+    operator-resolvable messages.
+
+    Each message names the specific budget line(s), the specific pool, the
+    dollars at stake, and the in-app action to take — so the operator can
+    resolve it on the Assessment Mapping Review screen rather than
+    re-running the exact same failing generation (an unresolvable loop).
+    """
+    messages: list[str] = []
+    for orphan in getattr(result, "orphaned_pool_lines", []) or []:
+        lines = ", ".join(orphan.contributing_line_labels) or "(unnamed lines)"
+        messages.append(
+            f"Budget line(s) [{lines}] are mapped to pool "
+            f"'{orphan.pool_key}', which no longer exists in the approved "
+            f"setup (${orphan.annual_total} annual). Remap them to a current "
+            f"pool or exclude them on the Assessment Mapping Review screen."
+        )
+    for zero in getattr(result, "zero_recipient_pools", []) or []:
+        lines = ", ".join(zero.contributing_line_labels) or "(unnamed lines)"
+        messages.append(
+            f"Pool '{zero.pool_key}' (scope '{zero.recipient_scope}') carries "
+            f"${zero.annual_total} annual from budget line(s) [{lines}] but no "
+            f"units match its scope, so those dollars cannot be billed. Remap "
+            f"the line(s) to a pool that has recipients, exclude them, or fix "
+            f"the unit categories in the DRE Review Workbench and repromote."
+        )
+    return messages
 
 
 def _child_pool_mapping_issues(pool_definitions: list[Any]) -> list[PreflightError]:
@@ -2105,11 +2135,34 @@ def build_matrix_from_approved_assessment_setup(
                 specified_value_lookup=specified_lookup,
             )
         )
-    except (NeedsHumanReview, ValueError) as exc:
+    except (NeedsHumanReview, EngineSetupError, ValueError) as exc:
+        # H3: EngineSetupError (unsupported allocation method, missing
+        # denominator, missing specified value) is a bad-setup signal, not a
+        # software fault — degrade to the operator-review fallback with the
+        # exact reason so the operator fixes the setup in the Review Workbench
+        # and repromotes, instead of the render job dying with an unhandled
+        # exception.
         return _fallback_matrix_for_db_issue(
             hoa_name=hoa_name,
             fiscal_year=fiscal_year,
             reason=f"Assessment matrix needs operator review before rendering: {exc}",
+            approved_at=approved_at,
+        )
+
+    # H1/H2: the engine reports budget dollars that would otherwise vanish
+    # silently — mapped to a pool that no longer exists (orphaned), or mapped
+    # to a pool whose scope resolves zero recipients. Never render a schedule
+    # that dropped money; degrade to the review fallback naming the exact
+    # lines/pool and the in-app action (remap, exclude, or fix the roster).
+    routing_issue_messages = _money_routing_issue_messages(result)
+    if routing_issue_messages:
+        return _fallback_matrix_for_db_issue(
+            hoa_name=hoa_name,
+            fiscal_year=fiscal_year,
+            reason=(
+                "Assessment mapping review required before final rendering. "
+                + " ".join(routing_issue_messages)
+            ).strip(),
             approved_at=approved_at,
         )
 

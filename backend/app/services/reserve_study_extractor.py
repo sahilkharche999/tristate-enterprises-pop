@@ -205,16 +205,36 @@ def _canonicalize_single_reserve_row(
     ):
         year_replacement_provision = _round_half_even_whole_dollars(row.replacement_cost / row.useful_life)
 
+    # H11: a Gemini-supplied remaining_life greater than useful_life is
+    # logically impossible and makes the liability formula
+    # ((useful_life - remaining_life) / useful_life) go NEGATIVE. The model's
+    # ge=0 guard only fires on validated fields, and model_copy below skips
+    # re-validation — so without this check a negative liability would be
+    # stored and silently offset other components' sum. Never compute a
+    # liability from inconsistent lifecycle values; flag the row for operator
+    # review instead. (The derived-remaining-life path above is already
+    # clamped to [0, useful_life], so this only guards Gemini-supplied values.)
+    lifecycle_inconsistent = (
+        row.useful_life is not None
+        and normalized_remaining_life is not None
+        and normalized_remaining_life > row.useful_life
+    )
+
     estimated_liability = row.estimated_liability
     if (
         estimated_liability is None
         and row.replacement_cost is not None
         and row.useful_life not in (None, 0)
         and normalized_remaining_life is not None
+        and not lifecycle_inconsistent
     ):
         estimated_liability = _round_half_even_whole_dollars(
             row.replacement_cost * ((row.useful_life - normalized_remaining_life) / row.useful_life)
         )
+
+    extra_flags = list(row.flags)
+    if lifecycle_inconsistent and "lifecycle_inconsistent" not in extra_flags:
+        extra_flags.append("lifecycle_inconsistent")
 
     normalized = row.model_copy(
         update={
@@ -222,6 +242,7 @@ def _canonicalize_single_reserve_row(
             "reference_year": normalized_reference_year,
             "year_replacement_provision": year_replacement_provision,
             "estimated_liability": estimated_liability,
+            "flags": extra_flags,
         }
     )
     return _apply_row_flags(normalized)
@@ -932,12 +953,21 @@ def _drop_annual_schedule_noise(
 ) -> tuple[list[ExtractedReserveStudyRow], int]:
     """Drop rows that cannot be real reserve components.
 
-    Two filters are applied to rows where ``row_type == 'item'``:
-      1. line_item matches a known annual-schedule header pattern
-         ("Replacement Year YYYY", "Total for YYYY", etc.).
-      2. row has no useful_life AND no remaining_life AND no replacement_cost —
-         the three primary lifecycle fields. A row with none of these is not a
-         component the UI can render, regardless of the line_item text.
+    H11 (CLAUDE.md rule 1 — meaning over appearance): a row is a REAL
+    component only if it carries genuine lifecycle data — ``useful_life`` or
+    ``remaining_life``. A ``replacement_cost`` alone does NOT make it a
+    component: yearly schedule totals ("Total for 2031") also carry a cost.
+    So the label-pattern regex may only drop a row that is NOT a real
+    component; a genuine component is NEVER dropped on label text alone (e.g.
+    a real component whose name happens to contain "subtotal"), and such a
+    row is kept with a ``suspicious_label`` flag for operator review.
+
+    Drop order per row:
+      1. No data at all (no useful_life, remaining_life, or replacement_cost)
+         → not renderable, drop.
+      2. Not a real component (only a cost / no lifecycle) AND a noise label
+         → schedule total, drop.
+      3. Real component with a noise label → keep + flag ``suspicious_label``.
 
     Header rows (``row_type == 'header'``) are preserved — they're rendered as
     visual breaks and don't claim to be components.
@@ -948,17 +978,35 @@ def _drop_annual_schedule_noise(
         if row.row_type == "header":
             kept.append(row)
             continue
-        label = (row.line_item or "").strip()
-        if label and _ANNUAL_SCHEDULE_NOISE_RE.match(label):
-            dropped += 1
-            continue
-        if (
+        has_any_data = not (
             row.useful_life is None
             and row.remaining_life is None
             and row.replacement_cost is None
-        ):
+        )
+        is_real_component = (
+            row.useful_life is not None or row.remaining_life is not None
+        )
+        label = (row.line_item or "").strip()
+        label_is_noise = bool(label and _ANNUAL_SCHEDULE_NOISE_RE.match(label))
+
+        if not has_any_data:
             dropped += 1
             continue
+
+        if label_is_noise and not is_real_component:
+            # A cost with no lifecycle + a noise label = a schedule total.
+            dropped += 1
+            continue
+
+        if label_is_noise:
+            # Genuine component with a suspicious label — never drop real data
+            # on appearance; keep and flag it for operator review.
+            flags = list(row.flags)
+            if "suspicious_label" not in flags:
+                flags.append("suspicious_label")
+            kept.append(row.model_copy(update={"flags": flags}))
+            continue
+
         kept.append(row)
     return kept, dropped
 
