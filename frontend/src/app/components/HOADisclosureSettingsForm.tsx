@@ -146,14 +146,14 @@ export const HOADisclosureSettingsForm = forwardRef<
     next: SpecialAssessmentEntry[],
   ) => update(key, JSON.stringify(next));
 
-  const scalarFields: Array<[keyof HOADisclosureSettings, string, 'text' | 'number']> = [
+  const scalarFields: Array<[keyof HOADisclosureSettings, string, 'text' | 'number' | 'textarea']> = [
     ['management_company', 'Management company name', 'text'],
     ['management_company_address', 'Management company address', 'text'],
     ['management_company_phone', 'Phone', 'text'],
     ['management_company_fax', 'Fax', 'text'],
     ['management_company_web', 'Website', 'text'],
     ['cpa_firm_name', 'CPA firm name', 'text'],
-    ['cpa_firm_address', 'CPA firm address', 'text'],
+    ['cpa_firm_address', 'CPA firm address (one line per row, e.g. street then city/state/zip)', 'textarea'],
     ['reserve_study_expert_name', 'Reserve study expert', 'text'],
     ['reserve_study_date', 'Reserve study report date (free text, e.g. "November 5, 2024")', 'text'],
     ['letter_signed_by', 'Letter signed by', 'text'],
@@ -416,6 +416,14 @@ export const HOADisclosureSettingsForm = forwardRef<
         {scalarFields.map(([key, label, type]) => (
           <label key={key} className="block text-sm">
             <span className="block text-xs text-[#737373] mb-1">{label}</span>
+            {type === 'textarea' ? (
+              <textarea
+                rows={2}
+                value={settings[key] === null || settings[key] === undefined ? '' : String(settings[key])}
+                onChange={(e) => update(key, e.target.value as never)}
+                className="w-full border border-[#d4d4d4] rounded px-2 py-1 text-sm"
+              />
+            ) : (
             <input
               type={type}
               step={type === 'number' ? 'any' : undefined}
@@ -441,6 +449,7 @@ export const HOADisclosureSettingsForm = forwardRef<
               }}
               className="w-full border border-[#d4d4d4] rounded px-2 py-1 text-sm"
             />
+            )}
           </label>
         ))}
 

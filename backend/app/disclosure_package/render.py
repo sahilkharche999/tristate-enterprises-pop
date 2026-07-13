@@ -23,8 +23,23 @@ from pathlib import Path
 from typing import Any
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined, select_autoescape
+from markupsafe import Markup, escape
 
 logger = logging.getLogger(__name__)
+
+
+def _nl2br(value: Any) -> Markup:
+    """Escape a value, then turn newlines into <br>, returning safe markup.
+
+    Escaping BEFORE introducing the ``<br>`` tags preserves the environment's
+    autoescape guarantee — operator-entered text (e.g. a multi-line CPA firm
+    address from HOA settings) cannot inject markup, but its line breaks are
+    honored in the rendered PDF.
+    """
+    if value is None:
+        return Markup("")
+    escaped = escape(value)
+    return Markup(escaped.replace("\n", Markup("<br>")))
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 
@@ -82,13 +97,15 @@ def _build_env(templates_subdir: str = "standard") -> Environment:
       * ``trim_blocks`` / ``lstrip_blocks`` — keeps generated HTML readable
         for downstream debugging without affecting rendered output.
     """
-    return Environment(
+    env = Environment(
         loader=FileSystemLoader(str(TEMPLATES_DIR / templates_subdir)),
         autoescape=select_autoescape(["html", "xml"]),
         undefined=StrictUndefined,
         trim_blocks=True,
         lstrip_blocks=True,
     )
+    env.filters["nl2br"] = _nl2br
+    return env
 
 
 def render_template(

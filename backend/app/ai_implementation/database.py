@@ -1085,7 +1085,10 @@ def _seed_tri_state_disclosure_defaults() -> None:
             "management_company_fax": "650.210.0086",
             "management_company_web": "www.3state.net",
             "cpa_firm_name": "Levy, Erlanger & Company LLP",
-            "cpa_firm_address": "100 Montgomery Street, Suite 715, San Francisco, California 94104",
+            # Two-line form: the disclosure templates now render this via the
+            # ``nl2br`` filter, so the street and city/state/zip land on their
+            # own lines like the old hardcoded letterhead block.
+            "cpa_firm_address": "100 Montgomery Street, Suite 715\nSan Francisco, California 94104",
             "reserve_study_expert_name": "SMA Reserves of San Jose",
             "letter_signed_by_title": "Tri-State Enterprises, Inc.",
         }
@@ -1094,6 +1097,20 @@ def _seed_tri_state_disclosure_defaults() -> None:
                 f"UPDATE hoa_settings SET {col} = ? WHERE {col} IS NULL OR {col} = ''",
                 (val,),
             )
+        # One-time backfill: rows seeded earlier hold the CPA address as a
+        # single comma-joined line. Now that templates read
+        # ``hoa_settings.cpa_firm_address`` (instead of a hardcoded two-line
+        # block), rewrite that exact legacy literal to the two-line form so
+        # existing HOAs keep the letterhead layout. Idempotent — matches only
+        # the old string, so it is a no-op once converted or if an operator has
+        # since edited the value.
+        raw_conn.execute(
+            "UPDATE hoa_settings SET cpa_firm_address = ? WHERE cpa_firm_address = ?",
+            (
+                "100 Montgomery Street, Suite 715\nSan Francisco, California 94104",
+                "100 Montgomery Street, Suite 715, San Francisco, California 94104",
+            ),
+        )
         # Numeric rate defaults — only seed when row is at the "unset"
         # sentinel (NULL or 0.0). Treating 0.0 as "unset" here is intentional:
         # the compiler's run_render_job now honors a literal 0, so explicit

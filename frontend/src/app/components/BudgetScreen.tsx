@@ -27,6 +27,7 @@ import {
   applyReserveStudyToBudget,
   commitBudgetGlMerge,
   replaceReserveStudy,
+  replaceBudgetSource,
   deleteActiveDraft,
   fetchBudgetGlMergeSuggestions,
   getActiveBudgetDraft,
@@ -246,6 +247,8 @@ export function BudgetScreen({
   const [isComparePanelOpen, setIsComparePanelOpen] = useState(false);
   const [isSavingDraft, setIsSavingDraft] = useState(false);
   const [isDeletingDraft, setIsDeletingDraft] = useState(false);
+  const [isReplacingBudgetFile, setIsReplacingBudgetFile] = useState(false);
+  const replaceBudgetFileInputRef = useRef<HTMLInputElement>(null);
   const [isDownloadingEnriched] = useState(false);
   const [autoSaveEnabled, setAutoSaveEnabled] = useState(false);
   const [budgetSourceFile, setBudgetSourceFile] = useState<File | null>(null);
@@ -676,6 +679,31 @@ export function BudgetScreen({
     if (!draftId) return;
     const updatedDraft = await replaceReserveStudy(hoaId, draftId, file);
     handleReserveStudyReplaced(updatedDraft);
+  };
+
+  const handleReplaceBudgetFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = ''; // allow re-selecting the same filename later
+    if (!file || !draftId) return;
+    setIsReplacingBudgetFile(true);
+    try {
+      const result = await replaceBudgetSource(hoaId, draftId, file);
+      if (result.review_required || result.draft === null) {
+        // Extraction needs review — the prior draft is left intact.
+        toast.error(
+          result.review_reason ||
+            'The replacement file needs review; the current budget was left unchanged.',
+        );
+        return;
+      }
+      // Success: reload so the screen re-fetches and shows the new budget.
+      toast.success('Budget file replaced.');
+      window.location.reload();
+    } catch (error) {
+      toast.error(getErrorMessage(error, 'Failed to replace budget file.'));
+    } finally {
+      setIsReplacingBudgetFile(false);
+    }
   };
 
   const handleReadOnlyOverride = (itemId: string, override: boolean | null) => {
@@ -1657,6 +1685,28 @@ export function BudgetScreen({
                 />
                 Auto-save every 30 seconds
               </Label>
+              {draftId && (
+                <>
+                  <input
+                    ref={replaceBudgetFileInputRef}
+                    type="file"
+                    accept=".xlsx,.xls,.pdf"
+                    className="hidden"
+                    onChange={(e) => void handleReplaceBudgetFile(e)}
+                  />
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => replaceBudgetFileInputRef.current?.click()}
+                    disabled={isReplacingBudgetFile || isSavingDraft || isGenerating}
+                    className="border-[#d4d4d4] text-[#111111] hover:border-[#a3a3a3] hover:bg-[#f5f5f5]"
+                    title="Upload a different starting budget file for this HOA without deleting the draft or package"
+                  >
+                    <Upload className="mr-1.5 h-3.5 w-3.5" />
+                    {isReplacingBudgetFile ? 'Replacing...' : 'Replace Budget File'}
+                  </Button>
+                </>
+              )}
               {draftId && !budgetGenerated && (
                 <Button
                   variant="outline"

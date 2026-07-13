@@ -2695,6 +2695,114 @@ def replace_reserve_study(
     return _serialize_draft(draft_row, _get_upload(session, draft_row.source_upload_id))
 
 
+def replace_budget_source(
+    session: Session,
+    *,
+    hoa_id: int,
+    draft_id: int,
+    actor: dict[str, Any],
+    original_filename: str,
+    content_type: Optional[str],
+    file_bytes: bytes,
+) -> BudgetUploadResponse:
+    """Replace the primary budget source file on an existing active draft.
+
+    Fixes the "can't change the starting budget without deleting the disclosure
+    package" bug: the operator no longer has to Discard the draft (blocked once
+    a version exists) or delete the HOA/package. The new file is extracted and
+    the current budget reflects it, while the attached reserve study and
+    draft-level settings are preserved and previously generated versions are
+    untouched.
+
+    Implementation: delegate to ``create_upload`` (reusing all extraction /
+    validation / enrichment / mapping logic unchanged), then carry the
+    preserved fields onto the resulting active draft. Passing the existing
+    draft's ``source_mode``/``assessment_mode`` keeps the same extraction branch
+    and makes the property assessment-mode update a no-op (no mode switch, no
+    ``assessment_mode_changed`` event). On extraction/validation failure,
+    ``create_upload`` returns a review-required response BEFORE superseding the
+    old draft, so the prior active draft is left intact.
+    """
+    # 404 if missing. Accept the CURRENT draft whether it is still ``active``
+    # or has been ``generated`` (a version was made from it) — the latter is
+    # exactly the state the operator gets stuck in today, where Discard 409s.
+    # Only a ``superseded`` draft (already replaced by a newer one) is
+    # rejected with 409.
+    draft = _get_draft(session, hoa_id, draft_id)
+    if draft.status == BUDGET_DRAFT_SUPERSEDED:
+        raise ValueError("Requested draft is no longer the current draft")
+
+    # Fields to carry over to the rebuilt draft (a new draft file must not
+    # silently drop the attached reserve study or operator draft settings).
+    preserved = {
+        "reserve_study_upload_id": draft.reserve_study_upload_id,
+        "reserve_study_rows_json": draft.reserve_study_rows_json,
+        "reserve_study_warnings_json": draft.reserve_study_warnings_json,
+        "reserve_study_status": draft.reserve_study_status,
+        "global_note": draft.global_note,
+        "reserve_inflation_rate": draft.reserve_inflation_rate,
+        "reserve_inflation_note": draft.reserve_inflation_note,
+    }
+    existing_source_mode = draft.source_mode
+    existing_assessment_mode = draft.assessment_mode
+
+    result = create_upload(
+        session,
+        hoa_id=hoa_id,
+        actor=actor,
+        original_filename=original_filename,
+        content_type=content_type,
+        file_bytes=file_bytes,
+        source_mode=existing_source_mode,
+        assessment_mode=existing_assessment_mode,
+    )
+
+    # Review-required / validation failure: the prior active draft was NOT
+    # superseded (create_upload returns before _replace_active_draft), so
+    # nothing to carry over — surface the feedback unchanged.
+    if result.draft is None:
+        return result
+
+    # Success: create_upload superseded the old draft and built a fresh active
+    # one. Carry the preserved fields onto it so the reserve study + draft
+    # settings survive the file swap.
+    new_draft = session.scalars(
+        select(BudgetDraft).where(
+            BudgetDraft.property_id == hoa_id,
+            BudgetDraft.status == BUDGET_DRAFT_ACTIVE,
+        ).order_by(BudgetDraft.updated_at.desc())
+    ).first()
+    if new_draft is None:  # defensive; create_upload just made one
+        return result
+
+    for field, value in preserved.items():
+        setattr(new_draft, field, value)
+
+    _create_audit_event(
+        session,
+        hoa_id=hoa_id,
+        actor=actor,
+        event_type="budget_source_replaced",
+        summary=f"Replaced budget source file with {original_filename}",
+        upload_id=new_draft.source_upload_id,
+        draft_id=new_draft.id,
+        payload={
+            "replaced_draft_id": draft_id,
+            "new_draft_id": new_draft.id,
+            "filename": original_filename,
+            "reserve_study_preserved": preserved["reserve_study_upload_id"] is not None,
+        },
+    )
+    session.commit()
+    return BudgetUploadResponse(
+        upload_id=result.upload_id,
+        draft=_serialize_draft(new_draft, _get_upload(session, new_draft.source_upload_id)),
+        timeline_event=result.timeline_event,
+        warnings=result.warnings,
+        extraction_quality_warning=result.extraction_quality_warning,
+    )
+
+
 def create_upload_bundle(
     session: Session,
     *,

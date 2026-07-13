@@ -813,6 +813,24 @@ export async function replaceReserveStudy(
   return handleResponse<BudgetDraftPayload>(res);
 }
 
+export async function replaceBudgetSource(
+  hoaId: number | string,
+  draftId: number | string,
+  file: File,
+): Promise<BudgetUploadResponse> {
+  const formData = new FormData();
+  formData.append('file', file);
+  const res = await fetch(
+    `${BASE_URL}/hoa/${hoaId}/budget/drafts/${draftId}/source/upload`,
+    {
+      method: 'POST',
+      headers: authHeaders(),
+      body: formData,
+    },
+  );
+  return handleResponse<BudgetUploadResponse>(res);
+}
+
 export async function saveBudgetNote(
   hoaId: number | string,
   payload: SaveBudgetNotePayload,
