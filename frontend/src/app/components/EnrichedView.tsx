@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { GitMerge, Lock, MessageSquare, ChevronDown, Percent, DollarSign, Unlock, Minus, Plus } from 'lucide-react';
+import { GitMerge, Lock, MessageSquare, ChevronDown, Percent, DollarSign, Unlock, Minus, Plus, Upload } from 'lucide-react';
 import { toast } from 'sonner';
 import { Input } from './ui/input';
 import { Button } from './ui/button';
@@ -43,6 +43,11 @@ interface EnrichedViewProps {
   // against at all; whether it points at a PDF or an Excel-rendered-as-HTML endpoint is decided
   // by the caller, not this component.
   onOpenCompare?: () => void;
+  // Opens the OS file picker to swap the starting budget file on this draft
+  // (rebuilds line items from the new file; keeps the reserve study + versions).
+  // Undefined when replacement isn't applicable (e.g. inside the compare pane).
+  onReplaceBudgetFile?: () => void;
+  isReplacingBudgetFile?: boolean;
   // True when rendered inside the compare view's left pane rather than as the full page —
   // mirrors ReserveStudyView's compact prop (tightens spacing; this view has no intro-text
   // block to suppress).
@@ -68,6 +73,8 @@ export function EnrichedView({
   hasUnsavedChanges = false,
   onJumpToPage,
   onOpenCompare,
+  onReplaceBudgetFile,
+  isReplacingBudgetFile = false,
   compact = false,
   stickyHeaderOffset = 0,
 }: EnrichedViewProps) {
@@ -189,6 +196,19 @@ export function EnrichedView({
               className="whitespace-nowrap border-[#d4d4d4] text-[#525252] hover:bg-[#f5f5f5]"
             >
               Compare with source
+            </Button>
+          ) : null}
+          {!compact && onReplaceBudgetFile ? (
+            <Button
+              type="button"
+              variant="outline"
+              onClick={onReplaceBudgetFile}
+              disabled={isReplacingBudgetFile}
+              className="whitespace-nowrap gap-1.5 border-[#d4d4d4] text-[#525252] hover:bg-[#f5f5f5]"
+              title="Swap the starting budget file for this draft. Line items are rebuilt from the new file; the attached reserve study and any generated versions are kept — no need to delete the disclosure package."
+            >
+              <Upload className="h-3.5 w-3.5" />
+              {isReplacingBudgetFile ? 'Replacing...' : 'Replace Budget File'}
             </Button>
           ) : null}
         </div>

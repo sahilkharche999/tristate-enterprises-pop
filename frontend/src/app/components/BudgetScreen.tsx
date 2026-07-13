@@ -1685,28 +1685,15 @@ export function BudgetScreen({
                 />
                 Auto-save every 30 seconds
               </Label>
-              {draftId && (
-                <>
-                  <input
-                    ref={replaceBudgetFileInputRef}
-                    type="file"
-                    accept=".xlsx,.xls,.pdf"
-                    className="hidden"
-                    onChange={(e) => void handleReplaceBudgetFile(e)}
-                  />
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => replaceBudgetFileInputRef.current?.click()}
-                    disabled={isReplacingBudgetFile || isSavingDraft || isGenerating}
-                    className="border-[#d4d4d4] text-[#111111] hover:border-[#a3a3a3] hover:bg-[#f5f5f5]"
-                    title="Upload a different starting budget file for this HOA without deleting the draft or package"
-                  >
-                    <Upload className="mr-1.5 h-3.5 w-3.5" />
-                    {isReplacingBudgetFile ? 'Replacing...' : 'Replace Budget File'}
-                  </Button>
-                </>
-              )}
+              {/* Hidden picker for the "Replace Budget File" control, which now
+                  lives next to "Compare with source" in the enriched view. */}
+              <input
+                ref={replaceBudgetFileInputRef}
+                type="file"
+                accept=".xlsx,.xls,.pdf"
+                className="hidden"
+                onChange={(e) => void handleReplaceBudgetFile(e)}
+              />
               {draftId && !budgetGenerated && (
                 <Button
                   variant="outline"
@@ -1874,6 +1861,10 @@ export function BudgetScreen({
               reserveInflationRate={activeReserveInflationRate}
               hasUnsavedChanges={hasUnsavedDraftChanges}
               onJumpToPage={jumpToEnrichedPage}
+              onReplaceBudgetFile={
+                draftId ? () => replaceBudgetFileInputRef.current?.click() : undefined
+              }
+              isReplacingBudgetFile={isReplacingBudgetFile}
               compact={isEnrichedCompareOpen}
               stickyHeaderOffset={tableStickyTop}
               onOpenCompare={
