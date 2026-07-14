@@ -47,10 +47,14 @@ from .schemas import (
     PoolDefinition,
     RecipientReference,
     RecipientTotalResult,
+    SpecialAssessmentAllocation,
+    SpecialAssessmentAllocationEntry,
     SpecialAssessmentInput,
     SpecialAssessmentRendererEvent,
     ZeroRecipientPoolReport,
 )
+
+SPECIAL_ASSESSMENT_POOL_KIND = "separately_billed_special_assessment"
 
 
 CENTS = Decimal("0.01")
@@ -243,6 +247,61 @@ def _resolve_allocation_pool_for_scope(
     return sorted(candidates, key=lambda p: p.display_order)[0]
 
 
+def _allocate_special_assessment(
+    total: Decimal,
+    recipients,
+    pool: Optional[PoolDefinition],
+    method: str,
+    *,
+    scope: str = "",
+    label: str = "",
+) -> tuple[dict[tuple[str, int], Decimal], list[str]]:
+    """Allocate a special-assessment ``total`` across ``recipients`` by
+    ``method`` (borrowed from ``pool``), reusing the same allocation functions
+    as regular pool math. Returns unrounded per-recipient component amounts keyed
+    by ``(ref_type, ref_id)`` plus warnings — rounding stays per-recipient at
+    summation time.
+
+    Shared by the settings-json path (``_apply_special_assessments``, where
+    ``total`` is a monthly figure) and the pool-based path (``run()``, where
+    ``total`` is a one-time lump). The caller decides the meaning of ``total``;
+    this helper never divides by 12.
+    """
+    warnings: list[str] = []
+    result: dict[tuple[str, int], Decimal] = {}
+    total_units = sum((r.unit_count for r in recipients), start=0)
+
+    if method == "square_footage" and pool is not None and pool.denominator_value is not None:
+        per_unit_within_group = square_footage_allocation(
+            total, pool.denominator_value, recipients
+        )
+        for r in recipients:
+            result[(r.ref_type, r.ref_id)] = (
+                per_unit_within_group[(r.ref_type, r.ref_id)] * Decimal(r.unit_count)
+            )
+    elif method == "ownership_percentage":
+        per_recipient, pct_warnings = ownership_percentage_allocation(total, recipients)
+        warnings.extend(pct_warnings)
+        for r in recipients:
+            result[(r.ref_type, r.ref_id)] = per_recipient[(r.ref_type, r.ref_id)]
+    else:
+        # Equal, or a method that can't be generalized to an arbitrary
+        # special-assessment total (specified_value is a per-budget-line absolute
+        # dollar lookup, not a proportional weight; square_footage without a
+        # denominator can't split). Fall back to equal-per-unit rather than guess.
+        if method not in ("equal",) and pool is not None:
+            warnings.append(
+                f"SpecialAssessmentAllocationFallbackWarning: recipient_scope "
+                f"'{scope}' resolves to a '{method}' pool, which cannot be "
+                f"generalized to an arbitrary special-assessment total; special "
+                f"assessment '{label}' fell back to equal-per-unit allocation"
+            )
+        per_unit = equal_allocation(total, total_units)
+        for r in recipients:
+            result[(r.ref_type, r.ref_id)] = per_unit * Decimal(r.unit_count)
+    return result, warnings
+
+
 def _apply_special_assessments(
     pool_allocations: list[PoolAllocationResult],
     special_assessments: list[SpecialAssessmentInput],
@@ -320,62 +379,21 @@ def _apply_special_assessments(
                     f"'{entry.label or ''}' fell back to equal-per-unit allocation"
                 )
 
-            if method == "square_footage" and pool is not None and pool.denominator_value is not None:
-                per_unit_within_group = square_footage_allocation(
-                    monthly_total, pool.denominator_value, recipients
+            allocation, alloc_warnings = _allocate_special_assessment(
+                monthly_total, recipients, pool, method,
+                scope=scope, label=entry.label or "",
+            )
+            warnings.extend(alloc_warnings)
+            for r in recipients:
+                pool_allocations.append(
+                    PoolAllocationResult(
+                        recipient_ref=r,
+                        pool_id=None,
+                        pool_key="special_assessment",
+                        unrounded_component_monthly=allocation[(r.ref_type, r.ref_id)],
+                        source="special_assessment",
+                    )
                 )
-                for r in recipients:
-                    pool_allocations.append(
-                        PoolAllocationResult(
-                            recipient_ref=r,
-                            pool_id=None,
-                            pool_key="special_assessment",
-                            unrounded_component_monthly=(
-                                per_unit_within_group[(r.ref_type, r.ref_id)] * Decimal(r.unit_count)
-                            ),
-                            source="special_assessment",
-                        )
-                    )
-            elif method == "ownership_percentage":
-                per_recipient, pct_warnings = ownership_percentage_allocation(
-                    monthly_total, recipients
-                )
-                warnings.extend(pct_warnings)
-                for r in recipients:
-                    pool_allocations.append(
-                        PoolAllocationResult(
-                            recipient_ref=r,
-                            pool_id=None,
-                            pool_key="special_assessment",
-                            unrounded_component_monthly=per_recipient[(r.ref_type, r.ref_id)],
-                            source="special_assessment",
-                        )
-                    )
-            else:
-                # Equal, or a method that can't be generalized to an
-                # arbitrary special-assessment total (specified_value is a
-                # per-budget-line absolute dollar lookup, not a proportional
-                # weight; square_footage without a denominator can't split).
-                # Fall back to equal-per-unit rather than guessing.
-                if method not in ("equal",) and pool is not None:
-                    warnings.append(
-                        f"SpecialAssessmentAllocationFallbackWarning: recipient_scope "
-                        f"'{scope}' resolves to a '{method}' pool, which cannot be "
-                        f"generalized to an arbitrary special-assessment total; special "
-                        f"assessment '{entry.label or ''}' fell back to equal-per-unit "
-                        f"allocation"
-                    )
-                per_unit = equal_allocation(monthly_total, total_units)
-                for r in recipients:
-                    pool_allocations.append(
-                        PoolAllocationResult(
-                            recipient_ref=r,
-                            pool_id=None,
-                            pool_key="special_assessment",
-                            unrounded_component_monthly=per_unit * Decimal(r.unit_count),
-                            source="special_assessment",
-                        )
-                    )
 
         elif entry.status == "possible_disclosure_only":
             events.append(
@@ -636,11 +654,60 @@ def run(calc_input: CalcInput) -> CalcResultSet:
     warnings: list[str] = []
     pool_sum_annual = Decimal("0")
     zero_recipient_pools: list[ZeroRecipientPoolReport] = []
+    special_assessment_allocations: list[SpecialAssessmentAllocation] = []
 
     defined_pool_keys = {pool.pool_key for pool in calc_input.pools}
 
     for pool in sorted(calc_input.pools, key=lambda p: p.display_order):
         annual_total = pool_totals_annual.get(pool.pool_key, Decimal("0"))
+
+        if pool.pool_kind == SPECIAL_ASSESSMENT_POOL_KIND:
+            # Separately-billed special assessment: allocate the pool's total
+            # ONCE (a one-time lump — no ÷12) across recipients by the pool's
+            # basis, and keep it OUT of pool_sum_annual / recipient_totals /
+            # reconciliation. It renders as its own allocation table, never as
+            # monthly dues. (An empty total → zero entries; preflight flags it.)
+            sa_custom_ids = calc_input.pool_custom_recipients.get(pool.pool_key)
+            sa_recipients = resolve_recipients(
+                calc_input.recipient_set,
+                pool.recipient_scope,
+                custom_unit_ids=sa_custom_ids,
+            )
+            if not sa_recipients:
+                if annual_total != 0:
+                    zero_recipient_pools.append(
+                        ZeroRecipientPoolReport(
+                            pool_key=pool.pool_key,
+                            recipient_scope=pool.recipient_scope,
+                            annual_total=annual_total,
+                            contributing_line_labels=contributing_labels.get(
+                                pool.pool_key, []
+                            ),
+                        )
+                    )
+                continue
+            sa_allocation, sa_warnings = _allocate_special_assessment(
+                annual_total, sa_recipients, pool, pool.allocation_method,
+                scope=pool.recipient_scope, label=pool.pool_name,
+            )
+            warnings.extend(sa_warnings)
+            special_assessment_allocations.append(
+                SpecialAssessmentAllocation(
+                    pool_key=pool.pool_key,
+                    label=pool.pool_name,
+                    allocation_method=pool.allocation_method,
+                    total=annual_total,
+                    entries=[
+                        SpecialAssessmentAllocationEntry(
+                            recipient_ref=r,
+                            amount=sa_allocation[(r.ref_type, r.ref_id)],
+                        )
+                        for r in sa_recipients
+                    ],
+                )
+            )
+            continue
+
         pool_sum_annual += annual_total
         monthly_total = annual_total / TWELVE
 
@@ -729,6 +796,7 @@ def run(calc_input: CalcInput) -> CalcResultSet:
         pool_sum_annual=pool_sum_annual,
         warnings=warnings,
         special_assessment_events=special_assessment_events,
+        special_assessment_allocations=special_assessment_allocations,
         applied_overrides=applied_overrides,
         orphaned_pool_lines=orphaned_pool_lines,
         zero_recipient_pools=zero_recipient_pools,

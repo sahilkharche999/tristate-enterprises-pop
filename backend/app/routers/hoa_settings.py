@@ -85,6 +85,45 @@ async def put_disclosure_settings(
     return _row_to_dict(row)
 
 
+@router.get("/{hoa_id}/assessment/special-pools")
+async def list_special_assessment_pools_endpoint(
+    hoa_id: int,
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user),  # noqa: ARG001
+):
+    """Special-assessment pools of the HOA's approved setup, for the Settings
+    §5570 section (classified by pool_kind, never by name)."""
+    if not session.query(Property).filter_by(id=hoa_id).one_or_none():
+        raise HTTPException(status_code=404, detail=f"HOA not found: {hoa_id}")
+    from ..disclosure_package.service import list_special_assessment_pools
+    return {"pools": list_special_assessment_pools(session, hoa_id=hoa_id)}
+
+
+@router.post("/{hoa_id}/assessment/special-preview")
+async def preview_special_assessment_endpoint(
+    hoa_id: int,
+    payload: dict = Body(...),
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user),  # noqa: ARG001
+):
+    """Per-unit allocation table for one special-assessment pool, computed by the
+    same matrix builder the render uses (reflects the saved total)."""
+    if not session.query(Property).filter_by(id=hoa_id).one_or_none():
+        raise HTTPException(status_code=404, detail=f"HOA not found: {hoa_id}")
+    pool_key = payload.get("pool_key")
+    if not pool_key:
+        raise HTTPException(status_code=400, detail="pool_key is required")
+    fiscal_year = payload.get("fiscal_year")
+    try:
+        fiscal_year = int(fiscal_year)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="fiscal_year (int) is required")
+    from ..disclosure_package.service import preview_special_assessment_allocation
+    return preview_special_assessment_allocation(
+        session, hoa_id=hoa_id, fiscal_year=fiscal_year, pool_key=str(pool_key)
+    )
+
+
 @router.post("/{hoa_id}/settings/logo")
 async def upload_hoa_logo(
     hoa_id: int,

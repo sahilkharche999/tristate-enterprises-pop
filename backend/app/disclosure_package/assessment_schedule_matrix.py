@@ -10,7 +10,8 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
+import json
 import sqlite3
 from typing import Any, Literal, Optional, Union
 
@@ -30,7 +31,10 @@ from app.assessment_engine import (
     RecipientSet,
     SetupType,
 )
-from app.assessment_engine.engine import run as run_assessment_engine
+from app.assessment_engine.engine import (
+    SPECIAL_ASSESSMENT_POOL_KIND,
+    run as run_assessment_engine,
+)
 from app.assessment_engine.errors import EngineSetupError, NeedsHumanReview
 from app.assessment_engine.percent_form import (
     AmbiguousPercentColumn,
@@ -199,11 +203,23 @@ class FooterRow(BaseModel):
     values: dict[str, Any] = {}
 
 
+class SpecialAssessmentAllocationRow(BaseModel):
+    recipient_label: str
+    amount: Decimal
+
+
 class SpecialAssessmentDisclosureBlock(BaseModel):
     label: str
     amount_per_unit: Optional[Decimal] = None
     due_date: Optional[str] = None
     display_language: Optional[str] = None
+    # Pool-based special assessments (add-variable-special-assessments): the
+    # per-recipient allocation table plus its total and basis. Empty on the
+    # legacy settings-json disclosure blocks (which carry only amount_per_unit).
+    pool_key: Optional[str] = None
+    total: Optional[Decimal] = None
+    allocation_method: Optional[str] = None
+    allocations: list[SpecialAssessmentAllocationRow] = []
 
 
 class AssessmentScheduleMatrix(BaseModel):
@@ -356,6 +372,13 @@ def _parent_pool_key(pool: Any) -> Optional[str]:
 
 
 def _pool_is_visible(pool: Any) -> bool:
+    # A special-assessment pool is never a regular monthly column — it renders in
+    # its own allocation table. Checked BEFORE include_in_pdf (which is always
+    # non-None on PoolDefinition, so the hidden_kinds branch below would never
+    # otherwise run for it).
+    if str(_get(pool, "pool_kind", "") or "") == SPECIAL_ASSESSMENT_POOL_KIND:
+        return False
+
     explicit = _get(pool, "include_in_pdf")
     if explicit is not None:
         return bool(explicit)
@@ -988,6 +1011,27 @@ def build_universal_assessment_matrix(
         for event in result.special_assessment_events
         if event.kind == "separate_disclosure_block"
     ]
+    # Pool-based special assessments: one block per special-kind pool, carrying
+    # the per-recipient allocation table (the single render channel — no separate
+    # matrix surface). For an equal split every row is the same; for a variable
+    # split the rows differ and the template shows the table, not one per-unit
+    # figure.
+    special_blocks.extend(
+        SpecialAssessmentDisclosureBlock(
+            label=allocation.label or "Special Assessment",
+            pool_key=allocation.pool_key,
+            total=allocation.total,
+            allocation_method=allocation.allocation_method,
+            allocations=[
+                SpecialAssessmentAllocationRow(
+                    recipient_label=entry.recipient_ref.label,
+                    amount=entry.amount,
+                )
+                for entry in allocation.entries
+            ],
+        )
+        for allocation in result.special_assessment_allocations
+    )
 
     return AssessmentScheduleMatrix(
         title=_title_for(hoa_name, fiscal_year, grain),
@@ -1715,6 +1759,93 @@ def _pool_totals_annual_for_mappings(
     return dict(totals)
 
 
+def _special_assessment_operator_totals(
+    connection: sqlite3.Connection, property_id: int
+) -> dict[str, Decimal]:
+    """Operator-entered one-time totals for special-assessment pools, read from
+    ``hoa_settings.special_assessments_json`` and keyed by the linked
+    ``pool_key``. Used only for special pools that have no mapped budget lines
+    (a pure-disclosure levy). Tolerant of legacy entries with no ``pool_key``."""
+    try:
+        row = connection.execute(
+            "SELECT special_assessments_json FROM hoa_settings WHERE property_id = ?",
+            (property_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        # hoa_settings table/column absent (hand-rolled test schema) — no totals.
+        return {}
+    if not row or not row[0]:
+        return {}
+    try:
+        entries = json.loads(row[0])
+    except (TypeError, ValueError):
+        return {}
+    totals: dict[str, Decimal] = {}
+    for entry in entries if isinstance(entries, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        pool_key = entry.get("pool_key")
+        amount = entry.get("total_amount")
+        if not pool_key or amount in (None, ""):
+            continue
+        try:
+            totals[str(pool_key)] = Decimal(str(amount))
+        except (InvalidOperation, TypeError, ValueError):
+            continue
+    return totals
+
+
+def _synthetic_special_assessment_lines(
+    *,
+    pools: list[PoolDefinition],
+    mappings: list[BudgetLineMappingInput],
+    operator_totals: dict[str, Decimal],
+    start_line_id: int,
+) -> tuple[list[BudgetLineInput], list[BudgetLineMappingInput]]:
+    """For each special-assessment pool with an operator total but NO mapped
+    budget lines, synthesize one budget line + mapping routing the total to that
+    pool_key, so the engine's ``_aggregate_by_pool`` picks it up (the matrix-level
+    ``pool_totals_annual`` dict is not passed to the engine). Budget-line-derived
+    special pools already have their total via real mappings and are left alone."""
+    mapped_keys = {m.pool_key for m in mappings if m.active}
+    lines: list[BudgetLineInput] = []
+    new_mappings: list[BudgetLineMappingInput] = []
+    line_id = start_line_id
+    for pool in pools:
+        if pool.pool_kind != SPECIAL_ASSESSMENT_POOL_KIND:
+            continue
+        if pool.pool_key in mapped_keys:
+            continue
+        total = operator_totals.get(pool.pool_key)
+        if total is None or total == 0:
+            continue
+        label = normalize_budget_label(f"__special_assessment__{pool.pool_key}")
+        lines.append(
+            BudgetLineInput(
+                line_id=line_id,
+                normalized_label=label,
+                section="special_assessment",
+                category="operating",
+                fund_type="operating",
+                account_code=None,
+                amount=total,
+            )
+        )
+        new_mappings.append(
+            BudgetLineMappingInput(
+                budget_line_normalized_label=label,
+                section="special_assessment",
+                category="operating",
+                fund_type="operating",
+                account_code=None,
+                pool_key=pool.pool_key,
+                active=True,
+            )
+        )
+        line_id += 1
+    return lines, new_mappings
+
+
 def _assessment_mapping_category(raw_category: object) -> str:
     category = str(raw_category or "").lower()
     if category == "income":
@@ -1813,10 +1944,18 @@ def build_matrix_from_approved_assessment_setup(
         setup_id=setup_id,
     )
 
+    # ``pool_kind`` is a brownfield-migrated column; tolerate a DB where the
+    # migration hasn't run (or a hand-rolled schema) by degrading to NULL rather
+    # than raising, so a special-assessment classification is simply absent.
+    has_pool_kind = any(
+        r[1] == "pool_kind"
+        for r in connection.execute("PRAGMA table_info(allocation_pools)").fetchall()
+    )
+    pool_kind_col = "pool_kind" if has_pool_kind else "NULL AS pool_kind"
     pool_rows = connection.execute(
-        """
+        f"""
         SELECT id, pool_key, pool_name, allocation_method, recipient_scope,
-               denominator_value, include_in_pdf, display_order
+               denominator_value, include_in_pdf, display_order, {pool_kind_col}
           FROM allocation_pools
          WHERE assessment_setup_id = ?
          ORDER BY display_order, id
@@ -1833,6 +1972,7 @@ def build_matrix_from_approved_assessment_setup(
             denominator_value=_money(row[5]) if row[5] is not None else None,
             include_in_pdf=bool(row[6]),
             display_order=int(row[7] or 0),
+            pool_kind=row[8],
         )
         for row in pool_rows
     ]
@@ -2079,6 +2219,19 @@ def build_matrix_from_approved_assessment_setup(
             )
         )
 
+    # Operator-entered totals for special-assessment pools with no mapped budget
+    # lines: fed as synthetic lines so the engine aggregates them (the engine
+    # re-derives pool totals from budget_lines+mappings, not from the matrix-level
+    # pool_totals_annual dict below).
+    sa_synthetic_lines, sa_synthetic_mappings = _synthetic_special_assessment_lines(
+        pools=pools,
+        mappings=mappings,
+        operator_totals=_special_assessment_operator_totals(connection, property_id),
+        start_line_id=max((line.line_id for line in budget_lines), default=0) + 1,
+    )
+    budget_lines = budget_lines + sa_synthetic_lines
+    mappings = mappings + sa_synthetic_mappings
+
     unit_id_by_number = {
         str(_get(recipient, "label") or ""): int(_get(recipient, "ref_id"))
         for recipient in recipients
@@ -2119,7 +2272,10 @@ def build_matrix_from_approved_assessment_setup(
     engine_pools = [
         pool.model_copy(
             update={"allocation_method": "specified_value"}
-        ) if pool.pool_key in payload_factor_pool_keys else pool
+        ) if (
+            pool.pool_key in payload_factor_pool_keys
+            and pool.pool_kind != SPECIAL_ASSESSMENT_POOL_KIND
+        ) else pool
         for pool in pools
     ]
 
@@ -2166,12 +2322,31 @@ def build_matrix_from_approved_assessment_setup(
             approved_at=approved_at,
         )
 
+    # A special-assessment pool with no amount (no mapped lines and no operator
+    # total) would render an all-zero allocation table. Surface it as a blocking,
+    # ACTIONABLE issue naming the pool and both in-app fixes — never a silent $0.
+    empty_special_pool_issues = [
+        PreflightError(
+            field_path=f"allocation_pools.{pool.pool_key}.total",
+            message=(
+                f"Special assessment pool '{pool.pool_name}' has no amount. Enter a "
+                "total in Settings → Special Assessments, or map a budget line to it "
+                "in Assessment Mapping Review."
+            ),
+            severity="blocking",
+        )
+        for pool in pools
+        if pool.pool_kind == SPECIAL_ASSESSMENT_POOL_KIND
+        and pool_totals_annual.get(pool.pool_key, Decimal("0")) == 0
+    ]
+
     return build_universal_assessment_matrix(
         result,
         setup_type=effective_setup_type,
         hoa_name=hoa_name,
         fiscal_year=fiscal_year,
         pool_definitions=pools,
+        pending_review_issues=empty_special_pool_issues,
         source_pages=_source_pages_from_payload(payload),
         internal_review_notes=internal_review_notes,
         evidence_refs=[

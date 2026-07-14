@@ -202,6 +202,14 @@ class AllocationPoolBlock(BaseModel):
     # extracted field, instead of being a promoted-table-only column that
     # edits can never reach.
     variable_flag: bool = False
+    # Operator-set (v1) structural classifier for special assessments. Same
+    # rationale as variable_flag: lives on the domain block so the "mark this
+    # pool a special assessment" review edit reaches it and promotion writes it
+    # to allocation_pools.pool_kind. NEVER inferred from pool_name. NULL/""" =
+    # ordinary pool; the one recognized value is
+    # 'separately_billed_special_assessment'. (v2 may set it from extraction by
+    # meaning — a one-time/limited levy distinct from ongoing assessments.)
+    pool_kind: str = ""
 
 
 class FormulaBlock(BaseModel):

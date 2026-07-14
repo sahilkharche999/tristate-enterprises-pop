@@ -33,6 +33,33 @@ export interface SpecialAssessmentEntry {
     | 'residential_only'
     | 'commercial_only'
     | 'parking_users';
+  // Pool-based special assessments (add-variable-special-assessments): link this
+  // entry to a special-assessment pool by pool_key. `total_amount` is the
+  // operator-entered one-time total used when the pool has no mapped budget line;
+  // the engine allocates it across units by the pool's basis.
+  pool_key?: string;
+  total_amount?: number | null;
+}
+
+export interface SpecialAssessmentPool {
+  pool_key: string;
+  pool_name: string;
+  allocation_method: string;
+  recipient_scope: string;
+}
+
+export interface SpecialAssessmentAllocationRow {
+  recipient_label: string;
+  amount: number;
+}
+
+export interface SpecialAssessmentPreview {
+  available: boolean;
+  reason?: string;
+  pool_key?: string;
+  allocation_method?: string;
+  total?: number | null;
+  allocations?: SpecialAssessmentAllocationRow[];
 }
 
 export interface OutstandingLoan {
@@ -121,6 +148,29 @@ export async function putHOADisclosureSettings(
     body: JSON.stringify(payload),
   });
   return handleResponse<HOADisclosureSettings>(r);
+}
+
+export async function listSpecialAssessmentPools(
+  hoaId: number,
+): Promise<SpecialAssessmentPool[]> {
+  const r = await fetch(`${BASE_URL}/hoa/${hoaId}/assessment/special-pools`, {
+    headers: authHeaders(),
+  });
+  const data = await handleResponse<{ pools: SpecialAssessmentPool[] }>(r);
+  return data.pools || [];
+}
+
+export async function previewSpecialAssessment(
+  hoaId: number,
+  poolKey: string,
+  fiscalYear: number,
+): Promise<SpecialAssessmentPreview> {
+  const r = await fetch(`${BASE_URL}/hoa/${hoaId}/assessment/special-preview`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ pool_key: poolKey, fiscal_year: fiscalYear }),
+  });
+  return handleResponse<SpecialAssessmentPreview>(r);
 }
 
 export function hoaLogoUrl(hoaId: number): string {

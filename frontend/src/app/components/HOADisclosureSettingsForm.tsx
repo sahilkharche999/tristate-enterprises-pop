@@ -7,8 +7,12 @@ import {
   type OutstandingLoan,
   type ReserveFundingSource,
   type SpecialAssessmentEntry,
+  type SpecialAssessmentPool,
+  type SpecialAssessmentPreview,
   getHOADisclosureSettings,
   putHOADisclosureSettings,
+  listSpecialAssessmentPools,
+  previewSpecialAssessment,
 } from '../api/hoaSettings';
 import { HOALogoUploadControl } from './HOALogoUploadControl';
 import { Button } from './ui/button';
@@ -104,11 +108,19 @@ export const HOADisclosureSettingsForm = forwardRef<
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Special-assessment pools of the approved setup (add-variable-special-assessments):
+  // the operator links a §5570 row to one so its per-unit allocation comes from the
+  // pool's basis. `previews` holds the last fetched allocation table per pool_key.
+  const [specialPools, setSpecialPools] = useState<SpecialAssessmentPool[]>([]);
+  const [previews, setPreviews] = useState<Record<string, SpecialAssessmentPreview>>({});
 
   useEffect(() => {
     void getHOADisclosureSettings(hoaId)
       .then(setSettings)
       .catch((e) => setError(e instanceof Error ? e.message : String(e)));
+    void listSpecialAssessmentPools(hoaId)
+      .then(setSpecialPools)
+      .catch(() => setSpecialPools([]));
   }, [hoaId]);
 
   // Must be defined before early returns so hook call count is stable per render.
@@ -145,6 +157,25 @@ export const HOADisclosureSettingsForm = forwardRef<
     key: 'special_assessments_json' | 'additional_assessments_needed_json',
     next: SpecialAssessmentEntry[],
   ) => update(key, JSON.stringify(next));
+
+  const handlePreviewAllocation = async (poolKey: string) => {
+    // Preview reflects the SAVED total, so save first (the endpoint reads the
+    // persisted special_assessments_json), then fetch the allocation table.
+    await save();
+    try {
+      const preview = await previewSpecialAssessment(
+        hoaId,
+        poolKey,
+        new Date().getFullYear(),
+      );
+      setPreviews((prev) => ({ ...prev, [poolKey]: preview }));
+    } catch (e) {
+      setPreviews((prev) => ({
+        ...prev,
+        [poolKey]: { available: false, reason: e instanceof Error ? e.message : String(e) },
+      }));
+    }
+  };
 
   const scalarFields: Array<[keyof HOADisclosureSettings, string, 'text' | 'number' | 'textarea']> = [
     ['management_company', 'Management company name', 'text'],
@@ -265,6 +296,91 @@ export const HOADisclosureSettingsForm = forwardRef<
                 Remove
               </Button>
             </div>
+            {/* Pool-based special assessment (add-variable-special-assessments):
+                link this §5570 row to a special-assessment pool so its per-unit
+                allocation comes from the pool's basis (sqft / ownership / equal),
+                extracted from the DRE/CC&R. Enter a total when the pool has no
+                mapped budget line; "Preview allocation" shows the per-unit table. */}
+            {key === 'special_assessments_json' && specialPools.length > 0 ? (
+              <div className="mt-1 grid gap-2 sm:grid-cols-[2fr_1fr_auto] items-end bg-[#fafafa] border border-[#eee] rounded p-2">
+                <label className="block">
+                  <span className="block text-[10px] text-[#a3a3a3]">
+                    Link to special-assessment pool (basis from DRE/CC&amp;R)
+                  </span>
+                  <select
+                    value={row.pool_key || ''}
+                    onChange={(e) => {
+                      const next = [...rows];
+                      next[i] = { ...row, pool_key: e.target.value || undefined };
+                      updateList(key, next);
+                    }}
+                    className="w-full border border-[#d4d4d4] rounded px-2 py-1 text-sm"
+                  >
+                    <option value="">Not linked (flat per-unit / disclosure text)</option>
+                    {specialPools.map((p) => (
+                      <option key={p.pool_key} value={p.pool_key}>
+                        {p.pool_name} — {p.allocation_method}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="block">
+                  <span className="block text-[10px] text-[#a3a3a3]">Total amount ($)</span>
+                  <input
+                    type="number"
+                    step="0.01"
+                    placeholder="e.g. 120000.00"
+                    disabled={!row.pool_key}
+                    value={row.total_amount ?? ''}
+                    onChange={(e) => {
+                      const next = [...rows];
+                      next[i] = {
+                        ...row,
+                        total_amount: e.target.value === '' ? null : Number(e.target.value),
+                      };
+                      updateList(key, next);
+                    }}
+                    className="w-full border border-[#d4d4d4] rounded px-2 py-1 text-sm disabled:bg-[#f5f5f5]"
+                  />
+                </label>
+                <Button
+                  variant="outline"
+                  disabled={!row.pool_key}
+                  onClick={() => row.pool_key && void handlePreviewAllocation(row.pool_key)}
+                  className="text-xs"
+                >
+                  Preview allocation
+                </Button>
+                {row.pool_key && previews[row.pool_key] ? (
+                  <div className="sm:col-span-3 mt-1">
+                    {previews[row.pool_key].available ? (
+                      <table className="w-full text-xs border border-[#eee]">
+                        <thead>
+                          <tr className="text-[#737373]">
+                            <th className="text-left px-2 py-0.5">Unit</th>
+                            <th className="text-right px-2 py-0.5">Share</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {(previews[row.pool_key].allocations || []).map((a, k) => (
+                            <tr key={k}>
+                              <td className="px-2 py-0.5">{a.recipient_label}</td>
+                              <td className="px-2 py-0.5 text-right">
+                                ${a.amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    ) : (
+                      <p className="text-[11px] text-[#b45309]">
+                        {previews[row.pool_key].reason || 'No allocation available.'}
+                      </p>
+                    )}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
             {/* Phase 4.4 status + display-language fields per dre-driven-assessment-engine.
                 Status drives the cover-letter §5300 + §5570 wording branches.
                 Collapsed behind a disclosure toggle so the common case (amount +

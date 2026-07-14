@@ -1250,6 +1250,12 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
                   <th className="py-2 pr-4 text-right font-medium">Denominator</th>
                   <th className="py-2 pr-4 text-right font-medium">Annual</th>
                   <th className="py-2 pr-4 text-center font-medium">Variable</th>
+                  <th
+                    className="py-2 pr-4 text-center font-medium"
+                    title="Mark this pool a special assessment: it is billed separately (one-time), allocated by its basis, and shown in Settings → Special Assessments. Never inferred from the pool name."
+                  >
+                    Special?
+                  </th>
                   <th className="py-2 pr-4 text-right font-medium">Confidence</th>
                   <th className="py-2 text-right font-medium"></th>
                 </tr>
@@ -1361,6 +1367,29 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
                               className="ml-1 inline-flex items-center rounded-full bg-indigo-50 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-700 ring-1 ring-inset ring-indigo-600/20"
                             >
                               {editCountByPath[`allocation_pools[${i}].variable_flag`]}✎
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-2 pr-4 text-center">
+                          <input
+                            type="checkbox"
+                            aria-label={`special assessment flag for pool ${poolKey}`}
+                            defaultChecked={pool.pool_kind === 'separately_billed_special_assessment'}
+                            disabled={!reviewReady}
+                            onChange={(e) =>
+                              onSaveEdit(
+                                `allocation_pools[${i}].pool_kind`,
+                                pool.pool_kind || '',
+                                e.target.checked ? 'separately_billed_special_assessment' : '',
+                              )
+                            }
+                          />
+                          {Boolean(editCountByPath[`allocation_pools[${i}].pool_kind`]) && (
+                            <span
+                              title={`${editCountByPath[`allocation_pools[${i}].pool_kind`]} edit(s) — see Edit history below`}
+                              className="ml-1 inline-flex items-center rounded-full bg-indigo-50 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-700 ring-1 ring-inset ring-indigo-600/20"
+                            >
+                              {editCountByPath[`allocation_pools[${i}].pool_kind`]}✎
                             </span>
                           )}
                         </td>

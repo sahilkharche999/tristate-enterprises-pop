@@ -547,6 +547,17 @@ def _build_thirty_year_plan(
     for entry in special_assessments or []:
         year = entry.get("year")
         per_unit = entry.get("per_unit") or entry.get("amount_per_unit") or entry.get("amount")
+        # Pool-based special assessment (add-variable-special-assessments): carry
+        # its total into the forecast as total / units, so a total-only entry is
+        # not silently dropped to $0. Still requires a forecast ``year`` (the
+        # projection is year-indexed); a one-time special with no year stays a
+        # §5570 disclosure and does not enter the multi-year projection. Whether
+        # one-time specials should feed the forecast at all is client-gated.
+        if per_unit is None and entry.get("total_amount") is not None and hoa_metadata.units:
+            try:
+                per_unit = Decimal(str(entry.get("total_amount"))) / Decimal(hoa_metadata.units)
+            except (ArithmeticError, ValueError, TypeError):
+                per_unit = None
         if year is None or per_unit is None:
             continue
         offset = int(year) - fiscal_year_start
@@ -619,7 +630,47 @@ def _normalize_special_assessment_for_render(entry: dict[str, Any]) -> dict[str,
     normalized.setdefault("purpose", None)
     normalized.setdefault("frequency", None)
     normalized.setdefault("included_in_regular_monthly", False)
+    # Defaults for the pool-based fields (add-variable-special-assessments); the
+    # StrictUndefined templates read these unconditionally. Populated later for
+    # pool-linked entries by _apply_special_assessment_allocations.
+    normalized.setdefault("pool_key", entry.get("pool_key"))
+    normalized.setdefault("allocation_method", None)
+    normalized.setdefault("is_variable_allocation", False)
+    normalized.setdefault("total_amount", None)
+    normalized.setdefault("allocations", [])
     return normalized
+
+
+_VARIABLE_ALLOCATION_METHODS = {"square_footage", "ownership_percentage"}
+
+
+def _apply_special_assessment_allocations(
+    special_assessments: list[dict[str, Any]],
+    assessment_matrix: Any,
+) -> None:
+    """Carry each special-assessment pool's engine allocation (method, total,
+    per-recipient table) onto the matching settings render entry, joined by
+    ``pool_key``. A ``square_footage``/``ownership_percentage`` split is marked
+    ``is_variable_allocation`` so §5300/§5570 show the total + table rather than a
+    single per-unit figure. Mutates ``special_assessments`` in place."""
+    blocks = getattr(assessment_matrix, "special_assessment_blocks", None) or []
+    by_pool = {
+        b.pool_key: b for b in blocks if getattr(b, "pool_key", None)
+    }
+    if not by_pool:
+        return
+    for entry in special_assessments:
+        block = by_pool.get(entry.get("pool_key"))
+        if block is None:
+            continue
+        method = block.allocation_method
+        entry["allocation_method"] = method
+        entry["is_variable_allocation"] = method in _VARIABLE_ALLOCATION_METHODS
+        entry["total_amount"] = float(block.total) if block.total is not None else None
+        entry["allocations"] = [
+            {"recipient_label": row.recipient_label, "amount": float(row.amount)}
+            for row in block.allocations
+        ]
 
 
 def _compute_all(
@@ -828,6 +879,13 @@ def _compute_all(
         if not isinstance(entry, dict):
             continue
         special_assessments.append(_normalize_special_assessment_for_render(entry))
+    # Join pool-based special assessments (add-variable-special-assessments): for
+    # each settings entry linked to a special-assessment pool by pool_key, carry
+    # the engine's allocation method + total + per-unit table onto the render
+    # entry so §5300/§5570 can show "total + table" for a variable split instead
+    # of a single (false) per-unit figure. The numbers come from the pool once;
+    # the json entry supplies only metadata (due date, purpose).
+    _apply_special_assessment_allocations(special_assessments, assessment_matrix)
     additional_assessments_needed = _parse_json_list("additional_assessments_needed_json")
     outstanding_loan = _parse_json_object("outstanding_loan_json")
 

@@ -563,6 +563,17 @@ def infer_special_assessment_status(entry: dict) -> str:
 
     if numeric > 0:
         return "approved_scheduled"
+    # Pool-based special assessment (add-variable-special-assessments): a total
+    # amount and/or a pool link is a scheduled charge even without a per-unit
+    # figure (the amount lives on the pool, allocated by its basis).
+    total = entry.get("total_amount")
+    try:
+        if total is not None and float(total) > 0:
+            return "approved_scheduled"
+    except (TypeError, ValueError):
+        pass
+    if entry.get("pool_key"):
+        return "approved_scheduled"
     display = (entry.get("display_language") or "").strip()
     if display:
         return "possible_disclosure_only"
@@ -600,13 +611,21 @@ def check_special_assessments(
                 numeric = float(amount) if amount is not None else 0.0
             except (TypeError, ValueError):
                 numeric = 0.0
-            if numeric <= 0:
+            try:
+                total_amount = float(entry.get("total_amount")) if entry.get("total_amount") is not None else 0.0
+            except (TypeError, ValueError):
+                total_amount = 0.0
+            # A pool-linked special assessment's dollars live on the pool (mapped
+            # lines or an operator total) and are validated in the matrix builder,
+            # so a per-unit figure is not required here.
+            has_amount = numeric > 0 or total_amount > 0 or bool(entry.get("pool_key"))
+            if not has_amount:
                 out.append(
                     PreflightError(
                         field_path=f"special_assessments[{i}].amount_per_unit",
                         message=(
                             f"Special assessment {label!r} status='approved_scheduled' "
-                            "but amount_per_unit is missing or 0."
+                            "but has no amount_per_unit, total_amount, or pool link."
                         ),
                         severity="blocking",
                     )

@@ -590,6 +590,11 @@ _ALLOCATION_POOL_COLUMN_DEFINITIONS: dict[str, str] = {
     "escalation_schedule_json": "TEXT DEFAULT '[]'",
     "starting_monthly_per_unit": "REAL",
     "denominator_label": "TEXT",
+    # Added by add-variable-special-assessments: structural classifier so a
+    # special-assessment pool is recognized by a field, never by its
+    # AI-generated pool_name. NULL = ordinary pool. The one recognized value is
+    # 'separately_billed_special_assessment' (see _pool_is_visible hidden-kinds).
+    "pool_kind": "TEXT",
 }
 
 

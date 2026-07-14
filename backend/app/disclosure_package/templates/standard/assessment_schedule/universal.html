@@ -246,10 +246,20 @@
       <strong>{{ block.label }}:</strong>
       {% if block.display_language %}
         {{ block.display_language }}
+      {% elif block.total is not none %}
+        ${{ '{:,.2f}'.format(block.total) }} total{% if block.due_date %}, due {{ block.due_date }}{% endif %}{% if block.allocations %}, allocated per unit as shown below{% endif %}
       {% elif block.amount_per_unit is not none %}
         ${{ '{:,.2f}'.format(block.amount_per_unit) }}{% if block.due_date %}, due {{ block.due_date }}{% endif %}
       {% endif %}
     </p>
+    {% if block.allocations %}
+    <table class="assessment-table">
+      <tr><th>Unit</th><th>Special assessment share</th></tr>
+      {% for row in block.allocations %}
+      <tr><td>{{ row.recipient_label }}</td><td>${{ '{:,.2f}'.format(row.amount) }}</td></tr>
+      {% endfor %}
+    </table>
+    {% endif %}
   {% endfor %}
   {% endif %}
 

@@ -264,6 +264,33 @@ def approve_extraction_run(
     ).fetchone()
     prior_setup_id = prior_setup[0] if prior_setup else None
 
+    # Preserve the operator's special-assessment classification across a
+    # re-extraction: if this run's pools carry no pool_kind but a prior approved
+    # setup marked the same pool_key special, carry it forward so re-uploading a
+    # DRE doesn't silently drop it. (Same-run re-promotion already keeps it via
+    # the re-applied review edits above; this covers a fresh extraction run whose
+    # pool_keys still match.)
+    if extraction is not None and prior_setup_id is not None:
+        prior_pool_kinds = {
+            row[0]: row[1]
+            for row in connection.execute(
+                "SELECT pool_key, pool_kind FROM allocation_pools "
+                "WHERE assessment_setup_id = ? AND pool_kind IS NOT NULL",
+                (prior_setup_id,),
+            ).fetchall()
+        }
+        if prior_pool_kinds:
+            extraction = extraction.model_copy(
+                update={
+                    "allocation_pools": [
+                        pool.model_copy(update={"pool_kind": prior_pool_kinds[pool.pool_key]})
+                        if not pool.pool_kind and pool.pool_key in prior_pool_kinds
+                        else pool
+                        for pool in extraction.allocation_pools
+                    ]
+                }
+            )
+
     # Supersede any prior approved setup for this property
     connection.execute(
         "UPDATE assessment_setups SET status = 'superseded' "

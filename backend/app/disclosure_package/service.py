@@ -1147,6 +1147,91 @@ def run_render_job(
         session.close()
 
 
+def list_special_assessment_pools(
+    session: Session, *, hoa_id: int
+) -> list[dict[str, Any]]:
+    """Special-assessment pools of the HOA's approved setup (by ``pool_kind``),
+    for the Settings §5570 section. Resolves the approved setup the same way the
+    matrix builder does, so the ``pool_key`` set can't drift. Empty when there is
+    no approved setup or no special pools."""
+    raw_conn = session.connection().connection
+    setup = raw_conn.execute(
+        "SELECT id FROM assessment_setups "
+        "WHERE property_id = ? AND status = 'approved' ORDER BY id DESC LIMIT 1",
+        (hoa_id,),
+    ).fetchone()
+    if setup is None:
+        return []
+    rows = raw_conn.execute(
+        "SELECT pool_key, pool_name, allocation_method, recipient_scope "
+        "FROM allocation_pools WHERE assessment_setup_id = ? AND pool_kind = ? "
+        "ORDER BY display_order, id",
+        (setup[0], "separately_billed_special_assessment"),
+    ).fetchall()
+    return [
+        {
+            "pool_key": r[0],
+            "pool_name": r[1],
+            "allocation_method": r[2],
+            "recipient_scope": r[3],
+        }
+        for r in rows
+    ]
+
+
+def preview_special_assessment_allocation(
+    session: Session, *, hoa_id: int, fiscal_year: int, pool_key: str
+) -> dict[str, Any]:
+    """Per-unit allocation table for one special-assessment pool, computed by the
+    SAME matrix builder the disclosure render uses (no separate allocator, so the
+    preview can't diverge from the rendered package). Reflects the currently saved
+    special-assessment total. Returns ``{"available": False, "reason": ...}`` when
+    there is no approved setup / active draft, rather than raising."""
+    from .assessment_schedule_matrix import build_matrix_for_assessment_mode
+
+    try:
+        bundle = _resolve_preflight_inputs(session, hoa_id, fiscal_year)
+    except (CompileError, LookupError) as exc:
+        return {"available": False, "reason": str(exc)}
+
+    raw_conn = session.connection().connection
+    property_row = session.query(Property).filter(Property.id == hoa_id).one_or_none()
+    assessment_mode = normalize_assessment_mode(
+        getattr(property_row, "assessment_mode", None) if property_row else None
+    )
+    assessment_revenue = _assessment_revenue_for_budget_draft(bundle.budget_draft)
+
+    matrix = build_matrix_for_assessment_mode(
+        connection=raw_conn,
+        property_id=hoa_id,
+        fiscal_year=fiscal_year,
+        budget_draft=bundle.budget_draft,
+        hoa_name=bundle.hoa_metadata.name,
+        unit_count=bundle.hoa_metadata.units,
+        approved_assessment_revenue_annual=assessment_revenue,
+        assessment_mode=assessment_mode,
+    )
+    for block in matrix.special_assessment_blocks:
+        if getattr(block, "pool_key", None) == pool_key:
+            return {
+                "available": True,
+                "pool_key": pool_key,
+                "allocation_method": block.allocation_method,
+                "total": float(block.total) if block.total is not None else None,
+                "allocations": [
+                    {"recipient_label": row.recipient_label, "amount": float(row.amount)}
+                    for row in block.allocations
+                ],
+            }
+    return {
+        "available": False,
+        "reason": (
+            "No allocation for this pool yet — enter a total or map a budget line, "
+            "and make sure the DRE setup is approved."
+        ),
+    }
+
+
 __all__ = [
     "OLD_MILL_LEGAL_NAME",
     "SUPPORTED_HOA_NAMES",
@@ -1156,6 +1241,8 @@ __all__ = [
     "delete_appendix",
     "is_supported_hoa",
     "list_appendices",
+    "list_special_assessment_pools",
+    "preview_special_assessment_allocation",
     "run_preflight",
     "run_render_job",
     "save_appendix",

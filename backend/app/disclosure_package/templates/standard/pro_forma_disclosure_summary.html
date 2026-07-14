@@ -82,7 +82,19 @@
           {% for sa in _scheduled %}
           <tr>
             <td>{{ sa.due_date or '—' }}</td>
-            <td class="right">${{ '{:,.2f}'.format(sa.amount_per_unit|float) }}{% if sa.frequency %} per {{ sa.frequency }}{% endif %}</td>
+            {# A variable (by sqft / ownership) special assessment has no single
+               per-ownership-interest figure — show the total and point to the
+               allocation schedule. Equal / legacy entries keep a single figure.
+               Variable-case wording is client-gated; neutral default here. #}
+            <td class="right">
+              {% if sa.get('is_variable_allocation') and sa.get('total_amount') is not none %}
+                ${{ '{:,.2f}'.format(sa.get('total_amount')) }} total (see allocation schedule)
+              {% elif sa.get('total_amount') is not none %}
+                ${{ '{:,.2f}'.format(sa.get('total_amount')) }} total
+              {% else %}
+                ${{ '{:,.2f}'.format(sa.amount_per_unit|float) }}{% if sa.frequency %} per {{ sa.frequency }}{% endif %}
+              {% endif %}
+            </td>
             <td>{{ sa.purpose or sa.label or '—' }}</td>
           </tr>
           {% endfor %}

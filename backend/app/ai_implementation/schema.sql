@@ -431,6 +431,11 @@ CREATE TABLE IF NOT EXISTS allocation_pools (
     -- the deprecated hoa_settings columns of the same purpose.
     escalation_schedule_json     TEXT DEFAULT '[]',
     starting_monthly_per_unit    REAL,
+    -- Structural classifier (add-variable-special-assessments). NULL = ordinary
+    -- pool; 'separately_billed_special_assessment' = a special assessment the
+    -- engine allocates as a one-time total, out of monthly dues. Never inferred
+    -- from pool_name (which is AI-generated and varies per HOA).
+    pool_kind                    TEXT,
     UNIQUE (assessment_setup_id, pool_key)
 );
 

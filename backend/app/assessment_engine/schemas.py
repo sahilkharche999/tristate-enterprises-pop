@@ -51,6 +51,11 @@ class PoolDefinition(BaseModel):
     denominator_value: Optional[Decimal] = None
     include_in_pdf: bool = True
     display_order: int = 0
+    # Structural classifier (add-variable-special-assessments). None = ordinary
+    # pool; "separately_billed_special_assessment" = a special assessment the
+    # engine allocates as a one-time total and diverts out of monthly dues.
+    # Never derived from pool_name.
+    pool_kind: Optional[str] = None
 
 
 class RecipientSet(BaseModel):
@@ -277,6 +282,28 @@ class ZeroRecipientPoolReport(BaseModel):
     contributing_line_labels: list[str] = []
 
 
+class SpecialAssessmentAllocationEntry(BaseModel):
+    """One recipient's share of a special-assessment pool's total."""
+
+    recipient_ref: RecipientReference
+    amount: Decimal
+
+
+class SpecialAssessmentAllocation(BaseModel):
+    """A ``separately_billed_special_assessment`` pool's total allocated once
+    across recipients (a one-time lump — NOT annualized/÷12), by the pool's
+    basis. Produced by ``run()`` for special-kind pools and kept OUT of
+    ``recipient_totals`` / reconciliation (separately billed). The matrix maps
+    it into ``special_assessment_blocks`` for rendering.
+    """
+
+    pool_key: str
+    label: str
+    allocation_method: AllocationMethod
+    total: Decimal
+    entries: list[SpecialAssessmentAllocationEntry] = []
+
+
 class CalcResultSet(BaseModel):
     """Full engine output. Templates that need per-pool columns read
     ``pool_allocations``; templates that need bottom-line dues read
@@ -290,6 +317,10 @@ class CalcResultSet(BaseModel):
     pool_sum_annual: Decimal
     warnings: list[str] = []
     special_assessment_events: list[SpecialAssessmentRendererEvent] = []
+    # Pool-based special assessments (separately billed, allocated once).
+    # Empty on setups with no special-kind pool, so existing output is
+    # byte-unchanged.
+    special_assessment_allocations: list[SpecialAssessmentAllocation] = []
     applied_overrides: list[AppliedOverrideEntry] = []
     # Money-routing integrity reports (H1/H2). Empty on a clean run, so
     # output bytes are unchanged for setups with no routing issues.

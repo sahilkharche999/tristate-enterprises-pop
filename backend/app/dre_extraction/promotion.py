@@ -421,8 +421,9 @@ def _insert_pool(
             variable_flag, display_order, include_in_pdf,
             budget_line_derivation,
             residual_after_pool_keys_json,
-            residual_exclusions_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+            residual_exclusions_json,
+            pool_kind
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
         """,
         (
             setup_id, pool.pool_key, pool.pool_name or pool.pool_key,
@@ -435,6 +436,7 @@ def _insert_pool(
             pool.budget_line_derivation,
             json.dumps(pool.residual_after_pool_keys),
             json.dumps(pool.residual_exclusions),
+            pool.pool_kind or None,
         ),
     )
     return cur.lastrowid

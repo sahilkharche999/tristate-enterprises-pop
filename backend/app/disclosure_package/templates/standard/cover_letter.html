@@ -66,7 +66,20 @@ ${{ '{:,.2f}'.format(computed.monthly_assessment_per_unit_current) }}.
     <ul>
       {% for sa in scheduled %}
       <li>
-        <strong>{{ sa.label or 'Special assessment' }}</strong>: ${{ '{:,.2f}'.format(sa.amount_per_unit) }} per unit
+        {# Pool-based special assessments carry a total + allocation basis. A
+           variable (by sqft / ownership) split has no single per-unit figure, so
+           show the total and point to the allocation schedule; an equal split or
+           a legacy per-unit entry keeps a single figure. NOTE: exact §5300
+           wording for the variable case is client-gated — this is the neutral
+           default. #}
+        <strong>{{ sa.label or 'Special assessment' }}</strong>:
+        {% if sa.get('is_variable_allocation') and sa.get('total_amount') is not none %}
+          ${{ '{:,.2f}'.format(sa.get('total_amount')) }} total, allocated per the assessment schedule
+        {% elif sa.get('total_amount') is not none %}
+          ${{ '{:,.2f}'.format(sa.get('total_amount')) }} total, allocated equally across units
+        {% else %}
+          ${{ '{:,.2f}'.format(sa.amount_per_unit) }} per unit
+        {% endif %}
         {% if sa.due_date %}due {{ sa.due_date }}{% endif %}
         {% if sa.included_in_regular_monthly %}
           {% if assessments_vary %}
