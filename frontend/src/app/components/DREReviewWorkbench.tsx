@@ -843,6 +843,30 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
   const units = (
     (parsed.unit_structure as { units?: unknown[] })?.units || []
   ) as Array<Record<string, unknown>>;
+  // Ownership-% form ambiguity — mirrors the backend resolver
+  // (assessment_engine/percent_form.py::resolve_percent_divisor): the engine
+  // blocks rendering only when the column sums to neither ~1.0 (values written
+  // as decimals, 0.0347 = 3.47%) nor ~100 (values written as points, 3.47 =
+  // 3.47%) AND no value exceeds 1. Surface a confirm control ONLY in that exact
+  // case, so a normal HOA never sees it.
+  const ownershipForm = String(
+    (parsed.unit_structure as { ownership_percent_form?: unknown })
+      ?.ownership_percent_form || 'unknown',
+  );
+  const ownershipValues = units
+    .map((u) => Number((u as { ownership_percent?: unknown }).ownership_percent))
+    .filter((v) => Number.isFinite(v));
+  const ownershipSum = ownershipValues.reduce((a, b) => a + b, 0);
+  const ownershipFormNeedsDecision =
+    ownershipForm !== 'fraction' &&
+    ownershipForm !== 'points' &&
+    ownershipValues.length > 0 &&
+    !(ownershipSum >= 0.98 && ownershipSum <= 1.02) && // decimals band
+    !(ownershipSum >= 98 && ownershipSum <= 102) && // points band
+    !ownershipValues.some((v) => v > 1.02) && // any value > 1 ⇒ points
+    ownershipSum >= 0.98; // sum < 0.98 ⇒ decimals (sub-scope)
+  const ownershipFormEditCount =
+    editCountByPath['unit_structure.ownership_percent_form'] || 0;
   const formulas = (parsed.formulas || []) as Array<Record<string, unknown>>;
   const reserveSetup = (parsed.reserve_setup ?? null) as Record<string, unknown> | null;
   const recommendedSetup = (parsed.recommended_saved_setup ?? null) as
@@ -1587,6 +1611,61 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
               </tbody>
             </table>
           </div>
+        </section>
+      )}
+
+      {/* ── Ownership-% form decision (only when genuinely ambiguous) ── */}
+      {ownershipFormNeedsDecision && (
+        <section className="rounded-md border border-amber-300 bg-amber-50 p-4 shadow-sm">
+          <h2 className="text-sm font-semibold text-amber-900">
+            Confirm ownership % form
+          </h2>
+          <p className="mt-1 text-xs leading-relaxed text-amber-800">
+            These ownership percentages add up to{' '}
+            <span className="font-semibold tabular-nums">
+              {ownershipSum.toFixed(2)}
+            </span>
+            , which is neither ~1.0 (written as decimals, e.g. 0.0347 = 3.47%) nor
+            ~100 (written as points, e.g. 3.47 = 3.47%). The engine will not guess,
+            so confirm how to read them. This does not change any assessment math
+            when no pool allocates by ownership %.
+          </p>
+          {ownershipFormEditCount > 0 ? (
+            <p className="mt-2 text-xs font-medium text-amber-900">
+              ✓ Recorded. Re-promote (Approve) to apply it to the schedule.
+            </p>
+          ) : (
+            <div className="mt-2 flex flex-wrap gap-2">
+              <button
+                type="button"
+                disabled={!reviewReady}
+                onClick={() =>
+                  onSaveEdit(
+                    'unit_structure.ownership_percent_form',
+                    ownershipForm,
+                    'fraction',
+                  )
+                }
+                className="rounded border border-amber-400 bg-white px-3 py-1 text-xs font-medium text-amber-900 hover:bg-amber-100 disabled:opacity-50"
+              >
+                Decimals (0.0347 = 3.47%)
+              </button>
+              <button
+                type="button"
+                disabled={!reviewReady}
+                onClick={() =>
+                  onSaveEdit(
+                    'unit_structure.ownership_percent_form',
+                    ownershipForm,
+                    'points',
+                  )
+                }
+                className="rounded border border-amber-400 bg-white px-3 py-1 text-xs font-medium text-amber-900 hover:bg-amber-100 disabled:opacity-50"
+              >
+                Points (3.47 = 3.47%)
+              </button>
+            </div>
+          )}
         </section>
       )}
 

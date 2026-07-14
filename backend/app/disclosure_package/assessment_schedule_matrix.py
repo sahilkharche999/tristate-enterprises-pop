@@ -1904,6 +1904,40 @@ def _line_item_to_review_budget_line(item: Any) -> dict[str, Any]:
     }
 
 
+def _ownership_divisor_or_drop(
+    values: list[Optional[Decimal]],
+    *,
+    column_label: str,
+    forced_form: str,
+    ownership_used: bool,
+) -> tuple[Optional[Decimal], bool]:
+    """Resolve the ownership-% column's divisor, degrading gracefully when the
+    column is decorative.
+
+    Returns ``(divisor, drop_ownership)``.
+
+    - When a pool actually allocates by ownership percentage (``ownership_used``),
+      an ambiguous column still raises ``AmbiguousPercentColumn`` — the operator
+      MUST resolve it because homeowner dollars depend on it.
+    - When NO pool allocates by ownership (the column is display-only), an
+      ambiguous column returns ``(None, True)`` so the caller omits ownership from
+      the schedule with a review note, instead of hard-blocking the PDF over a
+      column that feeds no math. Clean/unambiguous columns are unaffected in both
+      cases.
+    """
+    try:
+        return (
+            resolve_percent_divisor(
+                values, column_label=column_label, forced_form=forced_form
+            ),
+            False,
+        )
+    except AmbiguousPercentColumn:
+        if ownership_used:
+            raise
+        return None, True
+
+
 def build_matrix_from_approved_assessment_setup(
     *,
     connection: sqlite3.Connection,
@@ -1993,6 +2027,16 @@ def build_matrix_from_approved_assessment_setup(
         (payload.get("unit_structure") or {}).get("ownership_percent_form")
         or "unknown"
     )
+    # Ownership % is load-bearing only when a pool actually allocates by it.
+    # When it is not, an ambiguous ownership column is decorative and must not
+    # hard-block the PDF — we drop the column instead (see
+    # _ownership_divisor_or_drop). Checked against the original pool definitions
+    # (before any specified_value rewrite), which is the conservative choice.
+    ownership_used = any(
+        str(_get(pool, "allocation_method", "")) == "ownership_percentage"
+        for pool in pools
+    )
+    ownership_dropped = False
     try:
         if setup_type == "fixed":
             recipients = [
@@ -2013,10 +2057,11 @@ def build_matrix_from_approved_assessment_setup(
             # C8: column-level form resolution — robust to legacy
             # verbatim-stored points rows (sum≈100 → ÷100) AND rows
             # normalized at promotion (sum≈1 → no-op). Never per-value.
-            divisor = resolve_percent_divisor(
+            divisor, ownership_dropped = _ownership_divisor_or_drop(
                 [_money(row[4]) if row[4] is not None else None for row in rows],
                 column_label="assessment_groups.ownership_percent",
                 forced_form=percent_form_decision,
+                ownership_used=ownership_used,
             )
             recipients = [
                 RecipientReference(
@@ -2025,7 +2070,7 @@ def build_matrix_from_approved_assessment_setup(
                     label=row[1],
                     unit_count=int(row[2] or 1),
                     square_feet=_money(row[3]) if row[3] is not None else None,
-                    ownership_percent=normalize_percent_value(
+                    ownership_percent=None if ownership_dropped else normalize_percent_value(
                         _money(row[4]) if row[4] is not None else None, divisor
                     ),
                 )
@@ -2042,10 +2087,11 @@ def build_matrix_from_approved_assessment_setup(
                 """,
                 (setup_id,),
             ).fetchall()
-            divisor = resolve_percent_divisor(
+            divisor, ownership_dropped = _ownership_divisor_or_drop(
                 [_money(row[3]) if row[3] is not None else None for row in rows],
                 column_label="assessment_units.ownership_percent",
                 forced_form=percent_form_decision,
+                ownership_used=ownership_used,
             )
             recipients = [
                 RecipientReference(
@@ -2053,7 +2099,7 @@ def build_matrix_from_approved_assessment_setup(
                     ref_id=row[0],
                     label=row[1],
                     square_feet=_money(row[2]) if row[2] is not None else None,
-                    ownership_percent=normalize_percent_value(
+                    ownership_percent=None if ownership_dropped else normalize_percent_value(
                         _money(row[3]) if row[3] is not None else None, divisor
                     ),
                     category=row[4],
@@ -2175,6 +2221,24 @@ def build_matrix_from_approved_assessment_setup(
         )
 
     internal_review_notes: list[ReviewNote] = []
+    if ownership_dropped:
+        # Not silent: the ownership column was omitted (ambiguous form, and no
+        # pool allocates by ownership) rather than blocking the PDF. Assessments
+        # are unaffected — they derive from unit count / square footage.
+        internal_review_notes.append(
+            ReviewNote(
+                message=(
+                    "Ownership-interest column omitted from the assessment schedule: "
+                    "its values could not be read unambiguously (e.g. a phased/merged "
+                    "association whose per-increment percentages total ~200%), and no "
+                    "pool allocates by ownership percentage. Assessment amounts are "
+                    "unchanged (based on unit count / square footage). Supply the "
+                    "merged ownership percentages in the Review Workbench if the "
+                    "column is required on the disclosure."
+                ),
+                severity="warning",
+            )
+        )
     budget_lines = [
         _line_to_engine_input(idx, line)
         for idx, line in enumerate(_get(budget_draft, "line_items", []) or [], start=1)
