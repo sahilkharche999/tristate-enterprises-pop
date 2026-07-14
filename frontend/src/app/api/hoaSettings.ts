@@ -39,6 +39,10 @@ export interface SpecialAssessmentEntry {
   // the engine allocates it across units by the pool's basis.
   pool_key?: string;
   total_amount?: number | null;
+  // Manual (pool-free) variable special assessment: the operator picks how the
+  // total is split across the HOA's existing units. When set (and no pool_key),
+  // the backend allocates directly from the approved setup's per-unit data.
+  allocation_basis?: 'equal' | 'square_footage' | 'ownership_percentage';
 }
 
 export interface SpecialAssessmentPool {

@@ -296,41 +296,74 @@ export const HOADisclosureSettingsForm = forwardRef<
                 Remove
               </Button>
             </div>
-            {/* Pool-based special assessment (add-variable-special-assessments):
-                link this §5570 row to a special-assessment pool so its per-unit
-                allocation comes from the pool's basis (sqft / ownership / equal),
-                extracted from the DRE/CC&R. Enter a total when the pool has no
-                mapped budget line; "Preview allocation" shows the per-unit table. */}
-            {key === 'special_assessments_json' && specialPools.length > 0 ? (
-              <div className="mt-1 grid gap-2 sm:grid-cols-[2fr_1fr_auto] items-end bg-[#fafafa] border border-[#eee] rounded p-2">
-                <label className="block">
-                  <span className="block text-[10px] text-[#a3a3a3]">
-                    Link to special-assessment pool (basis from DRE/CC&amp;R)
-                  </span>
-                  <select
-                    value={row.pool_key || ''}
-                    onChange={(e) => {
-                      const next = [...rows];
-                      next[i] = { ...row, pool_key: e.target.value || undefined };
-                      updateList(key, next);
-                    }}
-                    className="w-full border border-[#d4d4d4] rounded px-2 py-1 text-sm"
-                  >
-                    <option value="">Not linked (flat per-unit / disclosure text)</option>
-                    {specialPools.map((p) => (
-                      <option key={p.pool_key} value={p.pool_key}>
-                        {p.pool_name} — {p.allocation_method}
-                      </option>
-                    ))}
-                  </select>
-                </label>
+            {/* Variable special assessment (add-variable-special-assessments):
+                enter a TOTAL and choose how to split it across the HOA's existing
+                units — Equal / Square footage / Ownership %. No pool needed; the
+                backend allocates from the approved setup's per-unit data. Advanced:
+                if the DRE/CC&R defined a special-assessment pool, link to it
+                instead. "Preview allocation" shows the per-unit table. */}
+            {key === 'special_assessments_json' ? (() => {
+              const previewKey = row.pool_key
+                || (row.allocation_basis ? `manual:${i}` : '');
+              const canAllocate = Boolean(row.pool_key || row.allocation_basis);
+              const preview = previewKey ? previews[previewKey] : undefined;
+              return (
+              <div className="mt-1 flex flex-wrap items-end gap-2 bg-[#fafafa] border border-[#eee] rounded p-2">
+                {!row.pool_key ? (
+                  <label className="block">
+                    <span className="block text-[10px] text-[#a3a3a3]">Allocate total by</span>
+                    <select
+                      value={row.allocation_basis || ''}
+                      onChange={(e) => {
+                        const next = [...rows];
+                        const v = e.target.value;
+                        next[i] = {
+                          ...row,
+                          allocation_basis: v
+                            ? (v as 'equal' | 'square_footage' | 'ownership_percentage')
+                            : undefined,
+                        };
+                        updateList(key, next);
+                      }}
+                      className="border border-[#d4d4d4] rounded px-2 py-1 text-sm"
+                    >
+                      <option value="">Flat per-unit (amount above)</option>
+                      <option value="equal">Equal (total ÷ units)</option>
+                      <option value="square_footage">Square footage</option>
+                      <option value="ownership_percentage">Ownership %</option>
+                    </select>
+                  </label>
+                ) : null}
+                {specialPools.length > 0 && !row.allocation_basis ? (
+                  <label className="block">
+                    <span className="block text-[10px] text-[#a3a3a3]">
+                      Or link a special-assessment pool (DRE/CC&amp;R)
+                    </span>
+                    <select
+                      value={row.pool_key || ''}
+                      onChange={(e) => {
+                        const next = [...rows];
+                        next[i] = { ...row, pool_key: e.target.value || undefined };
+                        updateList(key, next);
+                      }}
+                      className="border border-[#d4d4d4] rounded px-2 py-1 text-sm"
+                    >
+                      <option value="">Not linked</option>
+                      {specialPools.map((p) => (
+                        <option key={p.pool_key} value={p.pool_key}>
+                          {p.pool_name} — {p.allocation_method}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : null}
                 <label className="block">
                   <span className="block text-[10px] text-[#a3a3a3]">Total amount ($)</span>
                   <input
                     type="number"
                     step="0.01"
                     placeholder="e.g. 120000.00"
-                    disabled={!row.pool_key}
+                    disabled={!canAllocate}
                     value={row.total_amount ?? ''}
                     onChange={(e) => {
                       const next = [...rows];
@@ -340,20 +373,20 @@ export const HOADisclosureSettingsForm = forwardRef<
                       };
                       updateList(key, next);
                     }}
-                    className="w-full border border-[#d4d4d4] rounded px-2 py-1 text-sm disabled:bg-[#f5f5f5]"
+                    className="border border-[#d4d4d4] rounded px-2 py-1 text-sm disabled:bg-[#f5f5f5]"
                   />
                 </label>
                 <Button
                   variant="outline"
-                  disabled={!row.pool_key}
-                  onClick={() => row.pool_key && void handlePreviewAllocation(row.pool_key)}
+                  disabled={!canAllocate || !previewKey}
+                  onClick={() => previewKey && void handlePreviewAllocation(previewKey)}
                   className="text-xs"
                 >
                   Preview allocation
                 </Button>
-                {row.pool_key && previews[row.pool_key] ? (
-                  <div className="sm:col-span-3 mt-1">
-                    {previews[row.pool_key].available ? (
+                {preview ? (
+                  <div className="w-full mt-1">
+                    {preview.available ? (
                       <table className="w-full text-xs border border-[#eee]">
                         <thead>
                           <tr className="text-[#737373]">
@@ -362,7 +395,7 @@ export const HOADisclosureSettingsForm = forwardRef<
                           </tr>
                         </thead>
                         <tbody>
-                          {(previews[row.pool_key].allocations || []).map((a, k) => (
+                          {(preview.allocations || []).map((a, k) => (
                             <tr key={k}>
                               <td className="px-2 py-0.5">{a.recipient_label}</td>
                               <td className="px-2 py-0.5 text-right">
@@ -374,13 +407,14 @@ export const HOADisclosureSettingsForm = forwardRef<
                       </table>
                     ) : (
                       <p className="text-[11px] text-[#b45309]">
-                        {previews[row.pool_key].reason || 'No allocation available.'}
+                        {preview.reason || 'No allocation available.'}
                       </p>
                     )}
                   </div>
                 ) : null}
               </div>
-            ) : null}
+              );
+            })() : null}
             {/* Phase 4.4 status + display-language fields per dre-driven-assessment-engine.
                 Status drives the cover-letter §5300 + §5570 wording branches.
                 Collapsed behind a disclosure toggle so the common case (amount +

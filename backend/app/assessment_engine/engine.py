@@ -255,6 +255,7 @@ def _allocate_special_assessment(
     *,
     scope: str = "",
     label: str = "",
+    denominator: Optional[Decimal] = None,
 ) -> tuple[dict[tuple[str, int], Decimal], list[str]]:
     """Allocate a special-assessment ``total`` across ``recipients`` by
     ``method`` (borrowed from ``pool``), reusing the same allocation functions
@@ -263,17 +264,22 @@ def _allocate_special_assessment(
     summation time.
 
     Shared by the settings-json path (``_apply_special_assessments``, where
-    ``total`` is a monthly figure) and the pool-based path (``run()``, where
-    ``total`` is a one-time lump). The caller decides the meaning of ``total``;
-    this helper never divides by 12.
+    ``total`` is a monthly figure), the pool-based path (``run()``, where
+    ``total`` is a one-time lump), and the manual path (matrix builder), which
+    passes an explicit ``denominator`` so square_footage works WITHOUT a pool.
+    The caller decides the meaning of ``total``; this helper never divides by 12.
     """
     warnings: list[str] = []
     result: dict[tuple[str, int], Decimal] = {}
     total_units = sum((r.unit_count for r in recipients), start=0)
 
-    if method == "square_footage" and pool is not None and pool.denominator_value is not None:
+    # sqft denominator: explicit (manual path) wins, else the pool's frozen value.
+    sqft_denominator = denominator if denominator is not None else (
+        pool.denominator_value if pool is not None else None
+    )
+    if method == "square_footage" and sqft_denominator is not None:
         per_unit_within_group = square_footage_allocation(
-            total, pool.denominator_value, recipients
+            total, sqft_denominator, recipients
         )
         for r in recipients:
             result[(r.ref_type, r.ref_id)] = (

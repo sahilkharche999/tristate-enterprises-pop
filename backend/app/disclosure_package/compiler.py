@@ -85,6 +85,7 @@ from .reconciliation import (
 from .assessment_schedule_matrix import (
     AssessmentScheduleMatrix,
     build_universal_assessment_matrix,
+    manual_special_key,
 )
 from .schemas import (
     BudgetDraft,
@@ -648,19 +649,26 @@ def _apply_special_assessment_allocations(
     special_assessments: list[dict[str, Any]],
     assessment_matrix: Any,
 ) -> None:
-    """Carry each special-assessment pool's engine allocation (method, total,
-    per-recipient table) onto the matching settings render entry, joined by
-    ``pool_key``. A ``square_footage``/``ownership_percentage`` split is marked
+    """Carry each special-assessment engine allocation (method, total,
+    per-recipient table) onto the matching settings render entry. A pool-linked
+    entry joins by ``pool_key``; a MANUAL entry (no pool_key) joins by its index
+    via ``manual_special_key(i)`` — the same key the matrix builder assigned. A
+    ``square_footage``/``ownership_percentage`` split is marked
     ``is_variable_allocation`` so §5300/§5570 show the total + table rather than a
-    single per-unit figure. Mutates ``special_assessments`` in place."""
+    single per-unit figure. Mutates ``special_assessments`` in place.
+
+    Index alignment: both this list and the matrix builder iterate the dict
+    entries of ``special_assessments_json`` in order, so entry ``i`` here maps to
+    ``manual:{i}`` there."""
     blocks = getattr(assessment_matrix, "special_assessment_blocks", None) or []
     by_pool = {
         b.pool_key: b for b in blocks if getattr(b, "pool_key", None)
     }
     if not by_pool:
         return
-    for entry in special_assessments:
-        block = by_pool.get(entry.get("pool_key"))
+    for i, entry in enumerate(special_assessments):
+        key = entry.get("pool_key") or manual_special_key(i)
+        block = by_pool.get(key)
         if block is None:
             continue
         method = block.allocation_method

@@ -33,7 +33,14 @@ from app.assessment_engine import (
 )
 from app.assessment_engine.engine import (
     SPECIAL_ASSESSMENT_POOL_KIND,
+    _allocate_special_assessment,
     run as run_assessment_engine,
+)
+from app.assessment_engine.pools import OWNERSHIP_PERCENT_TOLERANCE
+from app.assessment_engine.recipients import resolve_recipients
+from app.assessment_engine.schemas import (
+    SpecialAssessmentAllocation,
+    SpecialAssessmentAllocationEntry,
 )
 from app.assessment_engine.errors import EngineSetupError, NeedsHumanReview
 from app.assessment_engine.percent_form import (
@@ -1795,6 +1802,141 @@ def _special_assessment_operator_totals(
     return totals
 
 
+def manual_special_key(index: int) -> str:
+    """Stable synthetic pool_key for a MANUAL (pool-free) special-assessment
+    entry, by its index in ``special_assessments_json``. Shared with the compiler
+    join (``compiler._apply_special_assessment_allocations``). Cannot collide with
+    a real pool_key (``manual:`` prefix)."""
+    return f"manual:{index}"
+
+
+def _special_assessments_json_entries(
+    connection: sqlite3.Connection, property_id: int
+) -> list[dict]:
+    """Raw ``special_assessments_json`` entries (list of dicts). Tolerant of a
+    missing table/column and malformed JSON (returns [])."""
+    try:
+        row = connection.execute(
+            "SELECT special_assessments_json FROM hoa_settings WHERE property_id = ?",
+            (property_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return []
+    if not row or not row[0]:
+        return []
+    try:
+        entries = json.loads(row[0])
+    except (TypeError, ValueError):
+        return []
+    return [e for e in entries if isinstance(e, dict)] if isinstance(entries, list) else []
+
+
+_MANUAL_SPECIAL_BASES = {"equal", "square_footage", "ownership_percentage"}
+
+
+def _manual_special_assessment_allocations(
+    entries: list[dict],
+    recipients: list[RecipientReference],
+) -> tuple[list[SpecialAssessmentAllocation], list[PreflightError]]:
+    """Allocate each MANUAL special-assessment entry (``total_amount`` +
+    ``allocation_basis``, NO ``pool_key``) across the HOA's existing recipients by
+    the chosen basis, reusing the engine's pool-free allocation primitive. Returns
+    the allocations plus blocking preflight issues.
+
+    One-time only: renders as a separate §5570 allocation table, NOT folded into
+    monthly dues (``included_in_regular_monthly`` is ignored for manual entries).
+
+    Basis-data guards BLOCK (never raise, never render a table that doesn't sum to
+    its total). They fire ONLY because the operator chose that basis for THIS
+    assessment — i.e. ownership-drift is flagged only when using ownership % is
+    compulsory (operator-selected) — so general rendering is unaffected.
+    """
+    allocations: list[SpecialAssessmentAllocation] = []
+    issues: list[PreflightError] = []
+    for i, entry in enumerate(entries):
+        if entry.get("pool_key"):
+            continue  # pool-linked entries use the synthetic-line path
+        basis = str(entry.get("allocation_basis") or "").strip()
+        raw_total = entry.get("total_amount")
+        if basis not in _MANUAL_SPECIAL_BASES or raw_total in (None, ""):
+            continue
+        try:
+            total = Decimal(str(raw_total))
+        except (InvalidOperation, TypeError, ValueError):
+            continue
+        if total <= 0:
+            continue
+
+        label = str(entry.get("label") or entry.get("purpose") or "Special Assessment")
+        scope = str(entry.get("recipient_scope") or "all_units")
+        scoped = resolve_recipients(
+            RecipientSet(recipients=recipients), scope,
+            custom_unit_ids=entry.get("custom_unit_ids") or None,
+        )
+        if not scoped:
+            continue
+
+        field = f"special_assessments[{i}].allocation_basis"
+        if basis == "square_footage" and any(r.square_feet is None for r in scoped):
+            issues.append(PreflightError(
+                field_path=field, severity="blocking",
+                message=(
+                    f"Special assessment {label!r} is set to allocate by square "
+                    "footage, but this HOA has no per-unit square footage. Choose "
+                    "Equal or Ownership %, or add square footage in DRE Review."
+                ),
+            ))
+            continue
+        if basis == "ownership_percentage":
+            if any(r.ownership_percent is None for r in scoped):
+                issues.append(PreflightError(
+                    field_path=field, severity="blocking",
+                    message=(
+                        f"Special assessment {label!r} is set to allocate by "
+                        "ownership %, but this HOA's ownership percentages are not "
+                        "usable (missing or ambiguous). Choose Equal, or fix the "
+                        "ownership roster in DRE Review."
+                    ),
+                ))
+                continue
+            pct_sum = sum((r.ownership_percent for r in scoped), start=Decimal("0"))
+            if abs(pct_sum - Decimal("1")) > OWNERSHIP_PERCENT_TOLERANCE:
+                issues.append(PreflightError(
+                    field_path=field, severity="blocking",
+                    message=(
+                        f"Special assessment {label!r} allocates by ownership %, but "
+                        f"the ownership percentages sum to {pct_sum}, not 100% — the "
+                        "per-unit amounts would not add up to the total. Fix the "
+                        "ownership roster or choose a different basis."
+                    ),
+                ))
+                continue
+
+        denominator = None
+        if basis == "square_footage":
+            denominator = sum(
+                ((r.square_feet or Decimal("0")) * Decimal(r.unit_count) for r in scoped),
+                start=Decimal("0"),
+            )
+        shares, _warnings = _allocate_special_assessment(
+            total, scoped, pool=None, method=basis,
+            scope=scope, label=label, denominator=denominator,
+        )
+        allocations.append(SpecialAssessmentAllocation(
+            pool_key=manual_special_key(i),
+            label=label,
+            allocation_method=basis,
+            total=total,
+            entries=[
+                SpecialAssessmentAllocationEntry(
+                    recipient_ref=r, amount=shares[(r.ref_type, r.ref_id)],
+                )
+                for r in scoped
+            ],
+        ))
+    return allocations, issues
+
+
 def _synthetic_special_assessment_lines(
     *,
     pools: list[PoolDefinition],
@@ -2404,13 +2546,23 @@ def build_matrix_from_approved_assessment_setup(
         and pool_totals_annual.get(pool.pool_key, Decimal("0")) == 0
     ]
 
+    # Manual (pool-free) special assessments: allocate an operator-entered total
+    # across the HOA's existing units by the chosen basis, and surface them via the
+    # same allocation-block channel as pool-based specials. Any basis-data guard
+    # failures become blocking, actionable issues (never a silent wrong table).
+    manual_allocs, manual_issues = _manual_special_assessment_allocations(
+        _special_assessments_json_entries(connection, property_id),
+        recipients,
+    )
+    result.special_assessment_allocations.extend(manual_allocs)
+
     return build_universal_assessment_matrix(
         result,
         setup_type=effective_setup_type,
         hoa_name=hoa_name,
         fiscal_year=fiscal_year,
         pool_definitions=pools,
-        pending_review_issues=empty_special_pool_issues,
+        pending_review_issues=empty_special_pool_issues + manual_issues,
         source_pages=_source_pages_from_payload(payload),
         internal_review_notes=internal_review_notes,
         evidence_refs=[
