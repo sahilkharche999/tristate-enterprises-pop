@@ -337,9 +337,11 @@ For each pool, derive:
     * custom_factor: DRE uses a custom factor or denominator
       that doesn't match any of the above methods.
     * unknown: method is visible but unclear and needs review.
-- recipient_scope: who pays this pool. Free-text values like
-  all_units, residential_units, commercial_units, parking_units,
-  specific_groups, or custom are all acceptable.
+- recipient_scope: who pays this pool. Use EXACTLY one of these
+  values (pick by meaning, do not invent variants): all_units,
+  residential_only, commercial_only, parking_users, custom_unit_list.
+  (e.g. a commercial-only pool is commercial_only — not
+  commercial_units; a parking pool is parking_users.)
 - denominator_value + denominator_label: the divisor used to split
   the pool. Use the DRE-stated value verbatim.
 
