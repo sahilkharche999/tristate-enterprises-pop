@@ -64,6 +64,14 @@ _REVIEWABLE_ROW_ROLES = {
     "pass_through_or_reimbursement",
     "unknown_needs_review",
 }
+# Reserve component/cashflow lines default to a "Reserve Detail" disposition in
+# the review so the operator isn't forced to click through each one (the reserve
+# contribution line is deliberately excluded — it is a single operating line, not
+# part of that click-through burden).
+_RESERVE_REVIEW_ROW_ROLES = {
+    "reserve_component_detail",
+    "reserve_cashflow_detail",
+}
 _REVIEW_ROW_ROLE_REASONS = {
     _REGULAR_REVIEW_ROW_ROLE: "eligible current-year operating budget line",
     "current_year_reserve_contribution_line": "current-year reserve contribution line",
@@ -1311,6 +1319,16 @@ def build_assessment_mapping_review_rows(
         )
         candidates: list[LineReviewCandidate] = []
         status = "mapped" if mapped else "needs_disposition"
+        if (
+            not mapped
+            and disposition_state == "clear"
+            and row_role in _RESERVE_REVIEW_ROW_ROLES
+        ):
+            # Reserve lines default to "Reserve Detail" so the operator isn't
+            # forced to click through every reserve component. Display-only —
+            # an explicit disposition below (pending_split/excluded/etc.) still
+            # wins, and reserve lines are already outside the regular basis.
+            status = "reserve_detail"
         if disposition_state == "pending_split":
             status = "pending_split"
         elif disposition_state == "excluded_non_regular":

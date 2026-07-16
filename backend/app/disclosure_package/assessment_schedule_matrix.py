@@ -1656,6 +1656,124 @@ def _generated_revenue_split_by_dre_pool_proportions(
     return budget_lines, mappings
 
 
+def _rebase_component_dollars_to_assessment_revenue(
+    *,
+    budget_lines: list[BudgetLineInput],
+    mappings: list[BudgetLineMappingInput],
+    pools: list[PoolDefinition],
+    approved_assessment_revenue_annual: Decimal,
+) -> tuple[list[BudgetLineInput], list[BudgetLineMappingInput]] | None:
+    """Rescale the regular (non-special) pool component dollars so they sum to
+    the approved Assessment Income, preserving the DRE pool split.
+
+    The per-unit assessment schedule is driven by the Assessment Income line, not
+    by the sum of mapped operating expenses (client requirement, July 2026): a
+    10% change to Assessment Income moves every unit 10%, and expense edits do
+    not move the schedule. The split across pools/units (ownership %, sqft,
+    equal) is unchanged — only the level is rebased, by one global factor.
+
+    Special-assessment pools are left untouched (separately billed). Returns
+    ``None`` — keep today's expense-sum behavior — when there is no positive
+    Assessment Income or no positive regular basis to scale.
+    """
+    if approved_assessment_revenue_annual <= Decimal("0"):
+        return None
+
+    visible_regular_keys = {
+        pool.pool_key for pool in pools if _pool_is_visible(pool)
+    }
+    if not visible_regular_keys:
+        return None
+
+    pool_totals = _pool_totals_annual_for_mappings(
+        budget_lines=budget_lines, mappings=mappings,
+    )
+    regular_totals = {
+        key: amount
+        for key, amount in pool_totals.items()
+        if key in visible_regular_keys and amount > Decimal("0")
+    }
+    current_sum = sum(regular_totals.values(), start=Decimal("0"))
+    if current_sum <= Decimal("0"):
+        return None
+
+    routing = {
+        (
+            mapping.budget_line_normalized_label,
+            mapping.section,
+            mapping.category,
+            mapping.fund_type,
+            mapping.account_code,
+        ): mapping.pool_key
+        for mapping in mappings
+        if mapping.active
+    }
+
+    def _line_pool_key(line: BudgetLineInput) -> Optional[str]:
+        return routing.get(
+            (
+                line.normalized_label,
+                line.section,
+                line.category,
+                line.fund_type,
+                line.account_code,
+            )
+        )
+
+    # Keep every line/mapping that does NOT route to a rescaled regular pool
+    # (special-assessment pools, hidden pools, unmapped lines) verbatim.
+    kept_lines = [
+        line for line in budget_lines if _line_pool_key(line) not in regular_totals
+    ]
+    kept_mappings = [
+        mapping for mapping in mappings if mapping.pool_key not in regular_totals
+    ]
+
+    display_order_by_key = {pool.pool_key: pool.display_order for pool in pools}
+    ordered_keys = sorted(
+        regular_totals,
+        key=lambda key: (display_order_by_key.get(key, 0), key),
+    )
+    synthetic_lines: list[BudgetLineInput] = []
+    synthetic_mappings: list[BudgetLineMappingInput] = []
+    start_line_id = max((line.line_id for line in kept_lines), default=0) + 1
+    remaining = approved_assessment_revenue_annual
+    for idx, key in enumerate(ordered_keys):
+        if idx == len(ordered_keys) - 1:
+            amount = remaining
+        else:
+            amount = (
+                approved_assessment_revenue_annual
+                * regular_totals[key]
+                / current_sum
+            ).quantize(Decimal("0.01"))
+            remaining -= amount
+        label = f"assessment_revenue_component:{key}"
+        synthetic_lines.append(
+            BudgetLineInput(
+                line_id=start_line_id + idx,
+                normalized_label=label,
+                section="income",
+                category="income",
+                fund_type="operating",
+                account_code=None,
+                amount=amount,
+            )
+        )
+        synthetic_mappings.append(
+            BudgetLineMappingInput(
+                budget_line_normalized_label=label,
+                section="income",
+                category="income",
+                fund_type="operating",
+                account_code=None,
+                pool_key=key,
+            )
+        )
+
+    return kept_lines + synthetic_lines, kept_mappings + synthetic_mappings
+
+
 def _per_unit_factor_value_lookup_from_payload(
     *,
     payload: dict[str, Any],
@@ -2424,6 +2542,28 @@ def build_matrix_from_approved_assessment_setup(
                 severity="warning",
             )
         )
+    else:
+        # The homeowner schedule is driven by the Assessment Income line, not the
+        # sum of mapped operating expenses: rebase the regular pool dollars to
+        # Assessment Income while preserving the DRE pool/unit split. No income
+        # line (or no assessable basis) → keep today's expense-sum behavior.
+        rebased = _rebase_component_dollars_to_assessment_revenue(
+            budget_lines=budget_lines,
+            mappings=mappings,
+            pools=pools,
+            approved_assessment_revenue_annual=approved_assessment_revenue_annual,
+        )
+        if rebased is not None:
+            budget_lines, mappings = rebased
+            internal_review_notes.append(
+                ReviewNote(
+                    message=(
+                        "Component dollars scaled to approved Assessment Income; "
+                        "DRE pool split preserved."
+                    ),
+                    severity="info",
+                )
+            )
 
     # Operator-entered totals for special-assessment pools with no mapped budget
     # lines: fed as synthetic lines so the engine aggregates them (the engine
