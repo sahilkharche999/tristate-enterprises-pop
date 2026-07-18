@@ -365,6 +365,8 @@ def _build_context() -> dict[str, Any]:
         "toc_page_numbers": {},
         "appendix_toc_entries": [],
         "hoa_logo_data_uri": None,
+        # hoa-boilerplate-workbench: cover_letter.html reads boilerplate.*
+        "boilerplate": {"cover_letter_body": None},
         **_minimal_computed_context(),
     }
 
@@ -901,7 +903,9 @@ def test_deny_url_fetcher_permits_data_uri():
     from app.disclosure_package.render import _deny_url_fetcher
 
     result = _deny_url_fetcher("data:text/plain;base64,SGVsbG8=")
-    assert result.read() == b"Hello"
+    # WeasyPrint's default_url_fetcher returns the standard dict shape; the
+    # decoded payload is exposed through the readable ``file_obj`` stream.
+    assert result["file_obj"].read() == b"Hello"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

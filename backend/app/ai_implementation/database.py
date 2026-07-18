@@ -144,6 +144,10 @@ _HOA_SETTINGS_COLUMN_DEFINITIONS: dict[str, str] = {
     # BUDGET_STORAGE_ROOT/hoa-logos/, not an absolute path (mirrors how
     # budget/DRE uploads are stored — see budget_storage_service.py).
     "logo_filename": "TEXT",
+    # Per-HOA package language overrides + workbench reference PDF
+    # (hoa-boilerplate-workbench).
+    "boilerplate_overrides_json": "TEXT",
+    "boilerplate_reference_filename": "TEXT",
 }
 
 

@@ -570,6 +570,9 @@ class _PreflightInputBundle:
     reserve_snapshot: Any
     hoa_metadata: Any
     overrides: dict
+    # Per-HOA package language slots (hoa-boilerplate-workbench). Always a
+    # full registry dict (values str|None) so Jinja StrictUndefined is safe.
+    boilerplate_overrides: dict
 
 
 def _resolve_preflight_inputs(
@@ -661,12 +664,19 @@ def _resolve_preflight_inputs(
     pool_overlay = _resolve_pool_forecast_overlay(session=session, property_id=hoa_id)
     overrides.update(pool_overlay)
 
+    from ..services import hoa_boilerplate as hoa_boilerplate_module
+
+    boilerplate_overrides = hoa_boilerplate_module.resolved_for_compile(
+        getattr(settings_row, "boilerplate_overrides_json", None)
+    )
+
     return _PreflightInputBundle(
         spec=spec.model_copy(update={"hoa_id": hoa_id, "fiscal_year": fiscal_year}),
         budget_draft=budget_draft,
         reserve_snapshot=reserve_snapshot,
         hoa_metadata=hoa_metadata,
         overrides=overrides,
+        boilerplate_overrides=boilerplate_overrides,
     )
 
 
@@ -851,6 +861,7 @@ def assemble_finalize_snapshots(
             "assessment_matrix": assessment_matrix.model_dump(mode="json"),
             "hoa_metadata": bundle.hoa_metadata.model_dump(mode="json"),
             "hoa_settings_overrides": bundle.overrides,
+            "boilerplate_overrides": bundle.boilerplate_overrides,
             "assessment_revenue_annual": str(assessment_revenue),
             "assessment_mode": assessment_mode,
         },
@@ -962,6 +973,14 @@ def run_render_job(
             reserve_snapshot = ReserveStudySnapshot.model_validate(snaps["reserve"])
             hoa_metadata = HOAMetadata.model_validate(context["hoa_metadata"])
             overrides = dict(context.get("hoa_settings_overrides") or {})
+            from ..services import hoa_boilerplate as hoa_boilerplate_module
+
+            # Frozen boilerplate only — never re-read live HOASettings for these slots.
+            boilerplate_overrides = hoa_boilerplate_module.for_render(
+                use_snapshots=True,
+                frozen=context.get("boilerplate_overrides"),
+                live_raw=None,
+            )
 
             from .assessment_schedule_matrix import AssessmentScheduleMatrix
 
@@ -1006,6 +1025,7 @@ def run_render_job(
             reserve_snapshot = bundle.reserve_snapshot
             hoa_metadata = bundle.hoa_metadata
             overrides = bundle.overrides
+            boilerplate_overrides = bundle.boilerplate_overrides
 
             _set_status(session, job_id, stage=DISCLOSURE_STAGE_COMPUTING)
 
@@ -1091,6 +1111,7 @@ def run_render_job(
             output_dir=output_dir,
             appendices_root=appendix_dir_for(hoa_id),
             hoa_settings_overrides=overrides,
+            boilerplate_overrides=boilerplate_overrides,
             extra_appendix_paths=manifest_paths,
             extra_appendix_titles=manifest_titles,
             assessment_matrix=assessment_matrix,

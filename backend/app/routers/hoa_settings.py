@@ -1,14 +1,20 @@
 """GET / PUT /hoa/{hoa_id}/settings/disclosure for the disclosure-package config."""
-from typing import Any, Dict
+from pathlib import Path
+from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Body, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from ..ai_implementation.db import get_session
-from ..ai_implementation.db.models import Property
+from ..ai_implementation.db.models import DisclosurePackageJob, Property
 from ..auth.dependencies import get_current_user
-from ..services import hoa_logo_storage, hoa_settings_service
+from ..services import (
+    hoa_boilerplate,
+    hoa_boilerplate_reference_storage,
+    hoa_logo_storage,
+    hoa_settings_service,
+)
 
 router = APIRouter(prefix="/hoa", tags=["HOA Settings"])
 
@@ -178,3 +184,180 @@ async def get_hoa_logo(
     if not row.logo_filename or not hoa_logo_storage.hoa_logo_exists(row.logo_filename):
         raise HTTPException(status_code=404, detail="No logo configured for this HOA")
     return FileResponse(path=hoa_logo_storage.hoa_logo_path(row.logo_filename))
+
+
+def _require_hoa(session: Session, hoa_id: int) -> None:
+    if not session.query(Property).filter_by(id=hoa_id).one_or_none():
+        raise HTTPException(status_code=404, detail=f"HOA not found: {hoa_id}")
+
+
+@router.get("/{hoa_id}/settings/boilerplate")
+async def get_boilerplate_settings(
+    hoa_id: int,
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user),  # noqa: ARG001
+):
+    """Per-HOA package language overrides (workbench left pane)."""
+    _require_hoa(session, hoa_id)
+    row = hoa_settings_service.get_or_create(session, hoa_id=hoa_id)
+    overrides = hoa_boilerplate.parse_overrides_json(row.boilerplate_overrides_json)
+    return {
+        "property_id": hoa_id,
+        "slots": hoa_boilerplate.slots_for_api(overrides),
+        "has_reference_upload": hoa_boilerplate_reference_storage.reference_exists(
+            row.boilerplate_reference_filename
+        ),
+    }
+
+
+@router.put("/{hoa_id}/settings/boilerplate")
+async def put_boilerplate_settings(
+    hoa_id: int,
+    payload: dict = Body(...),
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user),  # noqa: ARG001
+):
+    """Merge slot overrides. Body: ``{ "overrides": { "cover_letter_body": "…" } }``."""
+    _require_hoa(session, hoa_id)
+    raw_overrides = payload.get("overrides")
+    if raw_overrides is None:
+        raise HTTPException(status_code=400, detail="overrides object is required")
+    if not isinstance(raw_overrides, dict):
+        raise HTTPException(status_code=400, detail="overrides must be an object")
+    row = hoa_settings_service.get_or_create(session, hoa_id=hoa_id)
+    try:
+        merged = hoa_boilerplate.merge_overrides(
+            row.boilerplate_overrides_json, raw_overrides
+        )
+    except hoa_boilerplate.UnknownBoilerplateSlot as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    row.boilerplate_overrides_json = hoa_boilerplate.serialize_overrides(merged)
+    session.commit()
+    session.refresh(row)
+    overrides = hoa_boilerplate.parse_overrides_json(row.boilerplate_overrides_json)
+    return {
+        "property_id": hoa_id,
+        "slots": hoa_boilerplate.slots_for_api(overrides),
+        "has_reference_upload": hoa_boilerplate_reference_storage.reference_exists(
+            row.boilerplate_reference_filename
+        ),
+    }
+
+
+@router.get("/{hoa_id}/boilerplate/reference-jobs")
+async def list_boilerplate_reference_jobs(
+    hoa_id: int,
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user),  # noqa: ARG001
+):
+    """Completed disclosure jobs for this HOA with package.pdf still on disk.
+
+    HOA-scoped (any authenticated operator on the HOA), not job-creator-only.
+    """
+    _require_hoa(session, hoa_id)
+    jobs = (
+        session.query(DisclosurePackageJob)
+        .filter(
+            DisclosurePackageJob.property_id == hoa_id,
+            DisclosurePackageJob.status == "completed",
+            DisclosurePackageJob.output_path.isnot(None),
+        )
+        .order_by(
+            DisclosurePackageJob.completed_at.desc(),
+            DisclosurePackageJob.id.desc(),
+        )
+        .limit(50)
+        .all()
+    )
+    items = []
+    for job in jobs:
+        path = Path(job.output_path) if job.output_path else None
+        if path is None or not path.is_file():
+            continue
+        items.append(
+            {
+                "job_id": job.id,
+                "fiscal_year": job.fiscal_year,
+                "completed_at": job.completed_at,
+                "annual_package_id": job.annual_package_id,
+            }
+        )
+    return {"jobs": items}
+
+
+@router.get("/{hoa_id}/boilerplate/reference-pdf")
+async def get_boilerplate_reference_pdf(
+    hoa_id: int,
+    source: str = Query(..., pattern="^(job|upload)$"),
+    job_id: Optional[str] = Query(None),
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user),  # noqa: ARG001
+) -> FileResponse:
+    """Stream a reference PDF (HOA-scoped auth)."""
+    _require_hoa(session, hoa_id)
+    if source == "job":
+        if not job_id:
+            raise HTTPException(status_code=400, detail="job_id is required when source=job")
+        job = (
+            session.query(DisclosurePackageJob)
+            .filter(
+                DisclosurePackageJob.id == job_id,
+                DisclosurePackageJob.property_id == hoa_id,
+            )
+            .one_or_none()
+        )
+        if job is None or not job.output_path:
+            raise HTTPException(status_code=404, detail="Reference job PDF not found")
+        path = Path(job.output_path)
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="Reference job PDF not found on disk")
+        return FileResponse(path=str(path), media_type="application/pdf", filename=path.name)
+
+    row = hoa_settings_service.get_or_create(session, hoa_id=hoa_id)
+    if not hoa_boilerplate_reference_storage.reference_exists(row.boilerplate_reference_filename):
+        raise HTTPException(status_code=404, detail="No uploaded reference PDF for this HOA")
+    path = hoa_boilerplate_reference_storage.reference_path(row.boilerplate_reference_filename)
+    return FileResponse(path=str(path), media_type="application/pdf", filename="reference.pdf")
+
+
+@router.post("/{hoa_id}/boilerplate/reference-pdf")
+async def upload_boilerplate_reference_pdf(
+    hoa_id: int,
+    file: UploadFile = File(...),
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user),  # noqa: ARG001
+):
+    """Upload a reference PDF for the workbench (max 25 MiB)."""
+    _require_hoa(session, hoa_id)
+    payload = await file.read()
+    row = hoa_settings_service.get_or_create(session, hoa_id=hoa_id)
+    try:
+        relative = hoa_boilerplate_reference_storage.save_reference_pdf(
+            property_id=hoa_id,
+            file_bytes=payload,
+            original_filename=file.filename or "reference.pdf",
+            max_bytes=hoa_boilerplate.REFERENCE_MAX_BYTES,
+        )
+    except hoa_boilerplate_reference_storage.UnsupportedReferenceFileType as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except hoa_boilerplate_reference_storage.ReferenceFileTooLarge as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+    row.boilerplate_reference_filename = relative
+    session.commit()
+    return {"ok": True, "has_reference_upload": True}
+
+
+@router.delete("/{hoa_id}/boilerplate/reference-pdf")
+async def delete_boilerplate_reference_pdf(
+    hoa_id: int,
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user),  # noqa: ARG001
+):
+    """Remove the uploaded reference PDF for this HOA."""
+    _require_hoa(session, hoa_id)
+    row = hoa_settings_service.get_or_create(session, hoa_id=hoa_id)
+    if row.boilerplate_reference_filename:
+        hoa_boilerplate_reference_storage.delete_reference(row.boilerplate_reference_filename)
+        row.boilerplate_reference_filename = None
+        session.commit()
+    return {"ok": True, "has_reference_upload": False}

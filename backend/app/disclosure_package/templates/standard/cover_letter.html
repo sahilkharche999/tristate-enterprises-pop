@@ -16,7 +16,14 @@
 {% set presentation = computed.presentation_facts if computed.presentation_facts is defined else none %}
 {% set matrix_says_vary = matrix.recipient_grain == 'group' or matrix.recipient_grain == 'unit' %}
 {% set assessments_vary = matrix_says_vary or (presentation.assessments_vary if presentation else false) %}
+{% set cover_intro = boilerplate.cover_letter_body if boilerplate is defined else none %}
 
+{# Intro-only override (hoa-boilerplate-workbench): replaces the thank-you /
+   effective-date narrative only. Assessment/reserves bullets, enclosed list,
+   §5300 machine, civil-code list, and signature stay template-owned. #}
+{% if cover_intro %}
+<p>{{ cover_intro | nl2br }}</p>
+{% else %}
 <p>Thank you for the prompt payment of your assessments for the current year.
 The enclosed operating budget has been approved by your Board of Directors and
 will become effective on January 1, {{ fiscal_year }}.
@@ -27,6 +34,7 @@ shown in the assessment schedule included in this package.
 The monthly assessment per unit for {{ fiscal_year }} {{ presentation.assessment_change_phrase if presentation else computed.assessment_change_phrase }}
 ${{ '{:,.2f}'.format(computed.monthly_assessment_per_unit_current) }}.
 {% endif %}</p>
+{% endif %}
 
 <ul class="letter-bullets">
   <li>Reserves are being funded in the amount of

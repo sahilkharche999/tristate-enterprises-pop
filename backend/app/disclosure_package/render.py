@@ -184,6 +184,9 @@ def render_package(
                 # Default so _base.html's logo conditional doesn't raise
                 # StrictUndefined outside compile_package. None -> default mark.
                 "hoa_logo_data_uri": None,
+                # Default empty boilerplate registry (hoa-boilerplate-workbench)
+                # so cover_letter.html can reference boilerplate.cover_letter_body.
+                "boilerplate": {"cover_letter_body": None},
                 **computed,
             }
             out[entry.template] = render_template(

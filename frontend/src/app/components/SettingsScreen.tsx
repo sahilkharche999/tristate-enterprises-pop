@@ -26,6 +26,8 @@ import { getHOA, updateHOA, type HOARecord } from '../api/hoa';
 import { getErrorMessage } from '../lib/errors';
 import { MONTH_NAMES, monthNameToNumber, monthNumberToName } from '../lib/hoa';
 import { HOADisclosureSettingsForm, type HOADisclosureSettingsFormHandle } from './HOADisclosureSettingsForm';
+import { BoilerplateWorkbench } from './BoilerplateWorkbench';
+// full-screen package language workbench (same shell as DRE PDF compare)
 import { AppendixManifestEditor } from './AppendixManifestEditor';
 import { AnnualPackagesPanel } from './AnnualPackagesPanel';
 import { DREPanel } from './DREPanel';
@@ -76,7 +78,7 @@ const SETTINGS_NAV_GROUPS: Array<{
       {
         value: 'disclosure',
         label: 'Disclosure Defaults',
-        helper: 'Package language and contacts',
+        helper: 'Contacts, rates, package language',
         icon: FileText,
       },
     ],
@@ -180,6 +182,7 @@ export function SettingsScreen() {
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [packageLanguageOpen, setPackageLanguageOpen] = useState(false);
   const disclosureFormRef = useRef<HOADisclosureSettingsFormHandle>(null);
   const returnTo = searchParams.get('returnTo');
   const backHref = returnTo ?? `/hoa/${id}`;
@@ -545,6 +548,20 @@ export function SettingsScreen() {
           <TabsContent value="disclosure" className="space-y-6">
             <div className="bg-[#F7F7F7] border border-[#E5E5E5] rounded-lg p-8">
               <HOADisclosureSettingsForm hoaId={hoa.id} ref={disclosureFormRef} />
+              <div className="mt-8 border-t border-[#e5e5e5] pt-6">
+                <h3 className="text-base font-semibold text-[#1a1a1a]">Package language</h3>
+                <p className="mt-1 max-w-2xl text-sm text-[#666666]">
+                  Edit cover-letter intro in a full-screen workbench (same pattern as DRE PDF
+                  compare). Reference a prior package PDF on the right while you edit.
+                </p>
+                <Button
+                  type="button"
+                  className="mt-3"
+                  onClick={() => setPackageLanguageOpen(true)}
+                >
+                  Open package language workbench
+                </Button>
+              </div>
             </div>
           </TabsContent>
 
@@ -642,6 +659,13 @@ export function SettingsScreen() {
           </div>
         </Tabs>
       </main>
+
+      <BoilerplateWorkbench
+        hoaId={hoa.id}
+        hoaName={hoa.name}
+        open={packageLanguageOpen}
+        onClose={() => setPackageLanguageOpen(false)}
+      />
     </div>
   );
 }

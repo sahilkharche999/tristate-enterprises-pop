@@ -349,6 +349,8 @@ CREATE TABLE IF NOT EXISTS hoa_settings (
     tenant_id                           INTEGER NOT NULL DEFAULT 1,
     version_int                         INTEGER NOT NULL DEFAULT 0,
     logo_filename                       TEXT,
+    boilerplate_overrides_json          TEXT,
+    boilerplate_reference_filename      TEXT,
     updated_at                          TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

@@ -1109,6 +1109,7 @@ def compile_package(
     output_dir: Path,
     appendices_root: Optional[Path] = None,
     hoa_settings_overrides: Optional[dict] = None,
+    boilerplate_overrides: Optional[dict] = None,
     extra_appendix_paths: Optional[list[Path]] = None,
     extra_appendix_titles: Optional[dict[str, str]] = None,
     assessment_matrix: Optional[AssessmentScheduleMatrix] = None,
@@ -1252,6 +1253,23 @@ def compile_package(
     #     URI avoids ever needing a network/file fetch during render.
     hoa_logo_data_uri = _hoa_logo_data_uri(effective_hoa_settings.get("logo_filename"))
 
+    # Per-HOA package language (hoa-boilerplate-workbench). Always define the
+    # full registry so StrictUndefined templates can reference every key.
+    try:
+        from app.services.hoa_boilerplate import empty_boilerplate, parse_overrides_json
+    except ImportError:  # pragma: no cover
+        from ..services.hoa_boilerplate import empty_boilerplate, parse_overrides_json
+
+    boilerplate_ctx = empty_boilerplate()
+    if boilerplate_overrides:
+        if isinstance(boilerplate_overrides, str):
+            boilerplate_ctx = parse_overrides_json(boilerplate_overrides)
+        elif isinstance(boilerplate_overrides, dict):
+            for key in boilerplate_ctx:
+                val = boilerplate_overrides.get(key)
+                if val not in (None, ""):
+                    boilerplate_ctx[key] = str(val)
+
     # 3. Pre-compute section-grouped expenses/revenues so we can capture
     #    them in the audit input_snapshot (the snapshot is serialized at
     #    audit_context open time, so they cannot be added retroactively
@@ -1348,6 +1366,7 @@ def compile_package(
             "today_iso": datetime.now(timezone.utc).date().isoformat(),
             "hoa_settings": effective_hoa_settings,
             "hoa_logo_data_uri": hoa_logo_data_uri,
+            "boilerplate": boilerplate_ctx,
             **computed,
         }
 

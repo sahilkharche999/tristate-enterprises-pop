@@ -8,11 +8,13 @@ import {
   FileText,
   Landmark,
   PackageCheck,
+  PenLine,
   Settings,
   TableProperties,
 } from 'lucide-react';
 
 import { AnnualPackagesPanel } from './AnnualPackagesPanel';
+import { BoilerplateWorkbench } from './BoilerplateWorkbench';
 import { DisclosurePackagePanel } from './disclosure/DisclosurePackagePanel';
 import { getHOA, type HOARecord } from '../api/hoa';
 import { getErrorMessage } from '../lib/errors';
@@ -26,9 +28,11 @@ import {
 type ReadinessRow = {
   label: string;
   detail: string;
-  href: string;
+  href?: string;
   icon: typeof TableProperties;
   status: 'Ready' | 'Review setup';
+  /** Opens full-screen package language workbench (not a navigation link). */
+  action?: 'open-package-language';
 };
 
 function buildReadinessRows(hoaId: string, assessmentMode: AssessmentMode): ReadinessRow[] {
@@ -53,6 +57,14 @@ function buildReadinessRows(hoaId: string, assessmentMode: AssessmentMode): Read
       href: `/hoa/${hoaId}/settings?section=disclosure&returnTo=/hoa/${hoaId}/disclosure`,
       icon: Settings,
       status: 'Review setup',
+    },
+    {
+      label: 'Package language',
+      detail:
+        'Open full-screen workbench to edit cover-letter intro and compare with a prior package PDF.',
+      icon: PenLine,
+      status: 'Review setup',
+      action: 'open-package-language',
     },
     {
       label: 'DRE or assessment setup',
@@ -96,6 +108,7 @@ export function DisclosureWorkspaceScreen() {
   const [hoa, setHoa] = useState<HOARecord | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [packageLanguageOpen, setPackageLanguageOpen] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -219,12 +232,9 @@ export function DisclosureWorkspaceScreen() {
           <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
             {readinessRows.map((row) => {
               const Icon = row.icon;
-              return (
-                <Link
-                  key={row.label}
-                  to={row.href}
-                  className="group rounded-lg border border-[#e5e5e5] bg-white p-4 transition-colors hover:border-[#a3a3a3] hover:bg-[#fafafa] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#111111]"
-                >
+              const cardClassName =
+                'group rounded-lg border border-[#e5e5e5] bg-white p-4 text-left transition-colors hover:border-[#a3a3a3] hover:bg-[#fafafa] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#111111]';
+              const body = (
                   <div className="flex items-start gap-3">
                     <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-[#e5e5e5] bg-[#f7f7f7]">
                       <Icon className="h-4 w-4 text-[#525252]" />
@@ -245,6 +255,22 @@ export function DisclosureWorkspaceScreen() {
                       <p className="mt-1 text-sm leading-5 text-[#666666]">{row.detail}</p>
                     </div>
                   </div>
+              );
+              if (row.action === 'open-package-language') {
+                return (
+                  <button
+                    key={row.label}
+                    type="button"
+                    className={`${cardClassName} w-full cursor-pointer`}
+                    onClick={() => setPackageLanguageOpen(true)}
+                  >
+                    {body}
+                  </button>
+                );
+              }
+              return (
+                <Link key={row.label} to={row.href!} className={cardClassName}>
+                  {body}
                 </Link>
               );
             })}
@@ -268,6 +294,13 @@ export function DisclosureWorkspaceScreen() {
           <AnnualPackagesPanel hoaId={hoa.id} liveAssessmentMode={hoa.assessment_mode} />
         </section>
       </main>
+
+      <BoilerplateWorkbench
+        hoaId={hoa.id}
+        hoaName={hoa.name}
+        open={packageLanguageOpen}
+        onClose={() => setPackageLanguageOpen(false)}
+      />
     </div>
   );
 }

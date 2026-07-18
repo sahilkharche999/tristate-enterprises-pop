@@ -202,3 +202,89 @@ export async function deleteHOALogo(hoaId: number): Promise<HOADisclosureSetting
   });
   return handleResponse<HOADisclosureSettings>(r);
 }
+
+// --- Package language / boilerplate workbench (hoa-boilerplate-workbench) ---
+
+export interface BoilerplateSlot {
+  id: string;
+  label: string;
+  value: string;
+  is_override: boolean;
+}
+
+export interface BoilerplateSettings {
+  property_id: number;
+  slots: BoilerplateSlot[];
+  has_reference_upload: boolean;
+}
+
+export interface BoilerplateReferenceJob {
+  job_id: string;
+  fiscal_year: number;
+  completed_at: string | null;
+  annual_package_id: number | null;
+}
+
+export async function getBoilerplateSettings(hoaId: number): Promise<BoilerplateSettings> {
+  const r = await fetch(`${BASE_URL}/hoa/${hoaId}/settings/boilerplate`, {
+    headers: authHeaders(),
+  });
+  return handleResponse<BoilerplateSettings>(r);
+}
+
+export async function putBoilerplateSettings(
+  hoaId: number,
+  overrides: Record<string, string | null>,
+): Promise<BoilerplateSettings> {
+  const r = await fetch(`${BASE_URL}/hoa/${hoaId}/settings/boilerplate`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ overrides }),
+  });
+  return handleResponse<BoilerplateSettings>(r);
+}
+
+export async function listBoilerplateReferenceJobs(
+  hoaId: number,
+): Promise<BoilerplateReferenceJob[]> {
+  const r = await fetch(`${BASE_URL}/hoa/${hoaId}/boilerplate/reference-jobs`, {
+    headers: authHeaders(),
+  });
+  const data = await handleResponse<{ jobs: BoilerplateReferenceJob[] }>(r);
+  return data.jobs || [];
+}
+
+export function boilerplateReferencePdfUrl(
+  hoaId: number,
+  source: 'job' | 'upload',
+  jobId?: string,
+): string {
+  if (source === 'job') {
+    return `${BASE_URL}/hoa/${hoaId}/boilerplate/reference-pdf?source=job&job_id=${encodeURIComponent(jobId || '')}`;
+  }
+  return `${BASE_URL}/hoa/${hoaId}/boilerplate/reference-pdf?source=upload`;
+}
+
+export async function uploadBoilerplateReferencePdf(
+  hoaId: number,
+  file: File,
+): Promise<{ ok: boolean; has_reference_upload: boolean }> {
+  const form = new FormData();
+  form.append('file', file);
+  const r = await fetch(`${BASE_URL}/hoa/${hoaId}/boilerplate/reference-pdf`, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: form,
+  });
+  return handleResponse(r);
+}
+
+export async function deleteBoilerplateReferencePdf(
+  hoaId: number,
+): Promise<{ ok: boolean; has_reference_upload: boolean }> {
+  const r = await fetch(`${BASE_URL}/hoa/${hoaId}/boilerplate/reference-pdf`, {
+    method: 'DELETE',
+    headers: authHeaders(),
+  });
+  return handleResponse(r);
+}
