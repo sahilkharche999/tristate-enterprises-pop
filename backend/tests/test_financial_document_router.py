@@ -10,7 +10,6 @@ from app.config import settings
 from app.ai_implementation.pipeline.document_extraction_provider import (
     DocumentPromptContext,
     RenderedPage,
-    VisionStatementExtractor,
 )
 from app.models.financial_document_extraction import (
     ExtractedFinancialStatement,
@@ -91,7 +90,6 @@ def test_extracted_statement_schema_accepts_budget_fields():
 
 
 def test_provider_interface_is_importable_without_groq_specifics():
-    assert VisionStatementExtractor is not None
     page = RenderedPage(page_number=1, image_path="/tmp/page-1.png")
     context = DocumentPromptContext(filename="statement.pdf", route_family="pdf_visual_document")
     assert page.page_number == 1

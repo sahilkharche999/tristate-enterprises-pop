@@ -1106,33 +1106,20 @@ def _render_reserve_study_page_subset(
     *,
     dpi: int,
 ) -> dict[int, RenderedPage]:
+    """Render selected pages at ``dpi`` via shared VLM fitz helpers."""
     if not page_numbers or not Path(path).exists():
         return {}
     try:
-        import fitz  # type: ignore
+        from app.services.pdf_vlm_extractor import render_pdf_pages_for_numbers
     except ImportError:
+        logger.warning("pdf_vlm_extractor unavailable; skipping reserve high-DPI pages=%s", page_numbers)
+        return {}
+    try:
+        pages = render_pdf_pages_for_numbers(path, sorted(set(page_numbers)), dpi=dpi)
+    except RuntimeError:
         logger.warning("PyMuPDF unavailable; skipping reserve-study high-DPI rerender for pages=%s", page_numbers)
         return {}
-
-    requested_pages = sorted(set(page_numbers))
-    rendered_pages: dict[int, RenderedPage] = {}
-    document = fitz.open(path)
-    scale = dpi / 72.0
-    matrix = fitz.Matrix(scale, scale) if scale != 1.0 else None
-    try:
-        for page_number in requested_pages:
-            if page_number < 1 or page_number > len(document):
-                continue
-            page = document[page_number - 1]
-            pixmap = page.get_pixmap(matrix=matrix) if matrix is not None else page.get_pixmap()
-            rendered_pages[page_number] = RenderedPage(
-                page_number=page_number,
-                mime_type="image/png",
-                content=pixmap.tobytes("png"),
-            )
-    finally:
-        document.close()
-    return rendered_pages
+    return {page.page_number: page for page in pages}
 
 
 def _prepared_document(

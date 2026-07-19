@@ -21,11 +21,10 @@ from pathlib import Path
 
 import pytest
 
-from app.services.budget_line_mapping_service import (
-    BudgetLineKey,
-    approve_mapping,
-    carry_forward_mappings_across_setups,
+from app.services.budget_line_mapping_service import carry_forward_mappings_across_setups
+from tests.support.budget_line_mapping_seed import (
     lookup_saved_mappings,
+    seed_budget_line_mapping,
 )
 from app.services.dre_approval_service import approve_extraction_run
 from app.services.dre_review_service import record_review_edit
@@ -168,14 +167,16 @@ class TestMappingReuseAcrossSetups:
         pid = _seed_property(db)
         setup_v1 = self._create_setup(db, pid)
         # Operator approves a mapping under v1
-        approve_mapping(
-            property_id=pid, assessment_setup_id=setup_v1,
-            line_key=BudgetLineKey(
-                normalized_label="elevator maintenance", section="ops",
-                category="operating", fund_type="operating",
-            ),
-            pool_key="elevator", approved_by="ops@example.com",
+        seed_budget_line_mapping(
             connection=db,
+            property_id=pid,
+            assessment_setup_id=setup_v1,
+            normalized_label="elevator maintenance",
+            section="ops",
+            category="operating",
+            fund_type="operating",
+            pool_key="elevator",
+            approved_by="ops@example.com",
         )
         # New extraction → new AssessmentSetup version
         setup_v2 = self._create_setup(db, pid)
@@ -198,13 +199,16 @@ class TestMappingReuseAcrossSetups:
     def test_carry_forward_does_not_leak_across_properties(self, db):
         pid_a = _seed_property(db)
         setup_a = self._create_setup(db, pid_a)
-        approve_mapping(
-            property_id=pid_a, assessment_setup_id=setup_a,
-            line_key=BudgetLineKey(
-                normalized_label="utilities", section="ops",
-                category="operating", fund_type="operating",
-            ),
-            pool_key="ops_pool", approved_by="ops", connection=db,
+        seed_budget_line_mapping(
+            connection=db,
+            property_id=pid_a,
+            assessment_setup_id=setup_a,
+            normalized_label="utilities",
+            section="ops",
+            category="operating",
+            fund_type="operating",
+            pool_key="ops_pool",
+            approved_by="ops",
         )
 
         # Property B has its own setup; carry forward for A shouldn't

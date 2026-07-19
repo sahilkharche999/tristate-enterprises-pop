@@ -142,12 +142,10 @@ export interface FeedbackDecision {
 export interface FeedbackResponse {
   updated: number;
   total_cases: number;
-  catboost_active: boolean;
 }
 
 export interface AIStatsResponse {
   total_cases: number;
-  catboost_active: boolean;
   last_training: string | null;
   properties: string[];
   sop_rules: number;

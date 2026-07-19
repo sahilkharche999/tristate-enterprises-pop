@@ -3,13 +3,12 @@
 Schema source of truth: schema.sql (run on startup).
 All new code should use db.session.get_session() instead of get_db().
 """
-import contextlib
 import logging
 import sqlite3
 from pathlib import Path
 from typing import Iterable
 
-from .config import settings
+from ..config import settings
 from .db.session import engine
 from ..assessment_mode import (
     ASSESSMENT_MODE_FIXED,
@@ -1292,8 +1291,3 @@ def get_db() -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
-
-@contextlib.contextmanager
-def write_lock():
-    """DEPRECATED: No-op. SQLAlchemy session handles transactions."""
-    yield

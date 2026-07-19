@@ -78,12 +78,10 @@ class SuggestResponse(BaseModel):
 class FeedbackResponse(BaseModel):
     updated: int
     total_cases: int
-    catboost_active: bool
 
 
 class StatsResponse(BaseModel):
     total_cases: int
-    catboost_active: bool
     last_training: Optional[str] = None
     properties: list[str] = []
     sop_rules: int

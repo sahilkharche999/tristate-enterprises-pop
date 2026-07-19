@@ -88,11 +88,7 @@ class DREExtractionRunRecord:
     status: RunStatus = "failed"
 
 
-ExtractCallbackResult = Union[
-    str,
-    tuple[str, Optional[WireDRESetupExtraction]],
-    tuple[str, Optional[WireDRESetupExtraction], dict],
-]
+ExtractCallbackResult = tuple[str, Optional[WireDRESetupExtraction], dict]
 
 
 def run_dre_extraction(
@@ -110,17 +106,12 @@ def run_dre_extraction(
     one ``PageBatch`` and returns its ``page_inventory`` slice.
 
     ``extract_setup_callback`` runs the full Prompt 1 against the
-    filtered list of extraction-relevant page numbers. Two return
-    shapes are accepted for backward compatibility:
-
-    * The production callback (``build_extract_callback``) returns a
-      ``(raw_text, parsed_wire_instance)`` tuple, where the parsed
-      instance comes from the SDK's ``response.parsed`` after the
-      structured-output ``response_schema`` is applied. The pipeline
-      uses the parsed instance on the happy path and skips JSON
-      reparsing.
-    * Legacy callers may still return a plain ``str``; the pipeline
-      falls back to the text-parsing path in that case.
+    filtered list of extraction-relevant page numbers and returns
+    ``(raw_text, parsed_wire_instance, audit_dict)``. The production
+    callback (``build_extract_callback``) supplies the SDK's
+    ``response.parsed`` after structured-output ``response_schema``;
+    the pipeline uses the parsed instance on the happy path and skips
+    JSON reparsing.
 
     ``repair_callback`` (optional) runs the single repair retry when
     the first response fails to parse or schema-validate. With
@@ -157,14 +148,9 @@ def run_dre_extraction(
 
     # 3–4. Full extraction call + parse with single repair retry.
     callback_out = extract_setup_callback(classification.relevant_page_numbers)
-    audit: dict = {}
-    if isinstance(callback_out, tuple):
-        if len(callback_out) == 3:
-            raw, wire_parsed, audit = callback_out  # type: ignore[misc]
-        else:
-            raw, wire_parsed = callback_out  # type: ignore[misc]
-    else:
-        raw, wire_parsed = callback_out, None
+    raw, wire_parsed, audit = callback_out
+    if audit is None:
+        audit = {}
     record.raw_model_output = raw
     record.model_version_resolved = str(audit.get("model_version", ""))
     record.finish_reason = str(audit.get("finish_reason", ""))

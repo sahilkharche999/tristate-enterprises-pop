@@ -1,7 +1,7 @@
 """Adapter: WireCCRPolicyExtraction → shared DRESetupExtraction domain shape.
 
 The CC&R wire schema is allocation-policy-focused (legal prose → pool rules).
-The domain schema is what promote_extraction_to_setup() consumes. Converging
+The domain schema is what populate_setup_children() / approval consume. Converging
 on the shared shape is the integration seam that lets promotion, Review
 Workbench, approval, and assessment mapping require zero changes.
 
@@ -163,7 +163,7 @@ def to_domain(wire: ws.WireCCRPolicyExtraction) -> DRESetupExtraction:
     """Convert a CC&R wire extraction to the shared DRESetupExtraction domain shape.
 
     The resulting DRESetupExtraction validates against the same schema
-    promote_extraction_to_setup() expects, so promotion works with zero changes.
+    populate_setup_children() expects, so promotion works with zero changes.
     """
     reserve_setup: Optional[ReserveSetupBlock] = None
     if wire.reserve_policy is not None:

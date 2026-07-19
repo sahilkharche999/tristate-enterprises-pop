@@ -13,7 +13,6 @@ from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
-from .routers import macros
 from .auth.router import router as auth_router
 from .auth.dependencies import get_current_user
 from .ai_implementation.database import init_db
@@ -89,9 +88,6 @@ def create_app() -> FastAPI:
 
     # Auth routes (unprotected)
     app.include_router(auth_router)
-
-    # Protected macro routes
-    app.include_router(macros.router, prefix="", dependencies=[Depends(get_current_user)])
 
     # Protected HOA routes
     app.include_router(hoa_router, prefix="", dependencies=[Depends(get_current_user)])

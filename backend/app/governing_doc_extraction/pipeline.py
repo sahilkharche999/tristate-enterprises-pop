@@ -79,11 +79,7 @@ class CCRExtractionRunRecord:
     status: RunStatus = "failed"
 
 
-ExtractCallbackResult = Union[
-    str,
-    tuple[str, Optional[WireCCRPolicyExtraction]],
-    tuple[str, Optional[WireCCRPolicyExtraction], dict],
-]
+ExtractCallbackResult = tuple[str, Optional[WireCCRPolicyExtraction], dict]
 
 
 def run_ccr_extraction(
@@ -101,10 +97,8 @@ def run_ccr_extraction(
     against one PageBatch and returns its page_inventory slice.
 
     ``extract_policy_callback`` runs the full extraction call against the
-    filtered assessment-relevant page numbers and returns either:
-      - a (raw_text, wire_parsed) tuple (production path)
-      - a (raw_text, wire_parsed, audit_dict) tuple
-      - a plain str (legacy fallback)
+    filtered assessment-relevant page numbers and returns
+    ``(raw_text, wire_parsed, audit_dict)`` (production path).
 
     The function never raises — CCRExtractionRunRecord.status reports outcome.
     """
@@ -128,15 +122,11 @@ def run_ccr_extraction(
     record.relevant_page_numbers = classification.relevant_page_numbers
 
     # 3–4. Full extraction call + parse with single repair retry.
-    callback_out = extract_policy_callback(classification.relevant_page_numbers)
-    audit: dict = {}
-    if isinstance(callback_out, tuple):
-        if len(callback_out) == 3:
-            raw, wire_parsed, audit = callback_out  # type: ignore[misc]
-        else:
-            raw, wire_parsed = callback_out  # type: ignore[misc]
-    else:
-        raw, wire_parsed = callback_out, None
+    raw, wire_parsed, audit = extract_policy_callback(
+        classification.relevant_page_numbers
+    )
+    if audit is None:
+        audit = {}
     record.raw_model_output = raw
     record.model_version_resolved = str(audit.get("model_version", ""))
     record.finish_reason = str(audit.get("finish_reason", ""))

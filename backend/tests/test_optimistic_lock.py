@@ -9,7 +9,6 @@ import pytest
 from fastapi import HTTPException
 
 from app.optimistic_lock import (
-    VersionMismatchError,
     parse_if_match,
     require_if_match,
 )
@@ -62,17 +61,6 @@ class TestRequireIfMatch:
 
     def test_present_returns_int(self):
         assert require_if_match(if_match='"99"') == 99
-
-
-class TestVersionMismatchError:
-    def test_carries_context(self):
-        err = VersionMismatchError(
-            table="annual_packages", row_id=1, expected=0, actual=2,
-        )
-        assert err.table == "annual_packages"
-        assert err.expected == 0
-        assert err.actual == 2
-        assert "version mismatch" in str(err)
 
 
 @pytest.fixture

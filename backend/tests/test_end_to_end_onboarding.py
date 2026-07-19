@@ -22,11 +22,10 @@ from app.services.annual_package_service import (
     create_annual_package,
 )
 from app.services.appendix_service import upload_appendix
-from app.services.budget_line_mapping_service import (
-    BudgetLineKey,
-    approve_mapping,
-    carry_forward_mappings_across_setups,
+from app.services.budget_line_mapping_service import carry_forward_mappings_across_setups
+from tests.support.budget_line_mapping_seed import (
     lookup_saved_mappings,
+    seed_budget_line_mapping,
 )
 from app.services.dre_approval_service import approve_extraction_run
 from app.services.dre_review_service import record_review_edit

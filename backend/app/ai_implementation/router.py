@@ -120,7 +120,6 @@ async def feedback(request: FeedbackRequest, session: Session = Depends(get_sess
         return FeedbackResponse(
             updated=len(request.decisions),
             total_cases=total,
-            catboost_active=False,
         )
     except Exception as e:
         session.rollback()
@@ -140,7 +139,6 @@ async def stats(session: Session = Depends(get_session)) -> StatsResponse:
 
     return StatsResponse(
         total_cases=total,
-        catboost_active=False,
         last_training=None,
         properties=props,
         sop_rules=sop_count,

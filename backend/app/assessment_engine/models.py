@@ -1,10 +1,8 @@
 """Domain models for the assessment engine.
 
 These mirror the DB tables defined in design.md (AssessmentSetup,
-AllocationPool, BudgetLinePoolMapping) plus an in-memory CalcResult
-record used by the engine to assemble its output. Phase 1.3 will add
-the SQLite tables and migrations; for now these Pydantic models pin
-the shape the engine reasons about.
+AllocationPool, BudgetLinePoolMapping). Engine output assembly uses
+schemas.CalcResultSet / PoolAllocationResult, not models here.
 """
 
 from decimal import Decimal
@@ -108,19 +106,3 @@ class BudgetLinePoolMapping(BaseModel):
     approved_by: Optional[str] = None
     approved_at: Optional[str] = None
     active: bool = True
-
-
-class CalcResult(BaseModel):
-    """In-memory bookkeeping record produced by the engine for one
-    (recipient, pool) component before rounding.
-
-    Persisted later as an ``AssessmentPoolAllocationResult`` row.
-    """
-
-    model_config = ConfigDict(from_attributes=True)
-
-    recipient_ref: str
-    pool_id: Optional[int]
-    pool_key: str
-    unrounded_component_monthly: Decimal
-    source: PoolSource = "pool_math"

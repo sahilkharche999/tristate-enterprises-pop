@@ -1,9 +1,8 @@
 """Tests for the extraction → setup-children snapshot (Phase 4.2 task 105).
 
-Verifies that ``promote_extraction_to_setup`` reads a stored
-``parsed_json`` blob and writes AllocationPool / AssessmentGroup /
-AssessmentUnit / AssessmentUnitPoolAllocation rows alongside the
-existing AssessmentSetup row.
+Verifies that parse_extraction_payload + populate_setup_children write
+AllocationPool / AssessmentGroup / AssessmentUnit / AssessmentUnitPoolAllocation
+rows alongside the existing AssessmentSetup row.
 
 Also covers the integrated path through ``approve_extraction_run``
 including the new ``default_assessment_setup_id`` write on properties.
@@ -20,7 +19,6 @@ import pytest
 from app.dre_extraction.promotion import (
     parse_extraction_payload,
     populate_setup_children,
-    promote_extraction_to_setup,
 )
 from app.services.dre_approval_service import approve_extraction_run
 

@@ -31,7 +31,6 @@ from app.ai_implementation.db import (
     BudgetVersion,
     Property,
 )
-from app.routers import macros as macros_router
 from app.services import macros_service
 from app.ai_implementation.seed.seed_database import sync_portfolio_properties
 from app.auth.utils import create_access_token
@@ -169,8 +168,6 @@ def budget_storage_root(tmp_path, monkeypatch) -> Path:
         app_config.settings,
         main_module.settings,
         database_module.settings,
-        macros_router.settings,
-        macros_service.settings,
     )
     previous_values: list[tuple[object, bool, object | None]] = []
     for settings_owner in settings_owners:
@@ -192,15 +189,6 @@ def budget_storage_root(tmp_path, monkeypatch) -> Path:
 
 @pytest.fixture
 def budget_history_test_harness(monkeypatch, budget_storage_root):
-    monkeypatch.setattr(macros_router, "BudgetPipeline", FakeBudgetPipeline)
-    monkeypatch.setattr(macros_router, "infer_growth_factor_from_input", fake_infer_growth_factor_from_input)
-    monkeypatch.setattr(macros_router.macros_service, "read_sheet_as_table", fake_read_sheet_as_table)
-    monkeypatch.setattr(macros_router.macros_service, "read_first_sheet_preview", fake_read_first_sheet_preview)
-    monkeypatch.setattr(
-        macros_router.macros_service,
-        "write_percent_changes_by_label",
-        fake_write_percent_changes_by_label,
-    )
     monkeypatch.setattr(macros_service, "read_sheet_as_table", fake_read_sheet_as_table)
     monkeypatch.setattr(macros_service, "read_first_sheet_preview", fake_read_first_sheet_preview)
     monkeypatch.setattr(

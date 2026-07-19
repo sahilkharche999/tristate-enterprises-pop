@@ -73,41 +73,7 @@ def require_if_match(
     return parse_if_match(if_match)
 
 
-def optional_if_match(
-    if_match: Optional[str] = Header(default=None, alias="If-Match"),
-) -> Optional[int]:
-    """FastAPI dependency: parse the header if present, return None otherwise.
-
-    Useful for endpoints that accept both header-based and body-based
-    expected_version (transitional). When both are present the header
-    wins.
-    """
-    if if_match is None:
-        return None
-    return parse_if_match(if_match)
-
-
-class VersionMismatchError(RuntimeError):
-    """Raised by service-layer code when the supplied If-Match version
-    doesn't equal the row's current ``version_int``.
-
-    Endpoints map this to HTTP 409 (Conflict).
-    """
-
-    def __init__(self, *, table: str, row_id: int, expected: int, actual: int) -> None:
-        self.table = table
-        self.row_id = row_id
-        self.expected = expected
-        self.actual = actual
-        super().__init__(
-            f"{table} id={row_id} version mismatch "
-            f"(expected={expected}, actual={actual})"
-        )
-
-
 __all__ = [
-    "VersionMismatchError",
-    "optional_if_match",
     "parse_if_match",
     "require_if_match",
 ]

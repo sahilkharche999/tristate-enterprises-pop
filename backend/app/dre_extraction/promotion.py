@@ -8,8 +8,8 @@ header.
 
 The mapping is intentionally lossy on the AI-prompt vocabulary:
 
-* ``setup_type`` mapping happens in ``adapter.map_setup_type`` (already
-  applied at approval-time by the operator picking a value).
+* ``setup_type`` is chosen by the operator at approval-time
+  (``fixed`` | ``grouped`` | ``per_unit``) — not mapped from prompt enums here.
 * ``allocation_method`` mapping uses ``adapter.map_allocation_method`` —
   e.g. ``parking_space`` collapses to ``equal`` over ``parking_users``
   scope. We honor ``forced_scope`` even when the prompt also emitted
@@ -926,29 +926,6 @@ def populate_setup_children(
     return counts
 
 
-def promote_extraction_to_setup(
-    *,
-    setup_id: int,
-    setup_type: str,
-    parsed_json_text: Optional[str],
-    connection: sqlite3.Connection,
-) -> dict[str, Any]:
-    """Full snapshot pipeline: parse parsed_json + populate child rows.
-
-    Called inside the approval transaction so the AssessmentSetup row
-    and its children are committed atomically.
-    """
-    extraction = parse_extraction_payload(parsed_json_text)
-    if extraction is None:
-        return {"pools": 0, "groups": 0, "units": 0, "unit_pool_allocations": 0}
-    return populate_setup_children(
-        setup_id=setup_id,
-        setup_type=setup_type,
-        extraction=extraction,
-        connection=connection,
-    )
-
-
 __all__ = [
     "EditedEntityFailedToPromote",
     "MissingUnitFactors",
@@ -958,5 +935,4 @@ __all__ = [
     "entity_keys_touched_by_edits",
     "parse_extraction_payload",
     "populate_setup_children",
-    "promote_extraction_to_setup",
 ]

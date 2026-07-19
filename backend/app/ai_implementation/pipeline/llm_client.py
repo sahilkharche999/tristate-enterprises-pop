@@ -197,6 +197,9 @@ def get_llm_client() -> genai.Client:
     return cached
 
 
+GEMINI_BACKOFF_DELAYS: list[float] = [2, 4, 8]
+
+
 async def call_llm(
     messages: list[dict],
     response_schema: type[BaseModel],
@@ -209,7 +212,7 @@ async def call_llm(
     Per D-06: Only rate-limit retry with exponential backoff (no validation-retry).
     """
     client = get_llm_client()
-    backoff_delays = [2, 4, 8]
+    backoff_delays = GEMINI_BACKOFF_DELAYS
 
     # Build contents: extract system instruction, collect user parts
     system_text = None
@@ -294,7 +297,7 @@ async def call_llm_vision(
     statements. 120s gives comfortable headroom while still bounding the call.
     """
     client = get_llm_client()
-    backoff_delays = [2, 4, 8]
+    backoff_delays = GEMINI_BACKOFF_DELAYS
 
     system_text = None
     content_parts: list = []

@@ -4,7 +4,7 @@ Extends the DRE approval flow for governing-document runs:
   1. Reads operator-entered per-unit factors from
      dre_extraction_runs.operator_unit_factors_json.
   2. Merges those factors into the extraction's unit_structure.units so
-     promote_extraction_to_setup populates per-unit rows correctly.
+     populate_setup_children populates per-unit rows correctly.
   3. Blocks promotion (raises MissingUnitFactors) when a proportional
      pool has no factors from either extraction or operator entry — rather
      than distributing equally and silently producing wrong assessments.

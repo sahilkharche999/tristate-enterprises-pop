@@ -29,7 +29,6 @@ from app.dre_extraction import (
     collect_validation_warnings,
     filter_relevant_pages,
     map_allocation_method,
-    map_setup_type,
     merge_inventory,
     parse_extraction_response,
     split_pages_into_batches,
@@ -89,32 +88,6 @@ class TestPromptArtifacts:
 
 # -- enum adapter ----------------------------------------------------------
 
-
-class TestSetupTypeAdapter:
-    def test_fixed_equal_maps_to_fixed(self) -> None:
-        r = map_setup_type("fixed_equal")
-        assert r.internal_setup_type == "fixed"
-        assert not r.needs_review
-
-    def test_grouped_category_maps_to_grouped(self) -> None:
-        r = map_setup_type("grouped_category")
-        assert r.internal_setup_type == "grouped"
-
-    def test_individual_unit_maps_to_per_unit(self) -> None:
-        r = map_setup_type("individual_unit")
-        assert r.internal_setup_type == "per_unit"
-        assert not r.needs_review
-
-    def test_multi_pool_combination_per_unit_with_review_flag(self) -> None:
-        r = map_setup_type("multi_pool_combination")
-        assert r.internal_setup_type == "per_unit"
-        assert r.needs_review
-        assert "grouped" in (r.review_note or "")
-
-    def test_unknown_needs_review_no_internal_type(self) -> None:
-        r = map_setup_type("unknown_needs_review")
-        assert r.internal_setup_type is None
-        assert r.needs_review
 
 
 class TestAllocationMethodAdapter:

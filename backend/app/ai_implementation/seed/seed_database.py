@@ -18,7 +18,7 @@ from typing import Any, Optional
 
 import openpyxl
 
-from ..database import get_db, init_db, write_lock
+from ..database import get_db, init_db
 from ..pipeline.feature_engineering import (
     encode_account_hierarchy,
     get_seasonality_index,
@@ -377,25 +377,24 @@ def seed_casebase(db: sqlite3.Connection, property_id: int) -> int:
     budgets = [c.get("annual_budget", 1000) for c in cases if c.get("annual_budget", 0) > 0]
     max_budget = max(budgets) if budgets else 1.0
 
-    with write_lock():
-        for case in cases:
-            account_code = int(case.get("account_code", 0))
-            if account_code == 0:
-                continue
-            account_name = case.get("label", str(account_code)).split(" - ", 1)[-1] if " - " in case.get("label", "") else case.get("label", str(account_code))
-            annual_budget = float(case.get("annual_budget", 0))
-            ytd_actual = float(case.get("ytd_actual", 0))
-            accepted_pct = float(case.get("accepted_pct_change", 0))
+    for case in cases:
+        account_code = int(case.get("account_code", 0))
+        if account_code == 0:
+            continue
+        account_name = case.get("label", str(account_code)).split(" - ", 1)[-1] if " - " in case.get("label", "") else case.get("label", str(account_code))
+        annual_budget = float(case.get("annual_budget", 0))
+        ytd_actual = float(case.get("ytd_actual", 0))
+        accepted_pct = float(case.get("accepted_pct_change", 0))
 
-            features = compute_features(account_code, annual_budget, ytd_actual)
-            norm_budget = annual_budget / max_budget if max_budget > 0 else 0.5
+        features = compute_features(account_code, annual_budget, ytd_actual)
+        norm_budget = annual_budget / max_budget if max_budget > 0 else 0.5
 
-            insert_feedback_case(db, run_id, property_id, account_code, account_name,
-                                  annual_budget, ytd_actual, accepted_pct, features,
-                                  normalized_annual_budget=norm_budget)
-            count += 1
+        insert_feedback_case(db, run_id, property_id, account_code, account_name,
+                              annual_budget, ytd_actual, accepted_pct, features,
+                              normalized_annual_budget=norm_budget)
+        count += 1
 
-        db.commit()
+    db.commit()
 
     logger.info(f"Seeded {count} casebase cases")
     return count
@@ -424,27 +423,26 @@ def seed_feedback_jsonl(db: sqlite3.Connection, property_id: int) -> int:
     max_budget = max(b for b in budgets if b > 0) if budgets else 1.0
     count = 0
 
-    with write_lock():
-        for case in cases:
-            account_code = int(case.get("account_code", 0))
-            if account_code == 0:
-                continue
-            label = case.get("label", str(account_code))
-            account_name = label.split(" - ", 1)[-1] if " - " in label else label
-            annual_budget = float(case.get("annual_budget", 0))
-            ytd_actual = float(case.get("ytd_actual", 0))
-            accepted_pct = float(case.get("accepted_pct_change", 0))
-            ts = case.get("ts")
+    for case in cases:
+        account_code = int(case.get("account_code", 0))
+        if account_code == 0:
+            continue
+        label = case.get("label", str(account_code))
+        account_name = label.split(" - ", 1)[-1] if " - " in label else label
+        annual_budget = float(case.get("annual_budget", 0))
+        ytd_actual = float(case.get("ytd_actual", 0))
+        accepted_pct = float(case.get("accepted_pct_change", 0))
+        ts = case.get("ts")
 
-            features = compute_features(account_code, annual_budget, ytd_actual)
-            norm_budget = annual_budget / max_budget if max_budget > 0 else 0.5
+        features = compute_features(account_code, annual_budget, ytd_actual)
+        norm_budget = annual_budget / max_budget if max_budget > 0 else 0.5
 
-            insert_feedback_case(db, run_id, property_id, account_code, account_name,
-                                  annual_budget, ytd_actual, accepted_pct, features,
-                                  created_at=ts, normalized_annual_budget=norm_budget)
-            count += 1
+        insert_feedback_case(db, run_id, property_id, account_code, account_name,
+                              annual_budget, ytd_actual, accepted_pct, features,
+                              created_at=ts, normalized_annual_budget=norm_budget)
+        count += 1
 
-        db.commit()
+    db.commit()
 
     logger.info(f"Seeded {count} feedback JSONL cases")
     return count
@@ -523,15 +521,14 @@ def seed_excel_2025(db: sqlite3.Connection, property_id: int) -> int:
 
         max_budget = max((r["annual_budget"] for r in rows_data if r["annual_budget"] > 0), default=1.0)
 
-        with write_lock():
-            for r in rows_data:
-                features = compute_features(r["account_code"], r["annual_budget"], r["ytd_actual"])
-                norm_budget = r["annual_budget"] / max_budget if max_budget > 0 else 0.5
-                insert_feedback_case(db, run_id, property_id, r["account_code"], r["account_name"],
-                                      r["annual_budget"], r["ytd_actual"], r["pct_change"],
-                                      features, normalized_annual_budget=norm_budget)
-                count += 1
-            db.commit()
+        for r in rows_data:
+            features = compute_features(r["account_code"], r["annual_budget"], r["ytd_actual"])
+            norm_budget = r["annual_budget"] / max_budget if max_budget > 0 else 0.5
+            insert_feedback_case(db, run_id, property_id, r["account_code"], r["account_name"],
+                                  r["annual_budget"], r["ytd_actual"], r["pct_change"],
+                                  features, normalized_annual_budget=norm_budget)
+            count += 1
+        db.commit()
 
         logger.info(f"Seeded {count} 2025 Excel cases")
         return count
@@ -613,15 +610,14 @@ def seed_excel_2024(db: sqlite3.Connection, property_id: int) -> int:
 
         max_budget = max((r["annual_budget"] for r in rows_data if r["annual_budget"] > 0), default=1.0)
 
-        with write_lock():
-            for r in rows_data:
-                features = compute_features(r["account_code"], r["annual_budget"], r["ytd_actual"])
-                norm_budget = r["annual_budget"] / max_budget if max_budget > 0 else 0.5
-                insert_feedback_case(db, run_id, property_id, r["account_code"], r["account_name"],
-                                      r["annual_budget"], r["ytd_actual"], r["pct_change"],
-                                      features, normalized_annual_budget=norm_budget)
-                count += 1
-            db.commit()
+        for r in rows_data:
+            features = compute_features(r["account_code"], r["annual_budget"], r["ytd_actual"])
+            norm_budget = r["annual_budget"] / max_budget if max_budget > 0 else 0.5
+            insert_feedback_case(db, run_id, property_id, r["account_code"], r["account_name"],
+                                  r["annual_budget"], r["ytd_actual"], r["pct_change"],
+                                  features, normalized_annual_budget=norm_budget)
+            count += 1
+        db.commit()
 
         logger.info(f"Seeded {count} 2024 Excel cases")
         return count
@@ -716,16 +712,15 @@ def seed_sop_rules(db: sqlite3.Connection) -> int:
 
     rules = [line.strip() for line in sop_path.read_text().splitlines() if line.strip()]
 
-    with write_lock():
-        # Check if already seeded
-        existing = db.execute("SELECT COUNT(*) FROM sop_rules").fetchone()[0]
-        if existing > 0:
-            logger.info(f"SOP rules already seeded ({existing} rules), skipping")
-            return existing
+    # Check if already seeded
+    existing = db.execute("SELECT COUNT(*) FROM sop_rules").fetchone()[0]
+    if existing > 0:
+        logger.info(f"SOP rules already seeded ({existing} rules), skipping")
+        return existing
 
-        for rule in rules:
-            db.execute("INSERT INTO sop_rules (rule_text) VALUES (?)", (rule,))
-        db.commit()
+    for rule in rules:
+        db.execute("INSERT INTO sop_rules (rule_text) VALUES (?)", (rule,))
+    db.commit()
 
     logger.info(f"Seeded {len(rules)} SOP rules")
     return len(rules)

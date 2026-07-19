@@ -2,17 +2,14 @@
 
 Verifies that ``validate_inputs`` composes the existing budget/reserve/
 HOA checks with the new ``check_reserve_study_age``, and that
-``partition_errors`` + ``raise_if_blocking`` give callers a clean
-halt-or-surface API.
+``partition_errors`` gives callers a clean split of blocking vs warnings.
 """
 from __future__ import annotations
 
 import pytest
 
 from app.disclosure_package.preflight import (
-    PreflightBlockedError,
     partition_errors,
-    raise_if_blocking,
 )
 from app.disclosure_package.schemas import PreflightError
 
@@ -47,24 +44,6 @@ class TestPartitionErrors:
         assert [e.field_path for e in blocking] == ["b1", "b2"]
         assert [e.field_path for e in warnings] == ["w1", "w2"]
 
-
-class TestRaiseIfBlocking:
-    def test_returns_warnings_when_no_blocking(self) -> None:
-        warnings = raise_if_blocking([_err("warning", "w1"), _err("warning", "w2")])
-        assert [e.field_path for e in warnings] == ["w1", "w2"]
-
-    def test_raises_with_field_paths(self) -> None:
-        with pytest.raises(PreflightBlockedError) as ctx:
-            raise_if_blocking([
-                _err("warning", "ok"),
-                _err("blocking", "reserve_study", msg="too old"),
-                _err("blocking", "budget_draft", msg="missing"),
-            ])
-        assert ctx.value.field_paths == ("reserve_study", "budget_draft")
-        assert len(ctx.value.blocking) == 2
-        # Message includes each blocker's path + message
-        assert "reserve_study: too old" in str(ctx.value)
-        assert "budget_draft: missing" in str(ctx.value)
 
 
 class TestValidateInputsComposesReserveStudyCheck:

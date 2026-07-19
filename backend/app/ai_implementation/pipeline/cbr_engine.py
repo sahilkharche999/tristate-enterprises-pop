@@ -11,7 +11,7 @@ import numpy as np
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 
-from ..config import settings
+from ...config import settings
 from ..db.models import FeedbackCase, DECIDED_STATUSES, FEATURE_COLUMNS
 from ..models.schemas import EnrichedLineItem
 

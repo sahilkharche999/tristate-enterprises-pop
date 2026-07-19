@@ -427,34 +427,6 @@ def partition_errors(
     return blocking, warnings
 
 
-class PreflightBlockedError(RuntimeError):
-    """Raised by ``raise_if_blocking`` when at least one blocking error
-    is present. Carries the full error list and the field paths so the
-    Disclosure Settings form can deep-link the operator to every offender.
-    """
-
-    def __init__(self, blocking: list[PreflightError]) -> None:
-        self.blocking = blocking
-        self.field_paths = tuple(e.field_path for e in blocking)
-        super().__init__(
-            f"Preflight blocked with {len(blocking)} error(s): "
-            + "; ".join(f"{e.field_path}: {e.message}" for e in blocking)
-        )
-
-
-def raise_if_blocking(errors: list[PreflightError]) -> list[PreflightError]:
-    """Halt compilation when any blocking errors exist; otherwise return
-    the warnings so the caller can stash them in ``computed.data_gaps``.
-
-    Wires into ``compile_package`` so a single call covers both the
-    halt-on-blocking and the surface-warnings paths.
-    """
-    blocking, warnings = partition_errors(errors)
-    if blocking:
-        raise PreflightBlockedError(blocking)
-    return warnings
-
-
 # -- Appendix cadence preflight (Phase 5.6) --------------------------------
 
 

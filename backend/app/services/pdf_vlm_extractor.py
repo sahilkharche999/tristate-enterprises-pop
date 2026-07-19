@@ -21,7 +21,6 @@ from ..models.financial_document_extraction import (
 from ..ai_implementation.pipeline.document_extraction_provider import (
     DocumentPromptContext,
     RenderedPage,
-    VisionStatementExtractor,
 )
 from .financial_statement_validation import (
     derive_statement_confidence,
@@ -205,7 +204,7 @@ def render_pdf_pages(
 ) -> list[RenderedPage]:
     """Render PDF pages to PNG bytes for the hybrid ingestion path.
 
-    Kept for backward compatibility with tests and the VisionStatementExtractor
+    Kept for backward compatibility with tests and the Any
     protocol. The default ``dpi=72`` preserves existing behaviour for the
     hybrid text+image path; the scanned-PDF fallback in ``_extract_full_document``
     passes ``dpi=_SCANNED_FALLBACK_RENDER_DPI`` (200) so Gemini can actually
@@ -1235,7 +1234,7 @@ async def _extract_full_document(
 
 async def extract_pdf_statement(
     path: str,
-    provider: Optional[VisionStatementExtractor] = None,
+    provider: Optional[Any] = None,
     *,
     max_pages: Optional[int] = None,
     source_mode: str = "income_statement",

@@ -9,9 +9,6 @@ Public surface:
     render_template(*, template_name, context, templates_subdir="standard") -> bytes
         Render a single Jinja template to PDF bytes.
 
-    render_package(*, spec, computed, templates_subdir="standard") -> dict[str, bytes]
-        Render every GeneratedPage in spec.entries.
-
     RemoteFetchDenied (RuntimeError subclass)
         Raised when a template attempts a non-local resource fetch.
 """
@@ -145,53 +142,3 @@ def render_template(
     buf = BytesIO()
     html_doc.write_pdf(target=buf)
     return buf.getvalue()
-
-
-def render_package(
-    *,
-    spec,  # PackageSpec
-    computed: dict[str, Any],
-    templates_subdir: str = "standard",
-) -> dict[str, bytes]:
-    """Render every GeneratedPage entry in ``spec.entries``.
-
-    Returns a ``{template_name: pdf_bytes}`` dict. Static appendices
-    (``StaticAppendix`` entries) are NOT rendered here — they are merged
-    in plan 11-05.
-
-    The caller must supply ``computed`` already populated with everything
-    each template references; ``StrictUndefined`` will raise loudly if a
-    key is missing.
-    """
-    from .schemas import GeneratedPage
-
-    out: dict[str, bytes] = {}
-    for entry in spec.entries:
-        if isinstance(entry, GeneratedPage):
-            ctx = {
-                "spec": spec,
-                "static_data": spec.static_data,
-                "fiscal_year": spec.fiscal_year,
-                # Default so TOC/page-reference templates can safely call
-                # ``toc_page_numbers.get(...)`` even outside compiler.py's
-                # two-pass render (e.g. standalone/test renders). Real
-                # values are computed and injected by compile_package.
-                "toc_page_numbers": {},
-                # Same reasoning: appendix TOC rows are computed by
-                # compile_package's single-source-of-truth appendix
-                # resolution; standalone/test renders see an empty list.
-                "appendix_toc_entries": [],
-                # Default so _base.html's logo conditional doesn't raise
-                # StrictUndefined outside compile_package. None -> default mark.
-                "hoa_logo_data_uri": None,
-                # Default empty boilerplate registry (hoa-boilerplate-workbench)
-                # so cover_letter.html can reference boilerplate.cover_letter_body.
-                "boilerplate": {"cover_letter_body": None},
-                **computed,
-            }
-            out[entry.template] = render_template(
-                template_name=entry.template,
-                context=ctx,
-                templates_subdir=templates_subdir,
-            )
-    return out

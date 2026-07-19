@@ -8,7 +8,7 @@ from typing import Any, Optional
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..config import settings
+from ...config import settings
 from ..db.models import Property, SuggestionRun, FeedbackCase
 from ..models.schemas import (
     EnrichedLineItem,

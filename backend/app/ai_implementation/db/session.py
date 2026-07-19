@@ -4,7 +4,7 @@ from pathlib import Path
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker, Session
 
-from ..config import settings
+from ...config import settings
 
 # Ensure the data directory exists
 _db_path = Path(settings.DB_PATH)

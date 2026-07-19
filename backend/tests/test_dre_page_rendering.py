@@ -13,7 +13,6 @@ fitz = pytest.importorskip("fitz")  # PyMuPDF; skip whole module if unavailable
 
 from app.dre_extraction import (
     DRE_RENDER_DPI,
-    build_contact_sheet_pdf,
     render_dre_pages,
 )
 
@@ -60,39 +59,3 @@ class TestRenderDREPages:
         assert len(small[0].content) < len(big[0].content)
 
 
-class TestContactSheet:
-    def test_empty_input_returns_empty_bytes(self) -> None:
-        assert build_contact_sheet_pdf([]) == b""
-
-    def test_sheet_count_matches_grid_packing(self, tmp_path: Path) -> None:
-        # 6 thumbnails per sheet (2 cols × 3 rows); 7 source pages → 2 sheets
-        pdf = _synth_pdf(tmp_path / "doc.pdf", page_count=7)
-        pages = render_dre_pages(str(pdf))
-        sheet_bytes = build_contact_sheet_pdf(pages)
-        sheet_doc = fitz.open(stream=sheet_bytes, filetype="pdf")
-        try:
-            assert sheet_doc.page_count == 2
-        finally:
-            sheet_doc.close()
-
-    def test_single_sheet_when_pages_fit(self, tmp_path: Path) -> None:
-        pdf = _synth_pdf(tmp_path / "doc.pdf", page_count=4)
-        pages = render_dre_pages(str(pdf))
-        sheet_bytes = build_contact_sheet_pdf(pages)
-        sheet_doc = fitz.open(stream=sheet_bytes, filetype="pdf")
-        try:
-            assert sheet_doc.page_count == 1
-        finally:
-            sheet_doc.close()
-
-    def test_caption_includes_source_page_number(self, tmp_path: Path) -> None:
-        pdf = _synth_pdf(tmp_path / "doc.pdf", page_count=2)
-        pages = render_dre_pages(str(pdf))
-        sheet_bytes = build_contact_sheet_pdf(pages)
-        sheet_doc = fitz.open(stream=sheet_bytes, filetype="pdf")
-        try:
-            text = sheet_doc[0].get_text()
-            assert "Page 1" in text
-            assert "Page 2" in text
-        finally:
-            sheet_doc.close()

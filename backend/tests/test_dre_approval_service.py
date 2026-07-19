@@ -13,7 +13,7 @@ from app.services.dre_approval_service import (
     ExtractionRunNotFound,
     approve_extraction_run,
 )
-from app.services.budget_line_mapping_service import BudgetLineKey, approve_mapping
+from tests.support.budget_line_mapping_seed import seed_budget_line_mapping
 
 
 SCHEMA_PATH = (
@@ -193,18 +193,16 @@ class TestApproveSuccess:
             (pid,),
         )
         prior_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
-        approve_mapping(
+        seed_budget_line_mapping(
+            connection=db,
             property_id=pid,
             assessment_setup_id=prior_id,
-            line_key=BudgetLineKey(
-                normalized_label="insurance",
-                section="operating",
-                category="operating",
-                fund_type="operating",
-            ),
+            normalized_label="insurance",
+            section="operating",
+            category="operating",
+            fund_type="operating",
             pool_key="variable_costs",
             approved_by="ops@example.com",
-            connection=db,
         )
 
         resp = approve_extraction_run(

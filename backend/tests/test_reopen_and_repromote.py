@@ -28,7 +28,7 @@ from app.services.dre_approval_service import (
     approve_extraction_run,
     reopen_and_repromote,
 )
-from app.services.budget_line_mapping_service import BudgetLineKey, approve_mapping
+from tests.support.budget_line_mapping_seed import seed_budget_line_mapping
 from app.services.dre_review_service import record_review_edit
 
 
@@ -189,18 +189,16 @@ class TestReopenAndRepromoteDRE:
             property_id=pid, extraction_run_id=rid,
             setup_type="fixed", reviewed_by="ops1", connection=db,
         )
-        approve_mapping(
+        seed_budget_line_mapping(
+            connection=db,
             property_id=pid,
             assessment_setup_id=first.promoted_setup_id,
-            line_key=BudgetLineKey(
-                normalized_label="insurance",
-                section="operating",
-                category="operating",
-                fund_type="operating",
-            ),
+            normalized_label="insurance",
+            section="operating",
+            category="operating",
+            fund_type="operating",
             pool_key="operating",
             approved_by="ops@example.com",
-            connection=db,
         )
 
         second = reopen_and_repromote(

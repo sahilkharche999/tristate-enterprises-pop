@@ -18,57 +18,9 @@ from typing import Optional
 from app.assessment_engine import (
     AllocationMethod,
     RecipientScope,
-    SetupType,
 )
 
-from .schemas import PromptAllocationMethod, PromptSetupType
-
-
-# -- setup_type ------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class SetupTypeMapping:
-    """Result of mapping Prompt 1's ``setup_type`` to internal enum.
-
-    ``internal_setup_type`` is ``None`` when the prompt returned
-    ``unknown_needs_review`` — the engine refuses to compute against
-    that; the operator must pick a value in the Review Workbench
-    before promotion to live.
-    """
-
-    internal_setup_type: Optional[SetupType]
-    needs_review: bool
-    review_note: Optional[str] = None
-
-
-_SETUP_TYPE_TABLE: dict[str, SetupTypeMapping] = {
-    "fixed_equal": SetupTypeMapping(internal_setup_type="fixed", needs_review=False),
-    "grouped_category": SetupTypeMapping(
-        internal_setup_type="grouped", needs_review=False
-    ),
-    "individual_unit": SetupTypeMapping(
-        internal_setup_type="per_unit", needs_review=False
-    ),
-    "multi_pool_combination": SetupTypeMapping(
-        internal_setup_type="per_unit",
-        needs_review=True,
-        review_note=(
-            "Prompt classified multi_pool_combination → per_unit by default. "
-            "Operator may switch display_mode to grouped in the Review "
-            "Workbench when the multi-pool structure organizes around groups."
-        ),
-    ),
-    "unknown_needs_review": SetupTypeMapping(
-        internal_setup_type=None,
-        needs_review=True,
-        review_note="Prompt could not classify setup_type; operator must pick.",
-    ),
-}
-
-
-def map_setup_type(prompt_value: PromptSetupType) -> SetupTypeMapping:
-    return _SETUP_TYPE_TABLE[prompt_value]
+from .schemas import PromptAllocationMethod
 
 
 # -- allocation_method -----------------------------------------------------

@@ -93,8 +93,8 @@ class TestSaveExtractionRun:
                 for p in batch.page_numbers
             ]
 
-        def extract(pages: list[int]) -> str:
-            return json.dumps({
+        def extract(pages: list[int]):
+            raw = json.dumps({
                 "document_metadata": {
                     "association_name": "Old Mill",
                     "confidence": 0.95,
@@ -114,6 +114,7 @@ class TestSaveExtractionRun:
                     }
                 ],
             })
+            return raw, None, {}
 
         return run_dre_extraction(
             page_count=10,

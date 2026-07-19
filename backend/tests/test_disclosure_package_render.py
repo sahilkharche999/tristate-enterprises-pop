@@ -21,7 +21,6 @@ import pytest
 
 from app.disclosure_package.render import (
     RemoteFetchDenied,
-    render_package,
     render_template,
 )
 from app.disclosure_package.package_specs import SPECS
@@ -908,27 +907,10 @@ def test_deny_url_fetcher_permits_data_uri():
     assert result["file_obj"].read() == b"Hello"
 
 
+# Test 5 removed: render_package deleted (compiler uses render_template)
+
 # ─────────────────────────────────────────────────────────────────────────────
-# Test 5: render_package returns one PDF per GeneratedPage entry
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-def test_render_package_returns_one_pdf_per_generated_entry():
-    spec = SPECS["old_mill"]
-    out = render_package(spec=spec, computed=_minimal_computed_context())
-    expected_templates = {
-        e.template for e in spec.entries if isinstance(e, GeneratedPage)
-    }
-    assert set(out.keys()) == expected_templates
-    # 20 distinct generated-page templates after the drifting-puzzling-grove
-    # 30-year cash-flow + major-component schedule rebuild.
-    assert len(expected_templates) >= 17
-    for template_name, pdf_bytes in out.items():
-        assert pdf_bytes.startswith(b"%PDF"), (
-            f"{template_name} did not produce a valid PDF"
-        )
-
-
+# Test 6:
 # ─────────────────────────────────────────────────────────────────────────────
 # Test 6: rendered PDF has at least one page
 # ─────────────────────────────────────────────────────────────────────────────
