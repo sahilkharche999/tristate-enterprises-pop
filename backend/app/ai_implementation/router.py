@@ -1,14 +1,12 @@
 """FastAPI sub-router for AI Budget Pipeline endpoints."""
 import json
 import logging
-from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 
-from .config import settings
 from .db import get_session, FeedbackCase, Property, SOPRule, SuggestionRun, User, DECIDED_STATUSES
 from .models.schemas import (
     FeedbackRequest,
@@ -20,14 +18,11 @@ from .models.schemas import (
     SuggestionItem,
 )
 from .pipeline.cbr_engine import retain_feedback
-from .pipeline.ml_model import should_activate
 from .pipeline.orchestrator import run_pipeline
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-_CATBOOST_META_PATH = Path(__file__).parent / "data" / "catboost_model" / "meta.json"
 
 
 def _count_decided_cases(session: Session) -> int:
@@ -121,12 +116,11 @@ async def feedback(request: FeedbackRequest, session: Session = Depends(get_sess
         session.commit()
 
         total = _count_decided_cases(session)
-        catboost_active = total >= settings.CATBOOST_MIN_CASES
 
         return FeedbackResponse(
             updated=len(request.decisions),
             total_cases=total,
-            catboost_active=catboost_active,
+            catboost_active=False,
         )
     except Exception as e:
         session.rollback()
@@ -138,15 +132,6 @@ async def feedback(request: FeedbackRequest, session: Session = Depends(get_sess
 async def stats(session: Session = Depends(get_session)) -> StatsResponse:
     """Return pipeline health metrics."""
     total = _count_decided_cases(session)
-    catboost_active = total >= settings.CATBOOST_MIN_CASES
-
-    last_training = None
-    if _CATBOOST_META_PATH.exists():
-        try:
-            meta = json.loads(_CATBOOST_META_PATH.read_text())
-            last_training = meta.get("timestamp")
-        except Exception:
-            pass
 
     props = list(session.scalars(select(Property.name)))
     sop_count = session.scalar(
@@ -155,8 +140,8 @@ async def stats(session: Session = Depends(get_session)) -> StatsResponse:
 
     return StatsResponse(
         total_cases=total,
-        catboost_active=catboost_active,
-        last_training=last_training,
+        catboost_active=False,
+        last_training=None,
         properties=props,
         sop_rules=sop_count,
     )

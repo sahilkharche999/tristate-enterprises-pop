@@ -38,34 +38,6 @@ class UnsupportedHOAError(Exception):
         )
 
 
-# setup_type → assessment-schedule template path.
-# Spec entries reference templates by relative path under the loader's
-# subdirectory (``templates/standard/``). The compiler should call
-# ``template_for_setup_type`` when it needs to know which template would
-# be used for a given setup. All setup types now render through the
-# Universal Assessment Matrix. The legacy fixed/grouped/per_unit templates
-# remain on disk as a rollback path while matrix regression coverage grows.
-_SETUP_TYPE_TEMPLATE_MAP = {
-    "fixed": "assessment_schedule/universal.html",
-    "grouped": "assessment_schedule/universal.html",
-    "per_unit": "assessment_schedule/universal.html",
-}
-
-
-def template_for_setup_type(setup_type: str) -> str:
-    """Return the assessment-schedule template path for a setup_type.
-
-    Raises:
-        ValueError: when ``setup_type`` is unknown.
-    """
-    if setup_type not in _SETUP_TYPE_TEMPLATE_MAP:
-        raise ValueError(
-            f"Unknown setup_type {setup_type!r}; expected one of "
-            f"{sorted(_SETUP_TYPE_TEMPLATE_MAP)}"
-        )
-    return _SETUP_TYPE_TEMPLATE_MAP[setup_type]
-
-
 def resolve(
     property_id: int,
     fiscal_year: int,

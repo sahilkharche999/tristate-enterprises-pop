@@ -23,13 +23,12 @@ from ..pipeline.confidence import calculate_confidence
 from ..pipeline.feature_engineering import enrich_all_items
 from ..pipeline.llm_pass1 import run_pass1
 from ..pipeline.llm_pass2 import apply_pass2_revisions, compute_aggregate, run_pass2
-from ..pipeline.ml_model import load_model, predict, should_activate, train_async
 
 logger = logging.getLogger(__name__)
 
 
 async def run_pipeline(request: SuggestRequest, session: Session) -> SuggestResponse:
-    """Run the full 5-stage AI budget pipeline."""
+    """Run the AI budget pipeline (feature eng → CBR → LLM pass1/pass2)."""
     pipeline_start = time.time()
     timings: dict[str, float] = {}
 
@@ -53,21 +52,10 @@ async def run_pipeline(request: SuggestRequest, session: Session) -> SuggestResp
     cbr_hits = sum(1 for (a, _) in cbr_results.values() if a is not None)
     logger.info(f"Stage 2 done: {cbr_hits}/{len(active_items)} CBR anchors in {timings['cbr_ms']}ms")
 
-    # ── Stage 3: CatBoost Inference ─────────────────────────────────────────────
-    t0 = time.time()
+    # Stage 3 (CatBoost) removed — freeloader while permanently disabled.
+    # Keep empty ml_results so pass1 / confidence signatures stay stable.
     ml_results: dict[int, float] = {}
-    catboost_active = should_activate(session)
-    if catboost_active:
-        model = await asyncio.to_thread(load_model)
-        if model is not None:
-            ml_results = await asyncio.to_thread(predict, model, active_items)
-            logger.info(f"Stage 3 done: {len(ml_results)} ML predictions in {round((time.time() - t0) * 1000)}ms")
-        else:
-            asyncio.create_task(train_async())
-            logger.info("Stage 3: CatBoost active but no model yet, triggering training")
-    else:
-        logger.info("Stage 3: CatBoost dormant (insufficient cases)")
-    timings["catboost_ms"] = round((time.time() - t0) * 1000)
+    timings["catboost_ms"] = 0.0
 
     # ── Macro context for LLM ────────────────────────────────────────────────────
     ytd_pct = request.pct_year_elapsed * 100

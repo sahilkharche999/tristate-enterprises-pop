@@ -175,21 +175,6 @@ export async function listReviewEdits(
   return handleResponse(res);
 }
 
-export async function listFieldSources(
-  hoaId: number,
-  runId: number,
-  filter: { entity_type?: string; entity_id?: string } = {},
-): Promise<ExtractedFieldSource[]> {
-  const qs = new URLSearchParams();
-  if (filter.entity_type) qs.set('entity_type', filter.entity_type);
-  if (filter.entity_id) qs.set('entity_id', filter.entity_id);
-  const url =
-    `${BASE_URL}/hoa/${hoaId}/dre/extraction-runs/${runId}/field-sources` +
-    (qs.toString() ? `?${qs.toString()}` : '');
-  const res = await fetch(url, { headers: authHeaders() });
-  return handleResponse(res);
-}
-
 export async function recordReviewEdit(
   hoaId: number,
   runId: number,

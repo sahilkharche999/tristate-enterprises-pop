@@ -448,110 +448,30 @@ class TestXlsRowNormalization(unittest.TestCase):
         # Non-blank cells should be preserved
         self.assertEqual(rows[0][0], "val_0_0")
 
-    def test_xls_format_detected(self):
-        """Calling parse_income_statement with .xls path dispatches to xlrd reader."""
+    def test_xls_rows_feed_section_parser(self):
+        """xls reader rows + detect_columns + parse_rows_with_sections stay the live path."""
         mock_rows = [
             [None] * 40,
             _section_header_row("Operating Income"),
             _line_item_row("40000 - Assessment", ytd=1000.0, annual=1200.0),
         ]
-
         with patch.object(income_statement_parser, "_read_xls_rows", return_value=mock_rows) as mock_xls:
-            result = income_statement_parser.parse_income_statement("/fake/path.xls")
-
+            rows = income_statement_parser._read_xls_rows("/fake/path.xls", "Income Statement")
         mock_xls.assert_called_once_with("/fake/path.xls", "Income Statement")
+        col_indices = income_statement_parser.detect_columns(rows)
+        result = income_statement_parser.parse_rows_with_sections(rows, col_indices)
         self.assertIsInstance(result, list)
+        self.assertGreater(len(result), 0)
 
 
 # ---------------------------------------------------------------------------
-# PDF Text Extraction (pdfplumber)
+# Integration: detect_columns + parse_rows_with_sections (live Excel path)
 # ---------------------------------------------------------------------------
 
-class TestPdfExtraction(unittest.TestCase):
+class TestParseRowsIntegration(unittest.TestCase):
 
-    def test_pdf_extraction_basic(self):
-        """Given mock pdfplumber output, produces rows with section headers and line items."""
-        # Simulate pdfplumber words for a simple income statement page
-        # x0 < 20 = section header, x0 >= 20 = line item
-        words = []
-        # Section header: "Operating Income" at x0=10
-        for i, word in enumerate(["Operating", "Income"]):
-            words.append({
-                "text": word,
-                "x0": 10.0 + i * 60,
-                "top": 50.0,
-                "x1": 10.0 + i * 60 + 55,
-            })
-        # Line item: "40000 - Assessment Income" at x0=25
-        for i, word in enumerate(["40000", "-", "Assessment"]):
-            words.append({
-                "text": word,
-                "x0": 25.0 + i * 50,
-                "top": 70.0,
-                "x1": 25.0 + i * 50 + 45,
-            })
-        # Add enough words to pass the >20 words check
-        for j in range(25):
-            words.append({
-                "text": f"word{j}",
-                "x0": 25.0,
-                "top": 100.0 + j * 10,
-                "x1": 75.0,
-            })
-
-        mock_page = MagicMock()
-        mock_page.extract_words.return_value = words
-
-        mock_pdf = MagicMock()
-        mock_pdf.pages = [mock_page]
-        mock_pdf.__enter__ = MagicMock(return_value=mock_pdf)
-        mock_pdf.__exit__ = MagicMock(return_value=False)
-
-        with patch("pdfplumber.open", return_value=mock_pdf):
-            from app.services.income_statement_parser import _read_pdf_rows
-            rows = _read_pdf_rows("/fake/path.pdf")
-
-        self.assertIsInstance(rows, list)
-        self.assertGreater(len(rows), 0)
-
-    def test_scanned_pdf_raises_error(self):
-        """When pdfplumber extracts fewer than 20 words from page 1, raises ValueError."""
-        # Only 5 words — clearly a scanned PDF
-        sparse_words = [{"text": f"w{i}", "x0": 10.0, "top": 10.0, "x1": 40.0} for i in range(5)]
-
-        mock_page = MagicMock()
-        mock_page.extract_words.return_value = sparse_words
-
-        mock_pdf = MagicMock()
-        mock_pdf.pages = [mock_page]
-        mock_pdf.__enter__ = MagicMock(return_value=mock_pdf)
-        mock_pdf.__exit__ = MagicMock(return_value=False)
-
-        with patch("pdfplumber.open", return_value=mock_pdf):
-            from app.services.income_statement_parser import _read_pdf_rows
-            with self.assertRaises(ValueError) as ctx:
-                _read_pdf_rows("/fake/scan.pdf")
-
-        self.assertIn("no text layer", str(ctx.exception).lower())
-
-
-# ---------------------------------------------------------------------------
-# Row Validation
-# ---------------------------------------------------------------------------
-
-# TestRowValidation removed — validation_warning was comparing YTD values
-# to Annual Budget (cross-period), producing false positives on every row.
-# Deferred until YTD Budget column is also extracted for same-period validation.
-
-
-# ---------------------------------------------------------------------------
-# Integration: parse_income_statement end-to-end
-# ---------------------------------------------------------------------------
-
-class TestParseIncomeStatementIntegration(unittest.TestCase):
-
-    def test_parse_income_statement_xlsx(self):
-        """Given a mocked .xlsx file path, returns list of dicts with required keys."""
+    def test_parse_rows_from_xlsx_reader_shape(self):
+        """xlsx rows through detect_columns + parse_rows_with_sections return required keys."""
         expected_keys = {
             "line_item_key", "account_code", "category", "label",
             "ytd_actual", "annual_budget", "projection", "percent_change",
@@ -568,18 +488,16 @@ class TestParseIncomeStatementIntegration(unittest.TestCase):
             _line_item_row("91228 - Exposed Brick", ytd=500.0, annual=600.0),
         ]
 
-        with patch.object(income_statement_parser, "_read_xlsx_rows", return_value=mock_rows):
-            result = income_statement_parser.parse_income_statement("/fake/path.xlsx")
+        col_indices = income_statement_parser.detect_columns(mock_rows)
+        result = income_statement_parser.parse_rows_with_sections(mock_rows, col_indices)
 
         self.assertIsInstance(result, list)
         self.assertGreater(len(result), 0)
 
-        # Check all required keys are present
         for item in result:
             for key in expected_keys:
                 self.assertIn(key, item, f"Missing key: {key}")
 
-        # Check specific items
         income_items = [i for i in result if i["category"] == "income"]
         operating_items = [i for i in result if i["category"] == "operating"]
         reserve_items = [i for i in result if i["category"] in ("reserve", "reserve_income", "reserve_expense")]
@@ -588,15 +506,17 @@ class TestParseIncomeStatementIntegration(unittest.TestCase):
         self.assertGreater(len(operating_items), 0)
         self.assertGreater(len(reserve_items), 0)
 
-        # Reserve study items must be read_only
         reserve_read_only = [i for i in reserve_items if i["read_only"]]
         self.assertGreater(len(reserve_read_only), 0)
 
-    def test_parse_income_statement_unsupported_format(self):
-        """Unsupported file extension raises ValueError."""
+
+class TestEnsureXlsxRejectsPdf(unittest.TestCase):
+    def test_ensure_xlsx_raises_on_bare_pdf(self):
+        from app.services.budget_history_service import _ensure_xlsx
+
         with self.assertRaises(ValueError) as ctx:
-            income_statement_parser.parse_income_statement("/fake/path.csv")
-        self.assertIn("Unsupported", str(ctx.exception))
+            _ensure_xlsx("/tmp/statement.pdf")
+        self.assertIn("VLM", str(ctx.exception))
 
 
 if __name__ == "__main__":

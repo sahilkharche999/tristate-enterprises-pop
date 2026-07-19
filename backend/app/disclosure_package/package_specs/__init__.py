@@ -10,7 +10,7 @@ reserve_study_extractions, appendix_documents) — never in code.
 """
 from __future__ import annotations
 
-from .resolver import UnsupportedHOAError, resolve, template_for_setup_type
+from .resolver import UnsupportedHOAError, resolve
 from .standard import OLD_MILL_2026, STANDARD_PACKAGE_SPEC
 
 SPECS = {
@@ -24,5 +24,4 @@ __all__ = [
     "STANDARD_PACKAGE_SPEC",
     "UnsupportedHOAError",
     "resolve",
-    "template_for_setup_type",
 ]

@@ -32,7 +32,6 @@ from starlette.status import (
     HTTP_410_GONE,
     HTTP_413_CONTENT_TOO_LARGE,
     HTTP_500_INTERNAL_SERVER_ERROR,
-    HTTP_501_NOT_IMPLEMENTED,
 )
 
 from ..ai_implementation.db import get_session
@@ -87,15 +86,6 @@ async def generate_disclosure_package(
             raise HTTPException(
                 status_code=HTTP_404_NOT_FOUND,
                 detail=f"HOA not found: {payload.hoa_id}",
-            )
-        if not dp_service.is_supported_hoa(property_row.name):
-            # REQ-D11-016: non-Old-Mill returns 501 Not Implemented
-            raise HTTPException(
-                status_code=HTTP_501_NOT_IMPLEMENTED,
-                detail=(
-                    "Disclosure package generation is not yet available for "
-                    f"{property_row.name}"
-                ),
             )
 
         job = dp_service.create_job(
@@ -274,7 +264,8 @@ async def get_disclosure_preflight(
 _APPENDIX_MAX_BYTES = 25 * 1024 * 1024
 
 
-def _ensure_hoa_supported(session: Session, hoa_id: int) -> Property:
+def _require_property(session: Session, hoa_id: int) -> Property:
+    """Return the property row or raise 404 when missing."""
     property_row = (
         session.query(Property)
         .filter(Property.id == hoa_id)
@@ -283,14 +274,6 @@ def _ensure_hoa_supported(session: Session, hoa_id: int) -> Property:
     if property_row is None:
         raise HTTPException(
             status_code=HTTP_404_NOT_FOUND, detail=f"HOA not found: {hoa_id}"
-        )
-    if not dp_service.is_supported_hoa(property_row.name):
-        raise HTTPException(
-            status_code=HTTP_501_NOT_IMPLEMENTED,
-            detail=(
-                "Disclosure-package appendices are not yet available for "
-                f"{property_row.name}"
-            ),
         )
     return property_row
 
@@ -302,7 +285,7 @@ async def list_hoa_appendices(
     current_user: dict = Depends(get_current_user),  # noqa: ARG001 — auth gate
 ) -> JSONResponse:
     """List uploaded static appendices for an HOA, sorted by filename."""
-    _ensure_hoa_supported(session, hoa_id)
+    _require_property(session, hoa_id)
     return JSONResponse(content={"items": dp_service.list_appendices(hoa_id)})
 
 
@@ -314,7 +297,7 @@ async def upload_hoa_appendix(
     current_user: dict = Depends(get_current_user),  # noqa: ARG001 — auth gate
 ) -> JSONResponse:
     """Upload a single PDF appendix for an HOA. Replaces by filename."""
-    _ensure_hoa_supported(session, hoa_id)
+    _require_property(session, hoa_id)
     content = await file.read()
     if len(content) > _APPENDIX_MAX_BYTES:
         raise HTTPException(
@@ -338,7 +321,7 @@ async def download_hoa_appendix(
     current_user: dict = Depends(get_current_user),  # noqa: ARG001 — auth gate
 ) -> FileResponse:
     """Download a previously uploaded static appendix PDF."""
-    _ensure_hoa_supported(session, hoa_id)
+    _require_property(session, hoa_id)
     safe = dp_service._sanitize_appendix_filename(filename)
     path = dp_service.appendix_dir_for(hoa_id) / safe
     if not path.exists():
@@ -358,7 +341,7 @@ async def delete_hoa_appendix(
     current_user: dict = Depends(get_current_user),  # noqa: ARG001 — auth gate
 ):
     """Delete a previously uploaded appendix. 404 if it doesn't exist."""
-    _ensure_hoa_supported(session, hoa_id)
+    _require_property(session, hoa_id)
     try:
         deleted = dp_service.delete_appendix(hoa_id, filename)
     except ValueError as exc:

@@ -749,7 +749,12 @@ def _write_temp_workbook(file_bytes: bytes, original_filename: str) -> str:
 
 
 def _ensure_xlsx(temp_input_path: str) -> str:
-    """Convert .xls or .pdf to .xlsx for pipeline processing. Returns the .xlsx path."""
+    """Convert .xls to .xlsx for pipeline processing. Returns the .xlsx path.
+
+    PDF uploads must go through the VLM → ``build_normalized_statement_workbook``
+    path before the budget pipeline. Bare ``.pdf`` paths raise rather than
+    falling through to openpyxl.
+    """
     ext = Path(temp_input_path).suffix.lower()
     if ext == ".xls":
         from .income_statement_parser import _read_xls_rows
@@ -765,20 +770,12 @@ def _ensure_xlsx(temp_input_path: str) -> str:
         wb.save(xlsx_path)
         wb.close()
         return xlsx_path
-    elif ext == ".pdf":
-        from .income_statement_parser import _read_pdf_rows
-        from openpyxl import Workbook as _Workbook
-        rows = _read_pdf_rows(temp_input_path)
-        wb = _Workbook()
-        ws = wb.active
-        ws.title = "Income Statement"
-        for r, row in enumerate(rows, start=1):
-            for c, val in enumerate(row, start=1):
-                ws.cell(row=r, column=c, value=val)
-        xlsx_path = temp_input_path.rsplit(".", 1)[0] + ".xlsx"
-        wb.save(xlsx_path)
-        wb.close()
-        return xlsx_path
+    if ext == ".pdf":
+        raise ValueError(
+            "PDF files cannot be converted via the deterministic Excel path. "
+            "Upload PDFs through the VLM extraction path so a normalized "
+            ".xlsx workbook is built before the budget pipeline."
+        )
     return temp_input_path
 
 

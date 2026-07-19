@@ -6,7 +6,6 @@ import os
 import secrets
 import logging
 from pathlib import Path
-from typing import Optional
 
 from pydantic import Field
 from pydantic_settings import BaseSettings
@@ -37,12 +36,6 @@ class Settings(BaseSettings):
     # Maximum number of rows to include in budget preview
     MAX_PREVIEW_ROWS: int = 200
 
-    # Optionally provide repo root explicitly to locate pipeline modules
-    REPO_ROOT: Optional[str] = None
-
-    # Default template path (optional)
-    DEFAULT_TEMPLATE_PATH: Optional[str] = None
-
     # JWT Authentication
     JWT_SECRET_KEY: str = _INSECURE_DEFAULT
     JWT_ALGORITHM: str = "HS256"
@@ -63,14 +56,10 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: str = ""
     GEMINI_MODEL: str = ""
     DB_PATH: str = str(Path(__file__).parent / "ai_implementation" / "data" / "budget_ai.db")
-    DOCUMENT_VLM_ENABLED: bool = False
     DOCUMENT_VLM_MAX_PAGES: int = 6
     DOCUMENT_VLM_PAGE_SELECTION_THRESHOLD: int = 10
     DOCUMENT_VLM_PAGE_SELECTION_MAX_PAGES: int = 80
-    DOCUMENT_VLM_MAX_RETRIES: int = 1
     CBR_THRESHOLD: float = 0.95
-    CATBOOST_ENABLED: bool = False  # Set True to enable CatBoost ML stage
-    CATBOOST_MIN_CASES: int = 100
 
     class Config:
         env_file = ".env"

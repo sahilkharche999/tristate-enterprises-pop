@@ -19,7 +19,6 @@ from app.disclosure_package.package_specs import (
     STANDARD_PACKAGE_SPEC,
     UnsupportedHOAError,
     resolve,
-    template_for_setup_type,
 )
 
 
@@ -80,21 +79,6 @@ class TestResolveStandard:
         assert STANDARD_PACKAGE_SPEC.fiscal_year == 0
         # Backward-compat alias points at the same literal.
         assert OLD_MILL_2026 is STANDARD_PACKAGE_SPEC
-
-
-class TestTemplateForSetupType:
-    def test_fixed_maps_to_universal_template(self) -> None:
-        assert template_for_setup_type("fixed") == "assessment_schedule/universal.html"
-
-    def test_grouped_maps_to_universal_template(self) -> None:
-        assert template_for_setup_type("grouped") == "assessment_schedule/universal.html"
-
-    def test_per_unit_maps_to_universal_template(self) -> None:
-        assert template_for_setup_type("per_unit") == "assessment_schedule/universal.html"
-
-    def test_unknown_setup_type_raises(self) -> None:
-        with pytest.raises(ValueError, match="Unknown setup_type"):
-            template_for_setup_type("not_a_setup_type")
 
 
 class TestResolveUnsupported:

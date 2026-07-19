@@ -418,7 +418,7 @@ def test_upload_pdf_validation_failure_returns_review_required(client, budget_hi
 
 
 def test_variant_excel_low_confidence_returns_review_required(client, budget_history_test_harness, monkeypatch):
-    def _low_confidence_line_items(table):
+    def _low_confidence_line_items(table, **_kwargs):
         return (
             [
                 {
@@ -493,7 +493,7 @@ def test_bundle_upload_budget_review_required_explains_expected_income_statement
     budget_history_test_harness,
     monkeypatch,
 ):
-    def _low_confidence_line_items(table):
+    def _low_confidence_line_items(table, **_kwargs):
         return (
             [
                 {

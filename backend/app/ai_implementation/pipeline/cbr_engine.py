@@ -10,7 +10,6 @@ from typing import Optional
 import numpy as np
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
-from sklearn.preprocessing import MinMaxScaler
 
 from ..config import settings
 from ..db.models import FeedbackCase, DECIDED_STATUSES, FEATURE_COLUMNS
@@ -76,11 +75,20 @@ def retrieve_cases(session: Session) -> tuple[np.ndarray, list[dict]]:
 
 
 def _normalize_matrix(matrix: np.ndarray) -> np.ndarray:
-    """Min-max normalize to [0, 1] range per feature."""
+    """Min-max normalize to [0, 1] range per feature.
+
+    Zero-range columns become zeros (sklearn MinMaxScaler parity), not NaN.
+    """
     if matrix.shape[0] == 0:
         return matrix
-    scaler = MinMaxScaler()
-    return scaler.fit_transform(matrix)
+    col_min = matrix.min(axis=0)
+    col_max = matrix.max(axis=0)
+    denom = col_max - col_min
+    # Avoid divide-by-zero: zero-range features → all zeros after normalize
+    safe_denom = np.where(denom == 0, 1.0, denom)
+    normalized = (matrix - col_min) / safe_denom
+    normalized = np.where(denom == 0, 0.0, normalized)
+    return normalized
 
 
 def compute_similarity(

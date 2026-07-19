@@ -324,18 +324,6 @@ export async function analyzeAssessmentMappingReview(hoaId: number): Promise<Map
   return handleResponse<MappingReviewAnalysis>(res);
 }
 
-export async function applySafeAssessmentMappingReview(
-  hoaId: number,
-  safe_to_stage: AnalysisSafeToStageItem[],
-) {
-  const res = await fetch(`${BASE_URL}/hoa/${hoaId}/assessment-mapping-review/analyze/apply-safe`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    body: JSON.stringify({ safe_to_stage }),
-  });
-  return handleResponse(res);
-}
-
 export async function approveResidualRouting(hoaId: number, note = '') {
   const res = await fetch(`${BASE_URL}/hoa/${hoaId}/assessment-mapping-review/residual/approve`, {
     method: 'POST',

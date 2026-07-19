@@ -1,4 +1,4 @@
-"""Pure-unit tests for ``app.disclosure_package.verify.raster_diff``.
+"""Pure-unit tests for ``tests.support.raster_diff``.
 
 These tests manufacture synthetic PDFs with PyMuPDF and exercise the
 comparator in isolation — no golden PDF, no compile_package, no
@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from app.disclosure_package.verify import (
+from tests.support.raster_diff import (
     BYTE_TOL,
     DEFAULT_TOLERANCE,
     PageDivergence,

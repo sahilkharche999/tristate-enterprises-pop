@@ -67,16 +67,6 @@ export async function listAnnualPackages(hoaId: number): Promise<AnnualPackage[]
   return handleResponse<AnnualPackage[]>(res);
 }
 
-export async function getAnnualPackage(
-  hoaId: number,
-  packageId: number,
-): Promise<AnnualPackage> {
-  const res = await fetch(`${BASE_URL}/hoa/${hoaId}/annual-packages/${packageId}`, {
-    headers: authHeaders(),
-  });
-  return handleResponse<AnnualPackage>(res);
-}
-
 export async function createAnnualPackage(
   hoaId: number,
   body: CreatePackageRequest,

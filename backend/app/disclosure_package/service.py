@@ -4,7 +4,6 @@ Runs the compile_package pipeline inside a FastAPI BackgroundTask. Reports
 status via the disclosure_package_jobs SQLite table.
 
 Plan 11-06 contract:
-    * `is_supported_hoa(name)` — REQ-D11-016 phase-scope check used by router.
     * `_sanitize_segment(value)` — T-11-05 path-traversal mitigation.
     * `_output_dir_for(...)` — composes per-job dir under BUDGET_STORAGE_ROOT.
     * `assert_ownership(...)` — T-11-01 IDOR mitigation; LookupError → 404.
@@ -49,7 +48,6 @@ from .adapters import (
     from_reserve_study_extraction,
 )
 from .compiler import CompileError, compile_package
-from .package_specs import SPECS
 from .preflight import partition_errors, validate_inputs
 from .appendix_storage import appendix_file_exists, appendix_file_path
 from .schemas import (
@@ -60,9 +58,6 @@ from .schemas import (
 )
 
 logger = logging.getLogger(__name__)
-
-OLD_MILL_LEGAL_NAME = "Old Mill Homeowners Association"
-SUPPORTED_HOA_NAMES = {OLD_MILL_LEGAL_NAME}
 
 # T-11-05: only ASCII alphanum, underscore, hyphen are allowed in any path
 # segment derived from user-supplied or DB-supplied identifiers. This rejects
@@ -228,13 +223,9 @@ def delete_appendix(hoa_id: int, filename: str) -> bool:
 
 def _resolve_spec_for_property(property_id: int, fiscal_year: int):
     """Resolve the PackageSpec for ``(property_id, fiscal_year)`` via the
-    DB-backed ``package_specs.resolver`` (Phase 1.3 of
-    dre-driven-assessment-engine).
+    DB-backed ``package_specs.resolver``.
 
-    Replaces the old name-string match against ``OLD_MILL_LEGAL_NAME``;
-    the resolver inspects the ``properties`` row (name, hoa_code) and
-    picks the right manifest. Returns ``None`` when no manifest exists
-    for the property — caller surfaces a clear 501 to the router.
+    Returns ``None`` when the property row is missing.
     """
     from .package_specs import UnsupportedHOAError, resolve
 
@@ -242,34 +233,6 @@ def _resolve_spec_for_property(property_id: int, fiscal_year: int):
         return resolve(property_id, fiscal_year)
     except UnsupportedHOAError:
         return None
-
-
-def _resolve_spec_for_hoa(hoa_name: str):
-    """Backwards-compatible name-string resolver.
-
-    Existing call sites that have only the HOA name (not the property_id)
-    can keep working through this shim. New code SHOULD call
-    ``_resolve_spec_for_property`` directly.
-    """
-    if hoa_name == OLD_MILL_LEGAL_NAME:
-        return SPECS["old_mill"]
-    return None
-
-
-def is_supported_hoa(hoa_name: str) -> bool:
-    """Phase-11 hardcoded scope check, retired by the DRE-driven
-    assessment-engine work. Every HOA with a promoted assessment_setup
-    + a finalized AnnualPackage is now supported via the universal
-    standard package spec. The actual gate is enforced downstream by
-    ``preflight.validate_inputs`` (raises a structured error when
-    prerequisites are missing); this name-based check always returns
-    True so the router doesn't 501 every non-Old-Mill HOA.
-
-    ``hoa_name`` kept on the signature for backward compatibility
-    with existing router call sites.
-    """
-    _ = hoa_name
-    return True
 
 
 def _user_id_from(current_user: dict) -> Optional[int]:
@@ -1254,13 +1217,10 @@ def preview_special_assessment_allocation(
 
 
 __all__ = [
-    "OLD_MILL_LEGAL_NAME",
-    "SUPPORTED_HOA_NAMES",
     "appendix_dir_for",
     "assert_ownership",
     "create_job",
     "delete_appendix",
-    "is_supported_hoa",
     "list_appendices",
     "list_special_assessment_pools",
     "preview_special_assessment_allocation",
