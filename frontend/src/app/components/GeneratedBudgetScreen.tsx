@@ -10,7 +10,9 @@ import { toNum, type SheetTable } from '../api/macros';
 import type { LineItem } from '../data/mockData';
 import { calcProposed, formatCurrency, formatTimestamp } from '../lib/budget';
 import { budgetSourceModeLabel, type BudgetSourceMode } from '../lib/budgetSourceMode';
+import { downloadBlob } from '../lib/downloadBlob';
 import { getErrorMessage } from '../lib/errors';
+import { formatReserveInflation } from '../lib/formatReserveInflation';
 import { formatFiscalYearRangeLabel } from '../lib/hoa';
 
 interface BudgetTotals {
@@ -77,11 +79,6 @@ interface GeneratedBudgetScreenProps {
   readOnly?: boolean;
 }
 
-function formatReserveInflation(rate?: number) {
-  const normalizedRate = typeof rate === 'number' && Number.isFinite(rate) ? rate : 0;
-  return `${(normalizedRate * 100).toFixed(1)}%`;
-}
-
 export function GeneratedBudgetScreen({
   hoa,
   hoaId,
@@ -139,12 +136,7 @@ export function GeneratedBudgetScreen({
     setIsDownloading(true);
     try {
       const blob = await downloadBudgetVersionFile(hoaId, versionId);
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `${versionCode}-budget.xlsx`;
-      link.click();
-      URL.revokeObjectURL(url);
+      downloadBlob(blob, `${versionCode}-budget.xlsx`);
       toast.success(`${versionCode} downloaded.`);
     } catch (error) {
       toast.error(getErrorMessage(error, 'Failed to download the version workbook.'));

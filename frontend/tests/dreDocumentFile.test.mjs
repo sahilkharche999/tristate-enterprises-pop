@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { dreDocumentFileUrl } from '../src/app/api/dreDocumentFileUrl.ts';
+import { dreDocumentFileUrl } from '../src/app/api/fileUrls.ts';
 
 test('dreDocumentFileUrl builds the per-HOA per-document file path', () => {
   const url = dreDocumentFileUrl(7, 42);

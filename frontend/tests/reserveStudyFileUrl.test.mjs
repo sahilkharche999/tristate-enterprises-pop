@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { reserveStudyFileUrl } from '../src/app/api/reserveStudyFileUrl.ts';
+import { reserveStudyFileUrl } from '../src/app/api/fileUrls.ts';
 
 test('reserveStudyFileUrl builds the per-HOA per-upload file path', () => {
   const url = reserveStudyFileUrl(7, 42);

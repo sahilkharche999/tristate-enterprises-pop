@@ -122,15 +122,6 @@ interface BudgetScreenProps {
 
 const DRAFT_AUTO_SAVE_INTERVAL_MS = 30_000;
 
-function downloadBlob(blob: Blob, filename: string) {
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = filename;
-  link.click();
-  URL.revokeObjectURL(url);
-}
-
 function normalizedDraftSnapshot(
   lineItems: LineItem[],
   globalNote: string,
@@ -249,7 +240,6 @@ export function BudgetScreen({
   const [isDeletingDraft, setIsDeletingDraft] = useState(false);
   const [isReplacingBudgetFile, setIsReplacingBudgetFile] = useState(false);
   const replaceBudgetFileInputRef = useRef<HTMLInputElement>(null);
-  const [isDownloadingEnriched] = useState(false);
   const [autoSaveEnabled, setAutoSaveEnabled] = useState(false);
   const [budgetSourceFile, setBudgetSourceFile] = useState<File | null>(null);
   const [reserveStudyFile, setReserveStudyFile] = useState<File | null>(null);
@@ -1814,10 +1804,10 @@ export function BudgetScreen({
               variant="outline"
               className="border-[#e5e5e5] text-[#525252] hover:border-[#737373] hover:bg-[#f5f5f5]"
               onClick={() => void handleDownloadEnriched()}
-              disabled={!draftId || isDownloadingEnriched || isSavingDraft || isGenerating}
+              disabled={!draftId || isSavingDraft || isGenerating}
             >
               <Download className="mr-2 h-4 w-4" />
-              {isDownloadingEnriched ? 'Downloading...' : 'Download Enriched'}
+              Download Enriched
             </Button>
             {draftId && currentView === 'enriched' && (
               <Button

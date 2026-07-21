@@ -2,7 +2,6 @@ import { createBrowserRouter } from "react-router";
 import { LoginScreen } from "./components/LoginScreen";
 import { SignupScreen } from "./components/SignupScreen";
 import { HOAWorkspace } from "./components/HOAWorkspace";
-import { BudgetScreen } from "./components/BudgetScreen";
 import { SettingsScreen } from "./components/SettingsScreen";
 import { SettingsSelector } from "./components/SettingsSelector";
 import { BudgetScreenWrapper } from "./components/BudgetScreenWrapper";

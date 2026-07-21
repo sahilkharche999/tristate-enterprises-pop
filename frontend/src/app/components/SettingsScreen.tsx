@@ -3,7 +3,6 @@ import { useParams, Link, useSearchParams } from 'react-router';
 import {
   ArrowLeft,
   Archive,
-  BookOpen,
   Database,
   Download,
   Eye,
@@ -19,7 +18,6 @@ import { Input } from './ui/input';
 import { Label } from './ui/label';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
-import { getKnowledgeBaseFolders } from '../data/mockData';
 import { toast } from 'sonner';
 import { exportData } from '../api/macros';
 import { getHOA, updateHOA, type HOARecord } from '../api/hoa';
@@ -45,7 +43,7 @@ interface SettingsFormState {
 
 type ValidationField = 'name' | 'units' | 'fiscalYearStart';
 type ValidationErrors = Partial<Record<ValidationField, string>>;
-type SettingsSection = 'database' | 'disclosure' | 'appendices' | 'dre' | 'packages' | 'knowledge' | 'data';
+type SettingsSection = 'database' | 'disclosure' | 'appendices' | 'dre' | 'packages' | 'data';
 
 const SETTINGS_SECTIONS: SettingsSection[] = [
   'database',
@@ -53,7 +51,6 @@ const SETTINGS_SECTIONS: SettingsSection[] = [
   'appendices',
   'dre',
   'packages',
-  'knowledge',
   'data',
 ];
 
@@ -115,12 +112,6 @@ const SETTINGS_NAV_GROUPS: Array<{
     label: 'Tools',
     items: [
       {
-        value: 'knowledge',
-        label: 'Knowledge Base',
-        helper: 'Reference documents',
-        icon: BookOpen,
-      },
-      {
         value: 'data',
         label: 'Data Export',
         helper: 'Download system data',
@@ -178,7 +169,6 @@ export function SettingsScreen() {
   const [hoa, setHoa] = useState<HOARecord | null>(null);
   const [hoaConfig, setHoaConfig] = useState<SettingsFormState>(DEFAULT_FORM);
   const [validationErrors, setValidationErrors] = useState<ValidationErrors>({});
-  const [selectedFolder, setSelectedFolder] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
@@ -225,8 +215,6 @@ export function SettingsScreen() {
       cancelled = true;
     };
   }, [id]);
-
-  const knowledgeBaseFolders = id ? getKnowledgeBaseFolders(id) : [];
 
   const handleSectionChange = (value: string) => {
     const nextSection = SETTINGS_SECTIONS.includes(value as SettingsSection)
@@ -580,79 +568,6 @@ export function SettingsScreen() {
           <TabsContent value="dre" className="space-y-6">
             <div className="bg-[#F7F7F7] border border-[#E5E5E5] rounded-lg">
               <DREPanel hoaId={hoa.id} />
-            </div>
-          </TabsContent>
-
-          <TabsContent value="knowledge" className="space-y-6">
-            <div className="grid gap-6 xl:grid-cols-4">
-              <div className="bg-[#F7F7F7] border border-[#E5E5E5] rounded-lg p-4 xl:col-span-1">
-                <h3 className="text-sm font-medium text-[#111111] mb-4">Folders</h3>
-                <div className="space-y-2">
-                  {knowledgeBaseFolders.map((folder) => (
-                    <button
-                      key={folder.id}
-                      onClick={() => setSelectedFolder(folder.id)}
-                      className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-colors ${
-                        selectedFolder === folder.id
-                          ? 'bg-[#000000] text-white'
-                          : 'text-[#111111] hover:bg-white'
-                      }`}
-                    >
-                      <div className="flex items-center gap-2">
-                        <FolderOpen className="w-4 h-4" />
-                        <span>{folder.name}</span>
-                      </div>
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div className="min-w-0 xl:col-span-3">
-                {selectedFolder ? (
-                  <div className="overflow-x-auto rounded-lg border border-[#E5E5E5] bg-[#F7F7F7]">
-                    <div className="px-6 py-4 border-b border-[#E5E5E5] bg-white">
-                      <h3 className="text-lg font-medium text-[#111111]">
-                        {knowledgeBaseFolders.find((folder) => folder.id === selectedFolder)?.name}
-                      </h3>
-                    </div>
-                    <table className="w-full">
-                      <thead className="bg-[#F7F7F7] border-b border-[#E5E5E5]">
-                        <tr>
-                          <th className="text-left px-6 py-3 text-sm font-medium text-[#111111]">File Name</th>
-                          <th className="text-left px-6 py-3 text-sm font-medium text-[#111111]">Year</th>
-                          <th className="text-left px-6 py-3 text-sm font-medium text-[#111111]">Status</th>
-                          <th className="text-right px-6 py-3 text-sm font-medium text-[#111111]">Action</th>
-                        </tr>
-                      </thead>
-                      <tbody className="bg-white">
-                        {knowledgeBaseFolders
-                          .find((folder) => folder.id === selectedFolder)
-                          ?.files.map((file) => (
-                            <tr key={file.id} className="border-b border-[#E5E5E5] hover:bg-[#FAFAFA]">
-                              <td className="px-6 py-4 text-sm text-[#111111]">{file.name}</td>
-                              <td className="px-6 py-4 text-sm text-[#666666]">{file.year}</td>
-                              <td className="px-6 py-4 text-sm text-[#666666]">{file.status}</td>
-                              <td className="px-6 py-4 text-right">
-                                <div className="flex items-center justify-end gap-1">
-                                  <Button variant="ghost" size="sm" className="text-[#111111] hover:bg-[#F7F7F7]">
-                                    <Eye className="w-4 h-4" />
-                                  </Button>
-                                  <Button variant="ghost" size="sm" className="text-[#111111] hover:bg-[#F7F7F7]">
-                                    <Download className="w-4 h-4" />
-                                  </Button>
-                                </div>
-                              </td>
-                            </tr>
-                          ))}
-                      </tbody>
-                    </table>
-                  </div>
-                ) : (
-                  <div className="bg-[#F7F7F7] border border-[#E5E5E5] rounded-lg h-96 flex items-center justify-center">
-                    <p className="text-[#666666]">Select a folder to view files</p>
-                  </div>
-                )}
-              </div>
             </div>
           </TabsContent>
             </div>

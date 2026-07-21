@@ -28,6 +28,8 @@ import {
 } from '../api/budgetHistory';
 import { getHOA, type HOARecord } from '../api/hoa';
 import { formatCurrency, formatTimestamp } from '../lib/budget';
+import { downloadBlob } from '../lib/downloadBlob';
+import { formatReserveInflation } from '../lib/formatReserveInflation';
 import { assessmentModeLabel } from '../lib/assessmentMode';
 import { budgetSourceModeLabel } from '../lib/budgetSourceMode';
 import { getErrorMessage } from '../lib/errors';
@@ -53,25 +55,11 @@ function eventMetadata(event: BudgetTimelineEvent) {
   return { relatedFile, relatedVersion, sourceMode, assessmentMode };
 }
 
-function downloadBlob(blob: Blob, filename: string) {
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = filename;
-  link.click();
-  URL.revokeObjectURL(url);
-}
-
 function monthLabel(month: number | null | undefined) {
   if (!month) {
     return '—';
   }
   return new Date(2000, month - 1, 1).toLocaleString('en-US', { month: 'long' });
-}
-
-function formatReserveInflation(rate: number | null | undefined) {
-  const normalizedRate = typeof rate === 'number' && Number.isFinite(rate) ? rate : 0;
-  return `${(normalizedRate * 100).toFixed(1)}%`;
 }
 
 function compareFieldValue(

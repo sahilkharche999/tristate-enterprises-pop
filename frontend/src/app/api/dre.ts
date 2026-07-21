@@ -13,7 +13,7 @@
 //   GET    /hoa/{hoa_id}/dre/documents/{document_id}/file                    → raw source PDF bytes
 
 import { BASE_URL } from './config';
-import { dreDocumentFileUrl } from './dreDocumentFileUrl';
+import { dreDocumentFileUrl } from './fileUrls';
 import { authHeaders, handleResponse } from './http';
 
 export { dreDocumentFileUrl };

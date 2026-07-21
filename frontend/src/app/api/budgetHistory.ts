@@ -1,7 +1,10 @@
 import { BASE_URL } from './config.ts';
 import { authHeaders, handleBlobResponse, handleResponse } from './http.ts';
-import { reserveStudyFileUrl } from './reserveStudyFileUrl.ts';
-import { incomeStatementFileUrl, incomeStatementHtmlFileUrl } from './incomeStatementFileUrl.ts';
+import {
+  incomeStatementFileUrl,
+  incomeStatementHtmlFileUrl,
+  reserveStudyFileUrl,
+} from './fileUrls.ts';
 import type { LineItem } from '../data/mockData.ts';
 import {
   createBudgetBundleFormData,

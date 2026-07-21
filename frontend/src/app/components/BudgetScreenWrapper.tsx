@@ -17,7 +17,7 @@ import {
 } from '../api/budgetHistory';
 import { getHOA, type HOARecord } from '../api/hoa';
 import type { SheetTable } from '../api/macros';
-import { initialLineItems, type AISuggestionResponse, type LineItem } from '../data/mockData';
+import { type AISuggestionResponse, type LineItem } from '../data/mockData';
 import { getErrorMessage } from '../lib/errors';
 
 // The Phase 11 hardcode that gated generation on `hoa.name === "Old Mill
@@ -40,7 +40,7 @@ export function BudgetScreenWrapper() {
   const [hoa, setHoa] = useState<HOARecord | null>(null);
   const [isHoaLoading, setIsHoaLoading] = useState(true);
   const [hoaError, setHoaError] = useState<string | null>(null);
-  const [lineItems, setLineItems] = useState<LineItem[]>(initialLineItems);
+  const [lineItems, setLineItems] = useState<LineItem[]>([]);
   const [activeDraft, setActiveDraft] = useState<BudgetDraftPayload | null>(null);
   const [generatedVersion, setGeneratedVersion] = useState<BudgetVersionDetail | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
@@ -114,7 +114,7 @@ export function BudgetScreenWrapper() {
           setLineItems(mapBudgetHistoryLineItems(version.line_items));
         } else {
           setGeneratedVersion(null);
-          setLineItems(draft ? mapBudgetHistoryLineItems(draft.line_items) : initialLineItems);
+          setLineItems(draft ? mapBudgetHistoryLineItems(draft.line_items) : []);
         }
       } catch (error) {
         if (!cancelled) {
@@ -140,7 +140,7 @@ export function BudgetScreenWrapper() {
 
   const handleDraftDeleted = () => {
     setActiveDraft(null);
-    setLineItems(initialLineItems);
+    setLineItems([]);
     setGeneratedVersion(null);
     setSearchParams(new URLSearchParams());
     toast.success('Draft discarded.');
