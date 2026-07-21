@@ -60,6 +60,10 @@ from app.services.assessment_budget_mapping_rule_service import (
     normalize_budget_label,
     select_assessment_mapping_amount,
 )
+from app.services.assessment_mapping_category import (
+    _assessment_mapping_category,
+    _assessment_mapping_fund_type,
+)
 from app.services.ccr_approval_service import (
     get_operator_unit_factors,
     merge_operator_factors,
@@ -2104,21 +2108,6 @@ def _synthetic_special_assessment_lines(
         )
         line_id += 1
     return lines, new_mappings
-
-
-def _assessment_mapping_category(raw_category: object) -> str:
-    category = str(raw_category or "").lower()
-    if category == "income":
-        return "income"
-    if category == "reserve_income":
-        return "reserve_income"
-    if category in {"reserve", "reserve_expense"}:
-        return "reserve_expense"
-    return "operating"
-
-
-def _assessment_mapping_fund_type(category: str) -> str:
-    return "reserve" if category in {"reserve_income", "reserve_expense"} else "operating"
 
 
 def _line_item_to_review_budget_line(item: Any) -> dict[str, Any]:

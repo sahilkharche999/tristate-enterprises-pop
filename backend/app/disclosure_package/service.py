@@ -42,6 +42,10 @@ from ..services.assessment_budget_mapping_rule_service import (
     materialize_budget_line_pool_mappings,
     select_assessment_mapping_amount,
 )
+from ..services.assessment_mapping_category import (
+    _assessment_mapping_category,
+    _assessment_mapping_fund_type,
+)
 from .adapters import (
     from_budget_history_record,
     from_hoa_record,
@@ -371,21 +375,6 @@ def _compile_error_status_message(exc: CompileError) -> str:
         return "Preflight blocked compilation: " + "; ".join(parts)
     # No structured errors on this CompileError — return its plain message.
     return str(exc)
-
-
-def _assessment_mapping_category(raw_category: object) -> str:
-    category = str(raw_category or "").lower()
-    if category == "income":
-        return "income"
-    if category == "reserve_income":
-        return "reserve_income"
-    if category in {"reserve", "reserve_expense"}:
-        return "reserve_expense"
-    return "operating"
-
-
-def _assessment_mapping_fund_type(category: str) -> str:
-    return "reserve" if category in {"reserve_income", "reserve_expense"} else "operating"
 
 
 def _line_item_to_assessment_mapping_line(item: Any) -> dict[str, Any]:

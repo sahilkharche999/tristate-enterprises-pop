@@ -32,17 +32,6 @@ _GENERIC_LABEL_TOKENS = {
 }
 
 BudgetLineEligibility = str
-_NON_BLOCKING_ELIGIBILITIES = {
-    "assessment_revenue_tieout",
-    "pass_through",
-    "reimbursement",
-    "interest_income",
-    "late_fee_income",
-    "zero_or_blank",
-    "inactive",
-    "duplicate_raw_or_normalized",
-    "outside_assessment_scope",
-}
 _BLOCKED_REGULAR_MAPPING_ASSESSMENT_TYPES = {
     "exemption_credit",
     "subsidy_credit",
@@ -133,22 +122,6 @@ class LineReviewCandidate:
     match_label: str
     rule_source: str
     budget_line_derivation: str
-
-
-@dataclass(frozen=True)
-class LineReviewItem:
-    line_label: str
-    normalized_label: str
-    section: str
-    category: str
-    fund_type: str
-    account_code: Optional[str]
-    amount: Optional[Decimal]
-    eligibility: BudgetLineEligibility
-    reason: str
-    status: str
-    pool_key: Optional[str]
-    candidates: list[LineReviewCandidate]
 
 
 def normalize_budget_label(label: str) -> str:
@@ -2324,7 +2297,6 @@ __all__ = [
     "BudgetLineEligibility",
     "DuplicateBudgetLineConflict",
     "LineReviewCandidate",
-    "LineReviewItem",
     "MappingReconciliation",
     "backfill_rules_for_promoted_extraction_run",
     "build_assessment_mapping_review_line_key",

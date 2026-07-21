@@ -50,6 +50,10 @@ from ..services.assessment_budget_mapping_rule_service import (
     materialize_budget_line_pool_mappings,
     select_assessment_mapping_amount,
 )
+from ..services.assessment_mapping_category import (
+    _assessment_mapping_category,
+    _assessment_mapping_fund_type,
+)
 from ..services.budget_line_merge_service import auto_apply_merges_on_upload
 from ..services.budget_line_merge_service import finalize_applied_merges
 from ..services.financial_statement_validation import (
@@ -632,21 +636,6 @@ def _json_loads(value: Optional[str], default: Any) -> Any:
     if not value:
         return default
     return json.loads(value)
-
-
-def _assessment_mapping_category(raw_category: object) -> str:
-    category = str(raw_category or "").lower()
-    if category == "income":
-        return "income"
-    if category == "reserve_income":
-        return "reserve_income"
-    if category in {"reserve", "reserve_expense"}:
-        return "reserve_expense"
-    return "operating"
-
-
-def _assessment_mapping_fund_type(category: str) -> str:
-    return "reserve" if category in {"reserve_income", "reserve_expense"} else "operating"
 
 
 def _line_item_to_assessment_mapping_line(item: dict[str, Any]) -> dict[str, Any]:
@@ -1284,15 +1273,6 @@ def _reserve_group_for_item(item: Optional[dict[str, Any]]) -> Optional[str]:
     if "allocation/transfer" in normalized_label or "transfer" in normalized_label:
         return "transfer"
     return "component"
-
-
-def _is_reserve_overlay_excluded(label: str) -> bool:
-    normalized_label = _normalize_compare_text(label)
-    return (
-        "reserve income" in normalized_label
-        or "allocation/transfer" in normalized_label
-        or "transfer" in normalized_label
-    )
 
 
 def _is_reserve_overlay_eligible(row: dict[str, Any]) -> bool:
