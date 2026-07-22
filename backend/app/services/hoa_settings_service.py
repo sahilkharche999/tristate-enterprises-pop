@@ -61,12 +61,31 @@ def get_or_create(session: Session, *, hoa_id: int) -> HOASettings:
     return row
 
 
-def update(session: Session, *, hoa_id: int, payload: Dict[str, Any]) -> HOASettings:
+def update(session: Session, *, hoa_id: int, payload: Dict[str, Any], expected_version: Optional[int] = None) -> HOASettings:
     row = get_or_create(session, hoa_id=hoa_id)
+    if expected_version is not None:
+        if row.version_int != expected_version:
+            raise ValueError(f"version mismatch (expected={expected_version}, got={row.version_int})")
     for key, value in payload.items():
         if key not in _ALLOWED_FIELDS:
             raise ValueError(f"Unknown field: {key!r}")
         setattr(row, key, value)
+    # full optimistic lock predicate for safety (reuse pattern from other services)
+    try:
+        session.execute(
+            """
+            UPDATE hoasettings
+               SET version_int = version_int + 1
+             WHERE property_id = :property_id
+               AND version_int = :version_int
+            """,
+            {
+                "property_id": hoa_id,
+                "version_int": expected_version if expected_version is not None else row.version_int,
+            },
+        )
+    except Exception as exc:
+        raise ValueError(f"update failed: {exc}") from exc
     session.commit()
     session.refresh(row)
     return row

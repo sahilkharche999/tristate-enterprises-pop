@@ -15,6 +15,7 @@ from ..services import (
     hoa_logo_storage,
     hoa_settings_service,
 )
+from ..optimistic_lock import require_if_match
 
 router = APIRouter(prefix="/hoa", tags=["HOA Settings"])
 
@@ -81,11 +82,12 @@ async def put_disclosure_settings(
     payload: dict = Body(...),
     session: Session = Depends(get_session),
     current_user: dict = Depends(get_current_user),  # noqa: ARG001
+    expected_version: int = Depends(optimistic_lock.require_if_match),
 ):
     if not session.query(Property).filter_by(id=hoa_id).one_or_none():
         raise HTTPException(status_code=404, detail=f"HOA not found: {hoa_id}")
     try:
-        row = hoa_settings_service.update(session, hoa_id=hoa_id, payload=payload)
+        row = hoa_settings_service.update(session, hoa_id=hoa_id, payload=payload, expected_version=expected_version)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return _row_to_dict(row)
