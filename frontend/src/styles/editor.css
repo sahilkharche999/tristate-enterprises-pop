@@ -1,0 +1,57 @@
+/* Boilerplate rich-text editor (add-boilerplate-rich-text-editor).
+ *
+ * Tailwind v4's Preflight resets `ul, ol { list-style: none; margin: 0;
+ * padding: 0 }` and strips heading/paragraph margins. TipTap creates real
+ * <ul>/<ol>/<li> and paragraph nodes, but without these scoped rules the
+ * markers, indentation, and spacing are invisible while editing — the
+ * formatting toolbar appears to "do nothing". These rules restore visible
+ * formatting inside the editor surface only (they mirror the disclosure
+ * print CSS in _shared.css so the on-screen editor roughly matches the PDF).
+ */
+
+.ProseMirror {
+  outline: none;
+  min-height: 100%;
+}
+
+.ProseMirror p {
+  margin: 0 0 0.5em 0;
+}
+
+.ProseMirror strong,
+.ProseMirror b {
+  font-weight: 700;
+}
+
+.ProseMirror ul {
+  list-style: disc outside;
+  margin: 0.4em 0 0.6em 0;
+  padding-left: 1.6em;
+}
+
+.ProseMirror ol {
+  list-style: decimal outside;
+  margin: 0.4em 0 0.6em 0;
+  padding-left: 1.8em;
+}
+
+.ProseMirror li {
+  margin: 0.15em 0;
+}
+
+/* TipTap wraps list-item content in a <p>; collapse its margin so bullets
+ * sit tight against their text. */
+.ProseMirror li > p {
+  margin: 0;
+}
+
+/* Operator-applied indentation (Indent extension → class="indent-N"). */
+.ProseMirror .indent-1 { margin-left: 1.5em; }
+.ProseMirror .indent-2 { margin-left: 3em; }
+.ProseMirror .indent-3 { margin-left: 4.5em; }
+.ProseMirror .indent-4 { margin-left: 6em; }
+
+/* Placeholder-ish empty state: show a subtle caret area height. */
+.ProseMirror:focus {
+  outline: none;
+}

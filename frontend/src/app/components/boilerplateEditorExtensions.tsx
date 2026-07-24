@@ -131,16 +131,25 @@ export const Indent = Extension.create<IndentOptions>({
     const step = (delta: number) =>
       () =>
       ({ tr, state, dispatch }: { tr: any; state: any; dispatch: any }) => {
-        const { selection } = state;
-        let updated = false;
-        state.doc.nodesBetween(selection.from, selection.to, (node: any, pos: number) => {
-          if (this.options.types.includes(node.type.name)) {
-            const level = Math.max(0, Math.min(this.options.maxLevel, (node.attrs.indent || 0) + delta));
-            if (dispatch) tr.setNodeAttribute(pos, 'indent', level);
-            updated = true;
+        const { from, to } = state.selection;
+        const types = this.options.types;
+        const maxLevel = this.options.maxLevel;
+        let changed = false;
+        // nodesBetween on a collapsed cursor still visits the enclosing
+        // block, so this covers "cursor in a paragraph" (the common case)
+        // and a multi-block selection alike.
+        state.doc.nodesBetween(from, to, (node: any, pos: number) => {
+          if (types.includes(node.type.name)) {
+            const current = node.attrs.indent || 0;
+            const next = Math.max(0, Math.min(maxLevel, current + delta));
+            if (next !== current) {
+              tr.setNodeAttribute(pos, 'indent', next);
+              changed = true;
+            }
           }
         });
-        return updated;
+        if (changed && dispatch) dispatch(tr);
+        return changed;
       };
     return {
       indent: step(1),
