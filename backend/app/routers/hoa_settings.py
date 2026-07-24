@@ -82,7 +82,7 @@ async def put_disclosure_settings(
     payload: dict = Body(...),
     session: Session = Depends(get_session),
     current_user: dict = Depends(get_current_user),  # noqa: ARG001
-    expected_version: int = Depends(optimistic_lock.require_if_match),
+    expected_version: int = Depends(require_if_match),
 ):
     if not session.query(Property).filter_by(id=hoa_id).one_or_none():
         raise HTTPException(status_code=404, detail=f"HOA not found: {hoa_id}")
