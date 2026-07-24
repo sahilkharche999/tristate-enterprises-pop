@@ -282,6 +282,14 @@ table th {
     font-size: 9pt;
 }
 
+/* Indentation levels applied by the boilerplate rich-text editor
+ * (add-boilerplate-rich-text-editor) — operator-settable via the toolbar,
+ * stored as a `class` attribute nh3 allowlists on any tag. */
+.indent-1 { margin-left: 18pt; }
+.indent-2 { margin-left: 36pt; }
+.indent-3 { margin-left: 54pt; }
+.indent-4 { margin-left: 72pt; }
+
 .enclosed-list, .disclosure-list {
     list-style: decimal outside;
     margin: 4pt 0 8pt 24pt;

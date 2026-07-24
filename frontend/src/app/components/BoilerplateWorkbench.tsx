@@ -11,6 +11,7 @@ import { X } from 'lucide-react';
 import {
   type BoilerplateReferenceJob,
   type BoilerplateSlot,
+  type BoilerplateVariable,
   boilerplateReferencePdfUrl,
   deleteBoilerplateReferencePdf,
   getBoilerplateSettings,
@@ -20,11 +21,14 @@ import {
 } from '../api/hoaSettings';
 import { authHeaders } from '../api/http';
 import { getErrorMessage } from '../lib/errors';
+import { BoilerplateRichTextEditor } from './BoilerplateRichTextEditor';
 import { Button } from './ui/button';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { clampSplitPercent } from './resizableSplitPane';
 import { toast } from 'sonner';
 
-const SLOT_ID = 'cover_letter_body';
+const SLOT_IDS = ['cover_letter_intro', 'enclosed_documents_list', 'cover_letter_closing'] as const;
+const DEFAULT_SLOT_ID: (typeof SLOT_IDS)[number] = 'cover_letter_intro';
 
 type ReferenceSource = 'job' | 'upload';
 
@@ -40,7 +44,9 @@ export function BoilerplateWorkbench({
   hoaName?: string;
 }) {
   const [slots, setSlots] = useState<BoilerplateSlot[]>([]);
-  const [draft, setDraft] = useState('');
+  const [variables, setVariables] = useState<BoilerplateVariable[]>([]);
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [activeSlot, setActiveSlot] = useState<(typeof SLOT_IDS)[number]>(DEFAULT_SLOT_ID);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [referenceSource, setReferenceSource] = useState<ReferenceSource>('job');
@@ -59,8 +65,8 @@ export function BoilerplateWorkbench({
     try {
       const data = await getBoilerplateSettings(hoaId);
       setSlots(data.slots);
-      const cover = data.slots.find((s) => s.id === SLOT_ID);
-      setDraft(cover?.value ?? '');
+      setVariables(data.variables ?? []);
+      setDrafts(Object.fromEntries(data.slots.map((s) => [s.id, s.value ?? ''])));
       setHasUpload(Boolean(data.has_reference_upload));
     } catch (error) {
       toast.error(getErrorMessage(error, 'Failed to load package language.'));
@@ -150,12 +156,12 @@ export function BoilerplateWorkbench({
   const handleSave = async () => {
     setSaving(true);
     try {
-      const next = await putBoilerplateSettings(hoaId, {
-        [SLOT_ID]: draft.trim() ? draft : null,
-      });
+      const overrides = Object.fromEntries(
+        SLOT_IDS.map((id) => [id, drafts[id]?.trim() ? drafts[id] : null]),
+      );
+      const next = await putBoilerplateSettings(hoaId, overrides);
       setSlots(next.slots);
-      const cover = next.slots.find((s) => s.id === SLOT_ID);
-      setDraft(cover?.value ?? '');
+      setDrafts(Object.fromEntries(next.slots.map((s) => [s.id, s.value ?? ''])));
       toast.success('Package language saved for this HOA.');
     } catch (error) {
       toast.error(getErrorMessage(error, 'Failed to save package language.'));
@@ -164,12 +170,12 @@ export function BoilerplateWorkbench({
     }
   };
 
-  const handleReset = async () => {
+  const handleReset = async (slotId: string) => {
     setSaving(true);
     try {
-      const next = await putBoilerplateSettings(hoaId, { [SLOT_ID]: null });
+      const next = await putBoilerplateSettings(hoaId, { [slotId]: null });
       setSlots(next.slots);
-      setDraft('');
+      setDrafts((prev) => ({ ...prev, [slotId]: '' }));
       toast.success('Reset to system-generated wording.');
     } catch (error) {
       toast.error(getErrorMessage(error, 'Failed to reset.'));
@@ -222,8 +228,7 @@ export function BoilerplateWorkbench({
 
   if (!open) return null;
 
-  const slotLabel = slots.find((s) => s.id === SLOT_ID)?.label ?? 'Cover letter intro';
-  const isOverride = Boolean(slots.find((s) => s.id === SLOT_ID)?.is_override);
+  const slotMeta = (slotId: string) => slots.find((s) => s.id === slotId);
 
   return (
     <div
@@ -238,7 +243,7 @@ export function BoilerplateWorkbench({
             Package language{hoaName ? ` · ${hoaName}` : ''}
           </p>
           <p className="text-xs text-[#737373]">
-            Edit cover-letter intro for this HOA · reference PDF on the right · Esc or ✕ to close
+            Edit cover-letter sections for this HOA · reference PDF on the right · Esc or ✕ to close
           </p>
         </div>
         <Button type="button" variant="ghost" onClick={onClose} aria-label="Close package language workbench">
@@ -258,35 +263,55 @@ export function BoilerplateWorkbench({
             <>
               <p className="mb-4 text-sm text-[#666666]">
                 Saves apply to <strong>this HOA only</strong> for future packages. Leave blank for
-                system-generated wording (includes computed assessment figures). Numbers are not
-                edited here — save, then generate the disclosure package.
+                system-generated wording (includes computed assessment figures). Insert a variable
+                to keep HOA/year-specific values in sync automatically.
               </p>
-              <label className="mb-1 block text-sm font-medium text-[#1a1a1a]" htmlFor="bp-cover-fs">
-                {slotLabel}
-                {isOverride ? (
-                  <span className="ml-2 text-xs font-normal text-[#0a7]">Custom for this HOA</span>
-                ) : (
-                  <span className="ml-2 text-xs font-normal text-[#888]">Using system default</span>
-                )}
-              </label>
-              <textarea
-                id="bp-cover-fs"
-                className="min-h-[min(50vh,360px)] w-full flex-1 rounded-md border border-[#d4d4d4] px-3 py-2 text-sm text-[#1a1a1a] focus:outline-none focus:ring-2 focus:ring-[#1a1a1a]"
-                value={draft}
-                onChange={(e) => setDraft(e.target.value)}
-                placeholder="Leave blank for system-generated cover letter intro…"
-              />
+              <Tabs
+                value={activeSlot}
+                onValueChange={(v) => setActiveSlot(v as (typeof SLOT_IDS)[number])}
+                className="flex min-h-0 flex-1 flex-col"
+              >
+                <TabsList>
+                  {SLOT_IDS.map((slotId) => (
+                    <TabsTrigger key={slotId} value={slotId}>
+                      {slotMeta(slotId)?.label ?? slotId}
+                    </TabsTrigger>
+                  ))}
+                </TabsList>
+                {SLOT_IDS.map((slotId) => (
+                  <TabsContent key={slotId} value={slotId} className="flex min-h-0 flex-1 flex-col">
+                    <label className="mb-1 block text-sm font-medium text-[#1a1a1a]">
+                      {slotMeta(slotId)?.label ?? slotId}
+                      {slotMeta(slotId)?.is_override ? (
+                        <span className="ml-2 text-xs font-normal text-[#0a7]">Custom for this HOA</span>
+                      ) : (
+                        <span className="ml-2 text-xs font-normal text-[#888]">Using system default</span>
+                      )}
+                    </label>
+                    <BoilerplateRichTextEditor
+                      value={drafts[slotId] ?? ''}
+                      onChange={(html) => setDrafts((prev) => ({ ...prev, [slotId]: html }))}
+                      variables={variables}
+                      placeholder="Leave blank for system-generated wording…"
+                      disabled={saving}
+                    />
+                    <div className="mt-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => void handleReset(slotId)}
+                        disabled={saving || !slotMeta(slotId)?.is_override}
+                      >
+                        Reset this section to system default
+                      </Button>
+                    </div>
+                  </TabsContent>
+                ))}
+              </Tabs>
               <div className="mt-4 flex flex-wrap gap-2">
                 <Button type="button" onClick={() => void handleSave()} disabled={saving}>
                   {saving ? 'Saving…' : 'Save for this HOA'}
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={() => void handleReset()}
-                  disabled={saving || !isOverride}
-                >
-                  Reset to system default
                 </Button>
                 <Button type="button" variant="outline" onClick={onClose}>
                   Close

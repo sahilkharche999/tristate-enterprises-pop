@@ -16,13 +16,19 @@
 {% set presentation = computed.presentation_facts if computed.presentation_facts is defined else none %}
 {% set matrix_says_vary = matrix.recipient_grain == 'group' or matrix.recipient_grain == 'unit' %}
 {% set assessments_vary = matrix_says_vary or (presentation.assessments_vary if presentation else false) %}
-{% set cover_intro = boilerplate.cover_letter_body if boilerplate is defined else none %}
+{% set cover_intro = boilerplate.cover_letter_intro if boilerplate is defined else none %}
+{% set enclosed_override = boilerplate.enclosed_documents_list if boilerplate is defined else none %}
+{% set closing_override = boilerplate.cover_letter_closing if boilerplate is defined else none %}
 
-{# Intro-only override (hoa-boilerplate-workbench): replaces the thank-you /
-   effective-date narrative only. Assessment/reserves bullets, enclosed list,
-   §5300 machine, civil-code list, and signature stay template-owned. #}
+{# Rich-text-editor slot overrides (add-boilerplate-rich-text-editor): intro,
+   enclosed-documents list, and closing are operator-editable. Content is
+   nh3-sanitized + variable-token-resolved before storage (see
+   hoa_boilerplate.merge_overrides / boilerplate_variables.resolve), so
+   `safe_html` here only marks it as trusted markup — it does not re-escape.
+   The §5300 machine, civil-code list, and disclosure/opt-out language stay
+   template-owned and are NOT overridable via any slot. #}
 {% if cover_intro %}
-<p>{{ cover_intro | nl2br }}</p>
+{{ cover_intro | safe_html }}
 {% else %}
 <p>Thank you for the prompt payment of your assessments for the current year.
 The enclosed operating budget has been approved by your Board of Directors and
@@ -43,6 +49,9 @@ ${{ '{:,.2f}'.format(computed.monthly_assessment_per_unit_current) }}.
 
 <p>Please find the following documents enclosed:</p>
 
+{% if enclosed_override %}
+{{ enclosed_override | safe_html }}
+{% else %}
 <ol class="enclosed-list">
   <li>{{ fiscal_year }} Pro Forma Operating Budget ({{ hoa_settings.cpa_firm_name | replace(' LLP','') }})</li>
   <li>30 Year Pro Forma Funding Study ({{ hoa_settings.cpa_firm_name | replace(' LLP','') }})</li>
@@ -54,6 +63,7 @@ ${{ '{:,.2f}'.format(computed.monthly_assessment_per_unit_current) }}.
   <li>Voting &amp; Election Rules</li>
   <li>Rules, Regulations &amp; Miscellaneous Policies</li>
 </ol>
+{% endif %}
 
 <p>As per civil code, the following disclosures are made:</p>
 
@@ -192,8 +202,12 @@ name, mailing address and/or email address provided to other members who
 request this, please complete an Opt Out Form and mail it back to the above
 address.</p>
 
+{% if closing_override %}
+{{ closing_override | safe_html }}
+{% else %}
 <p style="margin-top:14pt">On behalf of the Board of Directors of The
 {{ hoa.name }},</p>
+{% endif %}
 
 <div class="letter-signature">
   <p style="margin-bottom:24pt">&nbsp;</p>

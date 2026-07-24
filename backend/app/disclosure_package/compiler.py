@@ -1076,17 +1076,17 @@ def _compute_all(
             ),
             "expenses_by_section": {k: {
                 "rows": [
-                    {"label": it["label"], "amount": float(it["amount"] or 0)}
+                    {"label": it["label"], "amount": Decimal(it["amount"] or 0)}
                     for it in v["rows"]
                 ],
-                "total": float(v["total"]),
+                "total": Decimal(v["total"]),
             } for k, v in expenses_by_section.items()},
             "revenues_by_section": {k: {
                 "rows": [
-                    {"label": it["label"], "amount": float(it["amount"] or 0)}
+                    {"label": it["label"], "amount": Decimal(it["amount"] or 0)}
                     for it in v["rows"]
                 ],
-                "total": float(v["total"]),
+                "total": Decimal(v["total"]),
             } for k, v in revenues_by_section.items()},
         },
         "reserve_study_snapshot": reserve_snapshot,
@@ -1155,6 +1155,26 @@ def compile_package(
     if appendices_root is None:
         appendices_root = APPENDICES_DIR
 
+    # Per-HOA package language (hoa-boilerplate-workbench). Always define the
+    # full registry so StrictUndefined templates can reference every key.
+    # Resolved BEFORE the preflight gate so an unknown variable token blocks
+    # compilation the same way any other bad input does (rich-text-editor
+    # change: slots may carry `data-var` tokens — see boilerplate_variables).
+    try:
+        from app.services.hoa_boilerplate import empty_boilerplate, parse_overrides_json
+    except ImportError:  # pragma: no cover
+        from ..services.hoa_boilerplate import empty_boilerplate, parse_overrides_json
+
+    boilerplate_ctx = empty_boilerplate()
+    if boilerplate_overrides:
+        if isinstance(boilerplate_overrides, str):
+            boilerplate_ctx = parse_overrides_json(boilerplate_overrides)
+        elif isinstance(boilerplate_overrides, dict):
+            for key in boilerplate_ctx:
+                val = boilerplate_overrides.get(key)
+                if val not in (None, ""):
+                    boilerplate_ctx[key] = str(val)
+
     # 1. Preflight gate (REQ-D11-008) — fail fast with field paths.
     errors = validate_inputs(
         spec=spec,
@@ -1163,6 +1183,7 @@ def compile_package(
         hoa_metadata=hoa_metadata,
         appendices_root=appendices_root,
         hoa_settings_overrides=hoa_settings_overrides,
+        boilerplate_overrides=boilerplate_ctx,
     )
     blocking = [e for e in errors if e.severity == "blocking"]
     if blocking:
@@ -1253,23 +1274,6 @@ def compile_package(
     #     URI avoids ever needing a network/file fetch during render.
     hoa_logo_data_uri = _hoa_logo_data_uri(effective_hoa_settings.get("logo_filename"))
 
-    # Per-HOA package language (hoa-boilerplate-workbench). Always define the
-    # full registry so StrictUndefined templates can reference every key.
-    try:
-        from app.services.hoa_boilerplate import empty_boilerplate, parse_overrides_json
-    except ImportError:  # pragma: no cover
-        from ..services.hoa_boilerplate import empty_boilerplate, parse_overrides_json
-
-    boilerplate_ctx = empty_boilerplate()
-    if boilerplate_overrides:
-        if isinstance(boilerplate_overrides, str):
-            boilerplate_ctx = parse_overrides_json(boilerplate_overrides)
-        elif isinstance(boilerplate_overrides, dict):
-            for key in boilerplate_ctx:
-                val = boilerplate_overrides.get(key)
-                if val not in (None, ""):
-                    boilerplate_ctx[key] = str(val)
-
     # 3. Pre-compute section-grouped expenses/revenues so we can capture
     #    them in the audit input_snapshot (the snapshot is serialized at
     #    audit_context open time, so they cannot be added retroactively
@@ -1354,6 +1358,38 @@ def compile_package(
                     "Assessment matrix was not supplied by the render job."
                 ),
             )
+
+        # Resolve boilerplate variable tokens (data-var chips) now that
+        # `computed` and the final `assessment_matrix` exist. Sourced from
+        # the same facts the cover-letter template branches on
+        # (assessments_vary / assessment_change_phrase) so there is a single
+        # source of truth. validate_inputs already rejected unknown tokens
+        # above; resolve() raising here would only happen if something
+        # bypassed that gate (e.g. a snapshot written before this change).
+        from app.services import boilerplate_variables as boilerplate_variables_module
+
+        _var_map = boilerplate_variables_module.build_var_map(
+            hoa=hoa_metadata,
+            fiscal_year=spec.fiscal_year,
+            hoa_settings=effective_hoa_settings,
+            computed=computed,
+            matrix=assessment_matrix,
+        )
+        try:
+            boilerplate_ctx = {
+                slot: boilerplate_variables_module.resolve(value, _var_map)
+                for slot, value in boilerplate_ctx.items()
+            }
+        except boilerplate_variables_module.UnresolvedBoilerplateToken as exc:
+            raise CompileError(
+                f"Preflight blocked compilation: 1 error(s)",
+                errors=[PreflightError(
+                    field_path="boilerplate",
+                    message=str(exc),
+                    severity="blocking",
+                )],
+            ) from exc
+
         ctx_full: dict[str, Any] = {
             "spec": spec,
             "static_data": spec.static_data,

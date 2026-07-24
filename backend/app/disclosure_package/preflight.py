@@ -186,6 +186,45 @@ def check_reserve_study_age(
     return []
 
 
+def check_boilerplate_tokens(
+    boilerplate_overrides: Optional[dict],
+) -> list[PreflightError]:
+    """Blocking gate: every ``data-var`` token in a boilerplate slot must be
+    in ``boilerplate_variables.TOKEN_CATALOG``.
+
+    Defense in depth alongside the save-time check in
+    ``hoa_boilerplate.merge_overrides`` — this catches an unknown/misspelled
+    token from any source (a snapshot frozen before this gate existed, a
+    direct DB edit) so it can never reach the finished PDF as raw
+    ``data-var`` markup.
+    """
+    if not boilerplate_overrides:
+        return []
+    from ..services import boilerplate_variables
+
+    out: list[PreflightError] = []
+    for slot_id, value in boilerplate_overrides.items():
+        if not value:
+            continue
+        unknown = boilerplate_variables.find_unknown_tokens(value)
+        for token in unknown:
+            out.append(PreflightError(
+                field_path=f"boilerplate.{slot_id}",
+                message=(
+                    f"Unknown variable token {token!r} in the {slot_id!r} "
+                    "boilerplate slot. Remove it or pick a valid variable "
+                    "from the insert-variable menu."
+                ),
+                severity="blocking",
+                code="unknown_boilerplate_token",
+                suggested_fix=(
+                    "Open the boilerplate editor and replace the token with "
+                    "one from the variable picker."
+                ),
+            ))
+    return out
+
+
 def validate_inputs(
     *,
     spec: PackageSpec,
@@ -194,6 +233,7 @@ def validate_inputs(
     hoa_metadata: HOAMetadata,
     appendices_root: Optional[Path] = None,
     hoa_settings_overrides: Optional[dict] = None,
+    boilerplate_overrides: Optional[dict] = None,
 ) -> list[PreflightError]:
     """Return the list of blocking + warning errors. Empty list = ready to render.
 
@@ -208,11 +248,13 @@ def validate_inputs(
         hoa_settings_overrides: operator-saved per-HOA settings. In the
             DRE-driven model the numeric disclosure inputs (reserve cash
             balance, etc.) live here, not in ``spec.static_data``.
+        boilerplate_overrides: resolved (registry-keyed) rich-text slot
+            values, checked for unknown variable tokens.
     """
     del appendices_root  # appendix existence is checked at merge time, not here
 
     overrides = hoa_settings_overrides or {}
-    errors: list[PreflightError] = []
+    errors: list[PreflightError] = list(check_boilerplate_tokens(boilerplate_overrides))
     packet_archetype = normalize_packet_archetype(
         overrides.get("financial_packet_archetype")
     )

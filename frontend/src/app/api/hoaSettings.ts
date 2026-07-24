@@ -212,9 +212,15 @@ export interface BoilerplateSlot {
   is_override: boolean;
 }
 
+export interface BoilerplateVariable {
+  id: string;
+  label: string;
+}
+
 export interface BoilerplateSettings {
   property_id: number;
   slots: BoilerplateSlot[];
+  variables: BoilerplateVariable[];
   has_reference_upload: boolean;
 }
 

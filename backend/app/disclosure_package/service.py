@@ -675,6 +675,7 @@ def run_preflight(
         hoa_metadata=bundle.hoa_metadata,
         appendices_root=appendix_dir_for(hoa_id),
         hoa_settings_overrides=bundle.overrides,
+        boilerplate_overrides=bundle.boilerplate_overrides,
     )
     # C7 gate: unresolved equal-split placeholders on specified_value pools
     # block generation — a synthetic split must never render as DRE data.

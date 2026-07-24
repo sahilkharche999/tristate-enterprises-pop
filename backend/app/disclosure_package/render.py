@@ -15,6 +15,7 @@ Public surface:
 from __future__ import annotations
 
 import logging
+import re
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -37,6 +38,32 @@ def _nl2br(value: Any) -> Markup:
         return Markup("")
     escaped = escape(value)
     return Markup(escaped.replace("\n", Markup("<br>")))
+
+
+_HAS_TAG_RE = re.compile(r"<[a-zA-Z!/]")
+
+
+def _safe_html(value: Any) -> Markup:
+    """Emit a boilerplate slot's stored HTML as trusted markup.
+
+    Slot content is nh3-sanitized (allowlist) and token-resolved before it
+    is ever stored (``hoa_boilerplate.merge_overrides`` /
+    ``boilerplate_variables.resolve``), so by the time it reaches this
+    filter it is safe to mark as ``Markup`` under autoescape — the same
+    trust boundary ``_nl2br`` establishes for other operator text.
+
+    A value with no HTML tags at all is a pre-rich-text-editor legacy row
+    (plain text, never sanitized): apply the same escape-then-<br> transform
+    ``_nl2br`` used to apply at render time, wrapped in a ``<p>`` so it
+    renders identically to the old ``<p>{{ cover_intro | nl2br }}</p>``
+    template markup it replaces.
+    """
+    if value is None:
+        return Markup("")
+    text = str(value)
+    if not _HAS_TAG_RE.search(text):
+        return Markup(f"<p>{escape(text)}</p>".replace("\n", "<br>"))
+    return Markup(text)
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 
@@ -102,6 +129,7 @@ def _build_env(templates_subdir: str = "standard") -> Environment:
         lstrip_blocks=True,
     )
     env.filters["nl2br"] = _nl2br
+    env.filters["safe_html"] = _safe_html
     return env
 
 

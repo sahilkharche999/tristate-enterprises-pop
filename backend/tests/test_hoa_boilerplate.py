@@ -12,9 +12,9 @@ from pathlib import Path
 import pytest
 from jinja2 import Environment, FileSystemLoader, StrictUndefined, select_autoescape
 
-from app.disclosure_package.render import TEMPLATES_DIR, _nl2br
+from app.disclosure_package.render import TEMPLATES_DIR, _build_env, _nl2br
 from app.services import hoa_boilerplate as bp
-from app.services.hoa_boilerplate import UnknownBoilerplateSlot
+from app.services.hoa_boilerplate import UnknownBoilerplateSlot, UnknownBoilerplateToken
 
 
 # ── pure helpers ─────────────────────────────────────────────────────────────
@@ -26,26 +26,53 @@ def test_merge_unknown_slot_raises():
 
 
 def test_merge_clear_and_set():
-    raw = bp.serialize_overrides({"cover_letter_body": "Hello"})
-    merged = bp.merge_overrides(raw, {"cover_letter_body": ""})
-    assert merged["cover_letter_body"] is None
-    merged2 = bp.merge_overrides(None, {"cover_letter_body": "  hi  "})
-    assert merged2["cover_letter_body"] == "hi"
-    merged3 = bp.merge_overrides(raw, {"cover_letter_body": None})
-    assert merged3["cover_letter_body"] is None
+    raw = bp.serialize_overrides({"cover_letter_intro": "Hello"})
+    merged = bp.merge_overrides(raw, {"cover_letter_intro": ""})
+    assert merged["cover_letter_intro"] is None
+    merged2 = bp.merge_overrides(None, {"cover_letter_intro": "  hi  "})
+    assert merged2["cover_letter_intro"] == "hi"
+    merged3 = bp.merge_overrides(raw, {"cover_letter_intro": None})
+    assert merged3["cover_letter_intro"] is None
 
 
 def test_parse_ignores_unknown_keys_on_read():
-    raw = json.dumps({"cover_letter_body": "a", "future_slot": "b"})
+    raw = json.dumps({"cover_letter_intro": "a", "future_slot": "b"})
     parsed = bp.parse_overrides_json(raw)
-    assert parsed["cover_letter_body"] == "a"
+    assert parsed["cover_letter_intro"] == "a"
     assert "future_slot" not in parsed
+
+
+def test_parse_legacy_cover_letter_body_aliases_to_intro():
+    """Rows written before the slot registry expanded still resolve."""
+    raw = json.dumps({"cover_letter_body": "LEGACY VALUE"})
+    parsed = bp.parse_overrides_json(raw)
+    assert parsed["cover_letter_intro"] == "LEGACY VALUE"
+
+
+def test_parse_legacy_alias_does_not_override_explicit_intro():
+    raw = json.dumps({"cover_letter_body": "OLD", "cover_letter_intro": "NEW"})
+    parsed = bp.parse_overrides_json(raw)
+    assert parsed["cover_letter_intro"] == "NEW"
 
 
 def test_empty_boilerplate_has_registry_keys():
     empty = bp.empty_boilerplate()
     assert set(empty.keys()) == set(bp.SLOT_REGISTRY.keys())
-    assert empty["cover_letter_body"] is None
+    assert empty["cover_letter_intro"] is None
+
+
+def test_merge_sanitizes_html_and_rejects_unknown_token():
+    merged = bp.merge_overrides(
+        None,
+        {"cover_letter_intro": "<p>hi<script>alert(1)</script></p>"},
+    )
+    assert merged["cover_letter_intro"] == "<p>hi</p>"
+
+    with pytest.raises(UnknownBoilerplateToken):
+        bp.merge_overrides(
+            None,
+            {"cover_letter_intro": '<span data-var="hao_name"></span>'},
+        )
 
 
 def test_nl2br_escapes_html():
@@ -57,21 +84,21 @@ def test_nl2br_escapes_html():
 
 def test_for_render_snapshot_ignores_live_t2():
     """Finalize freeze: snapshot branch keeps T1 after live mutates to T2."""
-    t1 = {"cover_letter_body": "FROZEN_T1"}
-    live_t2 = bp.serialize_overrides({"cover_letter_body": "LIVE_T2"})
+    t1 = {"cover_letter_intro": "FROZEN_T1"}
+    live_t2 = bp.serialize_overrides({"cover_letter_intro": "LIVE_T2"})
     resolved = bp.for_render(use_snapshots=True, frozen=t1, live_raw=live_t2)
-    assert resolved["cover_letter_body"] == "FROZEN_T1"
+    assert resolved["cover_letter_intro"] == "FROZEN_T1"
 
 
 def test_for_render_live_uses_current_settings():
-    live_t2 = bp.serialize_overrides({"cover_letter_body": "LIVE_T2"})
-    resolved = bp.for_render(use_snapshots=False, frozen={"cover_letter_body": "OLD"}, live_raw=live_t2)
-    assert resolved["cover_letter_body"] == "LIVE_T2"
+    live_t2 = bp.serialize_overrides({"cover_letter_intro": "LIVE_T2"})
+    resolved = bp.for_render(use_snapshots=False, frozen={"cover_letter_intro": "OLD"}, live_raw=live_t2)
+    assert resolved["cover_letter_intro"] == "LIVE_T2"
 
 
 def test_for_render_snapshot_missing_frozen_is_empty():
-    resolved = bp.for_render(use_snapshots=True, frozen=None, live_raw='{"cover_letter_body":"x"}')
-    assert resolved["cover_letter_body"] is None
+    resolved = bp.for_render(use_snapshots=True, frozen=None, live_raw='{"cover_letter_intro":"x"}')
+    assert resolved["cover_letter_intro"] is None
 
 
 def test_compile_package_accepts_boilerplate_kwarg():
@@ -85,13 +112,10 @@ def test_compile_package_accepts_boilerplate_kwarg():
 
 
 def _cover_letter_env():
-    env = Environment(
-        loader=FileSystemLoader(str(TEMPLATES_DIR / "standard")),
-        autoescape=select_autoescape(["html", "xml"]),
-        undefined=StrictUndefined,
-    )
-    env.filters["nl2br"] = _nl2br
-    return env
+    # Delegate to the real render env builder so this test suite can never
+    # drift from the filters (nl2br, safe_html) the production render path
+    # actually registers.
+    return _build_env("standard")
 
 
 def _cover_ctx(boilerplate_body):
@@ -125,7 +149,11 @@ def _cover_ctx(boilerplate_body):
             "monthly_replacement_contribution_total": 50.0,
             "special_assessments": [],
         },
-        "boilerplate": {"cover_letter_body": boilerplate_body},
+        "boilerplate": {
+            "cover_letter_intro": boilerplate_body,
+            "enclosed_documents_list": None,
+            "cover_letter_closing": None,
+        },
         "toc_page_numbers": {},
         "appendix_toc_entries": [],
     }
@@ -152,10 +180,20 @@ def test_cover_letter_empty_override_keeps_default_intro():
 
 
 def test_cover_letter_xss_escaped_in_override():
+    """Sanitization now happens at save time (merge_overrides), not at
+    render time — the `safe_html` filter trusts already-sanitized storage
+    (see boilerplate_sanitize). Exercise the real save->render pipeline.
+    """
+    sanitized = bp.merge_overrides(
+        None, {"cover_letter_intro": "<script>evil()</script>text"}
+    )["cover_letter_intro"]
+    assert "<script>" not in sanitized
+
     template = _cover_letter_env().get_template("cover_letter.html")
-    html = template.render(**_cover_ctx("<script>evil()</script>"))
+    html = template.render(**_cover_ctx(sanitized))
     assert "<script>evil()" not in html
-    assert "&lt;script&gt;" in html or "evil()" in html and "<script>" not in html
+    assert "evil()" not in html
+    assert "text" in html
 
 
 def test_cover_letter_strictundefined_with_empty_boilerplate_registry():
@@ -181,7 +219,7 @@ def test_boilerplate_api_isolation_and_clear(client, db_session):
 
     r = client.put(
         f"/hoa/{prop_a.id}/settings/boilerplate",
-        json={"overrides": {"cover_letter_body": "Only A"}},
+        json={"overrides": {"cover_letter_intro": "Only A"}},
     )
     assert r.status_code == 200, r.text
     assert r.json()["slots"][0]["is_override"] is True
@@ -200,7 +238,7 @@ def test_boilerplate_api_isolation_and_clear(client, db_session):
 
     r_clear = client.put(
         f"/hoa/{prop_a.id}/settings/boilerplate",
-        json={"overrides": {"cover_letter_body": None}},
+        json={"overrides": {"cover_letter_intro": None}},
     )
     assert r_clear.status_code == 200
     assert r_clear.json()["slots"][0]["is_override"] is False
@@ -216,7 +254,7 @@ def test_boilerplate_survives_unrelated_disclosure_settings_put(client, db_sessi
 
     put_bp = client.put(
         f"/hoa/{prop.id}/settings/boilerplate",
-        json={"overrides": {"cover_letter_body": "PERSIST_ME_ACROSS_SETTINGS"}},
+        json={"overrides": {"cover_letter_intro": "PERSIST_ME_ACROSS_SETTINGS"}},
     )
     assert put_bp.status_code == 200, put_bp.text
 
@@ -250,7 +288,7 @@ def test_boilerplate_survives_second_disclosure_put_full_roundtrip(client, db_se
 
     client.put(
         f"/hoa/{prop.id}/settings/boilerplate",
-        json={"overrides": {"cover_letter_body": "ROUNDTRIP_SAFE"}},
+        json={"overrides": {"cover_letter_intro": "ROUNDTRIP_SAFE"}},
     )
 
     disc = client.get(f"/hoa/{prop.id}/settings/disclosure")
@@ -268,7 +306,7 @@ def test_boilerplate_survives_second_disclosure_put_full_roundtrip(client, db_se
     # Column still on ORM row
     row = hoa_settings_service.get_or_create(db_session, hoa_id=prop.id)
     parsed = bp.parse_overrides_json(row.boilerplate_overrides_json)
-    assert parsed["cover_letter_body"] == "ROUNDTRIP_SAFE"
+    assert parsed["cover_letter_intro"] == "ROUNDTRIP_SAFE"
     assert "boilerplate_overrides_json" not in _row_to_dict(row) or True  # not exposed on disclosure GET
 
 
@@ -415,11 +453,11 @@ def test_assemble_finalize_writes_boilerplate_key_shape():
     assert "use_snapshots=True" in service_src
 
     t1 = bp.resolved_for_compile(
-        bp.serialize_overrides({"cover_letter_body": "ASSEMBLED_T1"})
+        bp.serialize_overrides({"cover_letter_intro": "ASSEMBLED_T1"})
     )
     # What assemble would freeze:
     compile_context = {"boilerplate_overrides": t1}
-    live_t2_raw = bp.serialize_overrides({"cover_letter_body": "LIVE_T2"})
+    live_t2_raw = bp.serialize_overrides({"cover_letter_intro": "LIVE_T2"})
 
     snap_render = bp.for_render(
         use_snapshots=True,
@@ -431,8 +469,8 @@ def test_assemble_finalize_writes_boilerplate_key_shape():
         frozen=compile_context["boilerplate_overrides"],
         live_raw=live_t2_raw,
     )
-    assert snap_render["cover_letter_body"] == "ASSEMBLED_T1"
-    assert live_render["cover_letter_body"] == "LIVE_T2"
+    assert snap_render["cover_letter_intro"] == "ASSEMBLED_T1"
+    assert live_render["cover_letter_intro"] == "LIVE_T2"
 
 
 def test_compiler_ctx_includes_boilerplate_key(tmp_path, monkeypatch):
@@ -468,7 +506,7 @@ def test_unicode_and_whitespace_override(client, db_session):
     body = "Dear Homeowner:\n\nThank you — café & “special” 日本語"
     r = client.put(
         f"/hoa/{prop.id}/settings/boilerplate",
-        json={"overrides": {"cover_letter_body": body}},
+        json={"overrides": {"cover_letter_intro": body}},
     )
     assert r.status_code == 200, r.text
     got = client.get(f"/hoa/{prop.id}/settings/boilerplate")
@@ -477,7 +515,7 @@ def test_unicode_and_whitespace_override(client, db_session):
     # whitespace-only clears
     r2 = client.put(
         f"/hoa/{prop.id}/settings/boilerplate",
-        json={"overrides": {"cover_letter_body": "   \n\t  "}},
+        json={"overrides": {"cover_letter_intro": "   \n\t  "}},
     )
     assert r2.status_code == 200
     assert r2.json()["slots"][0]["is_override"] is False
@@ -519,15 +557,9 @@ def test_reference_job_requires_job_id(client, db_session):
 
 
 def test_cover_letter_newlines_become_br():
-    from jinja2 import Environment, FileSystemLoader, StrictUndefined, select_autoescape
-    from app.disclosure_package.render import TEMPLATES_DIR, _nl2br
-    env = Environment(
-        loader=FileSystemLoader(str(TEMPLATES_DIR / "standard")),
-        autoescape=select_autoescape(["html", "xml"]),
-        undefined=StrictUndefined,
-    )
-    env.filters["nl2br"] = _nl2br
-    template = env.get_template("cover_letter.html")
+    """Legacy tag-free override: safe_html applies the same escape+<br>
+    transform _nl2br used to apply directly in the template."""
+    template = _cover_letter_env().get_template("cover_letter.html")
     ctx = _cover_ctx("Line one\nLine two")
     html = template.render(**ctx)
     assert "Line one" in html and "Line two" in html

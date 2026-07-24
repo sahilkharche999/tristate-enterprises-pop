@@ -365,7 +365,11 @@ def _build_context() -> dict[str, Any]:
         "appendix_toc_entries": [],
         "hoa_logo_data_uri": None,
         # hoa-boilerplate-workbench: cover_letter.html reads boilerplate.*
-        "boilerplate": {"cover_letter_body": None},
+        "boilerplate": {
+            "cover_letter_intro": None,
+            "enclosed_documents_list": None,
+            "cover_letter_closing": None,
+        },
         **_minimal_computed_context(),
     }
 

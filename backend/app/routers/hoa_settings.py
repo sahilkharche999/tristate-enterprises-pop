@@ -10,6 +10,7 @@ from ..ai_implementation.db import get_session
 from ..ai_implementation.db.models import DisclosurePackageJob, Property
 from ..auth.dependencies import get_current_user
 from ..services import (
+    boilerplate_variables,
     hoa_boilerplate,
     hoa_boilerplate_reference_storage,
     hoa_logo_storage,
@@ -204,6 +205,10 @@ async def get_boilerplate_settings(
     return {
         "property_id": hoa_id,
         "slots": hoa_boilerplate.slots_for_api(overrides),
+        "variables": [
+            {"id": token_id, "label": label}
+            for token_id, label in boilerplate_variables.TOKEN_CATALOG.items()
+        ],
         "has_reference_upload": hoa_boilerplate_reference_storage.reference_exists(
             row.boilerplate_reference_filename
         ),
@@ -231,6 +236,8 @@ async def put_boilerplate_settings(
         )
     except hoa_boilerplate.UnknownBoilerplateSlot as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except hoa_boilerplate.UnknownBoilerplateToken as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     row.boilerplate_overrides_json = hoa_boilerplate.serialize_overrides(merged)
     session.commit()
     session.refresh(row)
@@ -238,6 +245,10 @@ async def put_boilerplate_settings(
     return {
         "property_id": hoa_id,
         "slots": hoa_boilerplate.slots_for_api(overrides),
+        "variables": [
+            {"id": token_id, "label": label}
+            for token_id, label in boilerplate_variables.TOKEN_CATALOG.items()
+        ],
         "has_reference_upload": hoa_boilerplate_reference_storage.reference_exists(
             row.boilerplate_reference_filename
         ),
