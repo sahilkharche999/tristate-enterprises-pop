@@ -131,7 +131,6 @@ def merge_operator_factors(
 
     merged_units: list[UnitRow] = []
     for unit_number, factor_entry in operator_factors.items():
-        unit_number = unit_number.strip()  # minimal pony-tail normalization to prevent phantom units (M6)
         existing = existing_by_num.get(unit_number)
 
         sq_ft_raw = factor_entry.get("square_feet")
