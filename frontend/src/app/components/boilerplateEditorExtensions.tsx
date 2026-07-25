@@ -1,38 +1,29 @@
 /**
- * TipTap extensions for the boilerplate rich-text editor
- * (add-boilerplate-rich-text-editor).
+ * React NodeViews for the narrative editor.
  *
- * `Variable`: an atomic inline node serializing to `<span data-var="NAME">`
- * — the exact token format `boilerplate_variables.resolve` (backend) parses.
- * The NodeView below only affects the live editing DOM; `editor.getHTML()`
- * serializes via `renderHTML`/schema `toDOM`, independent of the NodeView,
- * so the stored value is always the plain span the backend expects.
- *
- * `Indent`: adds an `indent` (0-4) attribute to paragraphs/list items,
- * rendered as `class="indent-N"` — matching the `class`-on-any-tag
- * allowlist in `boilerplate_sanitize.py` and the `.indent-N` rules in
- * `_shared.css`.
+ * The content model itself lives in `boilerplateEditorSchema.ts` — deliberately
+ * JSX-free so `tests/narrativeRoundTrip.test.mjs` can import and verify it.
+ * This file supplies only the views, which affect the live editing DOM and
+ * never parse/serialize. `buildEditorExtensions` delegates to the same
+ * `buildSchemaExtensions` the test uses, so there is exactly one definition of
+ * what the editor can represent.
  */
-import { Extension, Node, mergeAttributes } from '@tiptap/core';
-import { NodeViewWrapper, ReactNodeViewRenderer } from '@tiptap/react';
+import { ReactNodeViewRenderer, NodeViewWrapper } from '@tiptap/react';
+import type { Extensions } from '@tiptap/core';
+import {
+  buildSchemaExtensions,
+  type SchemaOptions,
+} from './boilerplateEditorSchema';
 
-declare module '@tiptap/core' {
-  interface Commands<ReturnType> {
-    variableChip: {
-      insertVariable: (name: string) => ReturnType;
-    };
-    indent: {
-      indent: () => ReturnType;
-      outdent: () => ReturnType;
-    };
-  }
-}
+export * from './boilerplateEditorSchema';
 
-export interface VariableOptions {
-  labels: Record<string, string>;
-}
-
-function VariableChipView({ node, extension }: { node: { attrs: { name: string } }; extension: { options: VariableOptions } }) {
+function VariableChipView({
+  node,
+  extension,
+}: {
+  node: { attrs: { name: string } };
+  extension: { options: { labels: Record<string, string> } };
+}) {
   const name = node.attrs.name;
   const label = extension.options.labels[name] || name;
   return (
@@ -47,113 +38,64 @@ function VariableChipView({ node, extension }: { node: { attrs: { name: string }
   );
 }
 
-export const Variable = Node.create<VariableOptions>({
-  name: 'variable',
-  group: 'inline',
-  inline: true,
-  atom: true,
-  selectable: true,
-
-  addOptions() {
-    return { labels: {} };
-  },
-
-  addAttributes() {
-    return {
-      name: {
-        default: null,
-        parseHTML: (element) => (element as HTMLElement).getAttribute('data-var'),
-        renderHTML: (attributes) => ({ 'data-var': attributes.name }),
-      },
-    };
-  },
-
-  parseHTML() {
-    return [{ tag: 'span[data-var]' }];
-  },
-
-  renderHTML({ HTMLAttributes }) {
-    return ['span', mergeAttributes(HTMLAttributes)];
-  },
-
-  addNodeView() {
-    return ReactNodeViewRenderer(VariableChipView);
-  },
-
-  addCommands() {
-    return {
-      insertVariable:
-        (name: string) =>
-        ({ chain }) =>
-          chain().insertContent({ type: this.name, attrs: { name } }).run(),
-    };
-  },
-});
-
-export interface IndentOptions {
-  types: string[];
-  maxLevel: number;
+function ComputedBlockView({
+  node,
+  extension,
+}: {
+  node: { attrs: { name: string; carrier: string } };
+  extension: { options: { labels: Record<string, string> } };
+}) {
+  const { name, carrier } = node.attrs;
+  const label = extension.options.labels[name] || name;
+  return (
+    // The carrier must match the schema's: a chip inside a list is an <li>,
+    // and rendering a <div> there would be invalid markup in the editing DOM.
+    <NodeViewWrapper
+      as={carrier === 'li' ? 'li' : 'div'}
+      data-block={name}
+      contentEditable={false}
+      className="my-2 select-none rounded border border-dashed border-amber-400 bg-amber-50 px-3 py-2 text-xs text-amber-900"
+    >
+      <span className="font-medium">{label}</span>
+      <span className="ml-2 text-amber-700">
+        filled in when the package is generated
+      </span>
+    </NodeViewWrapper>
+  );
 }
 
-export const Indent = Extension.create<IndentOptions>({
-  name: 'indent',
+function ComputedPageView({
+  node,
+}: {
+  node: { attrs: { label: string; pageCount: number | null } };
+}) {
+  const { label, pageCount } = node.attrs;
+  return (
+    <NodeViewWrapper
+      as="div"
+      contentEditable={false}
+      className="my-6 select-none rounded-md border border-[#e5e5e5] bg-[#fafafa] px-4 py-3 text-sm text-[#525252]"
+    >
+      <div className="font-medium text-[#1a1a1a]">{label}</div>
+      <div className="mt-0.5 text-xs text-[#737373]">
+        Generated from your budget and reserve study
+        {pageCount ? ` · about ${pageCount} page${pageCount === 1 ? '' : 's'}` : ''}
+        {' · not editable'}
+      </div>
+    </NodeViewWrapper>
+  );
+}
 
-  addOptions() {
-    return {
-      types: ['paragraph', 'listItem'],
-      maxLevel: 4,
-    };
-  },
-
-  addGlobalAttributes() {
-    return [
-      {
-        types: this.options.types,
-        attributes: {
-          indent: {
-            default: 0,
-            parseHTML: (element) => {
-              const match = /indent-(\d)/.exec((element as HTMLElement).getAttribute('class') || '');
-              return match ? Number(match[1]) : 0;
-            },
-            renderHTML: (attributes) => {
-              const level = (attributes as { indent?: number }).indent;
-              if (!level) return {};
-              return { class: `indent-${level}` };
-            },
-          },
-        },
-      },
-    ];
-  },
-
-  addCommands() {
-    const step = (delta: number) =>
-      () =>
-      ({ tr, state, dispatch }: { tr: any; state: any; dispatch: any }) => {
-        const { from, to } = state.selection;
-        const types = this.options.types;
-        const maxLevel = this.options.maxLevel;
-        let changed = false;
-        // nodesBetween on a collapsed cursor still visits the enclosing
-        // block, so this covers "cursor in a paragraph" (the common case)
-        // and a multi-block selection alike.
-        state.doc.nodesBetween(from, to, (node: any, pos: number) => {
-          if (types.includes(node.type.name)) {
-            const current = node.attrs.indent || 0;
-            const next = Math.max(0, Math.min(maxLevel, current + delta));
-            if (next !== current) {
-              tr.setNodeAttribute(pos, 'indent', next);
-              changed = true;
-            }
-          }
-        });
-        if (changed && dispatch) dispatch(tr);
-        return changed;
-      };
-    return {
-      indent: step(1),
-      outdent: step(-1),
-    };
-  },
-});
+/** The shipped extension list: the tested schema plus its React views. */
+export function buildEditorExtensions(
+  options: Omit<SchemaOptions, 'nodeViews'>,
+): Extensions {
+  return buildSchemaExtensions({
+    ...options,
+    nodeViews: {
+      variable: ReactNodeViewRenderer(VariableChipView),
+      computedBlock: ReactNodeViewRenderer(ComputedBlockView),
+      computedPage: ReactNodeViewRenderer(ComputedPageView),
+    },
+  });
+}

@@ -1109,7 +1109,8 @@ def compile_package(
     output_dir: Path,
     appendices_root: Optional[Path] = None,
     hoa_settings_overrides: Optional[dict] = None,
-    boilerplate_overrides: Optional[dict] = None,
+    narrative: Optional[dict] = None,
+    render_date: Optional[str] = None,
     extra_appendix_paths: Optional[list[Path]] = None,
     extra_appendix_titles: Optional[dict[str, str]] = None,
     assessment_matrix: Optional[AssessmentScheduleMatrix] = None,
@@ -1155,25 +1156,34 @@ def compile_package(
     if appendices_root is None:
         appendices_root = APPENDICES_DIR
 
-    # Per-HOA package language (hoa-boilerplate-workbench). Always define the
-    # full registry so StrictUndefined templates can reference every key.
-    # Resolved BEFORE the preflight gate so an unknown variable token blocks
-    # compilation the same way any other bad input does (rich-text-editor
-    # change: slots may carry `data-var` tokens — see boilerplate_variables).
-    try:
-        from app.services.hoa_boilerplate import empty_boilerplate, parse_overrides_json
-    except ImportError:  # pragma: no cover
-        from ..services.hoa_boilerplate import empty_boilerplate, parse_overrides_json
+    # Narrative document bodies (add-full-document-editor), still carrying
+    # their unresolved chips — resolution needs `computed`, which doesn't
+    # exist yet. Callers pass the already-layered map from
+    # ``narrative_content.resolve_all``; anything missing (a caller that
+    # predates this change, or a snapshot written before a document existed)
+    # falls back to that document's repo baseline so every registry key is
+    # always present for StrictUndefined.
+    from app.services import narrative_content as narrative_content_module
 
-    boilerplate_ctx = empty_boilerplate()
-    if boilerplate_overrides:
-        if isinstance(boilerplate_overrides, str):
-            boilerplate_ctx = parse_overrides_json(boilerplate_overrides)
-        elif isinstance(boilerplate_overrides, dict):
-            for key in boilerplate_ctx:
-                val = boilerplate_overrides.get(key)
-                if val not in (None, ""):
-                    boilerplate_ctx[key] = str(val)
+    #
+    # Re-sanitized here even though every write path already sanitizes: content
+    # can also arrive from a snapshot frozen before a rule existed, or from a
+    # direct DB edit. Sanitizing *before* chip resolution is essential — block
+    # chips emit trusted system HTML (tables, nested lists) that the operator
+    # allowlist would strip if this ran afterwards.
+    from app.services import boilerplate_sanitize as boilerplate_sanitize_module
+
+    narrative_raw: dict[str, str] = {}
+    for doc_id in narrative_content_module.DOCUMENT_REGISTRY:
+        value = (narrative or {}).get(doc_id)
+        body = (
+            str(value)
+            if value not in (None, "")
+            else narrative_content_module.baseline_html(doc_id)
+        )
+        narrative_raw[doc_id] = (
+            boilerplate_sanitize_module.sanitize_slot_html(body) or ""
+        )
 
     # 1. Preflight gate (REQ-D11-008) — fail fast with field paths.
     errors = validate_inputs(
@@ -1183,7 +1193,7 @@ def compile_package(
         hoa_metadata=hoa_metadata,
         appendices_root=appendices_root,
         hoa_settings_overrides=hoa_settings_overrides,
-        boilerplate_overrides=boilerplate_ctx,
+        narrative=narrative_raw,
     )
     blocking = [e for e in errors if e.severity == "blocking"]
     if blocking:
@@ -1359,36 +1369,58 @@ def compile_package(
                 ),
             )
 
-        # Resolve boilerplate variable tokens (data-var chips) now that
-        # `computed` and the final `assessment_matrix` exist. Sourced from
-        # the same facts the cover-letter template branches on
-        # (assessments_vary / assessment_change_phrase) so there is a single
-        # source of truth. validate_inputs already rejected unknown tokens
-        # above; resolve() raising here would only happen if something
-        # bypassed that gate (e.g. a snapshot written before this change).
         from app.services import boilerplate_variables as boilerplate_variables_module
 
-        _var_map = boilerplate_variables_module.build_var_map(
-            hoa=hoa_metadata,
-            fiscal_year=spec.fiscal_year,
-            hoa_settings=effective_hoa_settings,
-            computed=computed,
-            matrix=assessment_matrix,
+        _rendered_today = render_date or datetime.now(timezone.utc).strftime(
+            "%A %B %-d, %Y"
         )
-        try:
-            boilerplate_ctx = {
-                slot: boilerplate_variables_module.resolve(value, _var_map)
-                for slot, value in boilerplate_ctx.items()
-            }
-        except boilerplate_variables_module.UnresolvedBoilerplateToken as exc:
-            raise CompileError(
-                f"Preflight blocked compilation: 1 error(s)",
-                errors=[PreflightError(
-                    field_path="boilerplate",
-                    message=str(exc),
-                    severity="blocking",
-                )],
-            ) from exc
+
+        def _resolve_narrative(
+            toc_page_numbers: Optional[dict[str, Any]] = None,
+            appendix_toc_entries: Optional[list[dict[str, Any]]] = None,
+        ) -> dict[str, str]:
+            """Resolve every narrative document's chips against the current context.
+
+            Called twice: once before render pass 1, and again after pass 1
+            produces real page numbers (the TOC's page chips would otherwise
+            freeze at their pass-1 placeholders). Everything else resolves
+            identically both times, so the second call is not a behavior
+            change for any other document.
+            """
+            var_map = boilerplate_variables_module.build_var_map(
+                hoa=hoa_metadata,
+                fiscal_year=spec.fiscal_year,
+                hoa_settings=effective_hoa_settings,
+                computed=computed,
+                matrix=assessment_matrix,
+                static_data=spec.static_data,
+                today=_rendered_today,
+                reserve_study_snapshot=reserve_snapshot,
+                toc_page_numbers=toc_page_numbers or {},
+            )
+            block_map = boilerplate_variables_module.build_block_map(
+                fiscal_year=spec.fiscal_year,
+                computed=computed,
+                matrix=assessment_matrix,
+                static_data=spec.static_data,
+                appendix_toc_entries=appendix_toc_entries or [],
+            )
+            try:
+                return {
+                    doc_id: boilerplate_variables_module.resolve(
+                        body, var_map, block_map
+                    )
+                    for doc_id, body in narrative_raw.items()
+                }
+            except boilerplate_variables_module.UnresolvedBoilerplateToken as exc:
+                raise CompileError(
+                    "Preflight blocked compilation: 1 error(s)",
+                    errors=[PreflightError(
+                        field_path="narrative",
+                        message=str(exc),
+                        severity="blocking",
+                    )],
+                ) from exc
 
         ctx_full: dict[str, Any] = {
             "spec": spec,
@@ -1398,11 +1430,12 @@ def compile_package(
                                   # prefer hoa.name over static_data.hoa_legal_name
                                   # so the rendered name reflects the live DB row.
             "matrix": assessment_matrix,
-            "today": datetime.now(timezone.utc).strftime("%A %B %-d, %Y"),
+            "today": _rendered_today,
             "today_iso": datetime.now(timezone.utc).date().isoformat(),
             "hoa_settings": effective_hoa_settings,
             "hoa_logo_data_uri": hoa_logo_data_uri,
-            "boilerplate": boilerplate_ctx,
+            # `narrative` is filled in below, once appendix TOC rows exist —
+            # resolving it here would bake an empty appendix list into pass 1.
             **computed,
         }
 
@@ -1488,6 +1521,14 @@ def compile_package(
             {"title": title, "page": "—"}
             for _path, title in [*spec_appendix_paths.values(), *trailing_appendix_entries]
         ]
+        # Resolve the narrative map only now. The TOC's appendix rows are a
+        # block chip, so resolving before the seeding above would give pass 1 a
+        # TOC with zero appendix rows — the exact miscount the comment warns
+        # about, since pass 2 re-renders the TOC but the cumulative offsets were
+        # already computed from pass-1 page counts.
+        ctx_full["narrative"] = _resolve_narrative(
+            appendix_toc_entries=ctx_full["appendix_toc_entries"],
+        )
         generated_order: list[str] = [
             entry.template for entry in spec.entries if isinstance(entry, GeneratedPage)
         ]
@@ -1523,6 +1564,14 @@ def compile_package(
 
         ctx_full["toc_page_numbers"] = toc_page_numbers
         ctx_full["appendix_toc_entries"] = appendix_toc_entries
+        # Re-resolve the narrative map so the TOC's page chips pick up the
+        # real numbers instead of their pass-1 placeholders. Only the TOC's
+        # chips read page numbers, so every other document resolves to the
+        # same bytes it did on pass 1.
+        ctx_full["narrative"] = _resolve_narrative(
+            toc_page_numbers=toc_page_numbers,
+            appendix_toc_entries=appendix_toc_entries,
+        )
         for template_name in _PAGE_NUMBER_DEPENDENT_TEMPLATES & set(generated_order):
             new_bytes = render_template(template_name=template_name, context=ctx_full)
             new_count = _pdf_page_count(new_bytes)

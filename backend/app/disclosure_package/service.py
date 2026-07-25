@@ -522,9 +522,10 @@ class _PreflightInputBundle:
     reserve_snapshot: Any
     hoa_metadata: Any
     overrides: dict
-    # Per-HOA package language slots (hoa-boilerplate-workbench). Always a
-    # full registry dict (values str|None) so Jinja StrictUndefined is safe.
-    boilerplate_overrides: dict
+    # Narrative document bodies, layered HOA → firm → repo baseline
+    # (add-full-document-editor). Always carries every registry key, still
+    # holding unresolved chips — resolution needs the compute context.
+    narrative: dict
 
 
 def _resolve_preflight_inputs(
@@ -616,11 +617,9 @@ def _resolve_preflight_inputs(
     pool_overlay = _resolve_pool_forecast_overlay(session=session, property_id=hoa_id)
     overrides.update(pool_overlay)
 
-    from ..services import hoa_boilerplate as hoa_boilerplate_module
+    from ..services import narrative_content as narrative_content_module
 
-    boilerplate_overrides = hoa_boilerplate_module.resolved_for_compile(
-        getattr(settings_row, "boilerplate_overrides_json", None)
-    )
+    narrative = narrative_content_module.resolve_all(session, hoa_id)
 
     return _PreflightInputBundle(
         spec=spec.model_copy(update={"hoa_id": hoa_id, "fiscal_year": fiscal_year}),
@@ -628,7 +627,7 @@ def _resolve_preflight_inputs(
         reserve_snapshot=reserve_snapshot,
         hoa_metadata=hoa_metadata,
         overrides=overrides,
-        boilerplate_overrides=boilerplate_overrides,
+        narrative=narrative,
     )
 
 
@@ -675,7 +674,7 @@ def run_preflight(
         hoa_metadata=bundle.hoa_metadata,
         appendices_root=appendix_dir_for(hoa_id),
         hoa_settings_overrides=bundle.overrides,
-        boilerplate_overrides=bundle.boilerplate_overrides,
+        narrative=bundle.narrative,
     )
     # C7 gate: unresolved equal-split placeholders on specified_value pools
     # block generation — a synthetic split must never render as DRE data.
@@ -814,7 +813,14 @@ def assemble_finalize_snapshots(
             "assessment_matrix": assessment_matrix.model_dump(mode="json"),
             "hoa_metadata": bundle.hoa_metadata.model_dump(mode="json"),
             "hoa_settings_overrides": bundle.overrides,
-            "boilerplate_overrides": bundle.boilerplate_overrides,
+            # Freeze the *layered* narrative bodies (chips still unresolved,
+            # exactly as the live branch feeds them to the compiler) so a
+            # finalized package re-renders byte-equal no matter how firm or
+            # HOA content changes afterwards.
+            "narrative": bundle.narrative,
+            # Frozen so a finalized package re-renders identically on any later
+            # date. Notes 1 and 7 print this ("information available as of …").
+            "render_date": datetime.now(timezone.utc).strftime("%A %B %-d, %Y"),
             "assessment_revenue_annual": str(assessment_revenue),
             "assessment_mode": assessment_mode,
         },
@@ -926,14 +932,17 @@ def run_render_job(
             reserve_snapshot = ReserveStudySnapshot.model_validate(snaps["reserve"])
             hoa_metadata = HOAMetadata.model_validate(context["hoa_metadata"])
             overrides = dict(context.get("hoa_settings_overrides") or {})
-            from ..services import hoa_boilerplate as hoa_boilerplate_module
+            from ..services import narrative_content as narrative_content_module
 
-            # Frozen boilerplate only — never re-read live HOASettings for these slots.
-            boilerplate_overrides = hoa_boilerplate_module.for_render(
+            # Frozen narrative only — a document absent from an older snapshot
+            # falls back to its repo baseline, never to current live content.
+            narrative = narrative_content_module.for_render(
                 use_snapshots=True,
-                frozen=context.get("boilerplate_overrides"),
-                live_raw=None,
+                frozen=context.get("narrative"),
             )
+            # None for packages finalized before render_date was frozen; those
+            # keep the pre-existing "renders with today's date" behavior.
+            render_date = context.get("render_date")
 
             from .assessment_schedule_matrix import AssessmentScheduleMatrix
 
@@ -978,7 +987,8 @@ def run_render_job(
             reserve_snapshot = bundle.reserve_snapshot
             hoa_metadata = bundle.hoa_metadata
             overrides = bundle.overrides
-            boilerplate_overrides = bundle.boilerplate_overrides
+            narrative = bundle.narrative
+            render_date = None  # live render: today's date, as before
 
             _set_status(session, job_id, stage=DISCLOSURE_STAGE_COMPUTING)
 
@@ -1064,7 +1074,8 @@ def run_render_job(
             output_dir=output_dir,
             appendices_root=appendix_dir_for(hoa_id),
             hoa_settings_overrides=overrides,
-            boilerplate_overrides=boilerplate_overrides,
+                narrative=narrative,
+            render_date=render_date,
             extra_appendix_paths=manifest_paths,
             extra_appendix_titles=manifest_titles,
             assessment_matrix=assessment_matrix,

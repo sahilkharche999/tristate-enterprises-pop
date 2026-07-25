@@ -203,25 +203,11 @@ export async function deleteHOALogo(hoaId: number): Promise<HOADisclosureSetting
   return handleResponse<HOADisclosureSettings>(r);
 }
 
-// --- Package language / boilerplate workbench (hoa-boilerplate-workbench) ---
-
-export interface BoilerplateSlot {
-  id: string;
-  label: string;
-  value: string;
-  is_override: boolean;
-}
+// --- Reference-PDF upload for the document editor ---
 
 export interface BoilerplateVariable {
   id: string;
   label: string;
-}
-
-export interface BoilerplateSettings {
-  property_id: number;
-  slots: BoilerplateSlot[];
-  variables: BoilerplateVariable[];
-  has_reference_upload: boolean;
 }
 
 export interface BoilerplateReferenceJob {
@@ -231,23 +217,100 @@ export interface BoilerplateReferenceJob {
   annual_package_id: number | null;
 }
 
-export async function getBoilerplateSettings(hoaId: number): Promise<BoilerplateSettings> {
-  const r = await fetch(`${BASE_URL}/hoa/${hoaId}/settings/boilerplate`, {
-    headers: authHeaders(),
-  });
-  return handleResponse<BoilerplateSettings>(r);
+// --- Narrative documents (add-full-document-editor) ---
+//
+// Supersedes the three-slot boilerplate API above. Every narrative document is
+// one editable body, resolved HOA override -> firm override -> repo baseline.
+
+export type NarrativeScope = 'firm' | 'hoa';
+export type NarrativeEffectiveScope = NarrativeScope | 'baseline';
+
+export interface NarrativeEditableDocument {
+  kind: 'editable';
+  id: string;
+  label: string;
+  html: string;
+  effective_scope: NarrativeEffectiveScope;
+  has_firm_override: boolean;
+  has_hoa_override: boolean;
+  required_blocks: string[];
 }
 
-export async function putBoilerplateSettings(
+/** A computed page (financial schedule, §5570 form) — shown, never edited. */
+export interface NarrativeComputedDocument {
+  kind: 'computed';
+  id: string;
+  label: string;
+  page_count_hint: number;
+}
+
+export type NarrativeDocument =
+  | NarrativeEditableDocument
+  | NarrativeComputedDocument;
+
+export interface NarrativeDocumentsResponse {
+  property_id: number;
+  documents: NarrativeDocument[];
+  variables: BoilerplateVariable[];
+  blocks: BoilerplateVariable[];
+}
+
+export async function getNarrativeDocuments(
   hoaId: number,
-  overrides: Record<string, string | null>,
-): Promise<BoilerplateSettings> {
-  const r = await fetch(`${BASE_URL}/hoa/${hoaId}/settings/boilerplate`, {
+): Promise<NarrativeDocumentsResponse> {
+  const r = await fetch(`${BASE_URL}/hoa/${hoaId}/documents`, {
+    headers: authHeaders(),
+  });
+  return handleResponse<NarrativeDocumentsResponse>(r);
+}
+
+/**
+ * Save several documents at one scope in a single transaction.
+ *
+ * Preferred over looping `putNarrativeDocument`: the backend validates the
+ * whole set before writing any of it, so a failure partway through cannot
+ * leave the firm defaults half-rewritten for every HOA.
+ */
+export async function putNarrativeDocuments(
+  hoaId: number,
+  documents: Record<string, string>,
+  scope: NarrativeScope,
+): Promise<NarrativeDocumentsResponse> {
+  const r = await fetch(`${BASE_URL}/hoa/${hoaId}/documents?scope=${scope}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    body: JSON.stringify({ overrides }),
+    body: JSON.stringify({ documents }),
   });
-  return handleResponse<BoilerplateSettings>(r);
+  return handleResponse<NarrativeDocumentsResponse>(r);
+}
+
+export async function putNarrativeDocument(
+  hoaId: number,
+  documentId: string,
+  html: string,
+  scope: NarrativeScope,
+): Promise<NarrativeDocumentsResponse> {
+  const r = await fetch(
+    `${BASE_URL}/hoa/${hoaId}/documents/${encodeURIComponent(documentId)}?scope=${scope}`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ html }),
+    },
+  );
+  return handleResponse<NarrativeDocumentsResponse>(r);
+}
+
+export async function resetNarrativeDocument(
+  hoaId: number,
+  documentId: string,
+  scope: NarrativeScope,
+): Promise<NarrativeDocumentsResponse> {
+  const r = await fetch(
+    `${BASE_URL}/hoa/${hoaId}/documents/${encodeURIComponent(documentId)}?scope=${scope}`,
+    { method: 'DELETE', headers: authHeaders() },
+  );
+  return handleResponse<NarrativeDocumentsResponse>(r);
 }
 
 export async function listBoilerplateReferenceJobs(

@@ -1,36 +1,53 @@
 /**
- * Full-screen package language workbench (hoa-boilerplate-workbench).
+ * Full-screen document editor for the disclosure package
+ * (add-full-document-editor).
  *
- * Same shell pattern as DrePdfCompareView / DRE review compare:
- * fixed inset-0 overlay, left editor, right reference PDF, Close to dismiss.
+ * One continuous scroll of the whole report, already written, edited like a
+ * Word document. Every narrative page is a `DocSection`; the financial
+ * schedules and the §5570 form appear as read-only cards in their true package
+ * positions so the report reads in order without pretending they are editable.
  *
- * Reference PDF: prior app-generated job for this HOA, or upload.
+ * Computed figures inside the prose (and inside tables) are chips the system
+ * fills in at generation time, so restructuring a table or rewriting a
+ * paragraph never disturbs the math.
+ *
+ * This component owns loading, scope, and the destructive-action guards; the
+ * editing surface itself is `NarrativeDocumentEditor`, mounted only once the
+ * payload has arrived so the editor is never rebuilt out from under its
+ * content.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { X } from 'lucide-react';
+import { FileText, X } from 'lucide-react';
 import {
   type BoilerplateReferenceJob,
-  type BoilerplateSlot,
   type BoilerplateVariable,
+  type NarrativeDocument,
+  type NarrativeDocumentsResponse,
+  type NarrativeScope,
   boilerplateReferencePdfUrl,
   deleteBoilerplateReferencePdf,
-  getBoilerplateSettings,
+  getNarrativeDocuments,
   listBoilerplateReferenceJobs,
-  putBoilerplateSettings,
+  putNarrativeDocuments,
+  resetNarrativeDocument,
   uploadBoilerplateReferencePdf,
 } from '../api/hoaSettings';
 import { authHeaders } from '../api/http';
 import { getErrorMessage } from '../lib/errors';
-import { BoilerplateRichTextEditor } from './BoilerplateRichTextEditor';
+import {
+  type NarrativeEditorHandle,
+  NarrativeDocumentEditor,
+  isEditable,
+} from './NarrativeDocumentEditor';
 import { Button } from './ui/button';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
-import { clampSplitPercent } from './resizableSplitPane';
 import { toast } from 'sonner';
 
-const SLOT_IDS = ['cover_letter_intro', 'enclosed_documents_list', 'cover_letter_closing'] as const;
-const DEFAULT_SLOT_ID: (typeof SLOT_IDS)[number] = 'cover_letter_intro';
-
 type ReferenceSource = 'job' | 'upload';
+
+const SCOPE_HINT: Record<NarrativeScope, string> = {
+  firm: 'Saving applies to every HOA that has no override of its own.',
+  hoa: 'Saving applies to this HOA only.',
+};
 
 export function BoilerplateWorkbench({
   hoaId,
@@ -43,39 +60,40 @@ export function BoilerplateWorkbench({
   onClose: () => void;
   hoaName?: string;
 }) {
-  const [slots, setSlots] = useState<BoilerplateSlot[]>([]);
+  const [documents, setDocuments] = useState<NarrativeDocument[] | null>(null);
   const [variables, setVariables] = useState<BoilerplateVariable[]>([]);
-  const [drafts, setDrafts] = useState<Record<string, string>>({});
-  const [activeSlot, setActiveSlot] = useState<(typeof SLOT_IDS)[number]>(DEFAULT_SLOT_ID);
-  const [loading, setLoading] = useState(true);
+  const [blocks, setBlocks] = useState<BoilerplateVariable[]>([]);
+  const [scope, setScope] = useState<NarrativeScope>('hoa');
   const [saving, setSaving] = useState(false);
-  const [referenceSource, setReferenceSource] = useState<ReferenceSource>('job');
+  const [dirty, setDirty] = useState(false);
+  const [activeDocId, setActiveDocId] = useState<string | null>(null);
+  const [showReference, setShowReference] = useState(false);
+  const editorRef = useRef<NarrativeEditorHandle>(null);
+
   const [jobs, setJobs] = useState<BoilerplateReferenceJob[]>([]);
+  const [referenceSource, setReferenceSource] = useState<ReferenceSource>('job');
   const [selectedJobId, setSelectedJobId] = useState<string>('');
   const [hasUpload, setHasUpload] = useState(false);
   const [pdfObjectUrl, setPdfObjectUrl] = useState<string | null>(null);
-  const [pdfStatus, setPdfStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
+  const [pdfStatus, setPdfStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>(
+    'idle',
+  );
   const [uploading, setUploading] = useState(false);
-  const [leftWidthPercent, setLeftWidthPercent] = useState(50);
-  const [isDragging, setIsDragging] = useState(false);
-  const containerRef = useRef<HTMLDivElement>(null);
+
+  const applyPayload = useCallback((payload: NarrativeDocumentsResponse) => {
+    setDocuments(payload.documents);
+    setVariables(payload.variables ?? []);
+    setBlocks(payload.blocks ?? []);
+  }, []);
 
   const load = useCallback(async () => {
-    setLoading(true);
     try {
-      const data = await getBoilerplateSettings(hoaId);
-      setSlots(data.slots);
-      setVariables(data.variables ?? []);
-      setDrafts(Object.fromEntries(data.slots.map((s) => [s.id, s.value ?? ''])));
-      setHasUpload(Boolean(data.has_reference_upload));
+      applyPayload(await getNarrativeDocuments(hoaId));
     } catch (error) {
-      toast.error(getErrorMessage(error, 'Failed to load package language.'));
-    } finally {
-      setLoading(false);
+      toast.error(getErrorMessage(error, 'Failed to load the disclosure documents.'));
     }
-  }, [hoaId]);
+  }, [hoaId, applyPayload]);
 
-  // Re-fetch every time the full-screen workbench opens (leave → edit budget → return).
   useEffect(() => {
     if (!open) return;
     void load();
@@ -99,7 +117,7 @@ export function BoilerplateWorkbench({
   }, [hoaId, open]);
 
   useEffect(() => {
-    if (!open) {
+    if (!open || !showReference) {
       setPdfStatus('idle');
       setPdfObjectUrl((prev) => {
         if (prev) URL.revokeObjectURL(prev);
@@ -111,22 +129,16 @@ export function BoilerplateWorkbench({
     const canLoadUpload = referenceSource === 'upload' && hasUpload;
     if (!canLoadJob && !canLoadUpload) {
       setPdfStatus('idle');
-      setPdfObjectUrl((prev) => {
-        if (prev) URL.revokeObjectURL(prev);
-        return null;
-      });
       return;
     }
 
     let url: string | null = null;
     let cancelled = false;
     setPdfStatus('loading');
-    const fileUrl = boilerplateReferencePdfUrl(
-      hoaId,
-      referenceSource,
-      selectedJobId || undefined,
-    );
-    void fetch(fileUrl, { headers: authHeaders() })
+    void fetch(
+      boilerplateReferencePdfUrl(hoaId, referenceSource, selectedJobId || undefined),
+      { headers: authHeaders() },
+    )
       .then((r) => (r.ok ? r.blob() : Promise.reject(new Error('Failed to load PDF'))))
       .then((blob) => {
         if (cancelled) return;
@@ -141,42 +153,77 @@ export function BoilerplateWorkbench({
       cancelled = true;
       if (url) URL.revokeObjectURL(url);
     };
-  }, [hoaId, open, referenceSource, selectedJobId, hasUpload]);
+  }, [hoaId, open, showReference, referenceSource, selectedJobId, hasUpload]);
 
-  // Escape closes full-screen workbench
+  const requestClose = useCallback(() => {
+    if (
+      dirty &&
+      !window.confirm('You have unsaved changes. Close without saving?')
+    ) {
+      return;
+    }
+    onClose();
+  }, [dirty, onClose]);
+
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+      if (e.key === 'Escape') requestClose();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [open, onClose]);
+  }, [open, requestClose]);
 
   const handleSave = async () => {
+    const changed = editorRef.current?.changedDocuments() ?? {};
+    const count = Object.keys(changed).length;
+    if (count === 0) {
+      toast.info('No changes to save.');
+      return;
+    }
+    if (
+      scope === 'firm' &&
+      !window.confirm(
+        `Save ${count} document(s) as the firm default?\n\n` +
+          'This changes the wording for every HOA that does not have its own ' +
+          'override. Associations with their own version are unaffected.',
+      )
+    ) {
+      return;
+    }
+
     setSaving(true);
     try {
-      const overrides = Object.fromEntries(
-        SLOT_IDS.map((id) => [id, drafts[id]?.trim() ? drafts[id] : null]),
+      // One transaction: a failure partway through must not leave the firm
+      // defaults half-rewritten.
+      applyPayload(await putNarrativeDocuments(hoaId, changed, scope));
+      editorRef.current?.markSaved();
+      toast.success(
+        scope === 'firm'
+          ? `Saved ${count} document(s) as the firm default.`
+          : `Saved ${count} document(s) for this HOA.`,
       );
-      const next = await putBoilerplateSettings(hoaId, overrides);
-      setSlots(next.slots);
-      setDrafts(Object.fromEntries(next.slots.map((s) => [s.id, s.value ?? ''])));
-      toast.success('Package language saved for this HOA.');
     } catch (error) {
-      toast.error(getErrorMessage(error, 'Failed to save package language.'));
+      toast.error(getErrorMessage(error, 'Failed to save. Nothing was changed.'));
     } finally {
       setSaving(false);
     }
   };
 
-  const handleReset = async (slotId: string) => {
+  const handleReset = async (docId: string, label: string) => {
+    if (
+      !window.confirm(
+        scope === 'firm'
+          ? `Reset “${label}” to the original shipped wording for every HOA?`
+          : `Reset “${label}” for this HOA?`,
+      )
+    ) {
+      return;
+    }
     setSaving(true);
     try {
-      const next = await putBoilerplateSettings(hoaId, { [slotId]: null });
-      setSlots(next.slots);
-      setDrafts((prev) => ({ ...prev, [slotId]: '' }));
-      toast.success('Reset to system-generated wording.');
+      applyPayload(await resetNarrativeDocument(hoaId, docId, scope));
+      toast.success('Reset to the wording underneath.');
     } catch (error) {
       toast.error(getErrorMessage(error, 'Failed to reset.'));
     } finally {
@@ -209,204 +256,202 @@ export function BoilerplateWorkbench({
     }
   };
 
-  const handleDividerPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
-    event.currentTarget.setPointerCapture(event.pointerId);
-    setIsDragging(true);
-  };
-
-  const handleDividerPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (!isDragging || !containerRef.current) return;
-    const rect = containerRef.current.getBoundingClientRect();
-    const percent = ((event.clientX - rect.left) / rect.width) * 100;
-    setLeftWidthPercent(clampSplitPercent(percent));
-  };
-
-  const stopDragging = (event: React.PointerEvent<HTMLDivElement>) => {
-    event.currentTarget.releasePointerCapture(event.pointerId);
-    setIsDragging(false);
-  };
-
   if (!open) return null;
 
-  const slotMeta = (slotId: string) => slots.find((s) => s.id === slotId);
+  const activeDoc = (documents ?? [])
+    .filter(isEditable)
+    .find((d) => d.id === activeDocId);
+  const canResetActive =
+    activeDoc &&
+    (scope === 'firm' ? activeDoc.has_firm_override : activeDoc.has_hoa_override);
 
   return (
     <div
-      className="fixed inset-0 z-50 flex flex-col bg-black/40"
+      className="fixed inset-0 z-50 flex flex-col bg-white"
       role="dialog"
       aria-modal="true"
-      aria-label="Package language workbench"
+      aria-label="Disclosure package document editor"
     >
-      <div className="flex items-center justify-between border-b border-[#e5e5e5] bg-white px-4 py-2.5">
+      <div className="flex items-center justify-between gap-4 border-b border-[#e5e5e5] bg-white px-4 py-2.5">
         <div className="min-w-0">
           <p className="text-sm font-medium text-[#111111]">
-            Package language{hoaName ? ` · ${hoaName}` : ''}
+            Disclosure package{hoaName ? ` · ${hoaName}` : ''}
+            {dirty && <span className="ml-2 text-xs text-[#b45309]">Unsaved</span>}
           </p>
-          <p className="text-xs text-[#737373]">
-            Edit cover-letter sections for this HOA · reference PDF on the right · Esc or ✕ to close
+          <p className="truncate text-xs text-[#737373]">
+            {activeDoc ? `Editing: ${activeDoc.label}` : 'Click anywhere to edit'} ·{' '}
+            {SCOPE_HINT[scope]}
           </p>
         </div>
-        <Button type="button" variant="ghost" onClick={onClose} aria-label="Close package language workbench">
-          <X className="h-5 w-5 text-[#525252]" />
-        </Button>
+        <div className="flex shrink-0 items-center gap-2">
+          {activeDoc && (
+            <>
+              <span
+                className={`rounded px-1.5 py-0.5 text-xs ${
+                  activeDoc.effective_scope === 'hoa'
+                    ? 'bg-emerald-50 text-emerald-800'
+                    : activeDoc.effective_scope === 'firm'
+                      ? 'bg-blue-50 text-blue-800'
+                      : 'bg-[#f5f5f5] text-[#737373]'
+                }`}
+              >
+                {activeDoc.effective_scope === 'hoa'
+                  ? 'Custom for this HOA'
+                  : activeDoc.effective_scope === 'firm'
+                    ? 'Firm default'
+                    : 'Original wording'}
+              </span>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={saving || !canResetActive}
+                onClick={() => void handleReset(activeDoc.id, activeDoc.label)}
+              >
+                Reset this page
+              </Button>
+            </>
+          )}
+          <label className="sr-only" htmlFor="bp-scope">
+            Save scope
+          </label>
+          <select
+            id="bp-scope"
+            className="rounded border border-[#d4d4d4] bg-white px-2 py-1 text-xs text-[#1a1a1a]"
+            value={scope}
+            onChange={(e) => setScope(e.target.value as NarrativeScope)}
+            disabled={saving}
+          >
+            <option value="firm">Firm default — applies to all HOAs</option>
+            <option value="hoa">This HOA only</option>
+          </select>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={() => setShowReference((v) => !v)}
+            aria-pressed={showReference}
+            title="Show a previously generated package alongside"
+          >
+            <FileText className="h-4 w-4" />
+          </Button>
+          <Button
+            type="button"
+            onClick={() => void handleSave()}
+            disabled={saving || !documents}
+          >
+            {saving ? 'Saving…' : 'Save'}
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            onClick={requestClose}
+            aria-label="Close document editor"
+          >
+            <X className="h-5 w-5 text-[#525252]" />
+          </Button>
+        </div>
       </div>
 
-      <div ref={containerRef} className="flex min-h-0 flex-1">
-        {/* Left: editor */}
-        <div
-          className="flex min-h-0 shrink-0 flex-col overflow-auto bg-white p-5"
-          style={{ width: `${leftWidthPercent}%` }}
-        >
-          {loading ? (
-            <p className="text-sm text-[#666666]">Loading package language…</p>
+      <div className="flex min-h-0 flex-1">
+        <div className="flex min-h-0 flex-1 flex-col">
+          {documents === null ? (
+            <p className="p-6 text-sm text-[#666666]">
+              Loading the disclosure package…
+            </p>
           ) : (
-            <>
-              <p className="mb-4 text-sm text-[#666666]">
-                Saves apply to <strong>this HOA only</strong> for future packages. Leave blank for
-                system-generated wording (includes computed assessment figures). Insert a variable
-                to keep HOA/year-specific values in sync automatically.
-              </p>
-              <Tabs
-                value={activeSlot}
-                onValueChange={(v) => setActiveSlot(v as (typeof SLOT_IDS)[number])}
-                className="flex min-h-0 flex-1 flex-col"
-              >
-                <TabsList>
-                  {SLOT_IDS.map((slotId) => (
-                    <TabsTrigger key={slotId} value={slotId}>
-                      {slotMeta(slotId)?.label ?? slotId}
-                    </TabsTrigger>
-                  ))}
-                </TabsList>
-                {SLOT_IDS.map((slotId) => (
-                  <TabsContent key={slotId} value={slotId} className="flex min-h-0 flex-1 flex-col">
-                    <label className="mb-1 block text-sm font-medium text-[#1a1a1a]">
-                      {slotMeta(slotId)?.label ?? slotId}
-                      {slotMeta(slotId)?.is_override ? (
-                        <span className="ml-2 text-xs font-normal text-[#0a7]">Custom for this HOA</span>
-                      ) : (
-                        <span className="ml-2 text-xs font-normal text-[#888]">Using system default</span>
-                      )}
-                    </label>
-                    <BoilerplateRichTextEditor
-                      value={drafts[slotId] ?? ''}
-                      onChange={(html) => setDrafts((prev) => ({ ...prev, [slotId]: html }))}
-                      variables={variables}
-                      placeholder="Leave blank for system-generated wording…"
-                      disabled={saving}
-                    />
-                    <div className="mt-2">
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        onClick={() => void handleReset(slotId)}
-                        disabled={saving || !slotMeta(slotId)?.is_override}
-                      >
-                        Reset this section to system default
-                      </Button>
-                    </div>
-                  </TabsContent>
-                ))}
-              </Tabs>
-              <div className="mt-4 flex flex-wrap gap-2">
-                <Button type="button" onClick={() => void handleSave()} disabled={saving}>
-                  {saving ? 'Saving…' : 'Save for this HOA'}
-                </Button>
-                <Button type="button" variant="outline" onClick={onClose}>
-                  Close
-                </Button>
-              </div>
-            </>
+            // Mounted only once the payload exists, so the editor is built with
+            // its chip labels already in place and never rebuilt underneath its
+            // own content.
+            <NarrativeDocumentEditor
+              ref={editorRef}
+              documents={documents}
+              variables={variables}
+              blocks={blocks}
+              disabled={saving}
+              onActiveDocChange={setActiveDocId}
+              onDirtyChange={setDirty}
+            />
           )}
         </div>
 
-        {/* Resize divider */}
-        <div
-          role="separator"
-          aria-orientation="vertical"
-          aria-label="Resize panels"
-          tabIndex={0}
-          onPointerDown={handleDividerPointerDown}
-          onPointerMove={handleDividerPointerMove}
-          onPointerUp={stopDragging}
-          onPointerCancel={stopDragging}
-          className={`group relative w-2 shrink-0 cursor-col-resize bg-[#e5e5e5] transition-colors hover:bg-[#a3a3a3] ${
-            isDragging ? 'bg-[#737373]' : ''
-          }`}
-        >
-          <div className="absolute inset-y-0 left-1/2 w-4 -translate-x-1/2" />
-        </div>
-
-        {/* Right: reference PDF (always visible in full-screen workbench) */}
-        <div className="flex min-h-0 flex-1 flex-col bg-[#fafafa]">
-          <div className="flex flex-wrap items-center gap-2 border-b border-[#e5e5e5] bg-white px-3 py-2">
-            <span className="text-sm font-medium text-[#1a1a1a]">Reference PDF</span>
-            <select
-              className="rounded border border-[#d4d4d4] px-2 py-1 text-sm"
-              value={referenceSource}
-              onChange={(e) => setReferenceSource(e.target.value as ReferenceSource)}
-            >
-              <option value="job">This app&apos;s package</option>
-              <option value="upload">Upload PDF</option>
-            </select>
-            {referenceSource === 'job' ? (
-              jobs.length === 0 ? (
-                <span className="text-xs text-[#666666]">No completed packages — try Upload</span>
+        {showReference && (
+          <div className="flex min-h-0 w-[45%] shrink-0 flex-col border-l border-[#e5e5e5] bg-[#fafafa]">
+            <div className="flex flex-wrap items-center gap-2 border-b border-[#e5e5e5] bg-white px-3 py-2">
+              <span className="text-sm font-medium text-[#1a1a1a]">Reference PDF</span>
+              <select
+                className="rounded border border-[#d4d4d4] px-2 py-1 text-sm"
+                value={referenceSource}
+                onChange={(e) => setReferenceSource(e.target.value as ReferenceSource)}
+              >
+                <option value="job">This app&apos;s package</option>
+                <option value="upload">Upload PDF</option>
+              </select>
+              {referenceSource === 'job' ? (
+                jobs.length === 0 ? (
+                  <span className="text-xs text-[#666666]">
+                    No completed packages — try Upload
+                  </span>
+                ) : (
+                  <select
+                    className="max-w-[min(100%,240px)] rounded border border-[#d4d4d4] px-2 py-1 text-sm"
+                    value={selectedJobId}
+                    onChange={(e) => setSelectedJobId(e.target.value)}
+                  >
+                    {jobs.map((j) => (
+                      <option key={j.job_id} value={j.job_id}>
+                        FY {j.fiscal_year}
+                        {j.completed_at ? ` · ${j.completed_at.slice(0, 10)}` : ''}
+                      </option>
+                    ))}
+                  </select>
+                )
               ) : (
-                <select
-                  className="max-w-[min(100%,280px)] rounded border border-[#d4d4d4] px-2 py-1 text-sm"
-                  value={selectedJobId}
-                  onChange={(e) => setSelectedJobId(e.target.value)}
-                >
-                  {jobs.map((j) => (
-                    <option key={j.job_id} value={j.job_id}>
-                      FY {j.fiscal_year}
-                      {j.completed_at ? ` · ${j.completed_at.slice(0, 10)}` : ''}
-                      {j.annual_package_id != null ? ` · pkg #${j.annual_package_id}` : ''}
-                    </option>
-                  ))}
-                </select>
-              )
-            ) : (
-              <>
-                <input
-                  type="file"
-                  accept="application/pdf,.pdf"
-                  disabled={uploading}
-                  className="text-sm"
-                  onChange={(e) => {
-                    const f = e.target.files?.[0] ?? null;
-                    void handleUpload(f);
-                    e.target.value = '';
-                  }}
+                <>
+                  <input
+                    type="file"
+                    accept="application/pdf,.pdf"
+                    disabled={uploading}
+                    className="text-sm"
+                    onChange={(e) => {
+                      void handleUpload(e.target.files?.[0] ?? null);
+                      e.target.value = '';
+                    }}
+                  />
+                  {hasUpload && (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => void handleClearUpload()}
+                    >
+                      Clear upload
+                    </Button>
+                  )}
+                </>
+              )}
+            </div>
+            <div className="min-h-0 flex-1">
+              {pdfStatus === 'loading' && (
+                <p className="p-4 text-sm text-[#666666]">Loading PDF…</p>
+              )}
+              {pdfStatus === 'error' && (
+                <p className="p-4 text-sm text-red-600">Could not load reference PDF.</p>
+              )}
+              {pdfStatus === 'ready' && pdfObjectUrl && (
+                <iframe
+                  title="Reference PDF"
+                  src={pdfObjectUrl}
+                  className="h-full w-full border-0"
                 />
-                {hasUpload && (
-                  <Button type="button" variant="outline" onClick={() => void handleClearUpload()}>
-                    Clear upload
-                  </Button>
-                )}
-              </>
-            )}
+              )}
+              {pdfStatus === 'idle' && (
+                <p className="p-4 text-sm text-[#666666]">
+                  Select a package or upload a PDF to compare against.
+                </p>
+              )}
+            </div>
           </div>
-          <div className="min-h-0 flex-1">
-            {pdfStatus === 'loading' && (
-              <p className="p-4 text-sm text-[#666666]">Loading PDF…</p>
-            )}
-            {pdfStatus === 'error' && (
-              <p className="p-4 text-sm text-red-600">Could not load reference PDF.</p>
-            )}
-            {pdfStatus === 'ready' && pdfObjectUrl && (
-              <iframe title="Reference PDF" src={pdfObjectUrl} className="h-full w-full border-0" />
-            )}
-            {pdfStatus === 'idle' && (
-              <p className="p-4 text-sm text-[#666666]">
-                Select a package or upload a PDF. Select text in the viewer and paste into the editor
-                on the left.
-              </p>
-            )}
-          </div>
-        </div>
+        )}
       </div>
     </div>
   );

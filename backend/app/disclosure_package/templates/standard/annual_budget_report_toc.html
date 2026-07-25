@@ -1,31 +1,10 @@
 {% extends "_base.html" %}
 {% block title %}{{ hoa.name }} — Annual Budget Report TOC{% endblock %}
+{# add-full-document-editor: this page's body is operator-owned content, not
+   template logic. It resolves HOA override -> firm override -> the repo baseline
+   at content/standard/budget_toc.html, with computed figures carried by chips.
+   `safe_html` marks the already-sanitized, already-resolved HTML as trusted
+   markup -- it does not re-escape. #}
 {% block content %}
-<h1>Annual Budget Report — Table of Contents</h1>
-<p class="muted">Year Ending December 31, {{ fiscal_year }}</p>
-
-<ul class="toc">
-  <li><span class="toc-entry">Pro Forma Operating Budget &amp; Reserve Funding Disclosure Summary</span><span class="toc-page">{{ toc_page_numbers.get('pro_forma_disclosure_summary.html', '—') }}</span></li>
-  <li><span class="toc-entry">Assessment Schedule</span><span class="toc-page">{{ toc_page_numbers.get('assessment_schedule/universal.html', '—') }}</span></li>
-  <li><span class="toc-entry">Forecasted Statement of Revenues &amp; Expenses</span><span class="toc-page">{{ toc_page_numbers.get('forecasted_statement_title.html', '—') }}</span></li>
-  <li><span class="toc-entry">Accountant's Compilation Report</span><span class="toc-page">{{ toc_page_numbers.get('compilation_report.html', '—') }}</span></li>
-  <li><span class="toc-entry">Forecasted Statement of Revenues and Expenses</span><span class="toc-page">{{ toc_page_numbers.get('forecasted_income_statement.html', '—') }}</span></li>
-  <li><span class="toc-entry">Note 1 — The Association</span><span class="toc-page">{{ toc_page_numbers.get('notes_1_to_3.html', '—') }}</span></li>
-  <li><span class="toc-entry">Note 2 — Forecast Period</span><span class="toc-page">{{ toc_page_numbers.get('notes_1_to_3.html', '—') }}</span></li>
-  <li><span class="toc-entry">Note 3 — Basis of Presentation</span><span class="toc-page">{{ toc_page_numbers.get('notes_1_to_3.html', '—') }}</span></li>
-  <li><span class="toc-entry">Note 4 — Revenues</span><span class="toc-page">{{ toc_page_numbers.get('note_4_5.html', '—') }}</span></li>
-  <li><span class="toc-entry">Note 5 — Replacement Fund Balance</span><span class="toc-page">{{ toc_page_numbers.get('note_4_5.html', '—') }}</span></li>
-  <li><span class="toc-entry">Note 6 — Funding Plan</span><span class="toc-page">{{ toc_page_numbers.get('note_6_funding_plan.html', '—') }}</span></li>
-  <li><span class="toc-entry">Note 7 — Significant Assumptions</span><span class="toc-page">{{ toc_page_numbers.get('note_7.html', '—') }}</span></li>
-  <li><span class="toc-entry">Note 8 — Outstanding Loans</span><span class="toc-page">{{ toc_page_numbers.get('note_8.html', '—') }}</span></li>
-  <li><span class="toc-entry">Forecasted Schedule of Major Component Replacement Provision</span><span class="toc-page">{{ toc_page_numbers.get('reserve_component_schedule_title.html', '—') }}</span></li>
-  <li><span class="toc-entry">Insurance Disclosure</span><span class="toc-page">{{ toc_page_numbers.get('insurance_disclosure_cover.html', '—') }}</span></li>
-  <li><span class="toc-entry">30-Year Reserve Funding Plan</span><span class="toc-page">{{ toc_page_numbers.get('thirty_year_study_title.html', '—') }}</span></li>
-  <li><span class="toc-entry">Accountants' Compilation Report — 30-Year Funding Study</span><span class="toc-page">{{ toc_page_numbers.get('thirty_year_study_compilation.html', '—') }}</span></li>
-  <li><span class="toc-entry">Cash Flow Forecast</span><span class="toc-page">{{ toc_page_numbers.get('thirty_year_cash_flow_panel.html', '—') }}</span></li>
-  <li><span class="toc-entry">Major Component Repair and Replacement Costs</span><span class="toc-page">{{ toc_page_numbers.get('major_component_schedule.html', '—') }}</span></li>
-  {% for entry in appendix_toc_entries %}
-  <li><span class="toc-entry">{{ entry.title }}</span><span class="toc-page">{{ entry.page }}</span></li>
-  {% endfor %}
-</ul>
+{{ narrative.budget_toc | safe_html }}
 {% endblock %}

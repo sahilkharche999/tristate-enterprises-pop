@@ -18,15 +18,48 @@ from typing import Optional
 
 import nh3
 
-# Formatting the rich-text editor exposes (bold, lists, indentation) plus
-# `span[data-var]` for variable-token chips. Nothing else survives —
-# scripts, styles, links, images, and inline event/style attributes are
-# stripped by omission from this allowlist.
-_ALLOWED_TAGS = {"p", "br", "strong", "b", "em", "i", "ul", "ol", "li", "span"}
-_ALLOWED_ATTRIBUTES = {
-    "span": {"data-var"},
+# The content model: the one definition of what HTML a narrative document may
+# contain. The sanitizer enforces it here, the editor schema mirrors it, and
+# the shipped baselines are linted against it — a tag the templates emit but
+# this set omits is silent data loss (nh3 deletes it on save), so all three
+# must agree. See design.md D5.
+#
+# Formatting the rich-text editor exposes (headings, bold, lists,
+# indentation, tables) plus `span[data-var]` value chips and
+# `div[data-block]` block chips. Nothing else survives — scripts, styles,
+# links, images, and inline event/style attributes are stripped by omission.
+#
+# `id` is deliberately excluded: internal anchors were already dropped from
+# the TOCs, while `class` survives, which is what keeps `.muted`,
+# `.totals-row`, and `.indent-N` styling intact.
+CONTENT_MODEL_TAGS: frozenset[str] = frozenset(
+    {
+        # inline / block text
+        "p", "br", "strong", "b", "em", "i", "span", "div", "sup",
+        # headings
+        "h1", "h2", "h3",
+        # lists
+        "ul", "ol", "li",
+        # tables
+        "table", "thead", "tbody", "tr", "th", "td",
+    }
+)
+
+CONTENT_MODEL_ATTRIBUTES: dict[str, set[str]] = {
+    "span": {"data-var"},  # value chip
+    # Block chips are carried by a div or an li. The `li` carrier exists so a
+    # conditional list item can disappear entirely when its chip resolves to
+    # empty — the resolver replaces the whole carrier element, and a `div`
+    # substituted into a `<ul>` would be invalid markup.
+    "div": {"data-block"},
+    "li": {"data-block"},
+    "td": {"colspan", "rowspan"},
+    "th": {"colspan", "rowspan"},
     "*": {"class"},  # editor-applied indent level, e.g. class="indent-1"
 }
+
+_ALLOWED_TAGS = set(CONTENT_MODEL_TAGS)
+_ALLOWED_ATTRIBUTES = CONTENT_MODEL_ATTRIBUTES
 
 # Same tag-detection heuristic as render.py's `_safe_html` filter. A value
 # with no HTML tags is plain text (a legacy pre-editor row, or a direct API

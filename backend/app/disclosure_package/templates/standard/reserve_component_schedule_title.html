@@ -1,13 +1,10 @@
 {% extends "_base.html" %}
 {% block title %}Schedule of Major Component Replacement Provision{% endblock %}
+{# add-full-document-editor: this page's body is operator-owned content, not
+   template logic. It resolves HOA override -> firm override -> the repo baseline
+   at content/standard/reserve_schedule_title.html, with computed figures carried by chips.
+   `safe_html` marks the already-sanitized, already-resolved HTML as trusted
+   markup -- it does not re-escape. #}
 {% block content %}
-<div class="title-page">
-  <h1 id="schedule">{{ hoa.name }}</h1>
-  <h2>Forecasted Schedule of Major Component Replacement Provision</h2>
-  <p>For the Year Ending December 31, {{ fiscal_year }}</p>
-  <p>and Estimated Liability at December 31, {{ fiscal_year - 1 }}</p>
-  <p class="muted">Reserve study by
-    {{ hoa_settings.reserve_study_expert_name }}<br>
-    Dated {{ reserve_study_snapshot.study_date }}</p>
-</div>
+{{ narrative.reserve_schedule_title | safe_html }}
 {% endblock %}

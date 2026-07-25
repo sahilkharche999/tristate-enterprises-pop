@@ -1248,6 +1248,78 @@ def _seed_old_mill_assessment_setup() -> None:
         raw_conn.close()
 
 
+def migrate_legacy_boilerplate_slots() -> None:
+    """One-time: fold the three cover-letter slots into a `cover_letter` row.
+
+    add-full-document-editor replaces the three carved-out
+    ``hoa_settings.boilerplate_overrides_json`` slots (intro / enclosed-documents
+    list / closing) with one editable ``cover_letter`` narrative document. Any
+    wording an operator already saved is composed into that document's baseline
+    at the positions the slots used to occupy, and written as an HOA-scope
+    override.
+
+    Done here rather than lazily at first edit: a lazy composition needs the
+    operator to open the document before their work is preserved, and silently
+    loses it if they don't. ``boilerplate_overrides_json`` is deliberately left
+    in place — it is the rollback path until the release after this one.
+
+    Idempotent: an HOA that already has a ``cover_letter`` override is skipped,
+    so re-running (every ``init_db``) never overwrites later edits.
+    """
+    raw_conn = engine.raw_connection()
+    try:
+        if not _table_exists(raw_conn, "hoa_settings") or not _table_exists(
+            raw_conn, "narrative_overrides"
+        ):
+            return
+
+        rows = raw_conn.execute(
+            "SELECT property_id, boilerplate_overrides_json FROM hoa_settings "
+            "WHERE boilerplate_overrides_json IS NOT NULL "
+            "  AND TRIM(boilerplate_overrides_json) NOT IN ('', '{}')"
+        ).fetchall()
+        if not rows:
+            return
+
+        from app.services import hoa_boilerplate, narrative_content
+
+        already = {
+            row[0]
+            for row in raw_conn.execute(
+                "SELECT scope_id FROM narrative_overrides "
+                "WHERE scope = 'hoa' AND document_id = 'cover_letter'"
+            ).fetchall()
+        }
+
+        migrated = 0
+        for property_id, raw_json in rows:
+            if property_id in already:
+                continue
+            slots = hoa_boilerplate.parse_overrides_json(raw_json)
+            if not any(slots.values()):
+                continue
+            composed = narrative_content.compose_legacy_cover_letter(slots)
+            if composed is None:
+                continue
+            raw_conn.execute(
+                "INSERT INTO narrative_overrides "
+                "(scope, scope_id, document_id, body_html, updated_at, updated_by) "
+                "VALUES ('hoa', ?, 'cover_letter', ?, datetime('now'), ?)",
+                (property_id, composed, "migration:add-full-document-editor"),
+            )
+            migrated += 1
+
+        if migrated:
+            raw_conn.commit()
+            logger.info(
+                "Migrated legacy cover-letter boilerplate for %s HOA(s) into "
+                "narrative_overrides",
+                migrated,
+            )
+    finally:
+        raw_conn.close()
+
+
 def init_db() -> None:
     """Execute schema.sql to create tables. Safe to call on existing DB."""
     logger.info("Initializing database from schema.sql...")
@@ -1274,6 +1346,7 @@ def init_db() -> None:
     ensure_budget_line_merge_applications_columns()
     ensure_assessment_unit_pool_allocations_source_check()
     ensure_disclosure_job_columns()
+    migrate_legacy_boilerplate_slots()
     _seed_tri_state_disclosure_defaults()
     _seed_old_mill_assessment_setup()
 

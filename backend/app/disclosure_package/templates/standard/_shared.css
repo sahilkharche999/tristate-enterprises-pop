@@ -157,6 +157,17 @@ p {
 .title-page h1 { font-size: 20pt; margin-bottom: 8pt; }
 .title-page h2 { font-size: 13pt; }
 
+/* Title-page line treatments (add-full-document-editor). These replace the
+ * inline `style=` attributes the title templates used to carry: narrative
+ * bodies are now operator-edited content, and the sanitizer's content model
+ * allows `class` but not `style`, so every presentational rule has to live
+ * here where it is also editable-safe. Declarations are unchanged from the
+ * inline styles they replace, so rendered output is identical. */
+.title-hoa-name { text-decoration: underline; font-size: 14pt; }
+.title-headline { font-size: 13pt; line-height: 1.3; margin-top: 18pt; }
+.title-subhead { font-size: 12pt; margin-top: 18pt; }
+.title-citation { margin-top: 30pt; }
+
 /* Tabular financial data */
 table {
     width: 100%;
@@ -179,6 +190,29 @@ table th, table td {
     font-size: 8pt;
     text-align: right;
     vertical-align: top;
+}
+
+/* ProseMirror's table cells and list items hold *block* content, so anything
+ * that has been through the document editor arrives as <td><p>…</p></td> and
+ * <li><p>…</p></li>. The shipped baselines are stored in that same canonical
+ * form (so opening and saving a document is a true no-op), which means these
+ * paragraphs are the normal case, not the exception. Without zeroing their
+ * margins every cell and bullet gains a paragraph's worth of spacing, which
+ * pushes content onto later pages.
+ *
+ * `.letter-body li > p` is listed explicitly because `.letter-body p` (0,1,1)
+ * outranks a bare `li > p` (0,0,2) and would keep its 6pt bottom margin.
+ * Mirrors the `.ProseMirror li > p` rule in the editor stylesheet. */
+table th > p, table td > p,
+li > p,
+.letter-body li > p {
+    margin: 0;
+    /* Also inherit the type: `.disclosure-list li` sets 8.5pt, but an
+     * inherited size loses to any rule matching the <p> directly — and
+     * `.letter-body p` sets 9pt. Without this the disclosure items render a
+     * half-point larger than they used to and re-wrap onto extra lines. */
+    font-size: inherit;
+    line-height: inherit;
 }
 
 table th:first-child, table td:first-child {
@@ -276,8 +310,12 @@ table th {
 }
 
 .letter-bullets {
-    list-style: disc inside;
-    margin: 4pt 0 8pt 12pt;
+    /* `outside`, not `inside`: list items now hold a <p> (the editor's
+     * canonical shape), and an inside marker sits in the principal box, so a
+     * block child starts on the line *below* the bullet. The numbered lists
+     * below already use `outside` for the same reason. */
+    list-style: disc outside;
+    margin: 4pt 0 8pt 24pt;
     padding: 0;
     font-size: 9pt;
 }
@@ -309,11 +347,29 @@ table th {
     margin: 6pt 0 6pt 24pt;
     font-size: 9pt;
     line-height: 1.25;
+    /* The management address arrives as a value chip (an escaped scalar), so a
+     * multi-line setting keeps its newlines only if CSS honors them — same
+     * treatment as .letterhead-address. */
+    white-space: pre-line;
 }
 
 .letter-signature {
     margin-top: 24pt;
 }
+
+/* Letter/report line treatments replacing former inline `style=` attributes
+ * (add-full-document-editor) — see the note under .title-page above. */
+.letter-meta-gap { margin-top: 6pt; }
+.letter-closing { margin-top: 14pt; }
+.signature-gap { margin-bottom: 24pt; }
+.signature-name { margin-bottom: 4pt; }
+
+/* CPA letterhead on the two compilation reports. `white-space: pre-line`
+ * replaces the old `| nl2br` filter: the address arrives as a value chip
+ * (an escaped scalar), so its newlines are honored by CSS rather than by
+ * injecting <br> markup the operator can't see or edit. */
+.letterhead-firm { font-size: 11pt; margin: 0; }
+.letterhead-address { margin: 0 0 16pt 0; white-space: pre-line; }
 
 /* Wide tables (reserve component schedule, 30-year plan) */
 .wide-table th, .wide-table td {

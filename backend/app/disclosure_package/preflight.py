@@ -186,40 +186,65 @@ def check_reserve_study_age(
     return []
 
 
-def check_boilerplate_tokens(
-    boilerplate_overrides: Optional[dict],
+def check_narrative_documents(
+    narrative: Optional[dict],
 ) -> list[PreflightError]:
-    """Blocking gate: every ``data-var`` token in a boilerplate slot must be
-    in ``boilerplate_variables.TOKEN_CATALOG``.
+    """Blocking gate over every editable narrative document.
 
-    Defense in depth alongside the save-time check in
-    ``hoa_boilerplate.merge_overrides`` — this catches an unknown/misspelled
-    token from any source (a snapshot frozen before this gate existed, a
-    direct DB edit) so it can never reach the finished PDF as raw
-    ``data-var`` markup.
+    Two failure modes, both of which would otherwise reach the finished PDF:
+
+    * an unknown ``data-var`` / ``data-block`` name — it would render as raw
+      chip markup in a legal disclosure;
+    * a *required* block chip the operator deleted — §5300's special-assessment
+      disclosure, Note 8's loan paragraph, Note 6's contribution schedule.
+      Block chips are deletable by design (Bob may legitimately restructure a
+      document), so the guarantee that statutory content survives has to live
+      here rather than in the editor.
+
+    Defense in depth alongside ``narrative_content.save_document``: this also
+    catches content from a snapshot frozen before a gate existed, or a direct
+    DB edit.
     """
-    if not boilerplate_overrides:
+    if not narrative:
         return []
-    from ..services import boilerplate_variables
+    from ..services import boilerplate_variables, narrative_content
 
     out: list[PreflightError] = []
-    for slot_id, value in boilerplate_overrides.items():
-        if not value:
-            continue
-        unknown = boilerplate_variables.find_unknown_tokens(value)
-        for token in unknown:
+    for doc_id, body in narrative.items():
+        doc = narrative_content.DOCUMENT_REGISTRY.get(doc_id)
+        label = doc.label if doc else doc_id
+
+        for token in boilerplate_variables.find_unknown_tokens(body):
             out.append(PreflightError(
-                field_path=f"boilerplate.{slot_id}",
+                field_path=f"narrative.{doc_id}",
                 message=(
-                    f"Unknown variable token {token!r} in the {slot_id!r} "
-                    "boilerplate slot. Remove it or pick a valid variable "
-                    "from the insert-variable menu."
+                    f"Unknown variable {token!r} in {label}. Remove it or pick "
+                    "a valid variable from the insert-variable menu."
                 ),
                 severity="blocking",
                 code="unknown_boilerplate_token",
                 suggested_fix=(
-                    "Open the boilerplate editor and replace the token with "
-                    "one from the variable picker."
+                    f"Open {label} in the document editor and replace the "
+                    "variable with one from the picker."
+                ),
+            ))
+
+        if doc is None:
+            continue
+        missing = sorted(doc.required_blocks - narrative_content.blocks_present(body))
+        for block in missing:
+            out.append(PreflightError(
+                field_path=f"narrative.{doc_id}",
+                message=(
+                    f"{label} is missing the required {block!r} block, which "
+                    "carries system-generated content that cannot be typed by "
+                    "hand."
+                ),
+                severity="blocking",
+                code="missing_required_block",
+                suggested_fix=(
+                    f"Open {label} in the document editor and re-insert the "
+                    "block, or reset the document to restore it."
                 ),
             ))
     return out
@@ -233,7 +258,7 @@ def validate_inputs(
     hoa_metadata: HOAMetadata,
     appendices_root: Optional[Path] = None,
     hoa_settings_overrides: Optional[dict] = None,
-    boilerplate_overrides: Optional[dict] = None,
+    narrative: Optional[dict] = None,
 ) -> list[PreflightError]:
     """Return the list of blocking + warning errors. Empty list = ready to render.
 
@@ -248,13 +273,14 @@ def validate_inputs(
         hoa_settings_overrides: operator-saved per-HOA settings. In the
             DRE-driven model the numeric disclosure inputs (reserve cash
             balance, etc.) live here, not in ``spec.static_data``.
-        boilerplate_overrides: resolved (registry-keyed) rich-text slot
-            values, checked for unknown variable tokens.
+        narrative: resolved (doc_id-keyed) narrative document bodies, still
+            carrying their unresolved chips. Checked for unknown chips and
+            missing required blocks.
     """
     del appendices_root  # appendix existence is checked at merge time, not here
 
     overrides = hoa_settings_overrides or {}
-    errors: list[PreflightError] = list(check_boilerplate_tokens(boilerplate_overrides))
+    errors: list[PreflightError] = list(check_narrative_documents(narrative))
     packet_archetype = normalize_packet_archetype(
         overrides.get("financial_packet_archetype")
     )

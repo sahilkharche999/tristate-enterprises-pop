@@ -55,3 +55,90 @@
 .ProseMirror:focus {
   outline: none;
 }
+
+/* ── add-full-document-editor ────────────────────────────────────────────
+ *
+ * Headings, tables, and locked blocks. Preflight strips heading margins and
+ * table borders, so without these the editor shows a wall of same-size text
+ * and invisible table structure while the PDF renders correctly — the kind
+ * of mismatch that makes an operator distrust what they're editing. These
+ * mirror _shared.css (the disclosure print CSS) at screen scale.
+ */
+
+.ProseMirror h1,
+.ProseMirror h2,
+.ProseMirror h3 {
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.ProseMirror h1 { font-size: 1.3em; margin: 0 0 0.5em 0; }
+.ProseMirror h2 { font-size: 1.12em; margin: 0.9em 0 0.4em 0; }
+.ProseMirror h3 { font-size: 1em; margin: 0.8em 0 0.35em 0; }
+
+.ProseMirror table {
+  border-collapse: collapse;
+  margin: 0.6em 0;
+  width: 100%;
+  table-layout: fixed;
+}
+
+.ProseMirror th,
+.ProseMirror td {
+  border: 1px solid #d4d4d4;
+  padding: 0.3em 0.5em;
+  vertical-align: top;
+  /* A zero-width cell is unclickable — the operator can't get a cursor into
+   * it to type or to place a chip. */
+  min-width: 3em;
+}
+
+.ProseMirror th {
+  background: #f5f5f5;
+  font-weight: 700;
+  text-align: left;
+}
+
+.ProseMirror tr.totals-row td {
+  border-top: 1.5px solid #1a1a1a;
+  font-weight: 700;
+}
+
+/* ProseMirror's cell selection highlight. */
+.ProseMirror .selectedCell::after {
+  background: rgba(59, 130, 246, 0.16);
+  content: '';
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+  z-index: 2;
+}
+
+.ProseMirror .selectedCell {
+  position: relative;
+}
+
+/* Locked block chips: visibly not-typing-space, so the operator understands
+ * why the cursor skips them. Deletable by design — the backend's required-
+ * block preflight is what guarantees statutory blocks survive. */
+.ProseMirror div[data-block],
+.ProseMirror li[data-block] {
+  user-select: none;
+}
+
+.ProseMirror li[data-block] {
+  list-style: none;
+  margin-left: -1.2em;
+}
+
+/* One continuous document: each narrative page is a DocSection, separated so
+ * the operator can see where one document ends and the next begins. */
+.ProseMirror section[data-doc-id] {
+  padding: 0 0 1.5rem 0;
+  margin: 0 0 1.5rem 0;
+  border-bottom: 1px dashed #e0e0e0;
+}
+
+.ProseMirror section[data-doc-id]:last-child {
+  border-bottom: none;
+}

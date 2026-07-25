@@ -1,27 +1,10 @@
 {% extends "_base.html" %}
-{% block title %}Note 8 — Outstanding Loans{% endblock %}
+{% block title %}Note 8 &mdash; Outstanding Loans{% endblock %}
+{# add-full-document-editor: this page's body is operator-owned content, not
+   template logic. It resolves HOA override -> firm override -> the repo baseline
+   at content/standard/note_8.html, with computed figures carried by chips.
+   `safe_html` marks the already-sanitized, already-resolved HTML as trusted
+   markup -- it does not re-escape. #}
 {% block content %}
-<h2 id="note-8">Note 8 — Outstanding Loans</h2>
-
-{% if computed.outstanding_loan %}
-{% set loan = computed.outstanding_loan %}
-<p>The Association has an outstanding loan balance of
-<span class="bold">${{ '{:,.2f}'.format(loan.balance|float) }}</span> as of
-December 31, {{ fiscal_year - 1 }}{% if loan.lender %} with {{ loan.lender }}{% endif %}.
-{%- if loan.original_amount %} The original principal was
-${{ '{:,.2f}'.format(loan.original_amount|float) }}.{%- endif %}
-{%- if loan.interest_rate is not none %} The interest rate is
-{{ '{:.2%}'.format(loan.interest_rate|float) }}.{%- endif %}
-{%- if loan.payoff_date %} Scheduled payoff: {{ loan.payoff_date }}.{%- endif %}
-{%- if loan.purpose %} Purpose: {{ loan.purpose }}.{%- endif %}</p>
-
-<p>Loan-service obligations are reflected in the {{ fiscal_year }} operating
-budget in accordance with the loan agreement and California Civil Code
-&sect; 5505 (notice of obligations).</p>
-{% else %}
-<p>There is no outstanding current or projected loan balance as of
-December 31, {{ fiscal_year - 1 }}. The Association has not entered
-into any borrowing arrangements that would result in a loan obligation
-during the {{ fiscal_year }} forecast period.</p>
-{% endif %}
+{{ narrative.note_8 | safe_html }}
 {% endblock %}

@@ -144,6 +144,27 @@ class HOASettings(Base):
     updated_at = Column(Text, server_default=_CREATED_AT_DEFAULT)
 
 
+class NarrativeOverride(Base):
+    """One operator-edited narrative document body at one scope.
+
+    Resolution is HOA row → firm row → repo baseline (see
+    services/narrative_content.py). ``scope='firm'`` rows carry
+    ``scope_id IS NULL`` and apply to every HOA; ``scope='hoa'`` rows carry
+    ``scope_id = properties.id``. Uniqueness per (scope, scope_id,
+    document_id) is enforced by two partial indexes in schema.sql.
+    """
+
+    __tablename__ = "narrative_overrides"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    scope = Column(Text, nullable=False)
+    scope_id = Column(Integer)
+    document_id = Column(Text, nullable=False)
+    body_html = Column(Text, nullable=False)
+    updated_at = Column(Text, server_default=_CREATED_AT_DEFAULT)
+    updated_by = Column(Text)
+
+
 class SuggestionRun(Base):
     __tablename__ = "suggestion_runs"
 

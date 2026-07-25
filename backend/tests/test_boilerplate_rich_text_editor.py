@@ -12,12 +12,11 @@ from __future__ import annotations
 
 import pytest
 
-from app.disclosure_package.preflight import check_boilerplate_tokens
 from app.disclosure_package.render import _build_env
 from app.services import boilerplate_sanitize as sanitize
 from app.services import boilerplate_variables as bv
 from app.services import hoa_boilerplate as bp
-from app.services.hoa_boilerplate import UnknownBoilerplateToken
+from app.services.boilerplate_variables import UnknownBoilerplateToken
 
 
 # ── sanitization edge cases (8.x) ───────────────────────────────────────────
@@ -138,100 +137,28 @@ def test_find_unknown_tokens_ignores_known_names():
     assert bv.find_unknown_tokens(html) == ["typo_name"]
 
 
-# ── preflight gate (9.5) ─────────────────────────────────────────────────────
-
-
-def test_check_boilerplate_tokens_blocks_unknown_token():
-    errors = check_boilerplate_tokens(
-        {"cover_letter_intro": '<span data-var="hao_name"></span>'}
-    )
-    assert len(errors) == 1
-    assert errors[0].severity == "blocking"
-    assert "hao_name" in errors[0].message
-    assert errors[0].field_path == "boilerplate.cover_letter_intro"
-
-
-def test_check_boilerplate_tokens_passes_known_tokens():
-    errors = check_boilerplate_tokens(
-        {"cover_letter_intro": '<span data-var="hoa_name"></span>'}
-    )
-    assert errors == []
-
-
-def test_check_boilerplate_tokens_handles_empty_and_none():
-    assert check_boilerplate_tokens(None) == []
-    assert check_boilerplate_tokens({}) == []
-    assert check_boilerplate_tokens({"cover_letter_intro": None}) == []
-
-
-# ── PUT endpoint rejects unknown token (9.6) ────────────────────────────────
-
-
-def test_put_boilerplate_unknown_token_returns_400(client, db_session):
-    from app.ai_implementation.db.models import Property
-
-    prop = Property(name="BP Token HOA", units=3, hoa_code="BPTOK")
-    db_session.add(prop)
-    db_session.commit()
-
-    r = client.put(
-        f"/hoa/{prop.id}/settings/boilerplate",
-        json={"overrides": {"cover_letter_intro": '<span data-var="hao_name"></span>'}},
-    )
-    assert r.status_code == 400
-    assert "hao_name" in r.json()["detail"]
-
-    # Nothing was persisted.
-    got = client.get(f"/hoa/{prop.id}/settings/boilerplate")
-    assert got.json()["slots"][0]["is_override"] is False
-
-
-def test_put_boilerplate_known_token_accepted(client, db_session):
-    from app.ai_implementation.db.models import Property
-
-    prop = Property(name="BP Token HOA 2", units=3, hoa_code="BPTOK2")
-    db_session.add(prop)
-    db_session.commit()
-
-    r = client.put(
-        f"/hoa/{prop.id}/settings/boilerplate",
-        json={"overrides": {"cover_letter_intro": '<p>Dear <span data-var="hoa_name"></span></p>'}},
-    )
-    assert r.status_code == 200, r.text
-    assert 'data-var="hoa_name"' in r.json()["slots"][0]["value"]
-
-
-def test_get_boilerplate_settings_returns_variable_catalog(client, db_session):
-    from app.ai_implementation.db.models import Property
-
-    prop = Property(name="BP Catalog HOA", units=2, hoa_code="BPCAT")
-    db_session.add(prop)
-    db_session.commit()
-
-    got = client.get(f"/hoa/{prop.id}/settings/boilerplate")
-    assert got.status_code == 200
-    variable_ids = {v["id"] for v in got.json()["variables"]}
-    assert "hoa_name" in variable_ids
-    assert "assessment_line" in variable_ids
-
-
 # ── rendered formatting is unescaped (10.4) ─────────────────────────────────
+#
+# add-full-document-editor moved the cover letter from three carved-out slots
+# to one editable narrative document. The two guarantees below are unchanged
+# in substance: operator formatting reaches the PDF as real markup, and the
+# statutory blocks stay system-owned no matter what the operator writes
+# around them.
 
 
-def test_formatting_appears_unescaped_in_rendered_html():
-    env = _build_env("standard")
-    template = env.get_template("cover_letter.html")
+def _cover_ctx(body_html=None):
+    from app.services import narrative_content as nc
 
     class _Hoa:
         name = "Test HOA"
+        city = "San Jose"
+        state = "CA"
+        units = 10
+        entity_type = None
+        incorporation_year = None
 
     class _Matrix:
         recipient_grain = "unit"
-
-    sanitized_intro = bp.merge_overrides(
-        None,
-        {"cover_letter_intro": "<p><strong>Bold intro</strong></p><ul><li>Item one</li></ul>"},
-    )["cover_letter_intro"]
 
     ctx = {
         "hoa": _Hoa(),
@@ -257,15 +184,23 @@ def test_formatting_appears_unescaped_in_rendered_html():
             "monthly_replacement_contribution_total": 50.0,
             "special_assessments": [],
         },
-        "boilerplate": {
-            "cover_letter_intro": sanitized_intro,
-            "enclosed_documents_list": None,
-            "cover_letter_closing": None,
-        },
+        "boilerplate": bp.empty_boilerplate(),
         "toc_page_numbers": {},
         "appendix_toc_entries": [],
     }
-    html = template.render(**ctx)
+    ctx["narrative"] = nc.resolve_for_context(
+        ctx, {"cover_letter": body_html} if body_html else None
+    )
+    return ctx
+
+
+def test_formatting_appears_unescaped_in_rendered_html():
+    sanitized = sanitize.sanitize_slot_html(
+        "<p><strong>Bold intro</strong></p><ul><li>Item one</li></ul>"
+    )
+    html = _build_env("standard").get_template("cover_letter.html").render(
+        **_cover_ctx(sanitized)
+    )
     assert "<strong>Bold intro</strong>" in html
     assert "<li>Item one</li>" in html
     assert "&lt;strong&gt;" not in html
@@ -274,64 +209,35 @@ def test_formatting_appears_unescaped_in_rendered_html():
 # ── legal/statutory blocks are never operator-editable (10.5) ──────────────
 
 
-def test_special_assessment_and_civil_code_blocks_not_in_slot_registry():
-    forbidden_substrings = ("5300", "civil_code", "special_assessment")
-    for slot_id in bp.SLOT_REGISTRY:
-        lowered = slot_id.lower()
-        for forbidden in forbidden_substrings:
-            assert forbidden not in lowered, (
-                f"slot {slot_id!r} must not target the statutory/§5300 blocks"
-            )
+def test_statutory_wording_is_a_block_chip_not_editable_prose():
+    """The §5300 disclosure is system-generated, so it lives in BLOCK_CATALOG
+    (resolved from data) and never in the value catalog operators type into."""
+    assert "special_assessment_disclosure" in bv.BLOCK_CATALOG
+    assert "special_assessment_disclosure" not in bv.TOKEN_CATALOG
 
 
-def test_civil_code_and_5300_language_always_present_regardless_of_overrides():
-    """Even with all 3 slots overridden, the template-owned legal blocks
-    (§5300 machine, civil-code citation list) still render verbatim."""
-    env = _build_env("standard")
-    template = env.get_template("cover_letter.html")
-
-    class _Hoa:
-        name = "Test HOA"
-
-    class _Matrix:
-        recipient_grain = "unit"
-
-    ctx = {
-        "hoa": _Hoa(),
-        "fiscal_year": 2026,
-        "today": "Monday January 1, 2026",
-        "hoa_settings": {
-            "letter_date": "01/01/2026",
-            "cpa_firm_name": "Test CPA LLP",
-            "letter_signed_by": "Board",
-            "letter_signed_by_title": None,
-            "management_company": "Mgmt",
-            "management_company_address": "1 Main",
-            "management_company_phone": None,
-            "management_company_fax": None,
-            "management_company_web": None,
-        },
-        "hoa_logo_data_uri": None,
-        "matrix": _Matrix(),
-        "computed": {
-            "presentation_facts": None,
-            "assessment_change_phrase": "will be",
-            "monthly_assessment_per_unit_current": 100.0,
-            "monthly_replacement_contribution_total": 50.0,
-            "special_assessments": [],
-        },
-        "boilerplate": {
-            "cover_letter_intro": "Custom intro override",
-            "enclosed_documents_list": "<ol><li>Custom doc</li></ol>",
-            "cover_letter_closing": "Custom closing override",
-        },
-        "toc_page_numbers": {},
-        "appendix_toc_entries": [],
-    }
-    html = template.render(**ctx)
+def test_5300_wording_comes_from_data_not_from_operator_prose():
+    """The operator owns every word around the §5300 chip; the chip's own
+    wording is produced from the special-assessment data regardless."""
+    html = _build_env("standard").get_template("cover_letter.html").render(
+        **_cover_ctx(
+            "<p>Completely rewritten letter.</p>"
+            '<ol class="disclosure-list">'
+            '<li data-block="special_assessment_disclosure"></li></ol>'
+        )
+    )
+    assert "Completely rewritten letter." in html
     assert "5300" in html
-    assert "4950(b)" in html
-    assert "does not anticipate" in html  # default §5300 no-SA wording
+    assert "does not anticipate" in html  # no-SA wording, from data
+
+
+def test_deleting_the_5300_block_is_refused_at_save():
+    """The §5300 block is deletable in the editor by design, so the
+    guarantee that it survives lives in validation, not in the template."""
+    from app.services import narrative_content as nc
+
+    with pytest.raises(nc.MissingRequiredBlock):
+        nc.validate_document_html("cover_letter", "<p>No disclosure here.</p>")
 
 
 # ── determinism of the resolver itself (11.1 support) ───────────────────────

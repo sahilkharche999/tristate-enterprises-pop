@@ -1,13 +1,10 @@
 {% extends "_base.html" %}
 {% block title %}{{ hoa.name }} &mdash; Annual Budget Report{% endblock %}
+{# add-full-document-editor: this page's body is operator-owned content, not
+   template logic. It resolves HOA override -> firm override -> the repo baseline
+   at content/standard/annual_budget_cover.html, with computed figures carried by chips.
+   `safe_html` marks the already-sanitized, already-resolved HTML as trusted
+   markup -- it does not re-escape. #}
 {% block content %}
-<div class="title-page">
-  <p class="bold" style="text-decoration: underline; font-size:14pt">{{ hoa.name | upper }}</p>
-  <p class="bold" style="font-size:13pt; line-height:1.3; margin-top:18pt">
-    ANNUAL BUDGET REPORT<br>
-    AND ACCOMPANYING DISCLOSURES<br>
-    YEAR ENDING DECEMBER 31, {{ fiscal_year }}
-  </p>
-  <p class="bold" style="margin-top:30pt">[California Civil Code Section 5300<br>{{ fiscal_year }} Annual Budget Report]</p>
-</div>
+{{ narrative.annual_budget_cover | safe_html }}
 {% endblock %}

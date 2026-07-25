@@ -356,6 +356,40 @@ CREATE TABLE IF NOT EXISTS hoa_settings (
 
 CREATE INDEX IF NOT EXISTS idx_hoa_settings_property ON hoa_settings(property_id);
 
+-- add-full-document-editor: operator-edited narrative document bodies.
+-- Two override layers over the repo baseline shipped in
+-- app/disclosure_package/content/standard/<document_id>.html; resolution is
+-- HOA row → firm row → baseline, and "reset to default" is a row DELETE.
+--
+-- scope='firm'  → scope_id IS NULL (applies to every HOA; the system is
+--                 single-tenant, so "firm" is a global layer, not a tenant)
+-- scope='hoa'   → scope_id = properties.id
+--
+-- No FK on scope_id: the column is polymorphic across scopes, so a property
+-- delete would not cascade here. There is no property-delete path today;
+-- narrative_content.delete_hoa_overrides() exists for whoever adds one.
+CREATE TABLE IF NOT EXISTS narrative_overrides (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    scope        TEXT NOT NULL CHECK (scope IN ('firm', 'hoa')),
+    scope_id     INTEGER,
+    document_id  TEXT NOT NULL,
+    body_html    TEXT NOT NULL,
+    updated_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_by   TEXT,
+    CHECK ((scope = 'firm' AND scope_id IS NULL)
+        OR (scope = 'hoa'  AND scope_id IS NOT NULL))
+);
+
+-- UNIQUE(scope, scope_id, document_id) as two partial indexes: SQLite treats
+-- NULLs as distinct in a plain UNIQUE index, so a firm-scope uniqueness
+-- constraint over a NULL scope_id would not actually constrain anything.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_narrative_overrides_firm
+    ON narrative_overrides(document_id)
+    WHERE scope = 'firm';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_narrative_overrides_hoa
+    ON narrative_overrides(scope_id, document_id)
+    WHERE scope = 'hoa';
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_properties_hoa_code ON properties(hoa_code);
 CREATE INDEX IF NOT EXISTS idx_feedback_account ON feedback_cases(account_code, property_id);

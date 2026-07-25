@@ -1,55 +1,10 @@
 {% extends "_base.html" %}
-{% block title %}Note 7 — Significant Assumptions{% endblock %}
+{% block title %}Note 7 &mdash; Significant Assumptions{% endblock %}
+{# add-full-document-editor: this page's body is operator-owned content, not
+   template logic. It resolves HOA override -> firm override -> the repo baseline
+   at content/standard/note_7.html, with computed figures carried by chips.
+   `safe_html` marks the already-sanitized, already-resolved HTML as trusted
+   markup -- it does not re-escape. #}
 {% block content %}
-<h2 id="note-7">Note 7 — Significant Assumptions</h2>
-
-<p>The accompanying forecast reflects the following significant
-assumptions:</p>
-
-{% set presentation = computed.presentation_facts if computed.presentation_facts is defined else none %}
-{% set packet = computed.packet_archetype_facts if computed.packet_archetype_facts is defined else none %}
-{% set matrix_says_vary = matrix.recipient_grain == 'group' or matrix.recipient_grain == 'unit' %}
-{% set assessments_vary = matrix_says_vary or (presentation.assessments_vary if presentation else false) %}
-
-<ul>
-  <li><span class="bold">Reserve study basis:</span> the Replacement
-    Fund forecast is grounded in the reserve study prepared by
-    {{ hoa_settings.reserve_study_expert_name }}{% if reserve_study_snapshot.study_date %} dated {{ reserve_study_snapshot.study_date }}{% endif %}{% if hoa_settings.reserve_funding_plan_date %}, with a funding plan dated {{ hoa_settings.reserve_funding_plan_date }}{% endif %}.
-    Major components, their useful lives, and their remaining lives are
-    taken from that study without adjustment.</li>
-  <li><span class="bold">Replacement-cost inflation:</span> projected
-    component replacement costs are increased at an annual rate of
-    {{ '{:.0%}'.format(hoa_settings.replacement_cost_increase_rate) }}
-    over the prior-year cost.</li>
-  <li><span class="bold">Interest income:</span> interest income on
-    Replacement Fund cash and certificate-of-deposit balances is
-    forecast at an after-tax annualized rate of
-    {{ '{:.1%}'.format(hoa_settings.interest_rate_after_tax) }}.</li>
-  <li><span class="bold">Income tax provision:</span> a provision of
-    ${{ '{:,.0f}'.format(computed.income_tax_provision) }}
-    is reflected in the {{ fiscal_year }} forecast for federal and
-    state income tax on Replacement Fund interest income.</li>
-  <li><span class="bold">Assessment level:</span>
-    {% if assessments_vary %}
-    regular monthly assessments vary by ownership interest as shown in the
-    assessment schedule.
-    {% else %}
-    regular monthly assessments are forecast at the current rate of
-    ${{ '{:,.2f}'.format(computed.monthly_assessment_per_unit_current) }}
-    per unit per month.
-    {% endif %}</li>
-  {% if packet and packet.archetype == 'reserve-only' %}
-  <li><span class="bold">Reserve-only packet:</span> the accountant-style
-    forecast statement pages present replacement-fund activity only and
-    exclude operations-fund activity.</li>
-  {% endif %}
-  <li><span class="bold">Funding plan schedule:</span> the funding plan
-    adjusts the per-unit Replacement Fund contribution per the Board's
-    adopted schedule, applied piecewise across the 30-year horizon
-    described in Note 6.</li>
-</ul>
-
-<p class="legal-block">All assumptions reflect management's good-faith
-estimates as of {{ today }} and may be revised as
-new information becomes available.</p>
+{{ narrative.note_7 | safe_html }}
 {% endblock %}

@@ -146,7 +146,8 @@ def render_template(
             ``"cover_letter.html"``).
         context: Jinja2 context — typically includes ``static_data``,
             ``fiscal_year``, ``spec``, and the ``computed`` dict produced by
-            ``formulas.py``.
+            ``formulas.py``. A ``narrative`` key (resolved document bodies)
+            is filled in from the shipped baselines when absent; see below.
         templates_subdir: per-HOA subdir under ``templates/``.
 
     Returns:
@@ -156,6 +157,16 @@ def render_template(
         RemoteFetchDenied: if any template attempts an external fetch.
     """
     from weasyprint import HTML
+
+    # Narrative pages render `narrative.<doc_id>`, which compile_package
+    # supplies with the operator's layered content. Callers that render one
+    # template directly with a hand-assembled context get the shipped
+    # baselines resolved against that context instead of a StrictUndefined
+    # failure — the same content an HOA with no overrides would see.
+    if "narrative" not in context:
+        from app.services import narrative_content
+
+        context = {**context, "narrative": narrative_content.resolve_for_context(context)}
 
     env = _build_env(templates_subdir)
     template = env.get_template(template_name)

@@ -1,54 +1,10 @@
 {% extends "_base.html" %}
 {% block title %}Accountants&rsquo; Compilation Report &mdash; 30-Year Funding Study{% endblock %}
+{# add-full-document-editor: this page's body is operator-owned content, not
+   template logic. It resolves HOA override -> firm override -> the repo baseline
+   at content/standard/thirty_year_compilation.html, with computed figures carried by chips.
+   `safe_html` marks the already-sanitized, already-resolved HTML as trusted
+   markup -- it does not re-escape. #}
 {% block content %}
-
-<p class="center bold" style="font-size:11pt; margin:0">
-  {{ hoa_settings.cpa_firm_name | upper }}
-</p>
-<p class="center small" style="margin:0 0 16pt 0">
-  {{ hoa_settings.cpa_firm_address | nl2br }}
-</p>
-
-<div class="letter-meta">
-  <div>Board of Directors</div>
-  <div>{{ hoa.name }}</div>
-  <div>{{ hoa.city or static_data.city }}, {{ hoa.state or static_data.state }}</div>
-</div>
-
-<p class="legal-block">Management is responsible for the accompanying forecast
-of {{ hoa.name }} (the &ldquo;Association&rdquo;), which
-comprises the forecasted statements of replacement fund cash receipts,
-disbursements and balances for the years ending December 31,
-{{ fiscal_year }} to {{ fiscal_year + 29 }}, and the related summaries of
-significant assumptions and accounting policies in accordance with
-guidelines for the presentation of a forecast established by the American
-Institute of Certified Public Accountants (AICPA). We have performed a
-compilation engagement in accordance with Statements on Standards for
-Accounting and Review Services promulgated by the Accounting and Review
-Services Committee of the AICPA. We did not examine or review the
-forecast, nor were we required to perform any procedures to verify the
-accuracy or completeness of the information provided by management.
-Accordingly, we do not express an opinion, a conclusion, nor provide any
-form of assurance on this forecast or the assumptions.</p>
-
-<p class="legal-block">The forecasted results may not be achieved as there
-will usually be differences between the forecast and actual results,
-because events and circumstances frequently do not occur as expected, and
-those differences may be material. We assume no responsibility to update
-this report for events and circumstances occurring after the date of this
-report.</p>
-
-<p class="legal-block">The accompanying forecast and summaries of
-significant assumptions and accounting policies were prepared to present
-the regular replacement fund assessments based on the projected long-term
-costs of repairing and replacing the major components of the Association.
-Accordingly, this forecast may not be useful for any other purpose.</p>
-
-<p class="legal-block">We are not independent with respect to
-{{ hoa.name }}.</p>
-
-<div class="letter-signature">
-  <p class="bold" style="margin-bottom:4pt">{{ hoa_settings.cpa_firm_name }}</p>
-  <p>{{ hoa_settings.reserve_funding_plan_date or hoa_settings.accountant_report_date or today }}</p>
-</div>
+{{ narrative.thirty_year_compilation | safe_html }}
 {% endblock %}

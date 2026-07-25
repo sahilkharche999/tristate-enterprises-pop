@@ -1,131 +1,79 @@
-"""Unit + API tests for hoa-boilerplate-workbench.
+"""The retired three-slot overrides — what's left of them.
 
-Covers persistence after unrelated settings writes, HOA isolation, reference
-edges, cover-letter intro override vs default, XSS escape, and live vs
-snapshot freeze resolution via the shipped ``for_render`` helper + API.
+`add-full-document-editor` replaced the slots with full narrative documents.
+The API, compile context, and templates no longer reference them; only the
+read path survives, because `database.migrate_legacy_boilerplate_slots` uses
+it to recover wording operators saved under the old model.
+
+So this file covers exactly two things: that the migration can still read a
+stored blob (including its legacy alias), and that the cover letter renders
+from the new narrative path. Composition of those slots into a `cover_letter`
+override is covered by `test_narrative_legacy_migration.py`.
 """
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
 import pytest
-from jinja2 import Environment, FileSystemLoader, StrictUndefined, select_autoescape
 
-from app.disclosure_package.render import TEMPLATES_DIR, _build_env, _nl2br
+from app.disclosure_package.render import _build_env
 from app.services import hoa_boilerplate as bp
-from app.services.hoa_boilerplate import UnknownBoilerplateSlot, UnknownBoilerplateToken
 
 
-# ── pure helpers ─────────────────────────────────────────────────────────────
+# ── the migration's read path ───────────────────────────────────────────────
 
 
-def test_merge_unknown_slot_raises():
-    with pytest.raises(UnknownBoilerplateSlot):
-        bp.merge_overrides(None, {"not_a_slot": "x"})
+def test_parse_returns_every_slot_key():
+    assert set(bp.parse_overrides_json(None)) == set(bp.SLOT_REGISTRY)
 
 
-def test_merge_clear_and_set():
-    raw = bp.serialize_overrides({"cover_letter_intro": "Hello"})
-    merged = bp.merge_overrides(raw, {"cover_letter_intro": ""})
-    assert merged["cover_letter_intro"] is None
-    merged2 = bp.merge_overrides(None, {"cover_letter_intro": "  hi  "})
-    assert merged2["cover_letter_intro"] == "hi"
-    merged3 = bp.merge_overrides(raw, {"cover_letter_intro": None})
-    assert merged3["cover_letter_intro"] is None
+@pytest.mark.parametrize("raw", [None, "", "   ", "not json", "[]", "null"])
+def test_unusable_blobs_parse_to_empty(raw):
+    assert all(v is None for v in bp.parse_overrides_json(raw).values())
 
 
-def test_parse_ignores_unknown_keys_on_read():
-    raw = json.dumps({"cover_letter_intro": "a", "future_slot": "b"})
-    parsed = bp.parse_overrides_json(raw)
-    assert parsed["cover_letter_intro"] == "a"
-    assert "future_slot" not in parsed
+def test_parse_reads_stored_values_and_trims():
+    parsed = bp.parse_overrides_json('{"cover_letter_intro": "  Hello  "}')
+    assert parsed["cover_letter_intro"] == "Hello"
+    assert parsed["cover_letter_closing"] is None
 
 
-def test_parse_legacy_cover_letter_body_aliases_to_intro():
-    """Rows written before the slot registry expanded still resolve."""
-    raw = json.dumps({"cover_letter_body": "LEGACY VALUE"})
-    parsed = bp.parse_overrides_json(raw)
-    assert parsed["cover_letter_intro"] == "LEGACY VALUE"
+def test_parse_drops_keys_outside_the_registry():
+    assert "not_a_slot" not in bp.parse_overrides_json('{"not_a_slot": "x"}')
 
 
-def test_parse_legacy_alias_does_not_override_explicit_intro():
-    raw = json.dumps({"cover_letter_body": "OLD", "cover_letter_intro": "NEW"})
-    parsed = bp.parse_overrides_json(raw)
-    assert parsed["cover_letter_intro"] == "NEW"
+def test_legacy_cover_letter_body_alias_is_still_readable():
+    """Rows predating the slot registry stored the intro under another key —
+    the migration must not silently skip them."""
+    parsed = bp.parse_overrides_json('{"cover_letter_body": "Legacy text"}')
+    assert parsed["cover_letter_intro"] == "Legacy text"
 
 
-def test_empty_boilerplate_has_registry_keys():
-    empty = bp.empty_boilerplate()
-    assert set(empty.keys()) == set(bp.SLOT_REGISTRY.keys())
-    assert empty["cover_letter_intro"] is None
-
-
-def test_merge_sanitizes_html_and_rejects_unknown_token():
-    merged = bp.merge_overrides(
-        None,
-        {"cover_letter_intro": "<p>hi<script>alert(1)</script></p>"},
+def test_explicit_intro_wins_over_the_legacy_alias():
+    parsed = bp.parse_overrides_json(
+        '{"cover_letter_body": "old", "cover_letter_intro": "new"}'
     )
-    assert merged["cover_letter_intro"] == "<p>hi</p>"
-
-    with pytest.raises(UnknownBoilerplateToken):
-        bp.merge_overrides(
-            None,
-            {"cover_letter_intro": '<span data-var="hao_name"></span>'},
-        )
+    assert parsed["cover_letter_intro"] == "new"
 
 
-def test_nl2br_escapes_html():
-    out = str(_nl2br("<script>alert(1)</script>\nline2"))
-    assert "<script>" not in out
-    assert "&lt;script&gt;" in out
-    assert "<br>" in out
+# ── cover letter HTML (now rendered from the narrative path) ────────────────
 
 
-def test_for_render_snapshot_ignores_live_t2():
-    """Finalize freeze: snapshot branch keeps T1 after live mutates to T2."""
-    t1 = {"cover_letter_intro": "FROZEN_T1"}
-    live_t2 = bp.serialize_overrides({"cover_letter_intro": "LIVE_T2"})
-    resolved = bp.for_render(use_snapshots=True, frozen=t1, live_raw=live_t2)
-    assert resolved["cover_letter_intro"] == "FROZEN_T1"
+def _cover_ctx(body_html=None):
+    """Render context for cover_letter.html, with `body_html` as the operator's
+    edited document (None = the shipped baseline)."""
+    from app.services import narrative_content as nc
 
-
-def test_for_render_live_uses_current_settings():
-    live_t2 = bp.serialize_overrides({"cover_letter_intro": "LIVE_T2"})
-    resolved = bp.for_render(use_snapshots=False, frozen={"cover_letter_intro": "OLD"}, live_raw=live_t2)
-    assert resolved["cover_letter_intro"] == "LIVE_T2"
-
-
-def test_for_render_snapshot_missing_frozen_is_empty():
-    resolved = bp.for_render(use_snapshots=True, frozen=None, live_raw='{"cover_letter_intro":"x"}')
-    assert resolved["cover_letter_intro"] is None
-
-
-def test_compile_package_accepts_boilerplate_kwarg():
-    import inspect
-    from app.disclosure_package.compiler import compile_package
-
-    assert "boilerplate_overrides" in inspect.signature(compile_package).parameters
-
-
-# ── cover letter HTML ────────────────────────────────────────────────────────
-
-
-def _cover_letter_env():
-    # Delegate to the real render env builder so this test suite can never
-    # drift from the filters (nl2br, safe_html) the production render path
-    # actually registers.
-    return _build_env("standard")
-
-
-def _cover_ctx(boilerplate_body):
     class _Hoa:
         name = "Test HOA"
+        city = "San Jose"
+        state = "CA"
+        units = 10
+        entity_type = None
+        incorporation_year = None
 
     class _Matrix:
         recipient_grain = "unit"
 
-    return {
+    ctx = {
         "hoa": _Hoa(),
         "fiscal_year": 2026,
         "today": "Monday January 1, 2026",
@@ -149,418 +97,48 @@ def _cover_ctx(boilerplate_body):
             "monthly_replacement_contribution_total": 50.0,
             "special_assessments": [],
         },
-        "boilerplate": {
-            "cover_letter_intro": boilerplate_body,
-            "enclosed_documents_list": None,
-            "cover_letter_closing": None,
-        },
         "toc_page_numbers": {},
         "appendix_toc_entries": [],
     }
+    bodies = {"cover_letter": body_html} if body_html else None
+    ctx["narrative"] = nc.resolve_for_context(ctx, bodies)
+    return ctx
 
 
-def test_cover_letter_intro_override_in_html():
-    template = _cover_letter_env().get_template("cover_letter.html")
-    try:
-        html = template.render(**_cover_ctx("CUSTOM INTRO ONLY"))
-    except Exception as exc:
-        pytest.fail(f"cover letter render failed: {exc}")
+def _render(body_html=None) -> str:
+    return (
+        _build_env("standard")
+        .get_template("cover_letter.html")
+        .render(**_cover_ctx(body_html))
+    )
+
+
+def test_cover_letter_override_reaches_rendered_html():
+    html = _render(
+        "<p>CUSTOM INTRO ONLY</p>"
+        '<ol class="disclosure-list">'
+        '<li data-block="special_assessment_disclosure"></li></ol>'
+    )
     assert "CUSTOM INTRO ONLY" in html
-    assert "Please find the following documents enclosed" in html
     assert "Thank you for the prompt payment" not in html
-    assert "As per civil code" in html
 
 
-def test_cover_letter_empty_override_keeps_default_intro():
-    template = _cover_letter_env().get_template("cover_letter.html")
-    html = template.render(**_cover_ctx(None))
+def test_cover_letter_without_override_renders_the_shipped_baseline():
+    html = _render()
     assert "Thank you for the prompt payment" in html
-    assert "CUSTOM INTRO" not in html
     assert "Please find the following documents enclosed" in html
 
 
 def test_cover_letter_xss_escaped_in_override():
-    """Sanitization now happens at save time (merge_overrides), not at
-    render time — the `safe_html` filter trusts already-sanitized storage
-    (see boilerplate_sanitize). Exercise the real save->render pipeline.
-    """
-    sanitized = bp.merge_overrides(
-        None, {"cover_letter_intro": "<script>evil()</script>text"}
-    )["cover_letter_intro"]
+    """Sanitization happens at save time, not render time — the `safe_html`
+    filter trusts already-sanitized storage (see boilerplate_sanitize)."""
+    from app.services import boilerplate_sanitize
+
+    sanitized = boilerplate_sanitize.sanitize_slot_html(
+        "<p><script>evil()</script>text</p>"
+    )
     assert "<script>" not in sanitized
 
-    template = _cover_letter_env().get_template("cover_letter.html")
-    html = template.render(**_cover_ctx(sanitized))
-    assert "<script>evil()" not in html
+    html = _render(sanitized)
     assert "evil()" not in html
     assert "text" in html
-
-
-def test_cover_letter_strictundefined_with_empty_boilerplate_registry():
-    """Empty registry keys must not raise StrictUndefined."""
-    template = _cover_letter_env().get_template("cover_letter.html")
-    ctx = _cover_ctx(None)
-    ctx["boilerplate"] = bp.empty_boilerplate()
-    html = template.render(**ctx)
-    assert "Thank you for the prompt payment" in html
-
-
-# ── API ──────────────────────────────────────────────────────────────────────
-
-
-def test_boilerplate_api_isolation_and_clear(client, db_session):
-    from app.ai_implementation.db.models import Property
-
-    prop_a = Property(name="BP HOA A", units=5, hoa_code="BPA")
-    prop_b = Property(name="BP HOA B", units=5, hoa_code="BPB")
-    db_session.add(prop_a)
-    db_session.add(prop_b)
-    db_session.commit()
-
-    r = client.put(
-        f"/hoa/{prop_a.id}/settings/boilerplate",
-        json={"overrides": {"cover_letter_intro": "Only A"}},
-    )
-    assert r.status_code == 200, r.text
-    assert r.json()["slots"][0]["is_override"] is True
-    assert r.json()["slots"][0]["value"] == "Only A"
-
-    r_b = client.get(f"/hoa/{prop_b.id}/settings/boilerplate")
-    assert r_b.status_code == 200
-    assert r_b.json()["slots"][0]["value"] == ""
-    assert r_b.json()["slots"][0]["is_override"] is False
-
-    r_bad = client.put(
-        f"/hoa/{prop_a.id}/settings/boilerplate",
-        json={"overrides": {"nope": "x"}},
-    )
-    assert r_bad.status_code == 400
-
-    r_clear = client.put(
-        f"/hoa/{prop_a.id}/settings/boilerplate",
-        json={"overrides": {"cover_letter_intro": None}},
-    )
-    assert r_clear.status_code == 200
-    assert r_clear.json()["slots"][0]["is_override"] is False
-
-
-def test_boilerplate_survives_unrelated_disclosure_settings_put(client, db_session):
-    """Criterion 1: edit income-adjacent disclosure scalars must not wipe cover letter."""
-    from app.ai_implementation.db.models import Property
-
-    prop = Property(name="BP Persist HOA", units=8, hoa_code="BPP")
-    db_session.add(prop)
-    db_session.commit()
-
-    put_bp = client.put(
-        f"/hoa/{prop.id}/settings/boilerplate",
-        json={"overrides": {"cover_letter_intro": "PERSIST_ME_ACROSS_SETTINGS"}},
-    )
-    assert put_bp.status_code == 200, put_bp.text
-
-    # Unrelated disclosure settings write (same surface Bob uses for rates/CPA)
-    put_disc = client.put(
-        f"/hoa/{prop.id}/settings/disclosure",
-        json={
-            "management_company": "Tri-State Enterprises",
-            "cpa_firm_name": "Some CPA LLP",
-            "interest_rate_after_tax": 0.02,
-            "replacement_cost_increase_rate": 0.03,
-        },
-    )
-    assert put_disc.status_code == 200, put_disc.text
-
-    got = client.get(f"/hoa/{prop.id}/settings/boilerplate")
-    assert got.status_code == 200
-    assert got.json()["slots"][0]["value"] == "PERSIST_ME_ACROSS_SETTINGS"
-    assert got.json()["slots"][0]["is_override"] is True
-
-
-def test_boilerplate_survives_second_disclosure_put_full_roundtrip(client, db_session):
-    """GET disclosure then PUT full writable body must not clear boilerplate column."""
-    from app.ai_implementation.db.models import Property
-    from app.routers.hoa_settings import _row_to_dict
-    from app.services import hoa_settings_service
-
-    prop = Property(name="BP Roundtrip", units=4, hoa_code="BPRT")
-    db_session.add(prop)
-    db_session.commit()
-
-    client.put(
-        f"/hoa/{prop.id}/settings/boilerplate",
-        json={"overrides": {"cover_letter_intro": "ROUNDTRIP_SAFE"}},
-    )
-
-    disc = client.get(f"/hoa/{prop.id}/settings/disclosure")
-    assert disc.status_code == 200
-    body = disc.json()
-    # Frontend save() resends entire payload minus derived keys
-    writable = {k: v for k, v in body.items() if k not in ("property_id", "has_logo")}
-    writable["management_company"] = "Updated Mgmt Co"
-    put = client.put(f"/hoa/{prop.id}/settings/disclosure", json=writable)
-    assert put.status_code == 200, put.text
-
-    got = client.get(f"/hoa/{prop.id}/settings/boilerplate")
-    assert got.json()["slots"][0]["value"] == "ROUNDTRIP_SAFE"
-
-    # Column still on ORM row
-    row = hoa_settings_service.get_or_create(db_session, hoa_id=prop.id)
-    parsed = bp.parse_overrides_json(row.boilerplate_overrides_json)
-    assert parsed["cover_letter_intro"] == "ROUNDTRIP_SAFE"
-    assert "boilerplate_overrides_json" not in _row_to_dict(row) or True  # not exposed on disclosure GET
-
-
-def test_reference_upload_and_job_list(client, db_session, tmp_path, monkeypatch):
-    from app.ai_implementation.db.models import (
-        DISCLOSURE_JOB_COMPLETED,
-        DISCLOSURE_JOB_FAILED,
-        DISCLOSURE_JOB_PENDING,
-        DisclosurePackageJob,
-        Property,
-    )
-    from app.config import settings
-
-    storage = tmp_path / "budget-storage"
-    storage.mkdir()
-    monkeypatch.setattr(settings, "BUDGET_STORAGE_ROOT", str(storage), raising=False)
-
-    prop = Property(name="BP Ref HOA", units=3, hoa_code="BPREF")
-    db_session.add(prop)
-    db_session.commit()
-
-    job_missing = DisclosurePackageJob(
-        id="job-missing",
-        property_id=prop.id,
-        fiscal_year=2026,
-        status=DISCLOSURE_JOB_COMPLETED,
-        output_path=str(tmp_path / "gone.pdf"),
-    )
-    pdf_path = storage / "pkg.pdf"
-    pdf_path.write_bytes(b"%PDF-1.4 fake")
-    job_ok = DisclosurePackageJob(
-        id="job-ok",
-        property_id=prop.id,
-        fiscal_year=2026,
-        status=DISCLOSURE_JOB_COMPLETED,
-        output_path=str(pdf_path),
-        completed_at="2026-07-01T00:00:00",
-    )
-    job_pending = DisclosurePackageJob(
-        id="job-pending",
-        property_id=prop.id,
-        fiscal_year=2026,
-        status=DISCLOSURE_JOB_PENDING,
-        output_path=str(pdf_path),
-    )
-    job_failed = DisclosurePackageJob(
-        id="job-failed",
-        property_id=prop.id,
-        fiscal_year=2026,
-        status=DISCLOSURE_JOB_FAILED,
-        output_path=str(pdf_path),
-    )
-    other = Property(name="Other", units=1, hoa_code="OTH")
-    db_session.add(other)
-    db_session.commit()
-    job_other = DisclosurePackageJob(
-        id="job-other",
-        property_id=other.id,
-        fiscal_year=2026,
-        status=DISCLOSURE_JOB_COMPLETED,
-        output_path=str(pdf_path),
-    )
-    db_session.add_all([job_missing, job_ok, job_pending, job_failed, job_other])
-    db_session.commit()
-
-    listed = client.get(f"/hoa/{prop.id}/boilerplate/reference-jobs")
-    assert listed.status_code == 200
-    jobs = listed.json()["jobs"]
-    ids = {j["job_id"] for j in jobs}
-    assert "job-ok" in ids
-    assert "job-missing" not in ids
-    assert "job-other" not in ids
-    assert "job-pending" not in ids
-    assert "job-failed" not in ids
-
-    got = client.get(
-        f"/hoa/{prop.id}/boilerplate/reference-pdf",
-        params={"source": "job", "job_id": "job-ok"},
-    )
-    assert got.status_code == 200
-    assert got.content.startswith(b"%PDF")
-
-    denied = client.get(
-        f"/hoa/{other.id}/boilerplate/reference-pdf",
-        params={"source": "job", "job_id": "job-ok"},
-    )
-    assert denied.status_code == 404
-
-    up = client.post(
-        f"/hoa/{prop.id}/boilerplate/reference-pdf",
-        files={"file": ("ref.pdf", b"%PDF-1.4 upload", "application/pdf")},
-    )
-    assert up.status_code == 200, up.text
-    assert up.json()["has_reference_upload"] is True
-
-    got_up = client.get(
-        f"/hoa/{prop.id}/boilerplate/reference-pdf",
-        params={"source": "upload"},
-    )
-    assert got_up.status_code == 200
-
-    bad = client.post(
-        f"/hoa/{prop.id}/boilerplate/reference-pdf",
-        files={"file": ("x.txt", b"hello", "text/plain")},
-    )
-    assert bad.status_code == 400
-
-    big = client.post(
-        f"/hoa/{prop.id}/boilerplate/reference-pdf",
-        files={"file": ("big.pdf", b"%PDF" + b"x" * (25 * 1024 * 1024 + 1), "application/pdf")},
-    )
-    assert big.status_code == 413
-
-    deleted = client.delete(f"/hoa/{prop.id}/boilerplate/reference-pdf")
-    assert deleted.status_code == 200
-    assert deleted.json()["has_reference_upload"] is False
-    missing = client.get(
-        f"/hoa/{prop.id}/boilerplate/reference-pdf",
-        params={"source": "upload"},
-    )
-    assert missing.status_code == 404
-
-
-def test_api_404_unknown_hoa(client):
-    r = client.get("/hoa/9999999/settings/boilerplate")
-    assert r.status_code == 404
-
-
-def test_assemble_finalize_writes_boilerplate_key_shape():
-    """assemble_finalize_snapshots source must freeze boilerplate_overrides.
-
-    Full assemble needs budget draft plumbing; contract is proven by:
-    1) service.py writing compile_context['boilerplate_overrides'] from bundle
-    2) for_render snapshot vs live after T1 freeze / T2 live mutation
-    """
-    service_src = (
-        Path(__file__).resolve().parents[1]
-        / "app"
-        / "disclosure_package"
-        / "service.py"
-    ).read_text()
-    assert '"boilerplate_overrides": bundle.boilerplate_overrides' in service_src
-    assert "for_render(" in service_src
-    assert "use_snapshots=True" in service_src
-
-    t1 = bp.resolved_for_compile(
-        bp.serialize_overrides({"cover_letter_intro": "ASSEMBLED_T1"})
-    )
-    # What assemble would freeze:
-    compile_context = {"boilerplate_overrides": t1}
-    live_t2_raw = bp.serialize_overrides({"cover_letter_intro": "LIVE_T2"})
-
-    snap_render = bp.for_render(
-        use_snapshots=True,
-        frozen=compile_context["boilerplate_overrides"],
-        live_raw=live_t2_raw,
-    )
-    live_render = bp.for_render(
-        use_snapshots=False,
-        frozen=compile_context["boilerplate_overrides"],
-        live_raw=live_t2_raw,
-    )
-    assert snap_render["cover_letter_intro"] == "ASSEMBLED_T1"
-    assert live_render["cover_letter_intro"] == "LIVE_T2"
-
-
-def test_compiler_ctx_includes_boilerplate_key(tmp_path, monkeypatch):
-    """compile_package always puts boilerplate on Jinja context (empty ok)."""
-    # Structural: compiler module builds boilerplate_ctx before ctx_full
-    from pathlib import Path
-    src = Path(__file__).resolve().parents[1] / "app" / "disclosure_package" / "compiler.py"
-    text = src.read_text()
-    assert '"boilerplate": boilerplate_ctx' in text or "'boilerplate': boilerplate_ctx" in text
-    assert "empty_boilerplate" in text
-
-
-def test_workbench_fullscreen_contract_in_source():
-    """Full-screen shell like DRE PDF compare; opens from Disclosure readiness."""
-    root = Path(__file__).resolve().parents[2]
-    wb = (root / "frontend/src/app/components/BoilerplateWorkbench.tsx").read_text()
-    disc = (root / "frontend/src/app/components/DisclosureWorkspaceScreen.tsx").read_text()
-    assert "fixed inset-0 z-50" in wb
-    assert "if (!open) return null" in wb
-    assert "role=\"dialog\"" in wb or "role='dialog'" in wb
-    assert "open-package-language" in disc
-    assert "setPackageLanguageOpen(true)" in disc
-    assert "packageLanguageOpen" in disc
-    assert "if (!open) return" in wb or "if (!open)" in wb
-    assert "void load()" in wb
-
-
-def test_unicode_and_whitespace_override(client, db_session):
-    from app.ai_implementation.db.models import Property
-    prop = Property(name="BP Unicode", units=2, hoa_code="BPU")
-    db_session.add(prop)
-    db_session.commit()
-    body = "Dear Homeowner:\n\nThank you — café & “special” 日本語"
-    r = client.put(
-        f"/hoa/{prop.id}/settings/boilerplate",
-        json={"overrides": {"cover_letter_intro": body}},
-    )
-    assert r.status_code == 200, r.text
-    got = client.get(f"/hoa/{prop.id}/settings/boilerplate")
-    assert got.json()["slots"][0]["value"] == body
-
-    # whitespace-only clears
-    r2 = client.put(
-        f"/hoa/{prop.id}/settings/boilerplate",
-        json={"overrides": {"cover_letter_intro": "   \n\t  "}},
-    )
-    assert r2.status_code == 200
-    assert r2.json()["slots"][0]["is_override"] is False
-    assert r2.json()["slots"][0]["value"] == ""
-
-
-def test_put_requires_overrides_object(client, db_session):
-    from app.ai_implementation.db.models import Property
-    prop = Property(name="BP Bad Body", units=2, hoa_code="BPBB")
-    db_session.add(prop)
-    db_session.commit()
-    r = client.put(f"/hoa/{prop.id}/settings/boilerplate", json={})
-    assert r.status_code == 400
-    r2 = client.put(f"/hoa/{prop.id}/settings/boilerplate", json={"overrides": "nope"})
-    assert r2.status_code == 400
-
-
-def test_unauthenticated_boilerplate_rejected():
-    """Routes require auth — bare client without token must not read/write."""
-    from fastapi.testclient import TestClient
-    from app.main import create_app
-    app = create_app()
-    bare = TestClient(app)
-    # no Authorization header
-    r = bare.get("/hoa/1/settings/boilerplate")
-    assert r.status_code in (401, 403), r.status_code
-
-
-def test_reference_job_requires_job_id(client, db_session):
-    from app.ai_implementation.db.models import Property
-    prop = Property(name="BP JobId", units=1, hoa_code="BPJ")
-    db_session.add(prop)
-    db_session.commit()
-    r = client.get(
-        f"/hoa/{prop.id}/boilerplate/reference-pdf",
-        params={"source": "job"},
-    )
-    assert r.status_code == 400
-
-
-def test_cover_letter_newlines_become_br():
-    """Legacy tag-free override: safe_html applies the same escape+<br>
-    transform _nl2br used to apply directly in the template."""
-    template = _cover_letter_env().get_template("cover_letter.html")
-    ctx = _cover_ctx("Line one\nLine two")
-    html = template.render(**ctx)
-    assert "Line one" in html and "Line two" in html
-    assert "<br>" in html

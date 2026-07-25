@@ -1,61 +1,10 @@
 {% extends "_base.html" %}
-{% block title %}Note 6 — Funding Plan{% endblock %}
+{% block title %}Note 6 &mdash; Funding Plan{% endblock %}
+{# add-full-document-editor: this page's body is operator-owned content, not
+   template logic. It resolves HOA override -> firm override -> the repo baseline
+   at content/standard/note_6.html, with computed figures carried by chips.
+   `safe_html` marks the already-sanitized, already-resolved HTML as trusted
+   markup -- it does not re-escape. #}
 {% block content %}
-
-<h2>Note 6 &mdash; Funding Plan</h2>
-{% set reserve_funding = computed.reserve_funding_facts if computed.reserve_funding_facts is defined else none %}
-{% set reserve_liability = computed.reserve_liability_facts if computed.reserve_liability_facts is defined else none %}
-
-<p class="legal-block">In accordance with California Civil Code &sect; 5550,
-the Board has reviewed the reserve study prepared by
-{{ hoa_settings.reserve_study_expert_name }} and adopted a funding plan
-intended to keep the Association&rsquo;s Replacement Fund at a level
-sufficient to meet projected major-component replacement obligations
-over the 30-year forecast horizon.</p>
-
-<p class="legal-block">For fiscal year {{ fiscal_year }} the base monthly
-contribution to the Replacement Fund is approximately
-<span class="bold">${{ '{:,.2f}'.format(reserve_funding.monthly_total if reserve_funding else computed.monthly_replacement_contribution_total) }}</span>
-for the Association as a whole, equivalent to
-<span class="bold">${{ '{:,.2f}'.format(reserve_funding.monthly_per_unit if reserve_funding else computed.monthly_replacement_contribution_per_unit_2026) }}</span>
-per ownership interest per month, based on {{ reserve_funding.source_label if reserve_funding else computed.reserve_funding_source_label }}.
-Total estimated liability for major
-component replacement (Civil Code &sect; 5565) is
-<span class="bold">${{ '{:,.0f}'.format(reserve_liability.total_estimated_liability if reserve_liability else computed.total_estimated_liability) }}</span>;
-projected reserve cash at end of prior fiscal year is
-<span class="bold">${{ '{:,.0f}'.format(reserve_liability.cash_reserve_balance_eoy_prior if reserve_liability else hoa_settings.reserve_cash_balance_eoy_prior) }}</span>;
-percent funded is <span class="bold">{{ reserve_liability.percent_funded if reserve_liability else computed.percent_funded }}%</span>.</p>
-
-<p class="legal-block">The funding plan applies a piecewise schedule of
-contribution adjustments over the next three decades:</p>
-
-<table class="form-5570-table">
-  <thead>
-    <tr>
-      <th class="left">Period</th>
-      <th class="right">Annual Contribution Increase</th>
-    </tr>
-  </thead>
-  <tbody>
-    {% for start, end, rate in static_data.assessment_increase_schedule %}
-    <tr>
-      <td>{{ start }} &ndash; {{ end }}</td>
-      <td class="right">{{ '{:.1%}'.format(rate) }}</td>
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
-
-<p class="legal-block">The Board has reviewed the funding plan in
-relation to the reserve study and finds the plan adequate to meet the
-Association&rsquo;s reserve obligations consistent with California Civil
-Code &sect;&sect; 5550, 5560, and 5570. Members may obtain a copy of the
-full reserve study and funding plan at no charge upon written request to
-{{ hoa_settings.management_company }}, {{ hoa_settings.management_company_address }}.</p>
-
-<p class="legal-block">A summary of the projected fiscal-year cash
-balances and percent-funded ratios for the next 30 years is included in
-the &ldquo;30 Year Pro Forma Funding Study&rdquo; section of this
-package.</p>
-
+{{ narrative.note_6 | safe_html }}
 {% endblock %}

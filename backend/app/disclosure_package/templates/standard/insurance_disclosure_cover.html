@@ -1,10 +1,10 @@
 {% extends "_base.html" %}
 {% block title %}Insurance Disclosure{% endblock %}
+{# add-full-document-editor: this page's body is operator-owned content, not
+   template logic. It resolves HOA override -> firm override -> the repo baseline
+   at content/standard/insurance_cover.html, with computed figures carried by chips.
+   `safe_html` marks the already-sanitized, already-resolved HTML as trusted
+   markup -- it does not re-escape. #}
 {% block content %}
-<div class="title-page">
-  <h1 id="insurance">II. Insurance Disclosure</h1>
-  <p>Please refer to the following pages.</p>
-  <p class="muted">{{ hoa.name }} —
-    Year Ending December 31, {{ fiscal_year }}</p>
-</div>
+{{ narrative.insurance_cover | safe_html }}
 {% endblock %}

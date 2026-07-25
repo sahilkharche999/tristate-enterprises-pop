@@ -11,10 +11,11 @@ from ..ai_implementation.db.models import DisclosurePackageJob, Property
 from ..auth.dependencies import get_current_user
 from ..services import (
     boilerplate_variables,
-    hoa_boilerplate,
+    hoa_boilerplate,  # REFERENCE_MAX_BYTES only; the slot API is retired
     hoa_boilerplate_reference_storage,
     hoa_logo_storage,
     hoa_settings_service,
+    narrative_content,
 )
 
 router = APIRouter(prefix="/hoa", tags=["HOA Settings"])
@@ -192,67 +193,177 @@ def _require_hoa(session: Session, hoa_id: int) -> None:
         raise HTTPException(status_code=404, detail=f"HOA not found: {hoa_id}")
 
 
-@router.get("/{hoa_id}/settings/boilerplate")
-async def get_boilerplate_settings(
-    hoa_id: int,
-    session: Session = Depends(get_session),
-    current_user: dict = Depends(get_current_user),  # noqa: ARG001
-):
-    """Per-HOA package language overrides (workbench left pane)."""
-    _require_hoa(session, hoa_id)
-    row = hoa_settings_service.get_or_create(session, hoa_id=hoa_id)
-    overrides = hoa_boilerplate.parse_overrides_json(row.boilerplate_overrides_json)
+# ── Narrative documents (add-full-document-editor) ──────────────────────────
+#
+# Replaced the three-slot /settings/boilerplate pair (retired once the
+# frontend cut over). Every narrative document is one editable rich-text
+# body, resolved HOA override → firm override → repo baseline; "reset"
+# deletes one layer's row.
+
+
+def _document_payload(session: Session, hoa_id: int) -> Dict[str, Any]:
     return {
         "property_id": hoa_id,
-        "slots": hoa_boilerplate.slots_for_api(overrides),
+        "documents": narrative_content.documents_for_api(session, hoa_id),
         "variables": [
             {"id": token_id, "label": label}
             for token_id, label in boilerplate_variables.TOKEN_CATALOG.items()
         ],
-        "has_reference_upload": hoa_boilerplate_reference_storage.reference_exists(
-            row.boilerplate_reference_filename
-        ),
+        "blocks": [
+            {"id": block_id, "label": label}
+            for block_id, label in boilerplate_variables.BLOCK_CATALOG.items()
+        ],
     }
 
 
-@router.put("/{hoa_id}/settings/boilerplate")
-async def put_boilerplate_settings(
+def _require_scope(scope: str, hoa_id: int) -> tuple[str, Optional[int]]:
+    """Map the ``scope`` query param onto (scope, scope_id)."""
+    if scope == narrative_content.FIRM_SCOPE:
+        return narrative_content.FIRM_SCOPE, None
+    if scope == narrative_content.HOA_SCOPE:
+        return narrative_content.HOA_SCOPE, hoa_id
+    raise HTTPException(
+        status_code=400, detail="scope must be 'firm' or 'hoa'"
+    )
+
+
+@router.get("/{hoa_id}/documents")
+async def list_narrative_documents(
+    hoa_id: int,
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user),  # noqa: ARG001
+):
+    """Every editable document in package order, with computed pages interleaved.
+
+    Computed pages appear as ``kind: "computed"`` placeholder entries (title +
+    page-count hint) so the editor can present the report in reading order
+    without making the financial schedules editable.
+    """
+    _require_hoa(session, hoa_id)
+    return _document_payload(session, hoa_id)
+
+
+@router.put("/{hoa_id}/documents")
+async def put_narrative_documents(
     hoa_id: int,
     payload: dict = Body(...),
+    scope: str = Query("hoa", description="'firm' (all HOAs) or 'hoa' (this one)"),
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user),
+):
+    """Save several documents at one scope, atomically.
+
+    Body: ``{ "documents": { "<doc_id>": "<html>", ... } }``.
+
+    Every document is validated before *any* is written, and the whole set
+    commits or rolls back together. A per-document loop on the client could
+    leave the firm defaults half-rewritten if the third of five saves failed —
+    which, at firm scope, is a partial edit visible to every HOA.
+    """
+    _require_hoa(session, hoa_id)
+    write_scope, scope_id = _require_scope(scope, hoa_id)
+
+    raw = payload.get("documents")
+    if not isinstance(raw, dict):
+        raise HTTPException(status_code=400, detail="documents object is required")
+    if not raw:
+        raise HTTPException(status_code=400, detail="documents object is empty")
+
+    try:
+        # Validate the whole set first so a bad document later in the batch
+        # cannot leave earlier ones committed.
+        for document_id, html in raw.items():
+            if not isinstance(html, str):
+                raise HTTPException(
+                    status_code=400, detail=f"html for {document_id!r} must be a string"
+                )
+            narrative_content.validate_document_html(document_id, html)
+
+        for document_id, html in raw.items():
+            narrative_content.save_document(
+                session,
+                document_id,
+                write_scope,
+                scope_id,
+                html,
+                updated_by=(current_user or {}).get("email"),
+            )
+    except (
+        narrative_content.UnknownNarrativeDocument,
+        narrative_content.UnknownNarrativeScope,
+        narrative_content.MissingRequiredBlock,
+        boilerplate_variables.UnknownBoilerplateToken,
+    ) as exc:
+        session.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except HTTPException:
+        session.rollback()
+        raise
+
+    session.commit()
+    return _document_payload(session, hoa_id)
+
+
+@router.put("/{hoa_id}/documents/{document_id}")
+async def put_narrative_document(
+    hoa_id: int,
+    document_id: str,
+    payload: dict = Body(...),
+    scope: str = Query("hoa", description="'firm' (all HOAs) or 'hoa' (this one)"),
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user),
+):
+    """Save one document at one scope. Body: ``{ "html": "…" }``."""
+    _require_hoa(session, hoa_id)
+    write_scope, scope_id = _require_scope(scope, hoa_id)
+
+    html = payload.get("html")
+    if html is None:
+        raise HTTPException(status_code=400, detail="html is required")
+    if not isinstance(html, str):
+        raise HTTPException(status_code=400, detail="html must be a string")
+
+    try:
+        narrative_content.save_document(
+            session,
+            document_id,
+            write_scope,
+            scope_id,
+            html,
+            updated_by=(current_user or {}).get("email"),
+        )
+    except (
+        narrative_content.UnknownNarrativeDocument,
+        narrative_content.UnknownNarrativeScope,
+        narrative_content.MissingRequiredBlock,
+        boilerplate_variables.UnknownBoilerplateToken,
+    ) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    session.commit()
+    return _document_payload(session, hoa_id)
+
+
+@router.delete("/{hoa_id}/documents/{document_id}")
+async def reset_narrative_document(
+    hoa_id: int,
+    document_id: str,
+    scope: str = Query("hoa", description="'firm' (all HOAs) or 'hoa' (this one)"),
     session: Session = Depends(get_session),
     current_user: dict = Depends(get_current_user),  # noqa: ARG001
 ):
-    """Merge slot overrides. Body: ``{ "overrides": { "cover_letter_body": "…" } }``."""
+    """Reset one document at one scope — it falls back to the layer beneath."""
     _require_hoa(session, hoa_id)
-    raw_overrides = payload.get("overrides")
-    if raw_overrides is None:
-        raise HTTPException(status_code=400, detail="overrides object is required")
-    if not isinstance(raw_overrides, dict):
-        raise HTTPException(status_code=400, detail="overrides must be an object")
-    row = hoa_settings_service.get_or_create(session, hoa_id=hoa_id)
+    reset_scope, scope_id = _require_scope(scope, hoa_id)
     try:
-        merged = hoa_boilerplate.merge_overrides(
-            row.boilerplate_overrides_json, raw_overrides
-        )
-    except hoa_boilerplate.UnknownBoilerplateSlot as exc:
+        narrative_content.reset_document(session, document_id, reset_scope, scope_id)
+    except (
+        narrative_content.UnknownNarrativeDocument,
+        narrative_content.UnknownNarrativeScope,
+    ) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except hoa_boilerplate.UnknownBoilerplateToken as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    row.boilerplate_overrides_json = hoa_boilerplate.serialize_overrides(merged)
     session.commit()
-    session.refresh(row)
-    overrides = hoa_boilerplate.parse_overrides_json(row.boilerplate_overrides_json)
-    return {
-        "property_id": hoa_id,
-        "slots": hoa_boilerplate.slots_for_api(overrides),
-        "variables": [
-            {"id": token_id, "label": label}
-            for token_id, label in boilerplate_variables.TOKEN_CATALOG.items()
-        ],
-        "has_reference_upload": hoa_boilerplate_reference_storage.reference_exists(
-            row.boilerplate_reference_filename
-        ),
-    }
+    return _document_payload(session, hoa_id)
 
 
 @router.get("/{hoa_id}/boilerplate/reference-jobs")
