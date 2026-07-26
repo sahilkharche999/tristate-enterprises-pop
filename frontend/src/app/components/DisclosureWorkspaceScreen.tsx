@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Link, useParams } from 'react-router';
+import { Link, useNavigate, useParams } from 'react-router';
 import {
   ArrowLeft,
   CheckCircle2,
@@ -105,6 +105,7 @@ function buildReadinessRows(hoaId: string, assessmentMode: AssessmentMode): Read
 
 export function DisclosureWorkspaceScreen() {
   const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
   const [hoa, setHoa] = useState<HOARecord | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -300,6 +301,19 @@ export function DisclosureWorkspaceScreen() {
         hoaName={hoa.name}
         open={packageLanguageOpen}
         onClose={() => setPackageLanguageOpen(false)}
+        // The editor opens from here as well as from Settings, so "Edit in
+        // settings" has to leave this screen entirely. `field` is picked up by
+        // SettingsScreen, which scrolls to and flashes it; `returnTo` brings
+        // the operator back here afterwards.
+        onEditSetting={(tab, field) =>
+          navigate(
+            `/hoa/${hoa.id}/settings?${new URLSearchParams({
+              ...(tab === 'database' ? {} : { section: tab }),
+              field,
+              returnTo: `/hoa/${hoa.id}/disclosure`,
+            })}`,
+          )
+        }
       />
     </div>
   );

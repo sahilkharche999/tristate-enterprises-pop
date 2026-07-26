@@ -235,33 +235,61 @@ export function SettingsScreen() {
    * Reveal the settings field behind a chip the operator clicked in the
    * disclosure editor.
    *
-   * Switching tabs unmounts and remounts the panel, so the field does not
-   * exist yet when this runs — hence the retry loop rather than a single
-   * `scrollIntoView`. It gives up quietly after ~1s: a field that never
-   * appears is a mismatch between `CHIP_SOURCES` and the form, which the
-   * backend's `test_settings_field_points_at_a_rendered_input` is there to
-   * catch before it ships.
+   * The request travels as a `field` query param rather than a direct DOM
+   * call, so it works identically whether the editor was opened from this
+   * screen or from the disclosure workspace (which navigates here). The
+   * effect below is what acts on it.
    */
   const revealSettingField = (tab: 'disclosure' | 'database', field: string) => {
-    handleSectionChange(tab);
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      if (tab === 'database') next.delete('section');
+      else next.set('section', tab);
+      next.set('field', field);
+      return next;
+    });
+  };
+
+  // Scroll to and flash the requested field, then drop the param so a later
+  // refresh or back-navigation doesn't replay the jump.
+  //
+  // Switching tabs remounts the panel and the disclosure form loads its own
+  // data, so the field usually does not exist on the first pass — hence the
+  // retry rather than a single `scrollIntoView`. It gives up quietly after
+  // ~2s: a field that never appears means `CHIP_SOURCES` and the form have
+  // drifted, which the backend's
+  // `test_settings_field_points_at_a_rendered_input` catches before ship.
+  useEffect(() => {
+    const field = searchParams.get('field');
+    if (!field || isLoading) return;
 
     let attempts = 0;
+    let timer = 0;
     const find = () => {
       const el = document.querySelector<HTMLElement>(
         `[data-setting-field="${CSS.escape(field)}"]`,
       );
       if (!el) {
         attempts += 1;
-        if (attempts < 20) window.setTimeout(find, 50);
+        if (attempts < 40) timer = window.setTimeout(find, 50);
         return;
       }
       el.scrollIntoView({ behavior: 'smooth', block: 'center' });
       el.classList.add('setting-field-flash');
       window.setTimeout(() => el.classList.remove('setting-field-flash'), 2000);
       el.querySelector<HTMLElement>('input, textarea, select')?.focus();
+      setSearchParams(
+        (current) => {
+          const next = new URLSearchParams(current);
+          next.delete('field');
+          return next;
+        },
+        { replace: true },
+      );
     };
-    window.setTimeout(find, 50);
-  };
+    timer = window.setTimeout(find, 50);
+    return () => window.clearTimeout(timer);
+  }, [searchParams, isLoading, setSearchParams]);
 
   const handleFieldChange = (field: keyof SettingsFormState, value: string) => {
     setHoaConfig((current) => ({ ...current, [field]: value }));
