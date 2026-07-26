@@ -63,8 +63,8 @@ export function BoilerplateWorkbench({
   open: boolean;
   onClose: () => void;
   hoaName?: string;
-  /** Reveal the settings field behind a chip. Called after the editor closes. */
-  onEditSetting?: (tab: 'disclosure' | 'database', field: string) => void;
+  /** Reveal the settings field behind a chip. Called after the editor closes. Required so hosts cannot silently no-op. */
+  onEditSetting: (tab: 'disclosure' | 'database', field: string) => void;
 }) {
   const [documents, setDocuments] = useState<NarrativeDocument[] | null>(null);
   const [variables, setVariables] = useState<BoilerplateVariable[]>([]);
@@ -245,7 +245,7 @@ export function BoilerplateWorkbench({
       }
       setInspecting(null);
       onClose();
-      onEditSetting?.(tab, field);
+      onEditSetting(tab, field);
     },
     [dirty, onClose, onEditSetting],
   );

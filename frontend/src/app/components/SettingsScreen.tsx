@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type MouseEvent } from 'react';
 import { useParams, Link, useSearchParams } from 'react-router';
 import {
   ArrowLeft,
@@ -23,6 +23,17 @@ import { exportData } from '../api/macros';
 import { getHOA, updateHOA, type HOARecord } from '../api/hoa';
 import { getErrorMessage } from '../lib/errors';
 import { MONTH_NAMES, monthNameToNumber, monthNumberToName } from '../lib/hoa';
+import {
+  clearFieldParam,
+  resolveSettingsBackHref,
+  resolveSettingsSection,
+  revealSettingElement,
+  waitForSettingField,
+  withRevealField,
+  withSection,
+  type SettingsEditTab,
+  type SettingsSection,
+} from '../lib/settingsNavigation';
 import { HOADisclosureSettingsForm, type HOADisclosureSettingsFormHandle } from './HOADisclosureSettingsForm';
 import { BoilerplateWorkbench } from './BoilerplateWorkbench';
 // full-screen package language workbench (same shell as DRE PDF compare)
@@ -43,16 +54,17 @@ interface SettingsFormState {
 
 type ValidationField = 'name' | 'units' | 'fiscalYearStart';
 type ValidationErrors = Partial<Record<ValidationField, string>>;
-type SettingsSection = 'database' | 'disclosure' | 'appendices' | 'dre' | 'packages' | 'data';
 
-const SETTINGS_SECTIONS: SettingsSection[] = [
-  'database',
-  'disclosure',
-  'appendices',
-  'dre',
-  'packages',
-  'data',
-];
+function databaseFormFingerprint(form: SettingsFormState): string {
+  return JSON.stringify({
+    name: form.name,
+    hoaId: form.hoaId,
+    fiscalYearStart: form.fiscalYearStart,
+    taxId: form.taxId,
+    units: form.units,
+    city: form.city,
+  });
+}
 
 const SETTINGS_NAV_GROUPS: Array<{
   label: string;
@@ -173,13 +185,16 @@ export function SettingsScreen() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [packageLanguageOpen, setPackageLanguageOpen] = useState(false);
+  const [disclosureReady, setDisclosureReady] = useState(false);
+  const [disclosureDirty, setDisclosureDirty] = useState(false);
+  const [databaseBaseline, setDatabaseBaseline] = useState<string | null>(null);
   const disclosureFormRef = useRef<HOADisclosureSettingsFormHandle>(null);
+  const flashCleanupRef = useRef<(() => void) | null>(null);
   const returnTo = searchParams.get('returnTo');
-  const backHref = returnTo ?? `/hoa/${id}`;
-  const requestedSection = searchParams.get('section');
-  const selectedSection = SETTINGS_SECTIONS.includes(requestedSection as SettingsSection)
-    ? (requestedSection as SettingsSection)
-    : 'database';
+  const backHref = resolveSettingsBackHref(returnTo, id ?? '');
+  const selectedSection = resolveSettingsSection(searchParams.get('section'));
+  const databaseDirty =
+    databaseBaseline != null && databaseFormFingerprint(hoaConfig) !== databaseBaseline;
 
   useEffect(() => {
     let cancelled = false;
@@ -197,7 +212,9 @@ export function SettingsScreen() {
         const response = await getHOA(id);
         if (!cancelled) {
           setHoa(response);
-          setHoaConfig((current) => buildFormState(response, current));
+          const form = buildFormState(response);
+          setHoaConfig(form);
+          setDatabaseBaseline(databaseFormFingerprint(form));
         }
       } catch (error) {
         if (!cancelled) {
@@ -216,80 +233,94 @@ export function SettingsScreen() {
     };
   }, [id]);
 
+  useEffect(() => {
+    if (selectedSection !== 'disclosure') {
+      setDisclosureReady(false);
+      setDisclosureDirty(false);
+    }
+  }, [selectedSection, id]);
+
+  const confirmLeaveDirty = (leaving: SettingsSection): boolean => {
+    const dirty =
+      (leaving === 'disclosure' && disclosureDirty) ||
+      (leaving === 'database' && databaseDirty);
+    if (!dirty) return true;
+    return window.confirm(
+      'You have unsaved changes. Leave this section without saving?',
+    );
+  };
+
   const handleSectionChange = (value: string) => {
-    const nextSection = SETTINGS_SECTIONS.includes(value as SettingsSection)
-      ? (value as SettingsSection)
-      : 'database';
-    setSearchParams((current) => {
-      const next = new URLSearchParams(current);
-      if (nextSection === 'database') {
-        next.delete('section');
-      } else {
-        next.set('section', nextSection);
-      }
-      return next;
-    });
+    const nextSection = resolveSettingsSection(value);
+    if (nextSection === selectedSection) return;
+    if (!confirmLeaveDirty(selectedSection)) return;
+    setSearchParams(
+      (current) => withSection(clearFieldParam(current), nextSection),
+      { replace: true },
+    );
+  };
+
+  const handleBackClick = (event: MouseEvent<HTMLAnchorElement>) => {
+    const dirty =
+      (selectedSection === 'disclosure' && disclosureDirty) ||
+      (selectedSection === 'database' && databaseDirty);
+    if (
+      dirty &&
+      !window.confirm('You have unsaved changes. Leave settings without saving?')
+    ) {
+      event.preventDefault();
+    }
   };
 
   /**
    * Reveal the settings field behind a chip the operator clicked in the
-   * disclosure editor.
-   *
-   * The request travels as a `field` query param rather than a direct DOM
-   * call, so it works identically whether the editor was opened from this
-   * screen or from the disclosure workspace (which navigates here). The
-   * effect below is what acts on it.
+   * disclosure editor. Transports intent as `field` (+ section) in the URL so
+   * the same path works from this screen and from the disclosure workspace.
    */
-  const revealSettingField = (tab: 'disclosure' | 'database', field: string) => {
-    setSearchParams((current) => {
-      const next = new URLSearchParams(current);
-      if (tab === 'database') next.delete('section');
-      else next.set('section', tab);
-      next.set('field', field);
-      return next;
-    });
+  const revealSettingField = (tab: SettingsEditTab, field: string) => {
+    setSearchParams(
+      (current) => withRevealField(current, tab, field),
+      { replace: true },
+    );
   };
 
-  // Scroll to and flash the requested field, then drop the param so a later
-  // refresh or back-navigation doesn't replay the jump.
-  //
-  // Switching tabs remounts the panel and the disclosure form loads its own
-  // data, so the field usually does not exist on the first pass — hence the
-  // retry rather than a single `scrollIntoView`. It gives up quietly after
-  // ~2s: a field that never appears means `CHIP_SOURCES` and the form have
-  // drifted, which the backend's
-  // `test_settings_field_points_at_a_rendered_input` catches before ship.
+  // Scroll to and flash the requested field once the hosting form is ready,
+  // then drop `field` (success or failure) so refresh does not replay the jump.
   useEffect(() => {
     const field = searchParams.get('field');
     if (!field || isLoading) return;
 
-    let attempts = 0;
-    let timer = 0;
-    const find = () => {
-      const el = document.querySelector<HTMLElement>(
-        `[data-setting-field="${CSS.escape(field)}"]`,
-      );
+    const section = resolveSettingsSection(searchParams.get('section'));
+    if (section === 'disclosure' && !disclosureReady) return;
+
+    const controller = new AbortController();
+    let cancelled = false;
+
+    void (async () => {
+      const el = await waitForSettingField(field, {
+        signal: controller.signal,
+        timeoutMs: 5000,
+      });
+      if (cancelled || controller.signal.aborted) return;
+
       if (!el) {
-        attempts += 1;
-        if (attempts < 40) timer = window.setTimeout(find, 50);
+        toast.message('Could not find that setting. It may have moved.');
+        setSearchParams((current) => clearFieldParam(current), { replace: true });
         return;
       }
-      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      el.classList.add('setting-field-flash');
-      window.setTimeout(() => el.classList.remove('setting-field-flash'), 2000);
-      el.querySelector<HTMLElement>('input, textarea, select')?.focus();
-      setSearchParams(
-        (current) => {
-          const next = new URLSearchParams(current);
-          next.delete('field');
-          return next;
-        },
-        { replace: true },
-      );
+
+      flashCleanupRef.current?.();
+      flashCleanupRef.current = revealSettingElement(el);
+      setSearchParams((current) => clearFieldParam(current), { replace: true });
+    })();
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+      flashCleanupRef.current?.();
+      flashCleanupRef.current = null;
     };
-    timer = window.setTimeout(find, 50);
-    return () => window.clearTimeout(timer);
-  }, [searchParams, isLoading, setSearchParams]);
+  }, [searchParams, isLoading, disclosureReady, setSearchParams]);
 
   const handleFieldChange = (field: keyof SettingsFormState, value: string) => {
     setHoaConfig((current) => ({ ...current, [field]: value }));
@@ -342,7 +373,9 @@ export function SettingsScreen() {
       };
       const savedHoa = await updateHOA(id, payload);
       setHoa(savedHoa);
-      setHoaConfig((current) => buildFormState(savedHoa, current));
+      const form = buildFormState(savedHoa);
+      setHoaConfig(form);
+      setDatabaseBaseline(databaseFormFingerprint(form));
       setValidationErrors({});
       toast.success('Settings saved.');
     } catch (error) {
@@ -373,7 +406,11 @@ export function SettingsScreen() {
       <header className="border-b border-[#e5e5e5] bg-white sticky top-0 z-10 shadow-sm">
         <div className="px-8 py-6 flex items-center justify-between">
           <div className="flex items-center gap-6">
-            <Link to={backHref} className="p-2 hover:bg-[#f5f5f5] rounded-lg transition-colors">
+            <Link
+              to={backHref}
+              onClick={handleBackClick}
+              className="p-2 hover:bg-[#f5f5f5] rounded-lg transition-colors"
+            >
               <ArrowLeft className="w-5 h-5 text-[#525252]" />
             </Link>
             <div>
@@ -483,7 +520,7 @@ export function SettingsScreen() {
               </div>
 
               <div className="grid gap-6 md:grid-cols-2">
-                <div className="space-y-2">
+                <div data-setting-field="fiscalYearStart" className="space-y-2">
                   <Label htmlFor="fiscalStart">Fiscal Year Start</Label>
                   <Select
                     value={hoaConfig.fiscalYearStart}
@@ -507,7 +544,7 @@ export function SettingsScreen() {
               </div>
 
               <div className="grid gap-6 md:grid-cols-2">
-                <div className="space-y-2">
+                <div data-setting-field="taxId" className="space-y-2">
                   <Label htmlFor="taxId">Tax ID</Label>
                   <Input
                     id="taxId"
@@ -595,7 +632,12 @@ export function SettingsScreen() {
 
           <TabsContent value="disclosure" className="space-y-6">
             <div className="bg-[#F7F7F7] border border-[#E5E5E5] rounded-lg p-8">
-              <HOADisclosureSettingsForm hoaId={hoa.id} ref={disclosureFormRef} />
+              <HOADisclosureSettingsForm
+                hoaId={hoa.id}
+                ref={disclosureFormRef}
+                onReadyChange={setDisclosureReady}
+                onDirtyChange={setDisclosureDirty}
+              />
               <div className="mt-8 border-t border-[#e5e5e5] pt-6">
                 <h3 className="text-base font-semibold text-[#1a1a1a]">
                   Disclosure package wording

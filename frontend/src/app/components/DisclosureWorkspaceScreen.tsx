@@ -24,6 +24,7 @@ import {
   assessmentModeShortLabel,
   type AssessmentMode,
 } from '../lib/assessmentMode';
+import { buildSettingsEditHref } from '../lib/settingsNavigation';
 
 type ReadinessRow = {
   label: string;
@@ -301,17 +302,16 @@ export function DisclosureWorkspaceScreen() {
         hoaName={hoa.name}
         open={packageLanguageOpen}
         onClose={() => setPackageLanguageOpen(false)}
-        // The editor opens from here as well as from Settings, so "Edit in
-        // settings" has to leave this screen entirely. `field` is picked up by
-        // SettingsScreen, which scrolls to and flashes it; `returnTo` brings
-        // the operator back here afterwards.
+        // Cross-route: navigate to Settings with field + returnTo (helpers keep
+        // section/returnTo encoding consistent with the same-screen path).
         onEditSetting={(tab, field) =>
           navigate(
-            `/hoa/${hoa.id}/settings?${new URLSearchParams({
-              ...(tab === 'database' ? {} : { section: tab }),
+            buildSettingsEditHref({
+              hoaId: hoa.id,
+              tab,
               field,
               returnTo: `/hoa/${hoa.id}/disclosure`,
-            })}`,
+            }),
           )
         }
       />

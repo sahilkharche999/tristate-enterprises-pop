@@ -1,4 +1,12 @@
-import { forwardRef, useCallback, useEffect, useImperativeHandle, useState } from 'react';
+import {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from 'react';
 import {
   type AssessmentIncreaseBracket,
   type BoardDeferralEntry,
@@ -16,6 +24,12 @@ import {
 } from '../api/hoaSettings';
 import { HOALogoUploadControl } from './HOALogoUploadControl';
 import { Button } from './ui/button';
+
+/** Stable fingerprint of editable disclosure settings for dirty detection. */
+function disclosureFingerprint(settings: HOADisclosureSettings): string {
+  const { property_id: _p, has_logo: _h, ...writable } = settings;
+  return JSON.stringify(writable);
+}
 
 const EMPTY_ASSESSMENT: SpecialAssessmentEntry = {
   due_date: '',
@@ -98,12 +112,21 @@ export interface HOADisclosureSettingsFormHandle {
    * form shows its own inline error too). Lets the parent Settings header
    * button surface a success/failure toast + spinner. */
   save: () => Promise<boolean>;
+  isDirty: () => boolean;
 }
+
+export type HOADisclosureSettingsFormProps = {
+  hoaId: number;
+  /** Fired when the form finishes loading (true) or resets / errors (false). */
+  onReadyChange?: (ready: boolean) => void;
+  /** Fired when dirty state relative to last load/save changes. */
+  onDirtyChange?: (dirty: boolean) => void;
+};
 
 export const HOADisclosureSettingsForm = forwardRef<
   HOADisclosureSettingsFormHandle,
-  { hoaId: number }
->(function HOADisclosureSettingsForm({ hoaId }, ref) {
+  HOADisclosureSettingsFormProps
+>(function HOADisclosureSettingsForm({ hoaId, onReadyChange, onDirtyChange }, ref) {
   const [settings, setSettings] = useState<HOADisclosureSettings | null>(null);
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState<string | null>(null);
@@ -113,15 +136,43 @@ export const HOADisclosureSettingsForm = forwardRef<
   // pool's basis. `previews` holds the last fetched allocation table per pool_key.
   const [specialPools, setSpecialPools] = useState<SpecialAssessmentPool[]>([]);
   const [previews, setPreviews] = useState<Record<string, SpecialAssessmentPreview>>({});
+  const baselineRef = useRef<string | null>(null);
+  const onReadyChangeRef = useRef(onReadyChange);
+  const onDirtyChangeRef = useRef(onDirtyChange);
+  onReadyChangeRef.current = onReadyChange;
+  onDirtyChangeRef.current = onDirtyChange;
 
   useEffect(() => {
+    setSettings(null);
+    setError(null);
+    baselineRef.current = null;
+    onReadyChangeRef.current?.(false);
+    onDirtyChangeRef.current?.(false);
     void getHOADisclosureSettings(hoaId)
-      .then(setSettings)
-      .catch((e) => setError(e instanceof Error ? e.message : String(e)));
+      .then((next) => {
+        setSettings(next);
+        baselineRef.current = disclosureFingerprint(next);
+        onDirtyChangeRef.current?.(false);
+      })
+      .catch((e) => {
+        setError(e instanceof Error ? e.message : String(e));
+        onReadyChangeRef.current?.(false);
+      });
     void listSpecialAssessmentPools(hoaId)
       .then(setSpecialPools)
       .catch(() => setSpecialPools([]));
   }, [hoaId]);
+
+  // After settings paint into the DOM, signal ready for field-reveal.
+  useLayoutEffect(() => {
+    if (settings) onReadyChangeRef.current?.(true);
+  }, [settings]);
+
+  useEffect(() => {
+    if (!settings || baselineRef.current == null) return;
+    const dirty = disclosureFingerprint(settings) !== baselineRef.current;
+    onDirtyChangeRef.current?.(dirty);
+  }, [settings]);
 
   // Must be defined before early returns so hook call count is stable per render.
   const save = useCallback(async (): Promise<boolean> => {
@@ -135,6 +186,8 @@ export const HOADisclosureSettingsForm = forwardRef<
       const { property_id: _propertyId, has_logo: _hasLogo, ...writable } = settings;
       const next = await putHOADisclosureSettings(hoaId, writable);
       setSettings(next);
+      baselineRef.current = disclosureFingerprint(next);
+      onDirtyChangeRef.current?.(false);
       setSavedAt(new Date().toLocaleTimeString());
       return true;
     } catch (e) {
@@ -145,7 +198,12 @@ export const HOADisclosureSettingsForm = forwardRef<
     }
   }, [settings, hoaId]);
 
-  useImperativeHandle(ref, () => ({ save }), [save]);
+  const isDirty = useCallback(() => {
+    if (!settings || baselineRef.current == null) return false;
+    return disclosureFingerprint(settings) !== baselineRef.current;
+  }, [settings]);
+
+  useImperativeHandle(ref, () => ({ save, isDirty }), [save, isDirty]);
 
   if (error) return <p className="text-xs text-[#b91c1c]">{error}</p>;
   if (!settings) return <p className="text-sm text-[#737373]">Loading…</p>;

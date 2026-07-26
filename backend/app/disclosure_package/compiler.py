@@ -1375,6 +1375,14 @@ def compile_package(
             "%A %B %-d, %Y"
         )
 
+        # `_compute_all` returns a *wrapper* — {computed, budget_draft,
+        # hoa_metadata, reserve_study_snapshot} — which is why the context
+        # below splats it (`**computed`) rather than nesting it. The chip
+        # resolver wants the facts themselves: it reads `reserve_liability_facts`
+        # and friends as top-level keys, and handing it the wrapper silently
+        # resolved every money chip to $0 instead of raising.
+        computed_facts = computed["computed"]
+
         def _resolve_narrative(
             toc_page_numbers: Optional[dict[str, Any]] = None,
             appendix_toc_entries: Optional[list[dict[str, Any]]] = None,
@@ -1391,7 +1399,7 @@ def compile_package(
                 hoa=hoa_metadata,
                 fiscal_year=spec.fiscal_year,
                 hoa_settings=effective_hoa_settings,
-                computed=computed,
+                computed=computed_facts,
                 matrix=assessment_matrix,
                 static_data=spec.static_data,
                 today=_rendered_today,
@@ -1400,7 +1408,7 @@ def compile_package(
             )
             block_map = boilerplate_variables_module.build_block_map(
                 fiscal_year=spec.fiscal_year,
-                computed=computed,
+                computed=computed_facts,
                 matrix=assessment_matrix,
                 static_data=spec.static_data,
                 appendix_toc_entries=appendix_toc_entries or [],

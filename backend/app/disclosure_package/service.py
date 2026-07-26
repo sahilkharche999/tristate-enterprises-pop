@@ -760,13 +760,17 @@ def chip_preview_values(
         reserve_snapshot = bundle.reserve_snapshot
         effective_settings = dict(bundle.overrides)
         try:
+            # `_compute_all` returns a wrapper — {computed, budget_draft,
+            # hoa_metadata, reserve_study_snapshot}. `build_var_map` wants the
+            # facts themselves; handing it the wrapper resolves every money
+            # chip to $0 rather than raising.
             computed = _compute_all(
                 spec=bundle.spec,
                 budget_draft=bundle.budget_draft,
                 reserve_snapshot=bundle.reserve_snapshot,
                 hoa_metadata=bundle.hoa_metadata,
                 effective_hoa_settings=effective_settings,
-            )
+            )["computed"]
         except Exception as exc:
             logger.exception("Chip preview: compute failed for HOA %s", hoa_id)
             computed = {}
