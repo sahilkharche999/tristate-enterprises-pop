@@ -205,9 +205,25 @@ export async function deleteHOALogo(hoaId: number): Promise<HOADisclosureSetting
 
 // --- Reference-PDF upload for the document editor ---
 
+/**
+ * Where a chip's value comes from — drives the chip popover.
+ *
+ * `settings` / `property`: someone typed it in. `computed`: it falls out of
+ * the budget and reserve study, and a `settings_field` here is an *override*,
+ * not the source. `derived`: mechanical from the package itself (fiscal year,
+ * page numbers) with nothing to edit, ever.
+ */
+export type ChipSourceKind = 'settings' | 'property' | 'computed' | 'derived';
+
 export interface BoilerplateVariable {
   id: string;
   label: string;
+  source: ChipSourceKind;
+  /** One sentence for the popover: what this is and where it comes from. */
+  source_note: string;
+  /** Field to jump to, or null when no form renders one. */
+  settings_field: string | null;
+  settings_tab: 'disclosure' | 'database' | null;
 }
 
 export interface BoilerplateReferenceJob {
@@ -262,6 +278,34 @@ export async function getNarrativeDocuments(
     headers: authHeaders(),
   });
   return handleResponse<NarrativeDocumentsResponse>(r);
+}
+
+/**
+ * What each chip will actually print for this HOA.
+ *
+ * Best-effort: an HOA with no active budget still gets its name, dates and CPA
+ * details back, with `computed_available: false` and the computed chips simply
+ * absent from `values`. A missing key means "not knowable right now" — never
+ * assume zero, because the backend deliberately withholds rather than send the
+ * `$0.00` its renderer would print.
+ *
+ * Fetched separately from `getNarrativeDocuments` so the editor opens
+ * immediately and the values fill in behind it.
+ */
+export interface NarrativeChipValues {
+  fiscal_year: number;
+  computed_available: boolean;
+  unavailable_reason: string | null;
+  values: Record<string, string>;
+}
+
+export async function getNarrativeChipValues(
+  hoaId: number,
+): Promise<NarrativeChipValues> {
+  const r = await fetch(`${BASE_URL}/hoa/${hoaId}/documents/chip-values`, {
+    headers: authHeaders(),
+  });
+  return handleResponse<NarrativeChipValues>(r);
 }
 
 /**

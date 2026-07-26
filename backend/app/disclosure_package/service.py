@@ -51,7 +51,7 @@ from .adapters import (
     from_hoa_record,
     from_reserve_study_extraction,
 )
-from .compiler import CompileError, compile_package
+from .compiler import CompileError, _compute_all, compile_package
 from .preflight import partition_errors, validate_inputs
 from .appendix_storage import appendix_file_exists, appendix_file_path
 from .schemas import (
@@ -685,6 +685,119 @@ def run_preflight(
         connection=session.connection().connection,
     )
     return partition_errors(errors)
+
+
+def _latest_fiscal_year(session: Session, hoa_id: int) -> int:
+    """The HOA's newest annual-package year, else the current calendar year."""
+    row = session.connection().connection.execute(
+        "SELECT fiscal_year FROM annual_packages WHERE property_id = ? "
+        "ORDER BY fiscal_year DESC, id DESC LIMIT 1",
+        (hoa_id,),
+    ).fetchone()
+    return int(row[0]) if row and row[0] is not None else datetime.now().year
+
+
+def chip_preview_values(
+    session: Session, hoa_id: int, fiscal_year: Optional[int] = None
+) -> dict[str, Any]:
+    """Resolved chip values for the narrative editor's chip popover.
+
+    Best-effort by design: this feeds a "what will print here?" popover, not a
+    render, so it must never fail the way generation legitimately can. Two
+    tiers:
+
+    * **Full** — the compile inputs resolve, so `_compute_all` runs and every
+      chip has a real value, money and percentages included.
+    * **Degraded** — no active budget draft, no reserve study, or no spec.
+      Identity, letter, CPA and management chips still resolve from the HOA and
+      its settings; `previewable_values` drops the computed ones rather than
+      show ``$0.00``, which `build_var_map` produces for "unknown" and which an
+      operator would read as a real figure.
+
+    Returns ``{fiscal_year, computed_available, unavailable_reason, values}``.
+    """
+    from ..services import boilerplate_variables as bv
+
+    fiscal_year = fiscal_year or _latest_fiscal_year(session, hoa_id)
+    today = datetime.now(timezone.utc).strftime("%A %B %-d, %Y")
+
+    property_row = session.query(Property).filter(Property.id == hoa_id).one_or_none()
+    if property_row is None:
+        raise LookupError(f"HOA not found: {hoa_id}")
+
+    computed: dict[str, Any] = {}
+    matrix = None
+    reserve_snapshot = None
+    static_data = None
+    reason: Optional[str] = None
+
+    try:
+        bundle = _resolve_preflight_inputs(session, hoa_id, fiscal_year)
+    except (CompileError, LookupError) as exc:
+        bundle = None
+        reason = str(exc)
+    except Exception:  # pragma: no cover — defensive; a popover must not 500
+        logger.exception("Chip preview: input resolution failed for HOA %s", hoa_id)
+        bundle = None
+        reason = "Could not read this HOA's budget inputs."
+
+    if bundle is None:
+        # Degraded: the settings row alone. Spec static-data defaults are not
+        # applied, so a chip the operator has never filled in previews as blank
+        # even though the package would print a firm default.
+        from ..services import hoa_settings_service as hoa_settings_module
+
+        settings_row = hoa_settings_module.get_or_create(session, hoa_id=hoa_id)
+        effective_settings = {
+            key: value
+            for key, value in vars(settings_row).items()
+            if not key.startswith("_") and value not in (None, "")
+        }
+        hoa_meta: Any = property_row
+    else:
+        hoa_meta = bundle.hoa_metadata
+        static_data = bundle.spec.static_data
+        reserve_snapshot = bundle.reserve_snapshot
+        effective_settings = dict(bundle.overrides)
+        try:
+            computed = _compute_all(
+                spec=bundle.spec,
+                budget_draft=bundle.budget_draft,
+                reserve_snapshot=bundle.reserve_snapshot,
+                hoa_metadata=bundle.hoa_metadata,
+                effective_hoa_settings=effective_settings,
+            )
+        except Exception as exc:
+            logger.exception("Chip preview: compute failed for HOA %s", hoa_id)
+            computed = {}
+            reason = f"Could not compute this HOA's figures: {exc}"
+
+    var_map = bv.build_var_map(
+        hoa=hoa_meta,
+        fiscal_year=fiscal_year,
+        hoa_settings=effective_settings,
+        computed=computed,
+        matrix=matrix,
+        static_data=static_data,
+        today=today,
+        reserve_study_snapshot=reserve_snapshot,
+        toc_page_numbers={},
+    )
+    computed_available = bool(computed)
+    return {
+        "fiscal_year": fiscal_year,
+        "computed_available": computed_available,
+        "unavailable_reason": None if computed_available else reason,
+        "values": bv.previewable_values(
+            var_map,
+            computed_available=computed_available,
+            # The matrix build needs `_materialize_assessment_mappings_for_
+            # budget_draft`, which writes rows — not something a preview GET
+            # may do. So the matrix-dependent chips stay unpreviewed; their
+            # popover shows the source note instead of a guessed sentence.
+            matrix_available=False,
+        ),
+    }
 
 
 def _serialize_assessment_setup_snapshot(

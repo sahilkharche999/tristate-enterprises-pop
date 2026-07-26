@@ -19,10 +19,12 @@
  */
 import { useCallback, useEffect, useImperativeHandle, useMemo, useRef } from 'react';
 import { forwardRef } from 'react';
+import type { MouseEvent as ReactMouseEvent } from 'react';
 import { EditorContent, useEditor } from '@tiptap/react';
 import { getHTMLFromFragment } from '@tiptap/core';
 import type { Editor } from '@tiptap/react';
 import type {
+  BoilerplateVariable,
   NarrativeDocument,
   NarrativeEditableDocument,
 } from '../api/hoaSettings';
@@ -31,6 +33,8 @@ import {
   EditorToolbar,
   buildEditorExtensions,
 } from './BoilerplateRichTextEditor';
+import type { ChipInspectorTarget } from './ChipInspector';
+import { resolveChipTarget } from './chipTarget';
 
 export function isEditable(
   doc: NarrativeDocument,
@@ -80,14 +84,24 @@ export const NarrativeDocumentEditor = forwardRef<
   NarrativeEditorHandle,
   {
     documents: NarrativeDocument[];
-    variables: { id: string; label: string }[];
-    blocks: { id: string; label: string }[];
+    variables: BoilerplateVariable[];
+    blocks: BoilerplateVariable[];
     disabled?: boolean;
     onActiveDocChange: (docId: string | null) => void;
     onDirtyChange: (dirty: boolean) => void;
+    /** Clicking a chip opens its inspector; the workbench owns the popover. */
+    onInspectChip?: (target: ChipInspectorTarget) => void;
   }
 >(function NarrativeDocumentEditor(
-  { documents, variables, blocks, disabled, onActiveDocChange, onDirtyChange },
+  {
+    documents,
+    variables,
+    blocks,
+    disabled,
+    onActiveDocChange,
+    onDirtyChange,
+    onInspectChip,
+  },
   ref,
 ) {
   const variableLabels = useMemo(
@@ -176,6 +190,20 @@ export const NarrativeDocumentEditor = forwardRef<
     [changedDocuments, editor, onDirtyChange],
   );
 
+  const handleChipClick = useCallback(
+    (e: ReactMouseEvent<HTMLDivElement>) => {
+      if (!onInspectChip) return;
+      const hit = resolveChipTarget(e.target, variables, blocks);
+      if (!hit) return;
+      onInspectChip({
+        chip: hit.chip,
+        kind: hit.kind,
+        rect: hit.element.getBoundingClientRect(),
+      });
+    },
+    [blocks, onInspectChip, variables],
+  );
+
   if (!editor) return null;
 
   return (
@@ -189,7 +217,10 @@ export const NarrativeDocumentEditor = forwardRef<
         />
       </div>
       <div className="min-h-0 flex-1 overflow-auto bg-[#f5f5f5]">
-        <div className="mx-auto my-6 max-w-[8.5in] rounded bg-white shadow-sm">
+        <div
+          className="mx-auto my-6 max-w-[8.5in] rounded bg-white shadow-sm"
+          onClick={handleChipClick}
+        >
           <EditorContent editor={editor} />
         </div>
       </div>

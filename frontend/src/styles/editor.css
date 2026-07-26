@@ -131,6 +131,45 @@
   margin-left: -1.2em;
 }
 
+/* Chips are clickable: one opens a popover showing what it will actually
+ * print and, where one exists, a link to the setting behind it. Without an
+ * affordance nobody discovers this, since a chip otherwise reads as inert
+ * decoration. */
+.ProseMirror span[data-var],
+.ProseMirror div[data-block],
+.ProseMirror li[data-block] {
+  cursor: pointer;
+}
+
+.ProseMirror span[data-var]:hover {
+  outline: 1px solid #93c5fd;
+  outline-offset: 1px;
+}
+
+.ProseMirror div[data-block]:hover,
+.ProseMirror li[data-block]:hover {
+  border-color: #f59e0b;
+}
+
+/* Momentary highlight on the settings field a chip sent the operator to —
+ * without it, landing mid-form leaves them hunting for what just changed. */
+@keyframes setting-field-flash {
+  0%,
+  70% {
+    background-color: #fef3c7;
+    box-shadow: 0 0 0 4px #fef3c7;
+  }
+  100% {
+    background-color: transparent;
+    box-shadow: 0 0 0 4px transparent;
+  }
+}
+
+.setting-field-flash {
+  animation: setting-field-flash 2s ease-out;
+  border-radius: 4px;
+}
+
 /* One continuous document: each narrative page is a DocSection, separated so
  * the operator can see where one document ends and the next begins. */
 .ProseMirror section[data-doc-id] {

@@ -26,6 +26,7 @@ time, and ``resolve`` raises rather than emit it if it ever reaches this far.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Mapping, Optional
 
@@ -113,6 +114,312 @@ TOC_PAGE_TOKENS: dict[str, str] = {
 TOKEN_CATALOG.update(
     {name: f"Page number — {template}" for name, template in TOC_PAGE_TOKENS.items()}
 )
+
+
+# ── chip provenance ─────────────────────────────────────────────────────────
+#
+# Where each chip's value comes from, so the editor can answer "what will
+# print here, and where do I change it?" without the operator guessing. This
+# is documentation of `build_var_map` below, and the test suite asserts the
+# two stay in step (every catalog chip needs an entry).
+#
+# `field` is only set when a *rendered* input exists to jump to. Several
+# values live on a settings row but have no form control (letter_signed_by_title,
+# replacement_cost_increase_rate, hoa_state); those carry field=None and say so
+# in `note`, because a dead link is worse than no link.
+
+
+@dataclass(frozen=True)
+class ChipSource:
+    """Provenance of one chip, for the editor's chip popover.
+
+    kind:
+        ``settings``  — typed into the HOA's disclosure settings.
+        ``property``  — typed into the HOA record (name, units, city).
+        ``computed``  — falls out of the budget / reserve study. A `field` here
+                        is an *override*, not the source.
+        ``derived``   — mechanical from the package itself (fiscal year, page
+                        numbers). Nothing to edit, ever.
+    """
+
+    kind: str
+    field: Optional[str] = None
+    note: str = ""
+
+    @property
+    def tab(self) -> Optional[str]:
+        """Which settings tab hosts `field` (matches SettingsScreen's values)."""
+        if self.field is None:
+            return None
+        return "database" if self.kind == "property" else "disclosure"
+
+
+_SETTINGS_NOTE = "Typed into this HOA's disclosure settings."
+_COMPUTED_NOTE = "Computed from the budget and reserve study."
+_DERIVED_NOTE = "Derived from the package itself — nothing to edit."
+
+CHIP_SOURCES: dict[str, ChipSource] = {
+    # ── identity: the HOA record ────────────────────────────────────────────
+    "hoa_name": ChipSource("property", "hoaName", "The HOA's name on its record."),
+    "hoa_name_upper": ChipSource(
+        "property", "hoaName", "The HOA's name, upper-cased for title pages."
+    ),
+    "hoa_city": ChipSource("property", "city", "The HOA's city on its record."),
+    "hoa_units": ChipSource("property", "units", "The HOA's unit count."),
+    "hoa_units_word": ChipSource(
+        "property", "units", "Reads “unit” or “units” to match the unit count."
+    ),
+    "hoa_state": ChipSource(
+        "property", None, "Stored on the HOA record; defaults to CA. No field yet."
+    ),
+    "hoa_entity_type": ChipSource(
+        "property",
+        None,
+        "Stored on the HOA record. Defaults to “non-profit mutual benefit "
+        "corporation”. No field yet.",
+    ),
+    "incorporation_clause": ChipSource(
+        "property",
+        None,
+        "Prints “, created in YYYY” from the HOA's incorporation year, and "
+        "disappears entirely when that is blank. No field yet.",
+    ),
+    # ── period: mechanical ──────────────────────────────────────────────────
+    "fiscal_year": ChipSource("derived", None, "The package's budget year."),
+    "prior_year": ChipSource("derived", None, "The budget year minus one."),
+    "final_forecast_year": ChipSource(
+        "derived", None, "The budget year plus 29 — the end of the 30-year study."
+    ),
+    "effective_date": ChipSource(
+        "derived", None, "January 1 of the budget year."
+    ),
+    "today": ChipSource("derived", None, "The date the package is generated."),
+    # ── letter / signature ──────────────────────────────────────────────────
+    "letter_date": ChipSource(
+        "settings",
+        "letter_date",
+        "The cover-letter date. Falls back to today's date when blank.",
+    ),
+    "signed_by": ChipSource("settings", "letter_signed_by", _SETTINGS_NOTE),
+    "signature_title": ChipSource(
+        "settings",
+        None,
+        "Falls back to the management company name — there is no separate "
+        "field for the signature title.",
+    ),
+    # ── management + CPA ────────────────────────────────────────────────────
+    "management_company": ChipSource("settings", "management_company", _SETTINGS_NOTE),
+    "management_company_address": ChipSource(
+        "settings", "management_company_address", _SETTINGS_NOTE
+    ),
+    "cpa_firm_name": ChipSource("settings", "cpa_firm_name", _SETTINGS_NOTE),
+    "cpa_firm_name_upper": ChipSource(
+        "settings", "cpa_firm_name", "The CPA firm name, upper-cased."
+    ),
+    "cpa_firm_name_short": ChipSource(
+        "settings", "cpa_firm_name", "The CPA firm name with “ LLP” removed."
+    ),
+    "cpa_firm_address": ChipSource("settings", "cpa_firm_address", _SETTINGS_NOTE),
+    "accountant_report_date": ChipSource(
+        "settings",
+        "accountant_report_date",
+        "Falls back to today's date when blank.",
+    ),
+    "reserve_funding_plan_date": ChipSource(
+        "settings",
+        "reserve_funding_plan_date",
+        "Falls back to the accountants' report date, then today.",
+    ),
+    "reserve_funding_plan_clause": ChipSource(
+        "settings",
+        "reserve_funding_plan_date",
+        "Prints “, with a funding plan dated <date>”, and disappears entirely "
+        "when the date is blank.",
+    ),
+    # ── reserve study ───────────────────────────────────────────────────────
+    "reserve_study_expert_name": ChipSource(
+        "settings", "reserve_study_expert_name", _SETTINGS_NOTE
+    ),
+    "reserve_study_date": ChipSource(
+        "settings",
+        "reserve_study_date",
+        "Taken from the uploaded reserve study when it carries a date; the "
+        "settings field is the fallback.",
+    ),
+    "reserve_study_date_clause": ChipSource(
+        "settings",
+        "reserve_study_date",
+        "Prints “ dated <date>”, and disappears entirely when no date is known.",
+    ),
+    # ── assessments: computed ───────────────────────────────────────────────
+    "assessment_line": ChipSource(
+        "computed",
+        "approved_monthly_assessment_per_unit",
+        "A whole sentence, written two ways: one amount when every unit pays "
+        "the same, otherwise a pointer to the assessment schedule.",
+    ),
+    "assessment_basis_sentence": ChipSource(
+        "computed",
+        None,
+        "A whole sentence describing how assessments are apportioned, built "
+        "from the assessment setup.",
+    ),
+    "assessment_change_phrase": ChipSource(
+        "computed",
+        None,
+        "Reads “increases to”, “decreases to” or “remains at”, from this year's "
+        "assessment against last year's.",
+    ),
+    "monthly_assessment_per_unit": ChipSource(
+        "computed",
+        "approved_monthly_assessment_per_unit",
+        "Derived from the budget. The settings field overrides it outright.",
+    ),
+    # ── reserve money: computed ─────────────────────────────────────────────
+    "reserve_monthly_contribution": ChipSource(
+        "computed",
+        "reserve_funding_source",
+        "The association's monthly reserve funding. Which figure drives it is "
+        "chosen by the reserve funding source setting.",
+    ),
+    "reserve_monthly_per_unit": ChipSource(
+        "computed",
+        "reserve_funding_source",
+        "The monthly reserve funding divided across units.",
+    ),
+    "reserve_funding_source_label": ChipSource(
+        "computed",
+        "reserve_funding_source",
+        "Names which figure drove the reserve funding number.",
+    ),
+    "cash_reserve_balance": ChipSource(
+        "computed",
+        "reserve_cash_balance_eoy_prior",
+        "From the reserve study; the settings field overrides it.",
+    ),
+    "total_estimated_liability": ChipSource("computed", None, _COMPUTED_NOTE),
+    "under_funded_balance": ChipSource("computed", None, _COMPUTED_NOTE),
+    "under_funded_balance_per_unit": ChipSource("computed", None, _COMPUTED_NOTE),
+    "percent_funded": ChipSource("computed", None, _COMPUTED_NOTE),
+    # ── rates ───────────────────────────────────────────────────────────────
+    "replacement_cost_increase_rate": ChipSource(
+        "settings",
+        None,
+        "An industry-standard default seeded once per HOA. No field — it does "
+        "not change year to year.",
+    ),
+    "interest_rate_after_tax": ChipSource(
+        "settings", "interest_rate_after_tax", _SETTINGS_NOTE
+    ),
+    "income_tax_provision": ChipSource(
+        "computed",
+        "income_tax_provision_override",
+        "Derived from interest revenue. The settings field overrides it.",
+    ),
+}
+
+CHIP_SOURCES.update(
+    {
+        name: ChipSource(
+            "derived",
+            None,
+            "A live page number, filled in from a real render pass — it "
+            "corrects itself as your edits change the pagination.",
+        )
+        for name in TOC_PAGE_TOKENS
+    }
+)
+
+# Block chips are system-generated wording; none of them has a single field.
+BLOCK_SOURCES: dict[str, ChipSource] = {
+    "special_assessment_disclosure": ChipSource(
+        "computed",
+        "special_assessments_json",
+        "Civil Code §5300 wording, chosen from whether special assessments are "
+        "scheduled for this year.",
+    ),
+    "outstanding_loan_note": ChipSource(
+        "computed",
+        "outstanding_loan_json",
+        "Written from the outstanding loan on file, and omitted entirely when "
+        "there is none.",
+    ),
+    "contribution_increase_schedule": ChipSource(
+        "computed",
+        "assessment_increase_schedule_json",
+        "A table built from the scheduled contribution increases.",
+    ),
+    "reserve_only_note": ChipSource(
+        "computed",
+        "financial_packet_archetype",
+        "Appears only for a reserve-only accountant statement.",
+    ),
+    "reserve_only_assumption": ChipSource(
+        "computed",
+        "financial_packet_archetype",
+        "Appears only for a reserve-only accountant statement.",
+    ),
+    "significant_assumptions_variance": ChipSource(
+        "computed",
+        None,
+        "Written from how assessments vary across this HOA's units.",
+    ),
+    "appendix_toc_rows": ChipSource(
+        "computed",
+        None,
+        "One table-of-contents row per uploaded appendix. Manage these on the "
+        "Appendices tab.",
+    ),
+}
+
+
+def chip_source(name: str) -> ChipSource:
+    """Provenance for a value or block chip; unknown names read as computed."""
+    return (
+        CHIP_SOURCES.get(name)
+        or BLOCK_SOURCES.get(name)
+        or ChipSource("computed", None, _COMPUTED_NOTE)
+    )
+
+
+# Chips whose wording is chosen by the assessment matrix, not by `computed`.
+# `_assessments_vary` reads `matrix.recipient_grain`, so without a built matrix
+# these silently take the every-unit-pays-the-same branch — which is the wrong
+# sentence for exactly the HOAs where it matters most.
+MATRIX_DEPENDENT_CHIPS: frozenset[str] = frozenset(
+    {"assessment_line", "assessment_basis_sentence"}
+)
+
+
+def previewable_values(
+    var_map: Mapping[str, str],
+    *,
+    computed_available: bool,
+    matrix_available: bool = False,
+) -> dict[str, str]:
+    """Filter a var map down to the values it is honest to show as a preview.
+
+    ``build_var_map`` formats missing money as ``"0.00"`` and a missing percent
+    as ``"0.0%"`` — correct for rendering (a template must print something) and
+    actively misleading as a preview, because "we could not compute this" and
+    "this really is zero" come out identical.
+
+    So when the compute context could not be built (no active budget, no reserve
+    study), every ``computed`` chip is dropped rather than shown as zero.
+    Settings-, property- and derived-sourced chips need no compute and are
+    always returned.
+
+    ``MATRIX_DEPENDENT_CHIPS`` are dropped unless the caller built a real
+    assessment matrix: their fallback is a plausible-looking *wrong* sentence
+    rather than an obvious blank, so guessing is worse than staying quiet.
+    """
+    return {
+        name: value
+        for name, value in var_map.items()
+        if (computed_available or chip_source(name).kind != "computed")
+        and (matrix_available or name not in MATRIX_DEPENDENT_CHIPS)
+    }
+
 
 # ── block chips ─────────────────────────────────────────────────────────────
 

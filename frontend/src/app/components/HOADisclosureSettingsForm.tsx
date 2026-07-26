@@ -218,7 +218,7 @@ export const HOADisclosureSettingsForm = forwardRef<
     key: 'special_assessments_json' | 'additional_assessments_needed_json',
     includePurpose: boolean,
   ) => (
-    <div className="space-y-2 border border-[#e5e5e5] rounded p-3">
+    <div data-setting-field={key} className="space-y-2 border border-[#e5e5e5] rounded p-3">
       <div className="flex items-center justify-between">
         <div>
           <h4 className="text-sm font-semibold text-[#111]">{title}</h4>
@@ -488,7 +488,10 @@ export const HOADisclosureSettingsForm = forwardRef<
   );
 
   const renderLoanEditor = () => (
-    <div className="space-y-2 border border-[#e5e5e5] rounded p-3">
+    <div
+      data-setting-field="outstanding_loan_json"
+      className="space-y-2 border border-[#e5e5e5] rounded p-3"
+    >
       <div className="flex items-center justify-between">
         <div>
           <h4 className="text-sm font-semibold text-[#111]">Outstanding loan</h4>
@@ -564,7 +567,11 @@ export const HOADisclosureSettingsForm = forwardRef<
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         {scalarFields.map(([key, label, type]) => (
-          <label key={key} className="block text-sm">
+          // `data-setting-field` is how the editor's chip popover finds the
+          // field behind a chip ("Edit in settings →"). Keep it on every
+          // control a CHIP_SOURCES entry can point at — the backend test
+          // `test_settings_field_points_at_a_rendered_input` guards the pairing.
+          <label key={key} data-setting-field={key} className="block text-sm">
             <span className="block text-xs text-[#737373] mb-1">{label}</span>
             {type === 'textarea' ? (
               <textarea
@@ -603,7 +610,7 @@ export const HOADisclosureSettingsForm = forwardRef<
           </label>
         ))}
 
-        <label className="block text-sm">
+        <label data-setting-field="financial_packet_archetype" className="block text-sm">
           <span className="block text-xs text-[#737373] mb-1">
             Financial packet archetype
           </span>
@@ -619,7 +626,7 @@ export const HOADisclosureSettingsForm = forwardRef<
           </select>
         </label>
 
-        <label className="block text-sm">
+        <label data-setting-field="reserve_funding_source" className="block text-sm">
           <span className="block text-xs text-[#737373] mb-1">
             Reserve funding source (which value drives Note 6 monthly funding)
           </span>
@@ -667,7 +674,10 @@ export const HOADisclosureSettingsForm = forwardRef<
         const update_schedule = (next: AssessmentIncreaseBracket[]) =>
           update('assessment_increase_schedule_json', JSON.stringify(next));
         return (
-          <div className="space-y-2 border border-[#e5e5e5] rounded p-3">
+          <div
+            data-setting-field="assessment_increase_schedule_json"
+            className="space-y-2 border border-[#e5e5e5] rounded p-3"
+          >
             <div className="flex items-center justify-between">
               <div>
                 <h4 className="text-sm font-semibold text-[#111]">

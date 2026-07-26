@@ -21,11 +21,13 @@ import { FileText, X } from 'lucide-react';
 import {
   type BoilerplateReferenceJob,
   type BoilerplateVariable,
+  type NarrativeChipValues,
   type NarrativeDocument,
   type NarrativeDocumentsResponse,
   type NarrativeScope,
   boilerplateReferencePdfUrl,
   deleteBoilerplateReferencePdf,
+  getNarrativeChipValues,
   getNarrativeDocuments,
   listBoilerplateReferenceJobs,
   putNarrativeDocuments,
@@ -34,6 +36,7 @@ import {
 } from '../api/hoaSettings';
 import { authHeaders } from '../api/http';
 import { getErrorMessage } from '../lib/errors';
+import { type ChipInspectorTarget, ChipInspector } from './ChipInspector';
 import {
   type NarrativeEditorHandle,
   NarrativeDocumentEditor,
@@ -54,11 +57,14 @@ export function BoilerplateWorkbench({
   open,
   onClose,
   hoaName,
+  onEditSetting,
 }: {
   hoaId: number;
   open: boolean;
   onClose: () => void;
   hoaName?: string;
+  /** Reveal the settings field behind a chip. Called after the editor closes. */
+  onEditSetting?: (tab: 'disclosure' | 'database', field: string) => void;
 }) {
   const [documents, setDocuments] = useState<NarrativeDocument[] | null>(null);
   const [variables, setVariables] = useState<BoilerplateVariable[]>([]);
@@ -67,6 +73,8 @@ export function BoilerplateWorkbench({
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [activeDocId, setActiveDocId] = useState<string | null>(null);
+  const [chipValues, setChipValues] = useState<NarrativeChipValues | null>(null);
+  const [inspecting, setInspecting] = useState<ChipInspectorTarget | null>(null);
   const [showReference, setShowReference] = useState(false);
   const editorRef = useRef<NarrativeEditorHandle>(null);
 
@@ -98,6 +106,35 @@ export function BoilerplateWorkbench({
     if (!open) return;
     void load();
   }, [open, load]);
+
+  // Chip values are fetched separately from the documents so the editor opens
+  // at once — resolving them can mean running the whole compute. Failure is
+  // silent by design: every popover still shows the chip's source and its
+  // "Edit in settings" link, just without a preview of the value.
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    setChipValues(null);
+    void getNarrativeChipValues(hoaId)
+      .then((v) => {
+        if (!cancelled) setChipValues(v);
+      })
+      .catch(() => {
+        // An empty map, not null: the popovers must stop saying "Checking…"
+        // and fall back to explaining each chip's source instead.
+        if (!cancelled) {
+          setChipValues({
+            fiscal_year: 0,
+            computed_available: false,
+            unavailable_reason: null,
+            values: {},
+          });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [hoaId, open]);
 
   useEffect(() => {
     if (!open) return;
@@ -168,11 +205,50 @@ export function BoilerplateWorkbench({
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') requestClose();
+      // The chip popover takes Esc first (it listens in the capture phase);
+      // if one is open, Esc dismisses it rather than the whole editor.
+      if (e.key === 'Escape' && !inspecting) requestClose();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [open, requestClose]);
+  }, [open, requestClose, inspecting]);
+
+  // The popover is anchored to a rect captured at click time, so it would
+  // detach from its chip on scroll. Closing is the honest response.
+  useEffect(() => {
+    if (!inspecting) return;
+    const dismiss = () => setInspecting(null);
+    window.addEventListener('scroll', dismiss, true);
+    window.addEventListener('resize', dismiss);
+    return () => {
+      window.removeEventListener('scroll', dismiss, true);
+      window.removeEventListener('resize', dismiss);
+    };
+  }, [inspecting]);
+
+  /**
+   * Leave the editor for the settings field that drives a chip.
+   *
+   * Routed through the same unsaved-changes guard as closing, because that is
+   * exactly what this does — the editor is a full-screen overlay over the
+   * settings page, and there is no way to show a field without leaving it.
+   */
+  const handleEditSetting = useCallback(
+    (tab: 'disclosure' | 'database', field: string) => {
+      if (
+        dirty &&
+        !window.confirm(
+          'You have unsaved changes. Leave the editor to change this setting?',
+        )
+      ) {
+        return;
+      }
+      setInspecting(null);
+      onClose();
+      onEditSetting?.(tab, field);
+    },
+    [dirty, onClose, onEditSetting],
+  );
 
   const handleSave = async () => {
     const changed = editorRef.current?.changedDocuments() ?? {};
@@ -371,6 +447,7 @@ export function BoilerplateWorkbench({
               disabled={saving}
               onActiveDocChange={setActiveDocId}
               onDirtyChange={setDirty}
+              onInspectChip={setInspecting}
             />
           )}
         </div>
@@ -453,6 +530,17 @@ export function BoilerplateWorkbench({
           </div>
         )}
       </div>
+
+      {inspecting && (
+        <ChipInspector
+          target={inspecting}
+          value={chipValues?.values[inspecting.chip.id]}
+          valuesLoaded={chipValues !== null}
+          unavailableReason={chipValues?.unavailable_reason ?? null}
+          onEdit={handleEditSetting}
+          onClose={() => setInspecting(null)}
+        />
+      )}
     </div>
   );
 }

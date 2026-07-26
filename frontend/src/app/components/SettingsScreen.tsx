@@ -231,6 +231,38 @@ export function SettingsScreen() {
     });
   };
 
+  /**
+   * Reveal the settings field behind a chip the operator clicked in the
+   * disclosure editor.
+   *
+   * Switching tabs unmounts and remounts the panel, so the field does not
+   * exist yet when this runs — hence the retry loop rather than a single
+   * `scrollIntoView`. It gives up quietly after ~1s: a field that never
+   * appears is a mismatch between `CHIP_SOURCES` and the form, which the
+   * backend's `test_settings_field_points_at_a_rendered_input` is there to
+   * catch before it ships.
+   */
+  const revealSettingField = (tab: 'disclosure' | 'database', field: string) => {
+    handleSectionChange(tab);
+
+    let attempts = 0;
+    const find = () => {
+      const el = document.querySelector<HTMLElement>(
+        `[data-setting-field="${CSS.escape(field)}"]`,
+      );
+      if (!el) {
+        attempts += 1;
+        if (attempts < 20) window.setTimeout(find, 50);
+        return;
+      }
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      el.classList.add('setting-field-flash');
+      window.setTimeout(() => el.classList.remove('setting-field-flash'), 2000);
+      el.querySelector<HTMLElement>('input, textarea, select')?.focus();
+    };
+    window.setTimeout(find, 50);
+  };
+
   const handleFieldChange = (field: keyof SettingsFormState, value: string) => {
     setHoaConfig((current) => ({ ...current, [field]: value }));
     if (field in validationErrors) {
@@ -399,7 +431,7 @@ export function SettingsScreen() {
 
             <div className="bg-[#F7F7F7] border border-[#E5E5E5] rounded-lg p-8 space-y-6">
               <div className="grid gap-6 md:grid-cols-2">
-                <div className="space-y-2">
+                <div data-setting-field="hoaName" className="space-y-2">
                   <Label htmlFor="hoaName">HOA Name</Label>
                   <Input
                     id="hoaName"
@@ -456,7 +488,7 @@ export function SettingsScreen() {
                     className="bg-white border-[#E5E5E5]"
                   />
                 </div>
-                <div className="space-y-2">
+                <div data-setting-field="units" className="space-y-2">
                   <Label htmlFor="units">Number of Units</Label>
                   <Input
                     id="units"
@@ -472,7 +504,7 @@ export function SettingsScreen() {
               </div>
 
               <div className="grid gap-6 md:grid-cols-2">
-                <div className="space-y-2">
+                <div data-setting-field="city" className="space-y-2">
                   <Label htmlFor="city">City</Label>
                   <Input
                     id="city"
@@ -584,6 +616,7 @@ export function SettingsScreen() {
         hoaName={hoa.name}
         open={packageLanguageOpen}
         onClose={() => setPackageLanguageOpen(false)}
+        onEditSetting={revealSettingField}
       />
     </div>
   );

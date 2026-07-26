@@ -201,16 +201,29 @@ def _require_hoa(session: Session, hoa_id: int) -> None:
 # deletes one layer's row.
 
 
+def _chip_entry(chip_id: str, label: str) -> Dict[str, Any]:
+    """Catalog entry plus provenance, for the picker and the chip popover."""
+    source = boilerplate_variables.chip_source(chip_id)
+    return {
+        "id": chip_id,
+        "label": label,
+        "source": source.kind,
+        "source_note": source.note,
+        "settings_field": source.field,
+        "settings_tab": source.tab,
+    }
+
+
 def _document_payload(session: Session, hoa_id: int) -> Dict[str, Any]:
     return {
         "property_id": hoa_id,
         "documents": narrative_content.documents_for_api(session, hoa_id),
         "variables": [
-            {"id": token_id, "label": label}
+            _chip_entry(token_id, label)
             for token_id, label in boilerplate_variables.TOKEN_CATALOG.items()
         ],
         "blocks": [
-            {"id": block_id, "label": label}
+            _chip_entry(block_id, label)
             for block_id, label in boilerplate_variables.BLOCK_CATALOG.items()
         ],
     }
@@ -241,6 +254,29 @@ async def list_narrative_documents(
     """
     _require_hoa(session, hoa_id)
     return _document_payload(session, hoa_id)
+
+
+@router.get("/{hoa_id}/documents/chip-values")
+async def get_narrative_chip_values(
+    hoa_id: int,
+    fiscal_year: Optional[int] = Query(
+        None, description="Defaults to the HOA's newest annual package year"
+    ),
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user),  # noqa: ARG001
+):
+    """What each chip will actually print for this HOA.
+
+    Feeds the editor's chip popover, so it is deliberately best-effort and
+    never mirrors generation's failures: an HOA with no active budget still
+    gets its name, dates and CPA details back, just without the computed
+    figures (see ``chip_preview_values``). Fetched separately from
+    ``GET /documents`` so the editor opens at once and the values fill in.
+    """
+    _require_hoa(session, hoa_id)
+    from ..disclosure_package import service as disclosure_service
+
+    return disclosure_service.chip_preview_values(session, hoa_id, fiscal_year)
 
 
 @router.put("/{hoa_id}/documents")
