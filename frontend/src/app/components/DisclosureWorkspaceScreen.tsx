@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router';
 import {
   ArrowLeft,
   CheckCircle2,
@@ -24,7 +24,12 @@ import {
   assessmentModeShortLabel,
   type AssessmentMode,
 } from '../lib/assessmentMode';
-import { buildSettingsEditHref } from '../lib/settingsNavigation';
+import {
+  buildSettingsEditHref,
+  stripOpenPackageLanguageParam,
+  wantsOpenPackageLanguage,
+  withOpenPackageLanguagePath,
+} from '../lib/settingsNavigation';
 
 type ReadinessRow = {
   label: string;
@@ -107,10 +112,22 @@ function buildReadinessRows(hoaId: string, assessmentMode: AssessmentMode): Read
 export function DisclosureWorkspaceScreen() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [hoa, setHoa] = useState<HOARecord | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [packageLanguageOpen, setPackageLanguageOpen] = useState(false);
+
+  // Settings Back used returnTo=…?openPackageLanguage=1 — reopen the workbench.
+  useEffect(() => {
+    if (!hoa) return;
+    if (!wantsOpenPackageLanguage(searchParams)) return;
+    setPackageLanguageOpen(true);
+    setSearchParams(
+      (current) => stripOpenPackageLanguageParam(current),
+      { replace: true },
+    );
+  }, [hoa, searchParams, setSearchParams]);
 
   useEffect(() => {
     let cancelled = false;
@@ -302,15 +319,17 @@ export function DisclosureWorkspaceScreen() {
         hoaName={hoa.name}
         open={packageLanguageOpen}
         onClose={() => setPackageLanguageOpen(false)}
-        // Cross-route: navigate to Settings with field + returnTo (helpers keep
-        // section/returnTo encoding consistent with the same-screen path).
+        // Cross-route: navigate to Settings with field + returnTo that reopens
+        // this package-language workbench when the operator hits Back.
         onEditSetting={(tab, field) =>
           navigate(
             buildSettingsEditHref({
               hoaId: hoa.id,
               tab,
               field,
-              returnTo: `/hoa/${hoa.id}/disclosure`,
+              returnTo: withOpenPackageLanguagePath(
+                `/hoa/${hoa.id}/disclosure`,
+              ),
             }),
           )
         }

@@ -32,6 +32,11 @@ const {
   waitForSettingField,
   findSettingFieldEl,
   PROPERTY_SETTING_FIELD_ANCHORS,
+  withOpenPackageLanguagePath,
+  pathWantsOpenPackageLanguage,
+  wantsOpenPackageLanguage,
+  stripOpenPackageLanguageParam,
+  OPEN_PACKAGE_LANGUAGE_PARAM,
 } = await import('../src/app/lib/settingsNavigation.ts');
 
 test('resolveSettingsSection: known and unknown', () => {
@@ -121,6 +126,44 @@ test('round-trip: build href returnTo is accepted by safeReturnTo', () => {
   });
   const url = new URL(href, 'http://local.test');
   assert.equal(safeReturnTo(url.searchParams.get('returnTo'), 7), '/hoa/7/disclosure');
+});
+
+test('withOpenPackageLanguagePath appends reopen flag', () => {
+  const path = withOpenPackageLanguagePath('/hoa/3/disclosure');
+  assert.equal(path, `/hoa/3/disclosure?${OPEN_PACKAGE_LANGUAGE_PARAM}=1`);
+  assert.equal(pathWantsOpenPackageLanguage(path), true);
+  // idempotent
+  assert.equal(withOpenPackageLanguagePath(path), path);
+  // preserves existing query
+  const withView = withOpenPackageLanguagePath('/hoa/3/disclosure?view=x');
+  const u = new URL(withView, 'http://local.test');
+  assert.equal(u.searchParams.get('view'), 'x');
+  assert.equal(u.searchParams.get(OPEN_PACKAGE_LANGUAGE_PARAM), '1');
+});
+
+test('buildSettingsEditHref: package-language returnTo survives allowlist', () => {
+  const returnTo = withOpenPackageLanguagePath('/hoa/3/disclosure');
+  const href = buildSettingsEditHref({
+    hoaId: 3,
+    tab: 'database',
+    field: 'city',
+    returnTo,
+  });
+  const url = new URL(href, 'http://local.test');
+  const rt = url.searchParams.get('returnTo');
+  assert.equal(safeReturnTo(rt, 3), returnTo);
+  assert.equal(pathWantsOpenPackageLanguage(rt), true);
+});
+
+test('stripOpenPackageLanguageParam / wantsOpenPackageLanguage', () => {
+  const params = new URLSearchParams({
+    [OPEN_PACKAGE_LANGUAGE_PARAM]: '1',
+    other: 'x',
+  });
+  assert.equal(wantsOpenPackageLanguage(params), true);
+  const stripped = stripOpenPackageLanguageParam(params);
+  assert.equal(wantsOpenPackageLanguage(stripped), false);
+  assert.equal(stripped.get('other'), 'x');
 });
 
 test('waitForSettingField: immediate hit', async () => {

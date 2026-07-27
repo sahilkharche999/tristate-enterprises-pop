@@ -41,6 +41,12 @@ export function resolveSettingsSection(raw: string | null | undefined): Settings
 }
 
 /**
+ * Query flag: after leaving package wording via “Edit in settings”, Back
+ * (or the returnTo destination) should reopen the package-language workbench.
+ */
+export const OPEN_PACKAGE_LANGUAGE_PARAM = 'openPackageLanguage';
+
+/**
  * Restrict returnTo to same-HOA relative paths. Rejects absolute/protocol-relative
  * URLs and other HOAs.
  */
@@ -59,6 +65,54 @@ export function safeReturnTo(
   const prefix = `/hoa/${hoaId}`;
   if (pathOnly !== prefix && !pathOnly.startsWith(`${prefix}/`)) return null;
   return value;
+}
+
+/**
+ * Append ``openPackageLanguage=1`` so the destination can reopen the workbench.
+ * Idempotent if the flag is already present.
+ */
+export function withOpenPackageLanguagePath(path: string): string {
+  const trimmed = String(path || '').trim();
+  if (!trimmed) return trimmed;
+  const hashIdx = trimmed.indexOf('#');
+  const withoutHash = hashIdx >= 0 ? trimmed.slice(0, hashIdx) : trimmed;
+  const hash = hashIdx >= 0 ? trimmed.slice(hashIdx) : '';
+  const qIdx = withoutHash.indexOf('?');
+  const base = qIdx >= 0 ? withoutHash.slice(0, qIdx) : withoutHash;
+  const qs = qIdx >= 0 ? withoutHash.slice(qIdx + 1) : '';
+  const params = new URLSearchParams(qs);
+  params.set(OPEN_PACKAGE_LANGUAGE_PARAM, '1');
+  const q = params.toString();
+  return `${base}?${q}${hash}`;
+}
+
+export function wantsOpenPackageLanguage(
+  params: Pick<URLSearchParams, 'get'> | null | undefined,
+): boolean {
+  if (!params) return false;
+  const v = params.get(OPEN_PACKAGE_LANGUAGE_PARAM);
+  return v === '1' || v === 'true';
+}
+
+/** True when a returnTo (or any path) asks to reopen package wording. */
+export function pathWantsOpenPackageLanguage(
+  raw: string | null | undefined,
+): boolean {
+  if (raw == null || !String(raw).trim()) return false;
+  try {
+    const url = new URL(String(raw).trim(), 'http://local.test');
+    return wantsOpenPackageLanguage(url.searchParams);
+  } catch {
+    return false;
+  }
+}
+
+export function stripOpenPackageLanguageParam(
+  params: URLSearchParams,
+): URLSearchParams {
+  const next = new URLSearchParams(params);
+  next.delete(OPEN_PACKAGE_LANGUAGE_PARAM);
+  return next;
 }
 
 export function resolveSettingsBackHref(

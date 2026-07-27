@@ -25,6 +25,7 @@ import { getErrorMessage } from '../lib/errors';
 import { MONTH_NAMES, monthNameToNumber, monthNumberToName } from '../lib/hoa';
 import {
   clearFieldParam,
+  pathWantsOpenPackageLanguage,
   resolveSettingsBackHref,
   resolveSettingsSection,
   revealSettingElement,
@@ -185,6 +186,9 @@ export function SettingsScreen() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [packageLanguageOpen, setPackageLanguageOpen] = useState(false);
+  // Set when the operator leaves package wording via “Edit in settings” on this
+  // screen so the header Back reopens the workbench instead of leaving Settings.
+  const [resumePackageLanguage, setResumePackageLanguage] = useState(false);
   const [disclosureReady, setDisclosureReady] = useState(false);
   const [disclosureDirty, setDisclosureDirty] = useState(false);
   const [databaseBaseline, setDatabaseBaseline] = useState<string | null>(null);
@@ -192,6 +196,8 @@ export function SettingsScreen() {
   const flashCleanupRef = useRef<(() => void) | null>(null);
   const returnTo = searchParams.get('returnTo');
   const backHref = resolveSettingsBackHref(returnTo, id ?? '');
+  // Cross-route: disclosure (or other host) asked Back to reopen package wording.
+  const returnToOpensPackageLanguage = pathWantsOpenPackageLanguage(returnTo);
   const selectedSection = resolveSettingsSection(searchParams.get('section'));
   const databaseDirty =
     databaseBaseline != null && databaseFormFingerprint(hoaConfig) !== databaseBaseline;
@@ -261,6 +267,15 @@ export function SettingsScreen() {
   };
 
   const handleBackClick = (event: MouseEvent<HTMLAnchorElement>) => {
+    // Same-screen path: package wording → Edit in settings → Back should
+    // reopen the workbench, not leave Settings for the prior page.
+    if (resumePackageLanguage) {
+      event.preventDefault();
+      setResumePackageLanguage(false);
+      setPackageLanguageOpen(true);
+      return;
+    }
+
     const dirty =
       (selectedSection === 'disclosure' && disclosureDirty) ||
       (selectedSection === 'database' && databaseDirty);
@@ -282,6 +297,15 @@ export function SettingsScreen() {
       (current) => withRevealField(current, tab, field),
       { replace: true },
     );
+  };
+
+  /** From package wording on this screen: reveal field and mark Back → workbench. */
+  const revealSettingFieldFromPackageLanguage = (
+    tab: SettingsEditTab,
+    field: string,
+  ) => {
+    setResumePackageLanguage(true);
+    revealSettingField(tab, field);
   };
 
   // Scroll to and flash the requested field once the hosting form is ready,
@@ -410,6 +434,16 @@ export function SettingsScreen() {
               to={backHref}
               onClick={handleBackClick}
               className="p-2 hover:bg-[#f5f5f5] rounded-lg transition-colors"
+              aria-label={
+                resumePackageLanguage || returnToOpensPackageLanguage
+                  ? 'Back to package wording'
+                  : 'Back'
+              }
+              title={
+                resumePackageLanguage || returnToOpensPackageLanguage
+                  ? 'Back to package wording'
+                  : undefined
+              }
             >
               <ArrowLeft className="w-5 h-5 text-[#525252]" />
             </Link>
@@ -685,8 +719,12 @@ export function SettingsScreen() {
         hoaId={hoa.id}
         hoaName={hoa.name}
         open={packageLanguageOpen}
-        onClose={() => setPackageLanguageOpen(false)}
-        onEditSetting={revealSettingField}
+        onClose={() => {
+          setPackageLanguageOpen(false);
+          // Closing the workbench explicitly ends the “return here on Back” loop.
+          setResumePackageLanguage(false);
+        }}
+        onEditSetting={revealSettingFieldFromPackageLanguage}
       />
     </div>
   );
