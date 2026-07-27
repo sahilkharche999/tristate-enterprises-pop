@@ -34,6 +34,7 @@ def test_update_hoa(client):
         "tax_id": "11-1111111",
         "units": 52,
         "fiscal_year_start_month": 2,
+        "portfolio_year": 2026,
     }
 
     update_response = client.put("/hoa/9", json=update_payload)
@@ -51,6 +52,35 @@ def test_update_hoa(client):
     assert payload["fiscal_year_start_month"] == 2
     # Auto-derived: start=2 (Feb) → end=1 (Jan)
     assert payload["fiscal_year_end_month"] == 1
+    assert payload["portfolio_year"] == 2026
+
+
+def test_update_hoa_portfolio_year_round_trip(client):
+    """Settings package year maps to properties.portfolio_year."""
+    before = client.get("/hoa/1").json()
+    assert "portfolio_year" in before
+
+    update_response = client.put(
+        "/hoa/1",
+        json={
+            "name": before["name"],
+            "fiscal_year_start_month": before["fiscal_year_start_month"],
+            "portfolio_year": 2027,
+        },
+    )
+    assert update_response.status_code == 200
+    assert update_response.json()["portfolio_year"] == 2027
+
+    # Omitting portfolio_year must not wipe the stored value.
+    keep = client.put(
+        "/hoa/1",
+        json={
+            "name": before["name"],
+            "fiscal_year_start_month": before["fiscal_year_start_month"],
+        },
+    )
+    assert keep.status_code == 200
+    assert keep.json()["portfolio_year"] == 2027
 
 
 def test_create_hoa(client):
@@ -58,6 +88,7 @@ def test_create_hoa(client):
         "name": "New Harbor HOA",
         "units": 88,
         "fiscal_year_start_month": 5,
+        "portfolio_year": 2026,
     }
 
     create_response = client.post("/hoa", json=create_payload)
@@ -74,13 +105,14 @@ def test_create_hoa(client):
     assert payload["reserve_inflation_rate"] == 0.0
     assert payload["city"] == ""
     assert payload["workflow_status"] == "Not Started"
+    assert payload["portfolio_year"] == 2026
 
     list_response = client.get("/hoa")
     assert list_response.status_code == 200
     hoas = list_response.json()
     created = next((hoa for hoa in hoas if hoa["name"] == "New Harbor HOA"), None)
     assert created is not None
-    assert created["portfolio_year"] is not None
+    assert created["portfolio_year"] == 2026
 
 
 def test_create_hoa_duplicate_name_returns_conflict(client):

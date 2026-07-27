@@ -68,6 +68,11 @@ def create_hoa(session: Session, payload: HOACreateRequest) -> HOADetail:
     if existing is not None:
         raise ValueError("duplicate_hoa_name")
 
+    package_year = (
+        int(payload.portfolio_year)
+        if payload.portfolio_year is not None
+        else datetime.now().year
+    )
     row = Property(
         name=normalized_name,
         units=payload.units if payload.units is not None else 0,
@@ -75,7 +80,7 @@ def create_hoa(session: Session, payload: HOACreateRequest) -> HOADetail:
         fiscal_year_start_month=payload.fiscal_year_start_month,
         fiscal_year_end_month=_derive_fiscal_year_end(payload.fiscal_year_start_month),
         city=(payload.city or "").strip(),
-        portfolio_year=datetime.now().year,
+        portfolio_year=package_year,
         workflow_status="Not Started",
         assessment_mode=normalize_assessment_mode(payload.assessment_mode),
     )
@@ -106,6 +111,8 @@ def update_hoa(session: Session, hoa_id: int, payload: HOAUpdateRequest) -> Opti
         row.reserve_inflation_rate = payload.reserve_inflation_rate
     if payload.assessment_mode is not None:
         row.assessment_mode = normalize_assessment_mode(payload.assessment_mode)
+    if payload.portfolio_year is not None:
+        row.portfolio_year = int(payload.portfolio_year)
     session.commit()
     session.refresh(row)
     # Prefer the HOA-saved rate when non-zero so the per-HOA value

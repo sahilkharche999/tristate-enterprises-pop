@@ -26,6 +26,8 @@ export interface HOAUpdatePayload {
   fiscal_year_start_month: number;
   city?: string;
   assessment_mode?: AssessmentMode;
+  /** Package / disclosure year (PDF title year), maps to properties.portfolio_year. */
+  portfolio_year?: number;
 }
 
 export interface HOACreatePayload {
@@ -36,6 +38,8 @@ export interface HOACreatePayload {
   fiscal_year_start_month: number;
   city?: string;
   assessment_mode?: AssessmentMode;
+  /** Package / disclosure year; defaults to current calendar year on the server. */
+  portfolio_year?: number;
 }
 
 export async function listHOAs(): Promise<HOARecord[]> {

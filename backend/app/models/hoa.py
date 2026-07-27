@@ -39,6 +39,9 @@ class HOACreateRequest(BaseModel):
     fiscal_year_end_month: Optional[int] = Field(default=None, ge=1, le=12)
     city: Optional[str] = Field(default=None, max_length=255)
     assessment_mode: AssessmentMode = ASSESSMENT_MODE_VARIABLE
+    # Package / disclosure year (e.g. 2026). When omitted, create uses the
+    # current calendar year. Distinct from fiscal_year_start_month (calendar).
+    portfolio_year: Optional[int] = Field(default=None, ge=1990, le=2100)
 
 
 class HOAUpdateRequest(BaseModel):
@@ -51,3 +54,5 @@ class HOAUpdateRequest(BaseModel):
     city: Optional[str] = Field(default=None, max_length=255)
     reserve_inflation_rate: Optional[float] = Field(default=None, ge=0, le=1)
     assessment_mode: Optional[AssessmentMode] = None
+    # Package / disclosure year shown on PDFs and used as generate default.
+    portfolio_year: Optional[int] = Field(default=None, ge=1990, le=2100)

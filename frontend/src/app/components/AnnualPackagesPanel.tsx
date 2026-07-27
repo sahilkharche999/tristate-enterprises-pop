@@ -18,7 +18,9 @@ import {
 
 type Props = {
   hoaId: number;
-  liveAssessmentMode: AssessmentMode;
+  liveAssessmentMode?: AssessmentMode;
+  /** Prefill create-year from HOA package year (portfolio_year). */
+  defaultPackageYear?: number;
 };
 
 const STATUS_COLORS: Record<AnnualPackage['status'], string> = {
@@ -29,13 +31,27 @@ const STATUS_COLORS: Record<AnnualPackage['status'], string> = {
   finalized: 'bg-green-100 text-green-800',
 };
 
-export function AnnualPackagesPanel({ hoaId, liveAssessmentMode }: Props) {
+export function AnnualPackagesPanel({
+  hoaId,
+  liveAssessmentMode,
+  defaultPackageYear,
+}: Props) {
   const [packages, setPackages] = useState<AnnualPackage[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [newYear, setNewYear] = useState<string>(
-    String(new Date().getFullYear() + 1),
+  const [newYear, setNewYear] = useState<string>(() =>
+    String(
+      defaultPackageYear && defaultPackageYear > 0
+        ? defaultPackageYear
+        : new Date().getFullYear(),
+    ),
   );
+
+  useEffect(() => {
+    if (defaultPackageYear && defaultPackageYear > 0) {
+      setNewYear(String(defaultPackageYear));
+    }
+  }, [defaultPackageYear]);
 
   const refresh = useCallback(async () => {
     try {

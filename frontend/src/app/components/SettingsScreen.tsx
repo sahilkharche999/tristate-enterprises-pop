@@ -46,6 +46,8 @@ interface SettingsFormState {
   name: string;
   hoaId: string;
   fiscalYearStart: string;
+  /** Package / disclosure year (e.g. 2026) → properties.portfolio_year. */
+  packageYear: string;
   taxId: string;
   units: string;
   city: string;
@@ -53,7 +55,7 @@ interface SettingsFormState {
   driveFolderPath: string;
 }
 
-type ValidationField = 'name' | 'units' | 'fiscalYearStart';
+type ValidationField = 'name' | 'units' | 'fiscalYearStart' | 'packageYear';
 type ValidationErrors = Partial<Record<ValidationField, string>>;
 
 function databaseFormFingerprint(form: SettingsFormState): string {
@@ -61,6 +63,7 @@ function databaseFormFingerprint(form: SettingsFormState): string {
     name: form.name,
     hoaId: form.hoaId,
     fiscalYearStart: form.fiscalYearStart,
+    packageYear: form.packageYear,
     taxId: form.taxId,
     units: form.units,
     city: form.city,
@@ -82,7 +85,7 @@ const SETTINGS_NAV_GROUPS: Array<{
       {
         value: 'database',
         label: 'HOA Database',
-        helper: 'Identity, fiscal year, units',
+        helper: 'Identity, package year, units',
         icon: Database,
       },
       {
@@ -138,6 +141,7 @@ const DEFAULT_FORM: SettingsFormState = {
   name: '',
   hoaId: '',
   fiscalYearStart: 'January',
+  packageYear: String(new Date().getFullYear()),
   taxId: '',
   units: '',
   city: '',
@@ -156,6 +160,9 @@ function buildFormState(
     name: hoa.name,
     hoaId: hoa.hoa_code,
     fiscalYearStart: monthNumberToName(hoa.fiscal_year_start_month),
+    packageYear: String(
+      hoa.portfolio_year ?? new Date().getFullYear(),
+    ),
     taxId: hoa.tax_id,
     units: String(hoa.units),
     city: hoa.city || '',
@@ -173,6 +180,16 @@ function validateForm(form: SettingsFormState): ValidationErrors {
   }
 
   if (!form.fiscalYearStart) errors.fiscalYearStart = 'Fiscal year start month is required.';
+
+  const packageYear = Number(form.packageYear);
+  if (
+    !form.packageYear.trim() ||
+    !Number.isInteger(packageYear) ||
+    packageYear < 1990 ||
+    packageYear > 2100
+  ) {
+    errors.packageYear = 'Package year must be a whole year between 1990 and 2100.';
+  }
   return errors;
 }
 
@@ -390,6 +407,7 @@ export function SettingsScreen() {
       const payload = {
         name: hoaConfig.name.trim(),
         fiscal_year_start_month: monthNameToNumber(hoaConfig.fiscalYearStart),
+        portfolio_year: Number(hoaConfig.packageYear),
         ...(hoaConfig.hoaId.trim() ? { hoa_code: hoaConfig.hoaId.trim() } : {}),
         ...(hoaConfig.taxId.trim() ? { tax_id: hoaConfig.taxId.trim() } : {}),
         ...(hoaConfig.units.trim() ? { units: Number(hoaConfig.units) } : {}),
@@ -571,8 +589,31 @@ export function SettingsScreen() {
                       ))}
                     </SelectContent>
                   </Select>
+                  <p className="text-xs text-[#737373]">
+                    Month the association&apos;s fiscal year begins (calendar cycle).
+                  </p>
                   {validationErrors.fiscalYearStart && (
                     <p className="text-xs text-[#b91c1c]">{validationErrors.fiscalYearStart}</p>
+                  )}
+                </div>
+                <div data-setting-field="packageYear" className="space-y-2">
+                  <Label htmlFor="packageYear">Package year</Label>
+                  <Input
+                    id="packageYear"
+                    type="number"
+                    min={1990}
+                    max={2100}
+                    step={1}
+                    value={hoaConfig.packageYear}
+                    onChange={(e) => handleFieldChange('packageYear', e.target.value)}
+                    className="bg-white border-[#E5E5E5]"
+                  />
+                  <p className="text-xs text-[#737373]">
+                    Year on disclosure PDFs, generate, budget export, and assessment
+                    mapping defaults (e.g. 2026).
+                  </p>
+                  {validationErrors.packageYear && (
+                    <p className="text-xs text-[#b91c1c]">{validationErrors.packageYear}</p>
                   )}
                 </div>
               </div>
@@ -668,6 +709,10 @@ export function SettingsScreen() {
             <div className="bg-[#F7F7F7] border border-[#E5E5E5] rounded-lg p-8">
               <HOADisclosureSettingsForm
                 hoaId={hoa.id}
+                packageYear={
+                  hoa.portfolio_year ??
+                  (Number(hoaConfig.packageYear) || undefined)
+                }
                 ref={disclosureFormRef}
                 onReadyChange={setDisclosureReady}
                 onDirtyChange={setDisclosureDirty}
@@ -701,7 +746,14 @@ export function SettingsScreen() {
 
           <TabsContent value="packages" className="space-y-6">
             <div className="bg-[#F7F7F7] border border-[#E5E5E5] rounded-lg">
-              <AnnualPackagesPanel hoaId={hoa.id} />
+              <AnnualPackagesPanel
+                hoaId={hoa.id}
+                liveAssessmentMode={hoa.assessment_mode}
+                defaultPackageYear={
+                  hoa.portfolio_year ??
+                  (Number(hoaConfig.packageYear) || undefined)
+                }
+              />
             </div>
           </TabsContent>
 
@@ -718,6 +770,9 @@ export function SettingsScreen() {
       <BoilerplateWorkbench
         hoaId={hoa.id}
         hoaName={hoa.name}
+        packageYear={
+          hoa.portfolio_year ?? (Number(hoaConfig.packageYear) || undefined)
+        }
         open={packageLanguageOpen}
         onClose={() => {
           setPackageLanguageOpen(false);

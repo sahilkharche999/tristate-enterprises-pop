@@ -57,12 +57,15 @@ export function BoilerplateWorkbench({
   open,
   onClose,
   hoaName,
+  packageYear,
   onEditSetting,
 }: {
   hoaId: number;
   open: boolean;
   onClose: () => void;
   hoaName?: string;
+  /** Package year for chip value preview (matches disclosure generate). */
+  packageYear?: number | null;
   /** Reveal the settings field behind a chip. Called after the editor closes. Required so hosts cannot silently no-op. */
   onEditSetting: (tab: 'disclosure' | 'database', field: string) => void;
 }) {
@@ -115,7 +118,7 @@ export function BoilerplateWorkbench({
     if (!open) return;
     let cancelled = false;
     setChipValues(null);
-    void getNarrativeChipValues(hoaId)
+    void getNarrativeChipValues(hoaId, packageYear)
       .then((v) => {
         if (!cancelled) setChipValues(v);
       })
@@ -124,7 +127,7 @@ export function BoilerplateWorkbench({
         // and fall back to explaining each chip's source instead.
         if (!cancelled) {
           setChipValues({
-            fiscal_year: 0,
+            fiscal_year: packageYear && packageYear > 0 ? packageYear : 0,
             computed_available: false,
             unavailable_reason: null,
             values: {},
@@ -134,7 +137,7 @@ export function BoilerplateWorkbench({
     return () => {
       cancelled = true;
     };
-  }, [hoaId, open]);
+  }, [hoaId, open, packageYear]);
 
   useEffect(() => {
     if (!open) return;

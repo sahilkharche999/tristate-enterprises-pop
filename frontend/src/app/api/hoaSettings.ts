@@ -301,10 +301,17 @@ export interface NarrativeChipValues {
 
 export async function getNarrativeChipValues(
   hoaId: number,
+  fiscalYear?: number | null,
 ): Promise<NarrativeChipValues> {
-  const r = await fetch(`${BASE_URL}/hoa/${hoaId}/documents/chip-values`, {
-    headers: authHeaders(),
-  });
+  const params = new URLSearchParams();
+  if (fiscalYear != null && Number.isFinite(fiscalYear) && fiscalYear > 0) {
+    params.set('fiscal_year', String(fiscalYear));
+  }
+  const qs = params.toString();
+  const r = await fetch(
+    `${BASE_URL}/hoa/${hoaId}/documents/chip-values${qs ? `?${qs}` : ''}`,
+    { headers: authHeaders() },
+  );
   return handleResponse<NarrativeChipValues>(r);
 }
 

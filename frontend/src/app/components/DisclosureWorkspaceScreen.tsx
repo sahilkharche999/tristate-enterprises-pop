@@ -310,13 +310,18 @@ export function DisclosureWorkspaceScreen() {
               Create, approve, and finalize package records that support the generated disclosure PDF.
             </p>
           </div>
-          <AnnualPackagesPanel hoaId={hoa.id} liveAssessmentMode={hoa.assessment_mode} />
+          <AnnualPackagesPanel
+            hoaId={hoa.id}
+            liveAssessmentMode={hoa.assessment_mode}
+            defaultPackageYear={fiscalYear}
+          />
         </section>
       </main>
 
       <BoilerplateWorkbench
         hoaId={hoa.id}
         hoaName={hoa.name}
+        packageYear={fiscalYear}
         open={packageLanguageOpen}
         onClose={() => setPackageLanguageOpen(false)}
         // Cross-route: navigate to Settings with field + returnTo that reopens

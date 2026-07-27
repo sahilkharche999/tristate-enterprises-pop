@@ -27,12 +27,14 @@ import { MONTH_NAMES, monthNameToNumber, toHOAViewModel, type HOAViewModel } fro
 interface CreateHoaFormState {
   name: string;
   fiscalYearStart: string;
+  packageYear: string;
   city: string;
 }
 
 const DEFAULT_CREATE_FORM: CreateHoaFormState = {
   name: '',
   fiscalYearStart: MONTH_NAMES[0],
+  packageYear: String(new Date().getFullYear()),
   city: '',
 };
 
@@ -189,10 +191,21 @@ export function HOAWorkspace() {
     setIsCreating(true);
     setCreateError(null);
     try {
+      const packageYear = Number(createForm.packageYear);
+      if (
+        !Number.isInteger(packageYear) ||
+        packageYear < 1990 ||
+        packageYear > 2100
+      ) {
+        setCreateError('Package year must be a whole year between 1990 and 2100.');
+        setIsCreating(false);
+        return;
+      }
       const created = await createHOA({
         name: trimmedName,
         fiscal_year_start_month: monthNameToNumber(createForm.fiscalYearStart),
         city: createForm.city.trim() || undefined,
+        portfolio_year: packageYear,
       });
       setHoas((current) => [toHOAViewModel(created), ...current]);
       setIsCreateOpen(false);
@@ -569,6 +582,26 @@ export function HOAWorkspace() {
                       ))}
                     </SelectContent>
                   </Select>
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="createHoaPackageYear">Package year</Label>
+                  <Input
+                    id="createHoaPackageYear"
+                    type="number"
+                    min={1990}
+                    max={2100}
+                    step={1}
+                    value={createForm.packageYear}
+                    onChange={(e) =>
+                      handleCreateFieldChange('packageYear', e.target.value)
+                    }
+                    className="bg-white border-[#E5E5E5]"
+                    disabled={isCreating}
+                  />
+                  <p className="text-xs text-[#737373]">
+                    Year on disclosure PDFs (e.g. 2026).
+                  </p>
                 </div>
 
               </div>

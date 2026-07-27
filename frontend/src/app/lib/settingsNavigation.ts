@@ -31,6 +31,7 @@ export const PROPERTY_SETTING_FIELD_ANCHORS = [
   'city',
   'taxId',
   'fiscalYearStart',
+  'packageYear',
 ] as const;
 
 export function resolveSettingsSection(raw: string | null | undefined): SettingsSection {

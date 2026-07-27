@@ -688,7 +688,21 @@ def run_preflight(
 
 
 def _latest_fiscal_year(session: Session, hoa_id: int) -> int:
-    """The HOA's newest annual-package year, else the current calendar year."""
+    """Default year for chip preview / generate alignment.
+
+    Prefer ``properties.portfolio_year`` (Settings package year) so narrative
+    chips match disclosure generate. Fall back to newest annual package, then
+    the current calendar year.
+    """
+    prop = session.connection().connection.execute(
+        "SELECT portfolio_year FROM properties WHERE id = ?",
+        (hoa_id,),
+    ).fetchone()
+    if prop and prop[0] is not None:
+        try:
+            return int(prop[0])
+        except (TypeError, ValueError):
+            pass
     row = session.connection().connection.execute(
         "SELECT fiscal_year FROM annual_packages WHERE property_id = ? "
         "ORDER BY fiscal_year DESC, id DESC LIMIT 1",

@@ -117,6 +117,8 @@ export interface HOADisclosureSettingsFormHandle {
 
 export type HOADisclosureSettingsFormProps = {
   hoaId: number;
+  /** Package year for allocation previews (portfolio_year). */
+  packageYear?: number;
   /** Fired when the form finishes loading (true) or resets / errors (false). */
   onReadyChange?: (ready: boolean) => void;
   /** Fired when dirty state relative to last load/save changes. */
@@ -126,7 +128,10 @@ export type HOADisclosureSettingsFormProps = {
 export const HOADisclosureSettingsForm = forwardRef<
   HOADisclosureSettingsFormHandle,
   HOADisclosureSettingsFormProps
->(function HOADisclosureSettingsForm({ hoaId, onReadyChange, onDirtyChange }, ref) {
+>(function HOADisclosureSettingsForm(
+  { hoaId, packageYear, onReadyChange, onDirtyChange },
+  ref,
+) {
   const [settings, setSettings] = useState<HOADisclosureSettings | null>(null);
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState<string | null>(null);
@@ -224,7 +229,9 @@ export const HOADisclosureSettingsForm = forwardRef<
       const preview = await previewSpecialAssessment(
         hoaId,
         poolKey,
-        new Date().getFullYear(),
+        packageYear && packageYear > 0
+          ? packageYear
+          : new Date().getFullYear(),
       );
       setPreviews((prev) => ({ ...prev, [poolKey]: preview }));
     } catch (e) {
