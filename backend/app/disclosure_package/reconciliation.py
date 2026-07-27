@@ -170,6 +170,136 @@ _BUDGET_RESERVE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Interfund transfer labels (ops expense side or mirrored reserve income).
+# Kept broader than find_budget_reserve_contribution so "Allocation/Transfer"
+# account lines are always treated as non-external money on the dual-fund statement.
+_INTERFUND_TRANSFER_RE = re.compile(
+    r"("
+    r"allocation\s*/\s*transfer"
+    r"|allocation\s+transfer"
+    r"|reserve\s*-\s*allocation"
+    r"|transfer\s+to\s+reserve"
+    r"|reserve\s+transfer"
+    r"|allocation\s+to\s+reserve"
+    r"|contribution\s+to\s+reserve"
+    r"|reserve\s+contribution"
+    r"|reserve\s+funding"
+    r"|replacement\s+fund\s+contribution"
+    r")",
+    re.IGNORECASE,
+)
+
+_STATEMENT_TOLERANCE = Decimal("0.02")
+
+
+def is_interfund_reserve_transfer_line(
+    label: object,
+    *,
+    section: object = None,
+) -> bool:
+    """True when a budget line is an interfund reserve contribution/transfer.
+
+    These lines move cash between Operating and Replacement funds. They are
+    not external revenue or a day-to-day operating cost for dual-fund statement
+    presentation (Fix 1). Parser may still classify them under operating for
+    income-statement UI fidelity.
+    """
+    text = f"{label or ''} {section or ''}".strip()
+    if not text:
+        return False
+    return bool(_INTERFUND_TRANSFER_RE.search(text) or _BUDGET_RESERVE_RE.search(text))
+
+
+def is_reserve_pool_component_key(component_key: object, component_label: object = None) -> bool:
+    """Classify an assessment-matrix component as the reserve-funding pool."""
+    key = str(component_key or "").lower()
+    label = str(component_label or "").lower()
+    blob = f"{key} {label}"
+    if "special" in blob:
+        return False
+    return "reserve" in blob or "replacement" in blob
+
+
+def assessment_split_from_schedule_components(
+    component_summary_rows: Optional[Sequence[object]],
+    *,
+    total_regular_assessment_revenue: Decimal,
+    fallback_reserve_assessment: Decimal,
+) -> tuple[Decimal, Decimal, str]:
+    """Policy S: P&L regular assessment columns follow the schedule matrix.
+
+    Returns ``(operating_assessment_annual, reserve_assessment_annual, source)``
+    where source is ``\"schedule_matrix\"`` or ``\"settings_funding_fallback\"``.
+
+    Does **not** change assessment schedule math — only reads component
+    annuals already computed by the matrix. Falls back to settings-funded
+    reserve assessment when the matrix is missing or empty.
+    """
+    total = Decimal(total_regular_assessment_revenue or 0).quantize(Decimal("0.01"))
+    fallback_reserve = Decimal(fallback_reserve_assessment or 0).quantize(Decimal("0.01"))
+    if fallback_reserve < 0:
+        fallback_reserve = Decimal("0.00")
+    if fallback_reserve > total:
+        fallback_reserve = total
+
+    if not component_summary_rows:
+        ops = max(total - fallback_reserve, Decimal("0")).quantize(Decimal("0.01"))
+        return ops, fallback_reserve, "settings_funding_fallback"
+
+    ops = Decimal("0")
+    reserve = Decimal("0")
+    for row in component_summary_rows:
+        if isinstance(row, dict):
+            key = row.get("component_key") or row.get("pool_key")
+            label = row.get("component_label") or row.get("pool_name") or row.get("label")
+            raw_amount = row.get("annual_amount")
+        else:
+            key = getattr(row, "component_key", None) or getattr(row, "pool_key", None)
+            label = (
+                getattr(row, "component_label", None)
+                or getattr(row, "pool_name", None)
+                or getattr(row, "label", None)
+            )
+            raw_amount = getattr(row, "annual_amount", None)
+        try:
+            amount = Decimal(str(raw_amount or 0))
+        except (InvalidOperation, ValueError, ArithmeticError):
+            amount = Decimal("0")
+        if amount <= 0:
+            continue
+        if is_reserve_pool_component_key(key, label):
+            reserve += amount
+        else:
+            ops += amount
+
+    combined = (ops + reserve).quantize(Decimal("0.01"))
+    if combined <= 0:
+        ops_fb = max(total - fallback_reserve, Decimal("0")).quantize(Decimal("0.01"))
+        return ops_fb, fallback_reserve, "settings_funding_fallback"
+
+    # Prefer matrix split when it reconciles to assessment income (Policy S).
+    if total > 0 and abs(combined - total) <= _STATEMENT_TOLERANCE:
+        # Distribute any penny drift to operating so columns sum exactly.
+        ops_q = ops.quantize(Decimal("0.01"))
+        res_q = (total - ops_q).quantize(Decimal("0.01"))
+        if res_q < 0:
+            res_q = Decimal("0.00")
+            ops_q = total
+        return ops_q, res_q, "schedule_matrix"
+
+    # Matrix present but does not reconcile to assessment income — still use
+    # relative split scaled to assessment income when both sides positive.
+    if ops > 0 or reserve > 0:
+        scale_ops = (total * ops / combined).quantize(Decimal("0.01"))
+        scale_res = (total - scale_ops).quantize(Decimal("0.01"))
+        if scale_res < 0:
+            scale_res = Decimal("0.00")
+            scale_ops = total
+        return scale_ops, scale_res, "schedule_matrix_scaled"
+
+    ops_fb = max(total - fallback_reserve, Decimal("0")).quantize(Decimal("0.01"))
+    return ops_fb, fallback_reserve, "settings_funding_fallback"
+
 
 def parse_optional_decimal_setting(value: object) -> Optional[Decimal]:
     """Parse an optional numeric setting.

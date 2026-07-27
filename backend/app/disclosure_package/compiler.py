@@ -73,7 +73,9 @@ from .merge import (
 from .preflight import infer_special_assessment_status, validate_inputs
 from .render import render_template
 from .reconciliation import (
+    assessment_split_from_schedule_components,
     build_annual_statement_facts,
+    is_interfund_reserve_transfer_line,
     parse_optional_decimal_setting,
     resolve_assessment_presentation_facts,
     resolve_assessment_facts,
@@ -713,14 +715,31 @@ def _compute_all(
     operating_lis = [li for li in budget_draft.line_items if not li.is_reserve]
     reserve_lis = [li for li in budget_draft.line_items if li.is_reserve]
 
+    # Fix 1: interfund reserve transfer is not an external ops cost and not
+    # external replacement revenue on the dual-fund statement. Keep the raw
+    # draft lines for budget UI / mapping; exclude them from package statement
+    # presentation so total-funds revenue is not double-counted.
+    def _is_transfer_li(li: Any) -> bool:
+        return is_interfund_reserve_transfer_line(
+            getattr(li, "label", None),
+            section=getattr(li, "section", None),
+        )
+
+    statement_operating_expense_lis = [
+        li for li in operating_lis if not li.is_revenue and not _is_transfer_li(li)
+    ]
+    statement_reserve_revenue_lis = [
+        li
+        for li in reserve_lis
+        if li.is_revenue and not _is_transfer_li(li)
+    ]
+
     # Section-grouped expenses & revenues — keyed on the raw Excel header
     # (LineItem.section) so the income-statement template can render
     # whatever sections the data provides instead of keyword-matching
     # labels against a hardcoded bucket list.
     expenses_by_section: dict[str, dict[str, Any]] = {}
-    for li in operating_lis:
-        if li.is_revenue:
-            continue
+    for li in statement_operating_expense_lis:
         section_name = (li.section or "Uncategorized").strip()
         bucket = expenses_by_section.setdefault(
             section_name, {"rows": [], "total": Decimal(0)}
@@ -739,16 +758,27 @@ def _compute_all(
         bucket["rows"].append({"label": li.label, "amount": li.amount or Decimal(0)})
         bucket["total"] = bucket["total"] + (li.amount or Decimal(0))
 
+    # Statement revenue formulas still see full operating revenue lines; replacement
+    # revenue formulas use transfer-filtered reserve revenues so mirrored
+    # contribution income is not counted as external funds.
     total_rev_op = total_revenues_operations(operating_line_items=operating_lis)
-    total_rev_rep = total_revenues_replacement(reserve_line_items=reserve_lis)
+    total_rev_rep = total_revenues_replacement(
+        reserve_line_items=statement_reserve_revenue_lis
+    )
     # The keyword-matched formulas below keep firing so the audit log captures
     # values for the legacy section labels ('Maintenance and operations', etc.),
     # but they are NOT the source of truth for the income-statement total —
     # sections in the active draft may use any label the operator's parser
     # produced. Real total is summed from `expenses_by_section` below.
-    exp_maint = expenses_maintenance_operating(operating_line_items=operating_lis)
-    exp_util = expenses_utilities_operating(operating_line_items=operating_lis)
-    exp_admin = expenses_administration_operating(operating_line_items=operating_lis)
+    exp_maint = expenses_maintenance_operating(
+        operating_line_items=statement_operating_expense_lis
+    )
+    exp_util = expenses_utilities_operating(
+        operating_line_items=statement_operating_expense_lis
+    )
+    exp_admin = expenses_administration_operating(
+        operating_line_items=statement_operating_expense_lis
+    )
     exp_rep = expenses_replacement(reserve_line_items=reserve_lis)
     total_exp_op = sum(
         (Decimal(str(b["total"])) for b in expenses_by_section.values()),
@@ -946,18 +976,35 @@ def _compute_all(
         ),
         Decimal("0"),
     )
+    # Fix 1: exclude interfund contribution mirrors from other replacement revenue.
     other_replacement_revenue = sum(
         (
             Decimal(li.amount or 0)
-            for li in reserve_lis
-            if li.is_revenue and li.label and "interest" not in li.label.lower()
+            for li in statement_reserve_revenue_lis
+            if li.label and "interest" not in li.label.lower()
         ),
         Decimal("0"),
+    )
+
+    # Fix 2 Policy S: P&L regular assessment columns follow schedule matrix
+    # pool annuals. Note 6 / 30-yr funding still use reserve_funding_facts
+    # (settings / study / manual) — independent funding-plan narrative.
+    component_rows = None
+    if assessment_matrix is not None:
+        component_rows = getattr(assessment_matrix, "component_summary_rows", None)
+    _ops_assess, _res_assess, assessment_split_source = (
+        assessment_split_from_schedule_components(
+            component_rows,
+            total_regular_assessment_revenue=annual_assessment_revenue,
+            fallback_reserve_assessment=reserve_funding_facts.annual_contribution,
+        )
     )
     annual_statement_facts = build_annual_statement_facts(
         packet_archetype=packet_archetype_facts.archetype,
         total_regular_assessment_revenue=annual_assessment_revenue,
-        reserve_assessment_revenue=reserve_funding_facts.annual_contribution,
+        # Pass schedule reserve share; build_annual_statement_facts derives
+        # operating = total - reserve so columns sum to Assessment Income.
+        reserve_assessment_revenue=_res_assess,
         reserve_interest_income=reserve_interest_tax_facts.reserve_interest_income,
         reserve_tax_provision=reserve_interest_tax_facts.reserve_tax_provision,
         other_operating_revenue=other_operating_revenue,
@@ -967,14 +1014,25 @@ def _compute_all(
         reserve_liability_facts=reserve_liability_facts,
     )
 
+    # Prefer statement facts for top-line computed totals so template/audit
+    # match the dual-fund statement (after transfer elimination + Policy S).
+    stmt = annual_statement_facts
+    total_rev_op = stmt.total_revenues_operations
+    total_rev_rep = stmt.total_revenues_replacement
+    total_exp_op = stmt.total_expenses_operations
+    exp_rep = stmt.total_expenses_replacement
+    total_exp_all = stmt.total_expenses
+    excess_op = stmt.excess_revenues_over_expenses_operations
+    excess_rep = stmt.excess_revenues_over_expenses_replacement
+
     return {
         "computed": {
             "total_revenues_operations": total_rev_op,
             "total_revenues_replacement": total_rev_rep,
             "total_revenues": total_rev_op + total_rev_rep,
             "operating_revenues": [li for li in operating_lis if li.is_revenue],
-            "replacement_revenues": [li for li in reserve_lis if li.is_revenue],
-            "operating_expenses": [li for li in operating_lis if not li.is_revenue],
+            "replacement_revenues": list(statement_reserve_revenue_lis),
+            "operating_expenses": list(statement_operating_expense_lis),
             "replacement_expenses": [li for li in reserve_lis if not li.is_revenue],
             "expenses_maintenance_operating": exp_maint,
             "expenses_utilities_operating": exp_util,
@@ -984,6 +1042,7 @@ def _compute_all(
             "total_expenses": total_exp_all,
             "excess_revenues_over_expenses_operations": excess_op,
             "excess_revenues_over_expenses_replacement": excess_rep,
+            "assessment_split_source": assessment_split_source,
             "fund_balance_eoy_operations": fund_balance_eoy_operations(
                 beginning_balance=fund_balance_boy_op,
                 excess=excess_op,
