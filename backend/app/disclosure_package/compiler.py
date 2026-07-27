@@ -986,9 +986,11 @@ def _compute_all(
         Decimal("0"),
     )
 
-    # Fix 2 Policy S: P&L regular assessment columns follow schedule matrix
-    # pool annuals. Note 6 / 30-yr funding still use reserve_funding_facts
-    # (settings / study / manual) — independent funding-plan narrative.
+    # Fix 2 soft Policy S: P&L regular assessment columns follow the schedule
+    # matrix only when it has a positive reserve-named pool (Sharon Ridge).
+    # Multi-pool / equal-only HOAs fall back to reserve_funding_facts so the
+    # Replacement Fund column is not forced to $0. Note 6 / 30-yr funding
+    # always use reserve_funding_facts (settings / study / manual).
     component_rows = None
     if assessment_matrix is not None:
         component_rows = getattr(assessment_matrix, "component_summary_rows", None)
@@ -1002,8 +1004,8 @@ def _compute_all(
     annual_statement_facts = build_annual_statement_facts(
         packet_archetype=packet_archetype_facts.archetype,
         total_regular_assessment_revenue=annual_assessment_revenue,
-        # Pass schedule reserve share; build_annual_statement_facts derives
-        # operating = total - reserve so columns sum to Assessment Income.
+        # Reserve share from soft Policy S (schedule or settings fallback);
+        # build_annual_statement_facts derives operating = total - reserve.
         reserve_assessment_revenue=_res_assess,
         reserve_interest_income=reserve_interest_tax_facts.reserve_interest_income,
         reserve_tax_provision=reserve_interest_tax_facts.reserve_tax_provision,

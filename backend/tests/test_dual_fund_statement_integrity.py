@@ -55,6 +55,83 @@ def test_assessment_split_falls_back_to_settings_when_matrix_empty() -> None:
     assert ops == Decimal("254735.60")
 
 
+def test_assessment_split_falls_back_when_matrix_has_no_reserve_pool() -> None:
+    """Multi-pool HOAs (equal/sqft) must not zero the P&L reserve column."""
+    # 800 High / Two Worlds / Old Mill / LAVS style: schedule has only
+    # operating-style pools; dual-fund reserve share comes from settings.
+    rows = [
+        SimpleNamespace(
+            component_key="equal_costs",
+            component_label="Equal Costs",
+            annual_amount=Decimal("2228094.00"),
+        ),
+        SimpleNamespace(
+            component_key="prorated_pool",
+            component_label="Monthly Assessment (Prorated Items Only)",
+            annual_amount=Decimal("296873.80"),
+        ),
+    ]
+    total = Decimal("900000.00")
+    settings_reserve = Decimal("200000.00")
+    ops, res, source = assessment_split_from_schedule_components(
+        rows,
+        total_regular_assessment_revenue=total,
+        fallback_reserve_assessment=settings_reserve,
+    )
+    assert source == "settings_funding_fallback_no_reserve_pool"
+    assert res == settings_reserve
+    assert ops == Decimal("700000.00")
+    assert ops + res == total
+
+
+def test_assessment_split_falls_back_when_reserve_pool_mapped_at_zero() -> None:
+    """Reserve pool exists but $0 mapped → treat as no reserve schedule basis."""
+    rows = [
+        SimpleNamespace(
+            component_key="general_operating",
+            component_label="Operating Expenses",
+            annual_amount=Decimal("268875.09"),
+        ),
+        SimpleNamespace(
+            component_key="reserve_contributions",
+            component_label="Reserve Contributions",
+            annual_amount=Decimal("0"),
+        ),
+    ]
+    ops, res, source = assessment_split_from_schedule_components(
+        rows,
+        total_regular_assessment_revenue=Decimal("372867.60"),
+        fallback_reserve_assessment=Decimal("118132"),
+    )
+    assert source == "settings_funding_fallback_no_reserve_pool"
+    assert res == Decimal("118132.00")
+    assert ops == Decimal("254735.60")
+
+
+def test_assessment_split_ignores_special_assessment_as_reserve() -> None:
+    """Special assessment pools must not count as the regular reserve share."""
+    rows = [
+        SimpleNamespace(
+            component_key="equal_pool",
+            component_label="Monthly Assessment",
+            annual_amount=Decimal("500000"),
+        ),
+        SimpleNamespace(
+            component_key="traffic_signal_pool",
+            component_label="Special Assessment for Traffic Signal",
+            annual_amount=Decimal("50000"),
+        ),
+    ]
+    ops, res, source = assessment_split_from_schedule_components(
+        rows,
+        total_regular_assessment_revenue=Decimal("500000"),
+        fallback_reserve_assessment=Decimal("120000"),
+    )
+    assert source == "settings_funding_fallback_no_reserve_pool"
+    assert res == Decimal("120000.00")
+    assert ops == Decimal("380000.00")
+
+
 def test_annual_statement_excludes_transfer_style_other_revenue_from_inflation() -> None:
     """When transfer is excluded from other_rep and ops expenses, totals stay clean."""
     liab = resolve_reserve_liability_facts(

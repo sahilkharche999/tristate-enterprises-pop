@@ -226,14 +226,23 @@ def assessment_split_from_schedule_components(
     total_regular_assessment_revenue: Decimal,
     fallback_reserve_assessment: Decimal,
 ) -> tuple[Decimal, Decimal, str]:
-    """Policy S: P&L regular assessment columns follow the schedule matrix.
+    """Policy S (soft): P&L assessment columns follow schedule when reserve exists.
 
     Returns ``(operating_assessment_annual, reserve_assessment_annual, source)``
-    where source is ``\"schedule_matrix\"`` or ``\"settings_funding_fallback\"``.
+    where source is one of:
+
+    - ``\"schedule_matrix\"`` / ``\"schedule_matrix_scaled\"`` — matrix has a
+      positive reserve-named component; P&L reserve share follows the schedule
+      (Sharon Ridge–style ops + reserve pools).
+    - ``\"settings_funding_fallback\"`` — matrix missing/empty/unusable.
+    - ``\"settings_funding_fallback_no_reserve_pool\"`` — matrix has only
+      non-reserve pools (equal/sqft/residential multi-pool HOAs) or a reserve
+      pool at $0. P&L reserve share keeps settings/study/manual funding so the
+      Replacement Fund column is not forced to $0 while Note 6 still shows a
+      funding plan.
 
     Does **not** change assessment schedule math — only reads component
-    annuals already computed by the matrix. Falls back to settings-funded
-    reserve assessment when the matrix is missing or empty.
+    annuals already computed by the matrix for dual-fund statement columns.
     """
     total = Decimal(total_regular_assessment_revenue or 0).quantize(Decimal("0.01"))
     fallback_reserve = Decimal(fallback_reserve_assessment or 0).quantize(Decimal("0.01"))
@@ -242,9 +251,12 @@ def assessment_split_from_schedule_components(
     if fallback_reserve > total:
         fallback_reserve = total
 
-    if not component_summary_rows:
+    def _settings_fallback(source: str) -> tuple[Decimal, Decimal, str]:
         ops = max(total - fallback_reserve, Decimal("0")).quantize(Decimal("0.01"))
-        return ops, fallback_reserve, "settings_funding_fallback"
+        return ops, fallback_reserve, source
+
+    if not component_summary_rows:
+        return _settings_fallback("settings_funding_fallback")
 
     ops = Decimal("0")
     reserve = Decimal("0")
@@ -274,8 +286,14 @@ def assessment_split_from_schedule_components(
 
     combined = (ops + reserve).quantize(Decimal("0.01"))
     if combined <= 0:
-        ops_fb = max(total - fallback_reserve, Decimal("0")).quantize(Decimal("0.01"))
-        return ops_fb, fallback_reserve, "settings_funding_fallback"
+        return _settings_fallback("settings_funding_fallback")
+
+    # Soft Policy S: require a positive reserve-named schedule component.
+    # Without one (Old Mill / Two Worlds / 800 High / LAVS), using the matrix
+    # would put 100% of assessments in Operations and $0 in Replacement —
+    # wrong dual-fund presentation. Keep settings/study funding instead.
+    if reserve <= 0:
+        return _settings_fallback("settings_funding_fallback_no_reserve_pool")
 
     # Prefer matrix split when it reconciles to assessment income (Policy S).
     if total > 0 and abs(combined - total) <= _STATEMENT_TOLERANCE:
@@ -287,18 +305,14 @@ def assessment_split_from_schedule_components(
             ops_q = total
         return ops_q, res_q, "schedule_matrix"
 
-    # Matrix present but does not reconcile to assessment income — still use
-    # relative split scaled to assessment income when both sides positive.
-    if ops > 0 or reserve > 0:
-        scale_ops = (total * ops / combined).quantize(Decimal("0.01"))
-        scale_res = (total - scale_ops).quantize(Decimal("0.01"))
-        if scale_res < 0:
-            scale_res = Decimal("0.00")
-            scale_ops = total
-        return scale_ops, scale_res, "schedule_matrix_scaled"
-
-    ops_fb = max(total - fallback_reserve, Decimal("0")).quantize(Decimal("0.01"))
-    return ops_fb, fallback_reserve, "settings_funding_fallback"
+    # Matrix present with a reserve share but does not reconcile to assessment
+    # income — scale relative ops/reserve split to assessment income.
+    scale_ops = (total * ops / combined).quantize(Decimal("0.01"))
+    scale_res = (total - scale_ops).quantize(Decimal("0.01"))
+    if scale_res < 0:
+        scale_res = Decimal("0.00")
+        scale_ops = total
+    return scale_ops, scale_res, "schedule_matrix_scaled"
 
 
 def parse_optional_decimal_setting(value: object) -> Optional[Decimal]:
