@@ -18,6 +18,7 @@ from app.assessment_engine.pools import (
     MissingSpecifiedValue,
     equal_allocation,
     ownership_percentage_allocation,
+    ownership_weight_sum_is_valid,
     specified_value_allocation,
     square_footage_allocation,
 )
@@ -174,6 +175,95 @@ class TestOwnershipPercentageAllocation:
         rec = RecipientReference(ref_type="unit", ref_id=1, label="U", unit_count=1)
         with pytest.raises(ValueError, match="ownership_percent"):
             ownership_percentage_allocation(Decimal("100"), [rec])
+
+    def test_grouped_per_unit_interest_expands_to_group_totals(self) -> None:
+        """Sharon Ridge-style: stored % is per-unit undivided interest."""
+        from decimal import ROUND_HALF_UP
+
+        def cents(value: Decimal) -> Decimal:
+            return value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+        # Monthly pool = Assessment Income $372,867.60 / 12
+        pool_total = Decimal("372867.60") / Decimal("12")
+        recipients = [
+            RecipientReference(
+                ref_type="group", ref_id=1, label="Unit Type A",
+                unit_count=7, ownership_percent=Decimal("0.0178"),
+            ),
+            RecipientReference(
+                ref_type="group", ref_id=2, label="Unit Type B",
+                unit_count=9, ownership_percent=Decimal("0.0242"),
+            ),
+            RecipientReference(
+                ref_type="group", ref_id=3, label="Unit Type C",
+                unit_count=24, ownership_percent=Decimal("0.0274"),
+            ),
+        ]
+        allocations, warnings = ownership_percentage_allocation(pool_total, recipients)
+        # Per-unit (what the schedule matrix will show after ÷ unit_count)
+        assert cents(allocations[("group", 1)] / Decimal(7)) == Decimal("553.09")
+        assert cents(allocations[("group", 2)] / Decimal(9)) == Decimal("751.95")
+        assert cents(allocations[("group", 3)] / Decimal(24)) == Decimal("851.38")
+        # Group totals are per-unit × count (not bare pool × pct alone)
+        assert allocations[("group", 1)] == pool_total * Decimal("0.0178") * Decimal(7)
+        assert allocations[("group", 1)] != pool_total * Decimal("0.0178")
+        # Full pool recovered
+        total = sum(allocations.values(), start=Decimal("0"))
+        assert cents(total) == cents(pool_total)
+        assert any("per-unit interest" in w.lower() or "per_unit" in w.lower() for w in warnings)
+
+    def test_grouped_recipient_share_does_not_multiply_unit_count(self) -> None:
+        """Group-total ownership % already sums to 1 — do not × unit_count."""
+        from decimal import ROUND_HALF_UP
+
+        def cents(value: Decimal) -> Decimal:
+            return value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+        pool_total = Decimal("372867.60") / Decimal("12")
+        recipients = [
+            RecipientReference(
+                ref_type="group", ref_id=1, label="Unit Type A",
+                unit_count=7, ownership_percent=Decimal("0.1246"),
+            ),
+            RecipientReference(
+                ref_type="group", ref_id=2, label="Unit Type B",
+                unit_count=9, ownership_percent=Decimal("0.2178"),
+            ),
+            RecipientReference(
+                ref_type="group", ref_id=3, label="Unit Type C",
+                unit_count=24, ownership_percent=Decimal("0.6576"),
+            ),
+        ]
+        allocations, warnings = ownership_percentage_allocation(pool_total, recipients)
+        # Same economic result as per-unit form (group total = pool × group share)
+        assert cents(allocations[("group", 1)] / Decimal(7)) == Decimal("553.09")
+        assert cents(allocations[("group", 2)] / Decimal(9)) == Decimal("751.95")
+        assert cents(allocations[("group", 3)] / Decimal(24)) == Decimal("851.38")
+        # Must NOT expand again by unit_count (would be 7× too large)
+        assert allocations[("group", 1)] == pool_total * Decimal("0.1246")
+        # No per-unit-interest expansion warning when bare sum ≈ 1
+        assert not any("per-unit interest" in w.lower() for w in warnings)
+
+    def test_ownership_weight_sum_valid_for_per_unit_interest_groups(self) -> None:
+        recipients = [
+            RecipientReference(
+                ref_type="group", ref_id=1, label="A",
+                unit_count=7, ownership_percent=Decimal("0.0178"),
+            ),
+            RecipientReference(
+                ref_type="group", ref_id=2, label="B",
+                unit_count=9, ownership_percent=Decimal("0.0242"),
+            ),
+            RecipientReference(
+                ref_type="group", ref_id=3, label="C",
+                unit_count=24, ownership_percent=Decimal("0.0274"),
+            ),
+        ]
+        ok, bare, weighted, form = ownership_weight_sum_is_valid(recipients)
+        assert ok is True
+        assert form == "per_unit_interest"
+        assert bare == Decimal("0.0694")
+        assert weighted == Decimal("1.0000")
 
 
 # -- specified_value_allocation --------------------------------------------

@@ -36,7 +36,7 @@ from app.assessment_engine.engine import (
     _allocate_special_assessment,
     run as run_assessment_engine,
 )
-from app.assessment_engine.pools import OWNERSHIP_PERCENT_TOLERANCE
+from app.assessment_engine.pools import ownership_weight_sum_is_valid
 from app.assessment_engine.recipients import resolve_recipients
 from app.assessment_engine.schemas import (
     SpecialAssessmentAllocation,
@@ -2021,15 +2021,20 @@ def _manual_special_assessment_allocations(
                     ),
                 ))
                 continue
-            pct_sum = sum((r.ownership_percent for r in scoped), start=Decimal("0"))
-            if abs(pct_sum - Decimal("1")) > OWNERSHIP_PERCENT_TOLERANCE:
+            # Accept either recipient_share (Σ pct ≈ 1) or per_unit_interest
+            # (Σ pct×unit_count ≈ 1). Bare sum alone false-blocks Sharon Ridge–
+            # style groups that store per-unit undivided interest on group rows.
+            ok, bare_sum, weighted_sum, form = ownership_weight_sum_is_valid(scoped)
+            if not ok:
                 issues.append(PreflightError(
                     field_path=field, severity="blocking",
                     message=(
                         f"Special assessment {label!r} allocates by ownership %, but "
-                        f"the ownership percentages sum to {pct_sum}, not 100% — the "
-                        "per-unit amounts would not add up to the total. Fix the "
-                        "ownership roster or choose a different basis."
+                        f"the ownership percentages do not sum to 100% under either "
+                        f"form (bare Σ={bare_sum}, weighted Σ pct×units={weighted_sum}, "
+                        f"detected form={form}) — the per-unit amounts would not add "
+                        "up to the total. Fix the ownership roster or choose a "
+                        "different basis."
                     ),
                 ))
                 continue

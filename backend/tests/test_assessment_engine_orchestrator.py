@@ -403,6 +403,70 @@ class TestDenominatorMismatch:
         assert not any("DenominatorMismatchWarning" in w for w in result.warnings)
 
 
+# -- Pattern: grouped ownership (Sharon Ridge-style per-unit interest) -----
+
+
+class TestPatternGroupedOwnershipPerUnitInterest:
+    """Grouped setup where ownership_percent is per-unit undivided interest.
+
+    Σ pct = 0.0694 but Σ pct×unit_count = 1.0. Engine must emit group totals
+    so matrix per-unit = group_total ÷ unit_count matches client schedule.
+    """
+
+    def _build(self) -> CalcInput:
+        groups = [
+            RecipientReference(
+                ref_type="group",
+                ref_id=1,
+                label="Unit Type A",
+                unit_count=7,
+                ownership_percent=Decimal("0.0178"),
+            ),
+            RecipientReference(
+                ref_type="group",
+                ref_id=2,
+                label="Unit Type B",
+                unit_count=9,
+                ownership_percent=Decimal("0.0242"),
+            ),
+            RecipientReference(
+                ref_type="group",
+                ref_id=3,
+                label="Unit Type C",
+                unit_count=24,
+                ownership_percent=Decimal("0.0274"),
+            ),
+        ]
+        annual = Decimal("372867.60")
+        return CalcInput(
+            setup_type="grouped",
+            pools=[_pool(1, "general_operating", "ownership_percentage", order=1)],
+            recipient_set=RecipientSet(recipients=groups),
+            budget_lines=[_line(1, "operating_costs", str(annual))],
+            mappings=[_mapping("operating_costs", "general_operating")],
+            approved_assessment_revenue_annual=annual,
+        )
+
+    def test_per_unit_dues_match_ownership_times_monthly_pool(self) -> None:
+        result = run(self._build())
+        by_id = {t.recipient_ref.ref_id: t for t in result.recipient_totals}
+        # Group totals / unit_count = client 2025 PUPM
+        assert (by_id[1].rounded_monthly_total / Decimal(7)).quantize(
+            Decimal("0.01")
+        ) == Decimal("553.09")
+        assert (by_id[2].rounded_monthly_total / Decimal(9)).quantize(
+            Decimal("0.01")
+        ) == Decimal("751.95")
+        assert (by_id[3].rounded_monthly_total / Decimal(24)).quantize(
+            Decimal("0.01")
+        ) == Decimal("851.38")
+
+    def test_annual_totals_reconcile_to_approved_revenue(self) -> None:
+        result = run(self._build())
+        total = sum((t.annual_total for t in result.recipient_totals), start=Decimal("0"))
+        assert abs(total - Decimal("372867.60")) < Decimal("1.00")
+
+
 # -- Pattern C: per-unit multi-pool (800 High-style) -----------------------
 
 

@@ -110,23 +110,30 @@ def square_footage_allocation(
     return out
 
 
-def ownership_percentage_allocation(
-    pool_total: Decimal,
+def resolve_ownership_weight_form(
     recipients: Sequence[RecipientReference],
-) -> tuple[dict[RecipientKey, Decimal], list[str]]:
-    """Ownership-weighted split: ``pool_total × recipient.ownership_percent``.
+) -> tuple[str, Decimal, Decimal, list[str]]:
+    """Decide how ``ownership_percent`` should weight each recipient.
 
-    DRE-recorded percentages are used verbatim regardless of whether
-    they sum cleanly to 1.0. If the sum drifts by more than
-    ``OWNERSHIP_PERCENT_TOLERANCE`` (0.001), a non-blocking warning
-    string is appended to the returned warnings list.
+    ``ownership_percent`` is always a fraction (after promotion normalize).
+    Two valid meanings exist for **group** recipients:
 
-    Returns ``(allocations, warnings)``.
+    - ``recipient_share``: the value is the whole group's share of the HOA
+      (``Σ ownership_percent ≈ 1``). Weight = pct.
+    - ``per_unit_interest``: the value is one unit's undivided interest
+      (``Σ ownership_percent × unit_count ≈ 1``), as printed on many DREs /
+      assessment schedules (e.g. Sharon Ridge 1.78% / 2.42% / 2.74%).
+      Weight = pct × unit_count so the allocator returns **group totals**.
+
+    For unit recipients ``unit_count`` is 1, so both forms coincide.
+
+    Preference order when both sums are near 1: ``recipient_share`` (do not
+    multiply by unit_count — that would over-allocate group-total data).
+
+    Returns ``(form, bare_sum, weighted_sum, warnings)``.
     """
-    _require_decimal("pool_total", pool_total)
-
-    out: dict[RecipientKey, Decimal] = {}
-    pct_sum = Decimal("0")
+    bare_sum = Decimal("0")
+    weighted_sum = Decimal("0")
     for r in recipients:
         if r.ownership_percent is None:
             raise ValueError(
@@ -134,17 +141,89 @@ def ownership_percentage_allocation(
                 "ownership_percentage pool but has no ownership_percent "
                 "recorded; DRE extraction or operator entry must supply it"
             )
-        out[(r.ref_type, r.ref_id)] = pool_total * r.ownership_percent
-        pct_sum += r.ownership_percent
+        bare_sum += r.ownership_percent
+        weighted_sum += r.ownership_percent * Decimal(int(r.unit_count or 1))
 
+    bare_drift = abs(bare_sum - Decimal("1"))
+    weighted_drift = abs(weighted_sum - Decimal("1"))
     warnings: list[str] = []
-    drift = abs(pct_sum - Decimal("1"))
-    if drift > OWNERSHIP_PERCENT_TOLERANCE:
+
+    if bare_drift <= OWNERSHIP_PERCENT_TOLERANCE:
+        form = "recipient_share"
+    elif weighted_drift <= OWNERSHIP_PERCENT_TOLERANCE:
+        form = "per_unit_interest"
         warnings.append(
-            f"ownership_percent values in pool sum to {pct_sum} "
-            f"(drift {drift} > tolerance {OWNERSHIP_PERCENT_TOLERANCE}); "
+            f"ownership_percent treated as per-unit interest "
+            f"(Σ pct={bare_sum}, Σ pct×unit_count={weighted_sum}); "
+            "group weights = ownership_percent × unit_count"
+        )
+    else:
+        # Prefer the closer sum; default to recipient_share when tied so
+        # legacy unit-grain / group-total behaviour is preserved.
+        if weighted_drift < bare_drift:
+            form = "per_unit_interest"
+        else:
+            form = "recipient_share"
+        chosen_sum = weighted_sum if form == "per_unit_interest" else bare_sum
+        chosen_drift = weighted_drift if form == "per_unit_interest" else bare_drift
+        warnings.append(
+            f"ownership_percent values in pool sum to bare={bare_sum} "
+            f"weighted={weighted_sum} (chosen form={form}, sum={chosen_sum}, "
+            f"drift {chosen_drift} > tolerance {OWNERSHIP_PERCENT_TOLERANCE}); "
             "DRE values preserved verbatim"
         )
+    return form, bare_sum, weighted_sum, warnings
+
+
+def ownership_weight_sum_is_valid(
+    recipients: Sequence[RecipientReference],
+) -> tuple[bool, Decimal, Decimal, str]:
+    """Return whether ownership weights close to 100% under either form.
+
+    Used by special-assessment preflight so per-unit-interest groups are not
+    false-blocked when bare ``Σ ownership_percent`` is only a few percent.
+    """
+    form, bare_sum, weighted_sum, _warnings = resolve_ownership_weight_form(recipients)
+    if form == "per_unit_interest":
+        ok = abs(weighted_sum - Decimal("1")) <= OWNERSHIP_PERCENT_TOLERANCE
+        return ok, bare_sum, weighted_sum, form
+    ok = abs(bare_sum - Decimal("1")) <= OWNERSHIP_PERCENT_TOLERANCE
+    return ok, bare_sum, weighted_sum, form
+
+
+def ownership_percentage_allocation(
+    pool_total: Decimal,
+    recipients: Sequence[RecipientReference],
+) -> tuple[dict[RecipientKey, Decimal], list[str]]:
+    """Ownership-weighted split returning **per-recipient dollars**.
+
+    For unit recipients, that is the unit's monthly/annual share.
+    For group recipients, that is the **group total** (all units in the
+    group), matching equal/sqft group semantics so the schedule matrix can
+    safely show per-unit = group_total ÷ unit_count.
+
+    Weight form is auto-detected via :func:`resolve_ownership_weight_form`.
+
+    Returns ``(allocations, warnings)``.
+    """
+    _require_decimal("pool_total", pool_total)
+
+    form, _bare_sum, _weighted_sum, form_warnings = resolve_ownership_weight_form(
+        recipients
+    )
+    warnings = list(form_warnings)
+
+    out: dict[RecipientKey, Decimal] = {}
+    for r in recipients:
+        # resolve_ownership_weight_form already validated non-None percents
+        pct = r.ownership_percent
+        assert pct is not None
+        if form == "per_unit_interest":
+            weight = pct * Decimal(int(r.unit_count or 1))
+        else:
+            weight = pct
+        out[(r.ref_type, r.ref_id)] = pool_total * weight
+
     return out, warnings
 
 

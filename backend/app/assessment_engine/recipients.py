@@ -5,9 +5,14 @@ recipients that participate in that pool's allocation — input to the
 pool math allocators.
 
 Setup-type (grouped vs per-unit) is encoded in the recipient itself
-(``ref_type``); this resolver does not branch on setup_type. For grouped
-HOAs, recipients carry ``unit_count`` and the engine main loop multiplies
-by it after pool allocation; for per-unit HOAs, ``unit_count`` is 1.
+(``ref_type``); this resolver does not branch on setup_type.
+
+For grouped HOAs, recipients carry ``unit_count``. Equal and square-footage
+allocators expand per-unit shares to **group totals** via ``× unit_count``.
+Ownership allocation resolves weight form inside
+``ownership_percentage_allocation`` (recipient_share vs per_unit_interest)
+and also returns group totals for groups. For per-unit HOAs,
+``unit_count`` is 1.
 """
 
 from __future__ import annotations

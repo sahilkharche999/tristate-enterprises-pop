@@ -16,7 +16,9 @@ The 8-step flow (per spec §Calculation Flow):
     5. Round once at the recipient level → rounded_monthly_total.
     6. Apply package/group/unit-scope overrides (replace
        rounded_monthly_total).
-    7. Compute annual_total = rounded × 12 × unit_count.
+    7. Compute annual_total = rounded × 12
+       (pool allocators already return per-recipient dollars: group totals
+       for groups, unit shares for units — no further × unit_count here).
     8. Compute reconciliation deltas against
        AnnualPackage.approved_assessment_revenue_annual.
 """
@@ -427,7 +429,8 @@ def _apply_pool_overrides(
     Audit: appends one ``AppliedOverrideEntry`` per pool-scoped
     override into ``applied_overrides`` capturing the pre-override
     monthly total (sum across recipients) so the operator UI can show
-    the delta.
+    the delta. For grouped cases, uses total_units to compute correct
+    pool-level delta (per-recipient override * total_units).
     """
     pool_overrides = {
         o.scope_ref_id: o for o in overrides if o.scope == "pool" and o.scope_ref_id is not None
@@ -439,6 +442,16 @@ def _apply_pool_overrides(
     for row in pool_allocations:
         if row.pool_id in pool_overrides:
             pre_override_totals[row.pool_id] += row.unrounded_component_monthly
+
+    # A pool override sets EACH recipient row's component to
+    # ``override_monthly_amount`` (flat per-recipient — see the copy loop
+    # below). The pool-wide delta is therefore
+    # ``override * recipient_count - original``; both operands are pool-wide
+    # totals, so the audit delta no longer mixes grains (M1).
+    recipient_count_per_pool: dict[int, int] = defaultdict(int)
+    for row in pool_allocations:
+        if row.pool_id is not None:
+            recipient_count_per_pool[row.pool_id] += 1
 
     out: list[PoolAllocationResult] = []
     for row in pool_allocations:
@@ -457,17 +470,18 @@ def _apply_pool_overrides(
 
     for pool_id, ov in pool_overrides.items():
         original = pre_override_totals.get(pool_id)
+        per_recipient_override = ov.override_monthly_amount
+        recipient_count = recipient_count_per_pool.get(pool_id, 0)
+        new_pool_total = per_recipient_override * recipient_count
         applied_overrides.append(
             AppliedOverrideEntry(
                 scope="pool",
                 scope_ref_id=pool_id,
                 override_type=ov.override_type,
                 original_calculated_monthly=original,
-                override_monthly=ov.override_monthly_amount,
+                override_monthly=per_recipient_override,
                 delta_monthly=(
-                    ov.override_monthly_amount - original
-                    if original is not None
-                    else None
+                    new_pool_total - original if original is not None else None
                 ),
                 reason=ov.reason,
                 approved_by=ov.approved_by,
@@ -509,6 +523,7 @@ def _summarize_recipients(
     for key in insertion_order:
         r = recipient_ref_by_key[key]
         raw = components_by_recipient[key]
+        assert isinstance(raw, Decimal), "raw subtotal must be Decimal"
         rounded = _round_cents(raw)
         # All pool components are normalized to per-recipient dollars
         # (per-group for groups, per-unit for units) inside _allocate_pool.
@@ -562,6 +577,11 @@ def _apply_recipient_overrides(
     if not (package_override or group_overrides or unit_overrides):
         return totals
 
+    # Explicit recipient existence check to eliminate phantom audit entries for deleted/missing recipients.
+    existing_recipient_ids: set[tuple[str, int]] = {
+        (t.recipient_ref.ref_type, t.recipient_ref.ref_id) for t in totals
+    }
+
     package_audit_done = False
     out: list[RecipientTotalResult] = []
     for t in totals:
@@ -596,6 +616,8 @@ def _apply_recipient_overrides(
 
         if fired is not None:
             scope, ref_id, ov = fired
+            if scope != "package" and (scope, ref_id) not in existing_recipient_ids:
+                continue  # phantom entry for non-existent recipient; skip audit to avoid noise
             # Package override applies to every recipient; only audit once
             if scope == "package":
                 if package_audit_done:
