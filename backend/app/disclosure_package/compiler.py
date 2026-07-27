@@ -723,6 +723,7 @@ def _compute_all(
         return is_interfund_reserve_transfer_line(
             getattr(li, "label", None),
             section=getattr(li, "section", None),
+            account_code=getattr(li, "account_code", None),
         )
 
     statement_operating_expense_lis = [

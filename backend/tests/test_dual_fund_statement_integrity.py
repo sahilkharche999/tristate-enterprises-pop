@@ -20,6 +20,27 @@ def test_interfund_transfer_label_detection() -> None:
     assert not is_interfund_reserve_transfer_line("Interest Earned Reserve")
 
 
+def test_interfund_transfer_fix1b_reserve_income_mirror() -> None:
+    """Fix 1b: 45000 Reserve Income is interfund mirror, not external revenue."""
+    assert is_interfund_reserve_transfer_line("Reserve Income")
+    assert is_interfund_reserve_transfer_line("45000 - Reserve Income")
+    assert is_interfund_reserve_transfer_line(
+        "Reserve Income", account_code="45000"
+    )
+    assert is_interfund_reserve_transfer_line("", account_code="45000")
+    assert is_interfund_reserve_transfer_line("", account_code="90000")
+    # Interest must never be stripped as a transfer (reported via interest facts).
+    assert not is_interfund_reserve_transfer_line("Interest Earned Reserve")
+    assert not is_interfund_reserve_transfer_line("Reserve Interest Income")
+    assert not is_interfund_reserve_transfer_line(
+        "Interest Earned Reserve", account_code="47000"
+    )
+    # Real operating costs stay expenses.
+    assert not is_interfund_reserve_transfer_line("Management Fee")
+    assert not is_interfund_reserve_transfer_line("Assessment Income")
+
+
+
 def test_assessment_split_from_schedule_matrix_policy_s() -> None:
     rows = [
         SimpleNamespace(

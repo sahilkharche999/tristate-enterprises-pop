@@ -173,21 +173,31 @@ _BUDGET_RESERVE_RE = re.compile(
 # Interfund transfer labels (ops expense side or mirrored reserve income).
 # Kept broader than find_budget_reserve_contribution so "Allocation/Transfer"
 # account lines are always treated as non-external money on the dual-fund statement.
+# Fix 1b: also catch bare "Reserve Income" (GL 45000 mirror) — not interest.
 _INTERFUND_TRANSFER_RE = re.compile(
     r"("
     r"allocation\s*/\s*transfer"
     r"|allocation\s+transfer"
     r"|reserve\s*-\s*allocation"
     r"|transfer\s+to\s+reserve"
+    r"|transfer\s+from\s+operat"
     r"|reserve\s+transfer"
     r"|allocation\s+to\s+reserve"
     r"|contribution\s+to\s+reserve"
     r"|reserve\s+contribution"
     r"|reserve\s+funding"
     r"|replacement\s+fund\s+contribution"
+    # Mirror revenue on the replacement fund (Tri-State COA 45000). Uses a
+    # negative lookahead so "Reserve Interest Income" is NOT treated as a
+    # transfer (interest is external-ish / handled via reserve interest facts).
+    r"|reserve\s+(?!interest\b)income"
+    r"|replacement\s+(?!interest\b)income"
     r")",
     re.IGNORECASE,
 )
+
+# Common Tri-State GLs: 90000 = transfer out of ops; 45000 = mirror into reserve.
+_INTERFUND_ACCOUNT_RE = re.compile(r"^\s*(90000|45000)\b", re.IGNORECASE)
 
 _STATEMENT_TOLERANCE = Decimal("0.02")
 
@@ -196,18 +206,32 @@ def is_interfund_reserve_transfer_line(
     label: object,
     *,
     section: object = None,
+    account_code: object = None,
 ) -> bool:
     """True when a budget line is an interfund reserve contribution/transfer.
 
     These lines move cash between Operating and Replacement funds. They are
     not external revenue or a day-to-day operating cost for dual-fund statement
-    presentation (Fix 1). Parser may still classify them under operating for
-    income-statement UI fidelity.
+    presentation (Fix 1 / Fix 1b). Parser may still classify them under
+    operating or reserve_income for income-statement UI fidelity.
+
+    Interest lines are never treated as interfund transfers even if the account
+    series overlaps (interest is reported via reserve interest / tax facts).
     """
     text = f"{label or ''} {section or ''}".strip()
-    if not text:
+    if text and re.search(r"\binterest\b", text, re.IGNORECASE):
         return False
-    return bool(_INTERFUND_TRANSFER_RE.search(text) or _BUDGET_RESERVE_RE.search(text))
+    if text and (
+        _INTERFUND_TRANSFER_RE.search(text) or _BUDGET_RESERVE_RE.search(text)
+    ):
+        return True
+    code = str(account_code or "").strip()
+    if code and _INTERFUND_ACCOUNT_RE.match(code):
+        return True
+    # Label may embed the account code ("45000 - Reserve Income").
+    if text and _INTERFUND_ACCOUNT_RE.search(text):
+        return True
+    return False
 
 
 def is_reserve_pool_component_key(component_key: object, component_label: object = None) -> bool:
