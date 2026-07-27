@@ -45,30 +45,79 @@ _RULE_SOURCE_RANK = {
     "carried_forward": 2,
 }
 _REGULAR_REVIEW_ROW_ROLE = "current_year_operating_budget_line"
+_RESERVE_CONTRIBUTION_REVIEW_ROW_ROLE = "current_year_reserve_contribution_line"
+# Rows that feed assessment-schedule pool dollars (ops + reserve contribution).
+# Reserve *component detail* stays outside — those are spend lines, not dues.
+_SCHEDULE_BASIS_ROW_ROLES = {
+    _REGULAR_REVIEW_ROW_ROLE,
+    _RESERVE_CONTRIBUTION_REVIEW_ROW_ROLE,
+}
 _REVIEWABLE_ROW_ROLES = {
     _REGULAR_REVIEW_ROW_ROLE,
-    "current_year_reserve_contribution_line",
+    _RESERVE_CONTRIBUTION_REVIEW_ROW_ROLE,
     "reserve_component_detail",
     "reserve_cashflow_detail",
     "pass_through_or_reimbursement",
     "unknown_needs_review",
 }
 # Reserve component/cashflow lines default to a "Reserve Detail" disposition in
-# the review so the operator isn't forced to click through each one (the reserve
-# contribution line is deliberately excluded — it is a single operating line, not
-# part of that click-through burden).
+# the review so the operator isn't forced to click through each one.
+# The reserve *contribution / transfer* line is schedule-basis: it must be
+# assignable to the reserve_contributions pool so the assessment schedule can
+# split operating vs reserve dues (not Note 6 alone).
 _RESERVE_REVIEW_ROW_ROLES = {
     "reserve_component_detail",
     "reserve_cashflow_detail",
 }
 _REVIEW_ROW_ROLE_REASONS = {
     _REGULAR_REVIEW_ROW_ROLE: "eligible current-year operating budget line",
-    "current_year_reserve_contribution_line": "current-year reserve contribution line",
+    _RESERVE_CONTRIBUTION_REVIEW_ROW_ROLE: (
+        "current-year reserve contribution line — assign to the reserve "
+        "contributions pool for the assessment schedule split"
+    ),
     "reserve_component_detail": "reserve component detail line",
     "reserve_cashflow_detail": "reserve cashflow detail line",
     "pass_through_or_reimbursement": "pass-through or reimbursement line",
     "unknown_needs_review": "row needs operator review",
 }
+
+
+def _is_reserve_pool_option(option: dict[str, object]) -> bool:
+    key = str(option.get("pool_key") or "").lower()
+    name = str(option.get("pool_name") or "").lower()
+    return "reserve" in key or "reserve" in name
+
+
+def _pool_options_for_row_role(
+    row_role: str,
+    valid_pool_options: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Prefer reserve pools for contribution lines; fall back to all pools."""
+    if row_role != _RESERVE_CONTRIBUTION_REVIEW_ROW_ROLE:
+        return list(valid_pool_options)
+    reserve_opts = [opt for opt in valid_pool_options if _is_reserve_pool_option(opt)]
+    return reserve_opts or list(valid_pool_options)
+
+
+def _preferred_reserve_pool_key(
+    valid_pool_options: list[dict[str, object]],
+) -> Optional[str]:
+    """Pick the best reserve pool key for contribution-line suggestions."""
+    if not valid_pool_options:
+        return None
+    for preferred in (
+        "reserve_contributions",
+        "reserve_contribution",
+        "replacement_fund",
+        "reserves",
+    ):
+        for opt in valid_pool_options:
+            if str(opt.get("pool_key") or "").lower() == preferred:
+                return str(opt["pool_key"])
+    for opt in valid_pool_options:
+        if _is_reserve_pool_option(opt):
+            return str(opt["pool_key"])
+    return None
 
 
 @dataclass(frozen=True)
@@ -1275,8 +1324,10 @@ def build_assessment_mapping_review_rows(
         mapped = mapped_by_key.get(key)
         disposition = dispositions_by_key.get(line_key, {})
         disposition_state = str(disposition.get("disposition_state") or "clear")
+        # Schedule-basis rows: operating expenses AND the reserve contribution /
+        # transfer line (when not excluded / marked reserve-detail only).
         included_in_regular_basis = (
-            row_role == _REGULAR_REVIEW_ROW_ROLE
+            row_role in _SCHEDULE_BASIS_ROW_ROLES
             and disposition_state == "clear"
         )
         current_pool_key = str(mapped[5]) if mapped else None
@@ -1290,6 +1341,8 @@ def build_assessment_mapping_review_rows(
         stale_pool_mapping = bool(
             current_pool_key and current_pool_key not in valid_pool_keys
         )
+        row_pool_options = _pool_options_for_row_role(row_role, valid_pool_options)
+        preferred_reserve_key = _preferred_reserve_pool_key(row_pool_options)
         candidates: list[LineReviewCandidate] = []
         status = "mapped" if mapped else "needs_disposition"
         if (
@@ -1297,10 +1350,10 @@ def build_assessment_mapping_review_rows(
             and disposition_state == "clear"
             and row_role in _RESERVE_REVIEW_ROW_ROLES
         ):
-            # Reserve lines default to "Reserve Detail" so the operator isn't
-            # forced to click through every reserve component. Display-only —
-            # an explicit disposition below (pending_split/excluded/etc.) still
-            # wins, and reserve lines are already outside the regular basis.
+            # Component/cashflow reserve lines default to "Reserve Detail" so
+            # the operator isn't forced to click through every spend line.
+            # Contribution/transfer lines are schedule-basis (above) and do
+            # NOT take this default — they must be assigned to a pool.
             status = "reserve_detail"
         if disposition_state == "pending_split":
             status = "pending_split"
@@ -1323,7 +1376,25 @@ def build_assessment_mapping_review_rows(
                 rules=rules,
                 pool_names=pool_names,
             )
-            status = "suggested" if candidates else "unresolved"
+            if (
+                row_role == _RESERVE_CONTRIBUTION_REVIEW_ROW_ROLE
+                and preferred_reserve_key
+                and not candidates
+            ):
+                status = "suggested"
+            else:
+                status = "suggested" if candidates else "unresolved"
+
+        recommended_pool_key: Optional[str] = None
+        if candidates:
+            recommended_pool_key = candidates[0].pool_key
+        elif (
+            row_role == _RESERVE_CONTRIBUTION_REVIEW_ROW_ROLE
+            and preferred_reserve_key
+            and included_in_regular_basis
+            and not mapped
+        ):
+            recommended_pool_key = preferred_reserve_key
 
         rows.append(
             {
@@ -1350,8 +1421,8 @@ def build_assessment_mapping_review_rows(
                 "stale_pool_mapping": stale_pool_mapping,
                 "mapping_source": str(mapped[6] or "") if mapped else None,
                 "review_state": str(mapped[7] or "") if mapped else None,
-                "valid_pool_options": valid_pool_options,
-                "recommended_pool_key": candidates[0].pool_key if candidates else None,
+                "valid_pool_options": row_pool_options,
+                "recommended_pool_key": recommended_pool_key,
                 "candidates": [
                     {
                         "rule_id": candidate.rule_id,

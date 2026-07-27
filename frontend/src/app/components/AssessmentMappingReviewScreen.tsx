@@ -413,8 +413,15 @@ export function AssessmentMappingReviewScreen() {
                   </thead>
                   <tbody className="divide-y divide-[#eeeeee]">
                     {state.review_rows.map((row) => {
-                      const selectedPoolKey = rowPoolSelections[row.line_key] || '';
-                      const isRegularRow = row.row_role === 'current_year_operating_budget_line';
+                      // Schedule-basis rows (ops + reserve contribution) get Assign.
+                      // Use included_in_regular_basis from the API — not row_role alone —
+                      // so reserve contribution lines are assignable after the backend fix.
+                      const isAssignableRow = Boolean(row.included_in_regular_basis);
+                      const selectedPoolKey =
+                        rowPoolSelections[row.line_key]
+                        || row.recommended_pool_key
+                        || row.current_pool_key
+                        || '';
                       const recommendationKind = recommendationLabel(row);
                       const analysisHint = inlineAnalysisHint(row, analysis);
                       return (
@@ -435,11 +442,16 @@ export function AssessmentMappingReviewScreen() {
                           <td className="py-3 pr-4">
                             <div className="text-[#111111]">{humanize(row.row_role)}</div>
                             <div className="mt-1 text-xs text-[#737373]">
-                              {row.included_in_regular_basis ? 'Included in regular basis' : 'Outside regular basis'}
+                              {row.included_in_regular_basis ? 'Included in schedule basis' : 'Outside schedule basis'}
                             </div>
                           </td>
                           <td className="py-3 pr-4">
                             <div className="text-[#111111]">{recommendationText(row)}</div>
+                            {row.recommended_pool_key && !row.candidates[0] && (
+                              <div className="mt-1 text-xs text-sky-700">
+                                Suggested pool: {row.recommended_pool_key}
+                              </div>
+                            )}
                             {row.candidates[0] && (
                               <div className="mt-1 flex flex-wrap items-center gap-2">
                                 {recommendationKind && (
@@ -464,7 +476,7 @@ export function AssessmentMappingReviewScreen() {
                             )}
                           </td>
                           <td className="py-3 pr-4">
-                            {isRegularRow ? (
+                            {isAssignableRow ? (
                               <div className="flex min-w-[240px] gap-2">
                                 <select
                                   value={selectedPoolKey}
@@ -491,7 +503,11 @@ export function AssessmentMappingReviewScreen() {
                                 </button>
                               </div>
                             ) : (
-                              <span className="text-[#737373]">Not a regular mapping row</span>
+                              <span className="text-[#737373]">
+                                {row.row_role === 'current_year_reserve_contribution_line'
+                                  ? 'Clear disposition to assign to reserve pool'
+                                  : 'Not a schedule-basis mapping row'}
+                              </span>
                             )}
                             {row.current_pool_key && (
                               <div className="mt-2 text-xs text-[#737373]">Current pool: {row.current_pool_key}</div>

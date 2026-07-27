@@ -1299,7 +1299,7 @@ def test_review_rows_assign_stable_identity_and_filter_non_review_rows(
     assert by_label["Insurance"]["row_role"] == "current_year_operating_budget_line"
     assert by_label["Insurance"]["included_in_regular_basis"] is True
     assert by_label["Reserve - Allocation/Transfer"]["row_role"] == "current_year_reserve_contribution_line"
-    assert by_label["Reserve - Allocation/Transfer"]["included_in_regular_basis"] is False
+    assert by_label["Reserve - Allocation/Transfer"]["included_in_regular_basis"] is True
     assert by_label["Roof"]["row_role"] == "reserve_component_detail"
     assert by_label["Roof"]["included_in_regular_basis"] is False
     assert by_label["Insurance"]["line_key"] == refreshed_by_label["Insurance"]["line_key"]
@@ -1480,6 +1480,10 @@ def test_materialize_filters_non_regular_review_rows_from_regular_mapping(
         """
     ).fetchall()
 
-    assert result["auto_approved"] == 1
-    assert result["non_blocking"] == 2
-    assert rows == [("insurance", 1250.0)]
+    # Insurance + reserve contribution are schedule-basis; roof component is not.
+    assert result["auto_approved"] == 2
+    assert result["non_blocking"] == 1
+    assert rows == [
+        ("insurance", 1250.0),
+        ("reserve allocation transfer", 600.0),
+    ]

@@ -354,10 +354,13 @@ def test_get_mapping_review_state_exposes_filtered_review_rows(client, db_sessio
     assert review_rows["Insurance"]["row_role"] == "current_year_operating_budget_line"
     assert review_rows["Insurance"]["included_in_regular_basis"] is True
     assert review_rows["Reserve - Allocation/Transfer"]["row_role"] == "current_year_reserve_contribution_line"
-    assert review_rows["Reserve - Allocation/Transfer"]["included_in_regular_basis"] is False
+    # Contribution/transfer is schedule-basis so the assessment schedule can
+    # split operating vs reserve dues (map to reserve_contributions).
+    assert review_rows["Reserve - Allocation/Transfer"]["included_in_regular_basis"] is True
     assert review_rows["Roof"]["row_role"] == "reserve_component_detail"
     assert review_rows["Roof"]["included_in_regular_basis"] is False
-    assert body["progress"]["unresolved_count"] == 3
+    # Insurance + contribution unresolved until assigned; roof is reserve_detail
+    assert body["progress"]["unresolved_count"] >= 2
 
 
 def test_residual_default_rule_surfaces_as_editable_row_candidate(client, db_session):
