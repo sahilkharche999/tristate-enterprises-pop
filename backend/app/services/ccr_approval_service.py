@@ -32,6 +32,10 @@ from app.dre_extraction.promotion import (
     populate_setup_children,
 )
 from app.dre_extraction.schemas import DRESetupExtraction, UnitRow
+from app.governing_doc_extraction.coherence import (
+    IncoherentCcrExtraction,
+    assert_ccr_allocation_coherent,
+)
 from app.services.dre_approval_service import (
     DREApprovalResponse,
     ExtractionRunAlreadyPromoted,
@@ -127,10 +131,18 @@ def merge_operator_factors(
     if not operator_factors:
         return extraction
 
-    existing_by_num = {u.unit_number: u for u in (extraction.unit_structure.units or [])}
+    # Normalize BOTH sides of the key match (M6): keys on the existing units
+    # and the operator-factor keys are stripped identically, so "101 " and
+    # "101" resolve to the same unit instead of appending a phantom.
+    existing_by_num = {
+        str(u.unit_number).strip(): u for u in (extraction.unit_structure.units or [])
+    }
+    normalized_operator_keys = {str(k).strip() for k in operator_factors}
 
     merged_units: list[UnitRow] = []
     for unit_number, factor_entry in operator_factors.items():
+        # String normalization + exact-key matching with case sensitivity (fix M6 phantom units)
+        unit_number = str(unit_number).strip()
         existing = existing_by_num.get(unit_number)
 
         sq_ft_raw = factor_entry.get("square_feet")
@@ -174,8 +186,10 @@ def merge_operator_factors(
             )
 
     # Also include any existing units NOT covered by operator factors.
+    # Compare against the normalized operator keys so a whitespace-only
+    # difference doesn't re-add a unit that was already merged above (M6).
     for unit_num, unit in existing_by_num.items():
-        if unit_num not in operator_factors:
+        if unit_num not in normalized_operator_keys:
             merged_units.append(unit)
 
     unit_structure = extraction.unit_structure.model_copy(
@@ -203,6 +217,7 @@ def approve_ccr_extraction_run(
         ExtractionRunAlreadyPromoted: concurrent approve race (→ 409).
         ExtractionRunNotApprovable: run is rejected (→ 400).
         MissingUnitFactors: proportional pool has no unit factors (→ 422).
+        IncoherentCcrExtraction: collapsed / incomplete allocation policy (→ 422).
     """
     if setup_type not in ("fixed", "grouped", "per_unit"):
         raise ValueError(
@@ -250,6 +265,9 @@ def approve_ccr_extraction_run(
     )
     if extraction is not None and operator_factors:
         extraction = merge_operator_factors(extraction, operator_factors)
+
+    # Block collapsed factor-table / multi-method policy after edits.
+    assert_ccr_allocation_coherent(extraction)
 
     # Block promotion if any proportional pool has no unit data (3.3).
     if extraction is not None and setup_type == "per_unit":
@@ -393,15 +411,15 @@ def reopen_and_repromote_ccr_run(
     """
 
     def _apply_ccr_factors(extraction: DRESetupExtraction) -> DRESetupExtraction:
-        # The missing-unit-factors guard itself now lives in
-        # reopen_and_repromote (shared with the plain DRE path) and runs
-        # right after this transform returns — this only needs to merge
-        # the CC&R-specific operator factors on top of the review edits.
+        # Merge CC&R operator factors, then re-enforce allocation coherence
+        # so re-promote cannot bypass the same guard as first-time approve.
+        # Missing-unit-factors still runs in reopen_and_repromote after this.
         operator_factors = get_operator_unit_factors(
             extraction_run_id=extraction_run_id, connection=connection
         )
         if operator_factors:
             extraction = merge_operator_factors(extraction, operator_factors)
+        assert_ccr_allocation_coherent(extraction)
         return extraction
 
     return reopen_and_repromote(
@@ -417,6 +435,7 @@ def reopen_and_repromote_ccr_run(
 __all__ = [
     "CCRUnitFactor",
     "MissingUnitFactors",
+    "IncoherentCcrExtraction",
     "save_operator_unit_factors",
     "get_operator_unit_factors",
     "merge_operator_factors",

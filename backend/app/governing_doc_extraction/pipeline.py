@@ -5,10 +5,13 @@ Flow:
        >50 pages: batched using dre_extraction page_classification helpers).
     2. Merge per-batch inventory; filter to assessment-relevant pages
        using CCR_EXTRACTION_RELEVANT_PAGE_TYPES.
-    3. Full extraction call against the filtered page set.
-    4. Single repair retry if JSON or schema validation fails.
-    5. Citation audit + low-confidence flags + validation-check warnings.
-    6. Assemble CCRExtractionRunRecord with status: succeeded / partial / failed.
+    3. Expand ±1 neighbors of assessment-family pages (union with relevant)
+       so multi-page allocation articles are not dropped when mislabeled.
+    4. Full extraction call against the expanded page set.
+    5. Single repair retry if JSON or schema validation fails.
+    6. Citation audit + low-confidence flags + validation-check warnings.
+    7. Allocation-coherence soft check (partial + human_review when collapsed).
+    8. Assemble CCRExtractionRunRecord with status: succeeded / partial / failed.
 
 Output mirrors DREExtractionRunRecord so persistence (save_extraction_run)
 and the Review Workbench consume the same shape.
@@ -31,9 +34,14 @@ from app.dre_extraction.validation import (
     parse_extraction_response,
 )
 
+from .coherence import (
+    apply_coherence_to_extraction,
+    assess_allocation_coherence,
+)
 from .page_classification import (
     CCR_EXTRACTION_RELEVANT_PAGE_TYPES,
     classify_pages,
+    expand_relevant_pages_with_neighbors,
 )
 from .prompts import (
     CCR_POLICY_EXTRACTOR_PROMPT_SHA256,
@@ -119,12 +127,15 @@ def run_ccr_extraction(
         **classification_kwargs,
     )
     record.page_inventory = classification.full_inventory
-    record.relevant_page_numbers = classification.relevant_page_numbers
+    expanded = expand_relevant_pages_with_neighbors(
+        classification.full_inventory,
+        classification.relevant_page_numbers,
+        page_count=page_count,
+    )
+    record.relevant_page_numbers = expanded
 
     # 3–4. Full extraction call + parse with single repair retry.
-    raw, wire_parsed, audit = extract_policy_callback(
-        classification.relevant_page_numbers
-    )
+    raw, wire_parsed, audit = extract_policy_callback(expanded)
     if audit is None:
         audit = {}
     record.raw_model_output = raw
@@ -166,7 +177,17 @@ def run_ccr_extraction(
     record.low_confidence_flags = collect_low_confidence_flags(parse_result.extraction)
     record.validation_warnings = collect_validation_warnings(parse_result.extraction)
 
-    record.status = (
-        "extraction_partial" if record.citation_audit.is_partial else "succeeded"
-    )
+    # Soft coherence gate: flag collapsed multi-method / factor-table misuse.
+    # Promote path re-checks after review edits (hard block).
+    coherence = assess_allocation_coherence(parse_result.extraction)
+    extraction = apply_coherence_to_extraction(parse_result.extraction, coherence)
+    record.extraction = extraction
+    record.parsed_json = extraction.model_dump(mode="json")
+
+    if coherence.is_incoherent or (
+        record.citation_audit is not None and record.citation_audit.is_partial
+    ):
+        record.status = "extraction_partial"
+    else:
+        record.status = "succeeded"
     return record

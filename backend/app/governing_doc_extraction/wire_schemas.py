@@ -88,11 +88,19 @@ class WireCCRAssessmentSetupBlock(BaseModel):
     setup_type: CCRSetupType = Field(
         description=(
             "The structural pattern the allocation policy follows. "
-            "'fixed_equal': all costs levied equally among all units with no exceptions. "
-            "'multi_pool_combination': a default equal/base pool plus one or more "
-            "exception pools with a different basis (e.g. square-footage proportional). "
+            "'fixed_equal': ALL regular costs use equal share with NO different-basis "
+            "exceptions (single equal pool). "
+            "'multi_pool_combination': a residual/default pool plus one or more "
+            "exception or cost-center pools with a different allocation_basis "
+            "(e.g. equal base + square-footage exceptions). Requires ≥2 pools. "
             "'grouped_category': costs vary by named owner group or unit type. "
-            "'individual_unit': each unit has its own schedule in the document. "
+            "'individual_unit': each unit has its own DOLLAR assessment schedule "
+            "(specified amounts per unit). Do NOT use individual_unit merely because "
+            "an ownership-percentage or square-footage factor table exists. "
+            "If ALL costs share one proportional basis (ownership_percentage or "
+            "square_footage) with no exceptions, emit ONE proportional pool and use "
+            "grouped_category when groups are named, otherwise unknown_needs_review — "
+            "never fixed_equal (that means equal share) and never individual_unit. "
             "'unknown_needs_review': cannot determine from the document."
         )
     )

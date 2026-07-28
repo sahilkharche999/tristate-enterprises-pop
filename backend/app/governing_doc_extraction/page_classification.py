@@ -11,6 +11,8 @@ extraction call — essential because CC&Rs routinely run 90+ pages.
 
 from __future__ import annotations
 
+from typing import Sequence
+
 from app.dre_extraction.page_classification import (  # re-export for convenience
     SINGLE_CALL_PAGE_THRESHOLD,
     DEFAULT_BATCH_SIZE,
@@ -21,6 +23,7 @@ from app.dre_extraction.page_classification import (  # re-export for convenienc
     filter_relevant_pages,
     classify_pages,
 )
+from app.dre_extraction.schemas import PageInventoryEntry
 
 # Legal-document page labels the Step-1 call must choose from.
 # Assessment-allocation-relevant labels are those the extraction call needs;
@@ -54,6 +57,51 @@ CCR_EXTRACTION_RELEVANT_PAGE_TYPES: frozenset[str] = frozenset(
     }
 )
 
+# Neighbor expansion seeds only assessment-family pages (not definitions or
+# exhibits). Assessment articles routinely continue across a page break; if
+# the continuation is mislabeled, ±1 re-admits it without bloating extract
+# from long definition runs or condo-plan neighbors of exhibit tables.
+CCR_NEIGHBOR_SEED_PAGE_TYPES: frozenset[str] = frozenset(
+    {
+        "assessment/allocation provisions",
+        "special assessment provisions",
+    }
+)
+
+
+def expand_relevant_pages_with_neighbors(
+    inventory: Sequence[PageInventoryEntry],
+    relevant_page_numbers: Sequence[int],
+    *,
+    page_count: int,
+    seed_types: frozenset[str] = CCR_NEIGHBOR_SEED_PAGE_TYPES,
+    radius: int = 1,
+) -> list[int]:
+    """Union relevant pages with ±radius neighbors of assessment-family pages.
+
+    Pure / HOA-agnostic. Does not invent pages outside ``1..page_count``.
+    Definitions and exhibit pages stay in the set when already relevant but
+    do not seed neighbor expansion.
+    """
+    if page_count < 0:
+        raise ValueError(f"page_count must be >= 0, got {page_count}")
+    if radius < 0:
+        raise ValueError(f"radius must be >= 0, got {radius}")
+
+    expanded: set[int] = {
+        int(p) for p in relevant_page_numbers if 1 <= int(p) <= page_count
+    }
+    seed_lower = {t.strip().lower() for t in seed_types}
+    for entry in inventory:
+        page_type = (entry.page_type or "").strip().lower()
+        if page_type not in seed_lower:
+            continue
+        p = int(entry.page_number)
+        for n in range(p - radius, p + radius + 1):
+            if 1 <= n <= page_count:
+                expanded.add(n)
+    return sorted(expanded)
+
 
 __all__ = [
     "SINGLE_CALL_PAGE_THRESHOLD",
@@ -62,6 +110,8 @@ __all__ = [
     "ClassificationResult",
     "CCR_PAGE_TYPE_LABELS",
     "CCR_EXTRACTION_RELEVANT_PAGE_TYPES",
+    "CCR_NEIGHBOR_SEED_PAGE_TYPES",
+    "expand_relevant_pages_with_neighbors",
     "split_pages_into_batches",
     "merge_inventory",
     "filter_relevant_pages",

@@ -416,7 +416,8 @@ class TestCCRLayeringOrder:
             "document_metadata": {"association_name": "Test CC&R"},
             "page_inventory": [],
             "assessment_setup": {
-                "setup_type": "individual_unit",
+                # Pure proportional + factor table is NOT individual_unit (coherence gate).
+                "setup_type": "unknown_needs_review",
                 "display_mode": "",
                 "summary": "",
                 "requires_dre_for_future_years": True,
@@ -502,5 +503,6 @@ class TestCCRLayeringOrder:
             (resp.promoted_setup_id,),
         ).fetchone()
         # square_feet / ownership_percent have NUMERIC column affinity.
+        # ownership_percent is stored in fraction form (operator "50" → 0.5).
         assert row[0] == 1200
-        assert row[1] == 50
+        assert float(row[1]) == 0.5

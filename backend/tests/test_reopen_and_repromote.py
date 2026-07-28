@@ -279,7 +279,8 @@ class TestReopenAndRepromoteCCR:
             "document_metadata": {"association_name": "Test CC&R"},
             "page_inventory": [],
             "assessment_setup": {
-                "setup_type": "individual_unit",
+                # Pure proportional + factor table is NOT individual_unit (coherence gate).
+                "setup_type": "unknown_needs_review",
                 "display_mode": "",
                 "summary": "",
                 "requires_dre_for_future_years": True,
@@ -397,5 +398,6 @@ class TestReopenAndRepromoteCCR:
             "WHERE assessment_setup_id = ? AND unit_number = '101'",
             (second.promoted_setup_id,),
         ).fetchone()
+        # ownership_percent stored in fraction form (operator "75" → 0.75).
         assert row[0] == 1500
-        assert row[1] == 75
+        assert float(row[1]) == 0.75

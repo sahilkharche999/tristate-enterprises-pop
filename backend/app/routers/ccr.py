@@ -33,6 +33,7 @@ from app.dre_extraction.promotion import (
 )
 from app.services.ccr_approval_service import (
     CCRUnitFactor,
+    IncoherentCcrExtraction,
     MissingUnitFactors,
     approve_ccr_extraction_run,
     get_operator_unit_factors,
@@ -321,6 +322,14 @@ def approve_ccr_run(
                 "missing_pool_keys": exc.missing_pool_keys,
             },
         ) from exc
+    except IncoherentCcrExtraction as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": str(exc),
+                "coherence_reasons": exc.reasons,
+            },
+        ) from exc
     except AmbiguousOwnershipPercentForm as exc:
         raise HTTPException(
             status_code=422,
@@ -421,6 +430,14 @@ def repromote_ccr_run(
             detail={
                 "message": str(exc),
                 "missing_pool_keys": exc.missing_pool_keys,
+            },
+        ) from exc
+    except IncoherentCcrExtraction as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": str(exc),
+                "coherence_reasons": exc.reasons,
             },
         ) from exc
     except AmbiguousOwnershipPercentForm as exc:

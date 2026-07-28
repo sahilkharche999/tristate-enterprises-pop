@@ -28,9 +28,19 @@ Populate page_inventory with one entry per page. Use a confidence < 0.7 when a p
 STEP 2 — ALLOCATION POLICY EXTRACTION
 ════════════════════════════════════════════════════════
 
-Read ONLY the pages tagged "assessment/allocation provisions", "special assessment provisions", "definitions", and "exhibit/percentage-interest table".
+Prioritize pages tagged "assessment/allocation provisions", "special assessment provisions",
+"definitions", and "exhibit/percentage-interest table". You may also receive adjacent pages
+that continue an assessments article — if those pages state division/apportionment rules,
+treat them as assessment/allocation content even if mis-tagged.
 
 YOUR TASK: Identify and extract the ECONOMIC ALLOCATION POLICY — that is, how the HOA divides operating and reserve costs among the owners. You are looking for:
+
+CRITICAL — FACTORS ≠ METHOD:
+   A percentage-interest / square-footage EXHIBIT TABLE supplies unit_structure.units
+   (per-unit factors). It does NOT by itself prove that all costs use ownership_percentage
+   or square_footage. The allocation METHOD for each cost bucket comes from
+   division/apportionment PROSE (e.g. "divided equally except …"). Never collapse a
+   multi-method policy into a single proportional pool solely because an exhibit lists %.
 
 A. DEFAULT BASIS — the rule that applies to ALL cost categories unless an exception overrides it.
    Examples of what a default basis might look like (by MEANING, not wording):
@@ -41,22 +51,25 @@ A. DEFAULT BASIS — the rule that applies to ALL cost categories unless an exce
    Never pattern-match against specific section numbers or HOA names.
 
 B. EXCEPTION BUCKETS — cost categories that are allocated by a DIFFERENT rule than the default.
-   For each exception bucket:
+   For each exception bucket (one or more):
    - Identify which expense CATEGORIES or PURPOSES fall into the bucket by what they fund (e.g., "costs that benefit only unit X" or "commonly metered utilities"), not by reading a hardcoded list.
    - Identify the basis for this bucket (same options as the default: equal, square_footage, ownership_percentage, specified_value, custom_factor).
    - Capture the denominator source (if the document says "in proportion to the square footage … as set forth in Exhibit B", the denominator is in an exhibit — record it as a cross-reference, not a number you invent).
+   - Language like "except", "unless", "provided that" after a default rule almost always means exception buckets.
 
 C. SPECIAL ASSESSMENTS — how one-time levies are allocated.
    If the document says special assessments follow "the same basis as regular assessments", resolve that reference and record the resolved policy, not "same as regular".
 
 D. RESERVE CONTRIBUTIONS — whether reserves are funded through the same apportionment or separately.
 
-E. CROSS-REFERENCES — if the policy defers to an exhibit, schedule, or DRE budget for specific numbers (e.g., "as set forth in the budget submitted to the California DRE and as set forth in Exhibit B"), record the cross-reference verbatim. Do NOT invent per-unit numbers from floor-plan drawings.
+E. CROSS-REFERENCES — if the policy defers to an exhibit, schedule, or DRE budget for specific numbers (e.g., "as set forth in the budget submitted to the California DRE and as set forth in Exhibit B"), record the cross-reference verbatim. Do NOT invent per-unit numbers from floor-plan drawings. Set requires_dre_for_future_years=true when amounts or proration schedules are deferred to a DRE/budget document.
 
 F. PER-UNIT FACTOR TABLE — decide whether the per-unit allocation data is PRESENT or merely REFERENCED:
-   - PRESENT: one of the pages you classified as "exhibit/percentage-interest table" (or an equivalent schedule) actually shows a legible, machine-readable table of per-unit factors — a list of units each with a square footage and/or an ownership/allocation percentage. When present, you MUST read EVERY row of that table verbatim into unit_structure.units (see STEP 3). This is reading printed values, NOT inventing them — extract them even though the prose pool rule only describes the basis. A percentage-interest column counts as a proportional factor (it is the normalized square-footage share).
+   - PRESENT: one of the pages you classified as "exhibit/percentage-interest table" (or an equivalent schedule) actually shows a legible, machine-readable table of per-unit factors — a list of units each with a square footage and/or an ownership/allocation percentage. When present, you MUST read EVERY row of that table verbatim into unit_structure.units (see STEP 3). This is reading printed values, NOT inventing them — extract them even though the prose pool rule only describes the basis. A percentage-interest column is a factor column, not proof that every cost uses ownership_percentage.
    - REFERENCED-BUT-ABSENT: the policy names an exhibit/schedule that is NOT among the uploaded/legible pages, or the only per-unit data is in floor-plan drawings. Then leave unit_structure.units empty, record the cross-reference, and raise a human_review_question. Never fabricate rows.
    - If a corrected/amended version of the table supersedes an earlier one in the same document, use the corrected values.
+
+G. COST CENTERS — if the document defines a cost center (facility or service that benefits only some units and is financed by assessments on those units, e.g. parking), emit a separate allocation_pool for it OR a high-severity human_review_question if beneficiaries cannot be determined. Do not silently omit cost centers.
 
 ════════════════════════════════════════════════════════
 STEP 3 — BUILD THE STRUCTURED OUTPUT
@@ -73,12 +86,14 @@ document_metadata
 
 assessment_setup
   • setup_type: choose the structural pattern that matches the allocation policy.
-    - If the default is "equal" and there is ONE proportional exception bucket → "multi_pool_combination" (two pools: equal base + exception).
-    - If there are NO exceptions → "fixed_equal".
+    - If the default basis has ONE OR MORE exception buckets with a different basis → "multi_pool_combination" (≥2 pools: residual base + exception pools).
+    - If ALL regular costs use equal share and there are NO exceptions → "fixed_equal" (one equal pool).
+    - If ALL regular costs use one proportional basis (ownership_percentage OR square_footage) with NO different-basis exceptions → still a SINGLE proportional pool; do NOT use "fixed_equal"; do NOT invent multi-pool; do NOT use "individual_unit" merely because a %/sqft table exists — use "grouped_category" if groups are named, else "unknown_needs_review".
     - If allocation varies by recorded group/type → "grouped_category".
-    - If each unit has its own schedule → "individual_unit".
+    - "individual_unit" ONLY when each unit has its own DOLLAR schedule (specified amounts per unit), NOT when the document only lists ownership % or sqft factors.
     Use "unknown_needs_review" only as a last resort.
-  • requires_dre_for_future_years: true if the document defers specific amounts to the DRE or board resolution; false only when amounts are fully self-contained in the document.
+  • default_basis: the default allocation basis (equal / ownership_percentage / square_footage / specified_value / custom_factor / unknown).
+  • requires_dre_for_future_years: true if the document defers specific amounts or proration schedules to the DRE, board resolution, or an external budget; false only when amounts are fully self-contained in the document.
   • source_pages: cite the section(s) that establish the structure.
 
 unit_structure
@@ -96,26 +111,19 @@ unit_structure
   • Never invent per-unit square footage or percentages from floor-plan drawings or from a denominator you cannot see.
 
 allocation_pools
-  Build one pool per distinct allocation rule:
-  • pool_key: stable snake_case key derived from the pool's PURPOSE (e.g., "equal_base", "sqft_proportional_exceptions", "reserve_equal"). Do NOT include HOA names or section numbers in pool_key values.
+  Build one pool per distinct allocation rule (wire field names):
+  • pool_key: stable snake_case key derived from the pool's PURPOSE (e.g., "equal_base", "sqft_proportional_exceptions", "parking_cost_center"). Do NOT include HOA names or section numbers in pool_key values.
   • pool_name: short operator-readable name.
-  • annual_amount: null — the CC&R defines the POLICY; the dollar amounts come from the annual budget at mapping time.
-  • allocation_method: the method for this pool ("equal", "square_footage", "ownership_percentage", "specified_value", "custom_factor").
+  • allocation_basis: the method for this pool ("equal", "square_footage", "ownership_percentage", "specified_value", "custom_factor").
+  • is_residual_base: true for the residual/default pool that covers all costs not in exception pools; false for exception / cost-center pools.
+  • expense_categories: SEMANTIC categories the document names for this pool when explicit (e.g., "insurance", "painting and roof reserves"). Empty for pure residual bases. Do NOT invent categories beyond the document.
+  • residual_after_pool_keys: for residual base pools, list the pool_keys of exception pools that carve out of the residual.
   • recipient_scope: who participates ("all_units", "residential_only", "commercial_only", etc.).
-  • denominator_label / denominator_value: if the document gives the denominator (e.g., "total square footage of all units"), record it; otherwise null with a human_review_question.
-  • budget_line_derivation:
-    - "residual_default" for the equal/base pool that covers all non-exception costs.
-    - "explicit_lines" if the document lists exactly which cost categories belong to a pool.
-    - "formula_only" if a pool is derived from a formula without specific line evidence.
-  • included_budget_lines: the SEMANTIC categories the document names for an exception pool (e.g., "insurance", "painting and roof reserves", "commonly metered utilities"). Do NOT expand or guess beyond what the document states.
-  • residual_after_pool_keys: for residual_default pools, list the pool_keys of any exception pools.
+  • denominator_label / denominator_source: if the document states the denominator, record it; otherwise use a human_review_question.
   • source_pages: every page on which this pool's rule appears.
+  If default is equal and exceptions exist → emit the residual equal pool PLUS one pool per exception basis/category group (≥2 pools total).
 
-formulas: empty list (CC&Rs contain prose rules, not per-unit formulas; formulas are derived at promotion from the unit data).
-
-reserve_setup: capture if the document addresses reserve contributions. Set its confidence to reflect how legibly the reserve provisions read — high when the reserve-funding policy is clearly stated, below 0.7 only when faded or ambiguous. Do not leave it at 0.0 when you stated a policy you are confident in.
-
-budget_line_mapping_evidence: empty list — budget-line routing is determined at assessment-mapping time, not in the CC&R.
+reserve_policy: capture if the document addresses reserve contributions. High confidence when the reserve-funding policy is clearly stated.
 
 validation_checks: record any internal consistency checks you can perform, e.g., "special assessment basis resolves to the same method as regular assessments" — status "pass" or "fail" with details.
 

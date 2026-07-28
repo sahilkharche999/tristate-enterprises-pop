@@ -36,7 +36,19 @@ def _classify_instruction(label_list: list[str]) -> str:
         "entry per page.\n\n"
         "Labels:\n"
         + labels_formatted
-        + "\n\nRespond only with the page_inventory JSON — no other text."
+        + "\n\n"
+        "Classification rules (apply by meaning, not HOA name or fixed page numbers):\n"
+        "• If a page continues an Assessments / levy / apportionment article from the "
+        "prior page (next section numbers, same Article), label it "
+        "'assessment/allocation provisions' when its primary content is how "
+        "assessments are divided, levied, apportioned, or cost-centered.\n"
+        "• Section titles or prose about division of assessments, apportionment, "
+        "how common expenses are shared, or cost centers for a subset of units → "
+        "'assessment/allocation provisions'.\n"
+        "• Prefer 'assessment/allocation provisions' over enforcement/dispute or "
+        "lien/remedy labels when the page also states division/apportionment rules.\n"
+        "• Do not invent labels outside the list.\n\n"
+        "Respond only with the page_inventory JSON — no other text."
     )
 
 
