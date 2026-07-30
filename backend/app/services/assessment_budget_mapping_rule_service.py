@@ -1322,13 +1322,22 @@ def build_assessment_mapping_review_rows(
         normalized, section, category, fund_type, account_code = _line_key(line)
         key = (normalized, section, category, fund_type, account_code)
         mapped = mapped_by_key.get(key)
-        disposition = dispositions_by_key.get(line_key, {})
+        # Distinguish never-touched (missing disposition row) from an
+        # operator Clear that UPSERTed disposition_state="clear". Without
+        # that distinction, Clear on default reserve detail is a no-op
+        # (July 2026 client dogfood).
+        disposition = dispositions_by_key.get(line_key)
+        has_explicit_disposition = disposition is not None
+        disposition = disposition or {}
         disposition_state = str(disposition.get("disposition_state") or "clear")
-        # Schedule-basis rows: operating expenses AND the reserve contribution /
-        # transfer line (when not excluded / marked reserve-detail only).
-        included_in_regular_basis = (
+        # Schedule-basis: operating + reserve contribution when clear, OR a
+        # reserve component/cashflow line the operator cleared (opt-in to map).
+        included_in_regular_basis = disposition_state == "clear" and (
             row_role in _SCHEDULE_BASIS_ROW_ROLES
-            and disposition_state == "clear"
+            or (
+                row_role in _RESERVE_REVIEW_ROW_ROLES
+                and has_explicit_disposition
+            )
         )
         current_pool_key = str(mapped[5]) if mapped else None
         # H1: the line's active mapping points at a pool_key that no longer
@@ -1349,11 +1358,14 @@ def build_assessment_mapping_review_rows(
             not mapped
             and disposition_state == "clear"
             and row_role in _RESERVE_REVIEW_ROW_ROLES
+            and not has_explicit_disposition
         ):
             # Component/cashflow reserve lines default to "Reserve Detail" so
             # the operator isn't forced to click through every spend line.
             # Contribution/transfer lines are schedule-basis (above) and do
             # NOT take this default — they must be assigned to a pool.
+            # Only when never dispositioned — operator Clear writes an
+            # explicit clear row and opts the line into schedule mapping.
             status = "reserve_detail"
         if disposition_state == "pending_split":
             status = "pending_split"
@@ -1416,6 +1428,7 @@ def build_assessment_mapping_review_rows(
                 "current_status": status,
                 "disposition_state": disposition_state,
                 "disposition_note": str(disposition.get("notes") or ""),
+                "has_explicit_disposition": has_explicit_disposition,
                 "pool_key": current_pool_key,
                 "current_pool_key": current_pool_key,
                 "stale_pool_mapping": stale_pool_mapping,

@@ -81,6 +81,8 @@ export interface ReviewRow {
   current_status: string;
   disposition_state: string;
   disposition_note: string;
+  /** True when a disposition row was stored (operator acted); false for never-touched defaults. */
+  has_explicit_disposition?: boolean;
   pool_key: string | null;
   current_pool_key: string | null;
   stale_pool_mapping?: boolean;

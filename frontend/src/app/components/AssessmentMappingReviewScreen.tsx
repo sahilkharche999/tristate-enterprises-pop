@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router';
 import { ArrowLeft, Ban, Check, Pencil, Play, RotateCw, Save, Sparkles, X } from 'lucide-react';
 
@@ -76,6 +76,70 @@ type InlineAnalysisHint = {
 };
 
 const MAIN_BLOCKER_CATEGORIES = new Set(['unresolved_eligible_lines', 'pending_split', 'stale_pool_mapping']);
+
+const RESERVE_DETAIL_ROLES = new Set([
+  'reserve_component_detail',
+  'reserve_cashflow_detail',
+]);
+
+type ReviewSectionId = 'operating' | 'reserve_contribution' | 'reserve_detail' | 'other';
+
+const REVIEW_SECTION_ORDER: ReviewSectionId[] = [
+  'operating',
+  'reserve_contribution',
+  'reserve_detail',
+  'other',
+];
+
+const REVIEW_SECTION_LABELS: Record<ReviewSectionId, string> = {
+  operating: 'Operating (schedule basis)',
+  reserve_contribution: 'Reserve contribution (schedule basis)',
+  reserve_detail: 'Reserve detail (outside schedule basis by default)',
+  other: 'Other / pass-through',
+};
+
+function reviewSectionForRow(row: ReviewRow): ReviewSectionId {
+  if (row.row_role === 'current_year_operating_budget_line') return 'operating';
+  if (row.row_role === 'current_year_reserve_contribution_line') return 'reserve_contribution';
+  if (RESERVE_DETAIL_ROLES.has(row.row_role)) return 'reserve_detail';
+  return 'other';
+}
+
+function partitionReviewRows(rows: ReviewRow[]): Array<{ id: ReviewSectionId; label: string; rows: ReviewRow[] }> {
+  const buckets: Record<ReviewSectionId, ReviewRow[]> = {
+    operating: [],
+    reserve_contribution: [],
+    reserve_detail: [],
+    other: [],
+  };
+  for (const row of rows) {
+    buckets[reviewSectionForRow(row)].push(row);
+  }
+  return REVIEW_SECTION_ORDER
+    .filter((id) => buckets[id].length > 0)
+    .map((id) => ({ id, label: REVIEW_SECTION_LABELS[id], rows: buckets[id] }));
+}
+
+function isReserveDetailRole(row: ReviewRow): boolean {
+  return RESERVE_DETAIL_ROLES.has(row.row_role);
+}
+
+/** Effective disposition for button highlight (includes default reserve detail). */
+function effectiveDisposition(row: ReviewRow): string {
+  if (row.disposition_state && row.disposition_state !== 'clear') {
+    return row.disposition_state;
+  }
+  if (row.current_status === 'reserve_detail') return 'reserve_detail';
+  if (row.current_status === 'excluded_non_regular') return 'excluded_non_regular';
+  if (row.current_status === 'pending_split') return 'pending_split';
+  return 'clear';
+}
+
+function dispositionButtonClass(active: boolean): string {
+  return active
+    ? 'rounded border border-sky-600 bg-sky-50 px-2 py-1 text-xs font-medium text-sky-800'
+    : 'rounded border border-[#d4d4d4] px-2 py-1 text-xs hover:bg-[#f5f5f5]';
+}
 
 function analysisCacheKey(hoaId: number) {
   return `assessment-mapping-analysis-${hoaId}`;
@@ -201,6 +265,11 @@ export function AssessmentMappingReviewScreen() {
       mapped: state.review_rows.filter((row) => row.current_status === 'mapped').length,
     };
   }, [state]);
+
+  const reviewSections = useMemo(
+    () => (state ? partitionReviewRows(state.review_rows) : []),
+    [state],
+  );
 
   const showAnalyzeButton = useMemo(() => {
     if (!state) return false;
@@ -406,155 +475,183 @@ export function AssessmentMappingReviewScreen() {
                       <th className="py-2 pr-4">Amount</th>
                       <th className="py-2 pr-4">Role</th>
                       <th className="py-2 pr-4">Recommendation</th>
-                      <th className="py-2 pr-4">Assignment</th>
                       <th className="py-2 pr-4">Status</th>
-                      <th className="py-2 pr-4">Actions</th>
+                      <th className="py-2 pr-4">Controls</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[#eeeeee]">
-                    {state.review_rows.map((row) => {
-                      // Schedule-basis rows (ops + reserve contribution) get Assign.
-                      // Use included_in_regular_basis from the API — not row_role alone —
-                      // so reserve contribution lines are assignable after the backend fix.
-                      const isAssignableRow = Boolean(row.included_in_regular_basis);
-                      const selectedPoolKey =
-                        rowPoolSelections[row.line_key]
-                        || row.recommended_pool_key
-                        || row.current_pool_key
-                        || '';
-                      const recommendationKind = recommendationLabel(row);
-                      const analysisHint = inlineAnalysisHint(row, analysis);
-                      return (
-                        <tr key={row.line_key} className="align-top">
-                          <td className="py-3 pr-4">
-                            <div className="font-medium text-[#111111]">{row.line_label}</div>
-                            <div className="mt-1 text-xs text-[#737373]">{row.reason}</div>
-                            {row.disposition_note && (
-                              <div className="mt-1 text-xs text-[#737373]">Note: {row.disposition_note}</div>
-                            )}
-                          </td>
-                          <td className="py-3 pr-4">
-                            <div className="font-medium text-[#111111]">
-                              {row.assessment_mapping_amount == null ? '-' : formatCurrency(row.assessment_mapping_amount)}
-                            </div>
-                            <div className="mt-1 text-xs text-[#737373]">Source: {row.source_column_used}</div>
-                          </td>
-                          <td className="py-3 pr-4">
-                            <div className="text-[#111111]">{humanize(row.row_role)}</div>
-                            <div className="mt-1 text-xs text-[#737373]">
-                              {row.included_in_regular_basis ? 'Included in schedule basis' : 'Outside schedule basis'}
-                            </div>
-                          </td>
-                          <td className="py-3 pr-4">
-                            <div className="text-[#111111]">{recommendationText(row)}</div>
-                            {row.recommended_pool_key && !row.candidates[0] && (
-                              <div className="mt-1 text-xs text-sky-700">
-                                Suggested pool: {row.recommended_pool_key}
-                              </div>
-                            )}
-                            {row.candidates[0] && (
-                              <div className="mt-1 flex flex-wrap items-center gap-2">
-                                {recommendationKind && (
-                                  <span className="rounded-full bg-sky-50 px-2 py-0.5 text-xs font-medium text-sky-700 ring-1 ring-inset ring-sky-600/20">
-                                    {recommendationKind}
-                                  </span>
-                                )}
-                                <DecisionBadge value={row.candidates[0].decision_level} />
-                                {row.candidates[0].review_reason && (
-                                  <span className="text-xs text-amber-700">{row.candidates[0].review_reason}</span>
-                                )}
-                              </div>
-                            )}
-                            {analysisHint && (
-                              <div className="mt-2 rounded border border-sky-200 bg-sky-50 p-2">
-                                <div className="flex flex-wrap items-center gap-2">
-                                  <span className="text-xs font-medium text-sky-800">{analysisHint.title}</span>
-                                  <DecisionBadge value={analysisHint.badge} />
-                                </div>
-                                <p className="mt-1 text-xs text-sky-900">{analysisHint.detail}</p>
-                              </div>
-                            )}
-                          </td>
-                          <td className="py-3 pr-4">
-                            {isAssignableRow ? (
-                              <div className="flex min-w-[240px] gap-2">
-                                <select
-                                  value={selectedPoolKey}
-                                  onChange={(event) => setRowPoolSelections((prev) => ({
-                                    ...prev,
-                                    [row.line_key]: event.target.value,
-                                  }))}
-                                  className="min-w-0 flex-1 rounded border border-[#d4d4d4] px-2 py-1 text-sm"
-                                >
-                                  <option value="">Select pool</option>
-                                  {row.valid_pool_options.map((option) => (
-                                    <option key={`${row.line_key}-${option.pool_key}`} value={option.pool_key}>
-                                      {option.pool_name}
-                                    </option>
-                                  ))}
-                                </select>
-                                <button
-                                  type="button"
-                                  className="rounded border border-[#d4d4d4] px-3 py-1 text-sm hover:bg-[#f5f5f5] disabled:opacity-60"
-                                  disabled={busy !== null || !selectedPoolKey}
-                                  onClick={() => void handleAssign(row)}
-                                >
-                                  Assign
-                                </button>
-                              </div>
-                            ) : (
-                              <span className="text-[#737373]">
-                                {row.row_role === 'current_year_reserve_contribution_line'
-                                  ? 'Clear disposition to assign to reserve pool'
-                                  : 'Not a schedule-basis mapping row'}
-                              </span>
-                            )}
-                            {row.current_pool_key && (
-                              <div className="mt-2 text-xs text-[#737373]">Current pool: {row.current_pool_key}</div>
-                            )}
-                          </td>
-                          <td className="py-3 pr-4">
-                            <StatusBadge value={row.current_status} />
-                          </td>
-                          <td className="py-3 pr-4">
-                            <div className="flex flex-wrap gap-2">
-                              <button
-                                type="button"
-                                className="rounded border border-[#d4d4d4] px-2 py-1 text-xs hover:bg-[#f5f5f5]"
-                                onClick={() => void handleDisposition(row, 'excluded_non_regular')}
-                                disabled={busy !== null}
-                              >
-                                Exclude
-                              </button>
-                              <button
-                                type="button"
-                                className="rounded border border-[#d4d4d4] px-2 py-1 text-xs hover:bg-[#f5f5f5]"
-                                onClick={() => void handleDisposition(row, 'reserve_detail')}
-                                disabled={busy !== null}
-                              >
-                                Reserve detail
-                              </button>
-                              <button
-                                type="button"
-                                className="rounded border border-[#d4d4d4] px-2 py-1 text-xs hover:bg-[#f5f5f5]"
-                                onClick={() => void handleDisposition(row, 'pending_split')}
-                                disabled={busy !== null}
-                              >
-                                Needs split
-                              </button>
-                              <button
-                                type="button"
-                                className="rounded border border-[#d4d4d4] px-2 py-1 text-xs hover:bg-[#f5f5f5]"
-                                onClick={() => void handleDisposition(row, 'clear')}
-                                disabled={busy !== null}
-                              >
-                                Clear
-                              </button>
-                            </div>
+                    {reviewSections.map((section) => (
+                      <Fragment key={section.id}>
+                        <tr className="bg-[#f5f5f5]">
+                          <td colSpan={6} className="py-2 pr-4 text-xs font-semibold uppercase tracking-wide text-[#525252]">
+                            {section.label}
+                            <span className="ml-2 font-normal normal-case text-[#737373]">
+                              ({section.rows.length})
+                            </span>
                           </td>
                         </tr>
-                      );
-                    })}
+                        {section.rows.map((row) => {
+                          const isAssignableRow = Boolean(row.included_in_regular_basis);
+                          const hideExclude = isReserveDetailRole(row);
+                          const effective = effectiveDisposition(row);
+                          const isDefaultReserveDetail =
+                            isReserveDetailRole(row)
+                            && row.current_status === 'reserve_detail'
+                            && !row.has_explicit_disposition;
+                          const selectedPoolKey =
+                            rowPoolSelections[row.line_key]
+                            || row.recommended_pool_key
+                            || row.current_pool_key
+                            || '';
+                          const recommendationKind = recommendationLabel(row);
+                          const analysisHint = inlineAnalysisHint(row, analysis);
+                          const clearTitle = isReserveDetailRole(row)
+                            ? 'Include this line for pool assignment (un-default reserve detail)'
+                            : 'Return to normal schedule-basis review';
+                          return (
+                            <tr key={row.line_key} className="align-top">
+                              <td className="py-3 pr-4">
+                                <div className="font-medium text-[#111111]">{row.line_label}</div>
+                                <div className="mt-1 text-xs text-[#737373]">{row.reason}</div>
+                                {isDefaultReserveDetail && (
+                                  <div className="mt-1 text-xs text-sky-700">Default: reserve detail (not operator-set)</div>
+                                )}
+                                {row.disposition_note && (
+                                  <div className="mt-1 text-xs text-[#737373]">Note: {row.disposition_note}</div>
+                                )}
+                              </td>
+                              <td className="py-3 pr-4">
+                                <div className="font-medium text-[#111111]">
+                                  {row.assessment_mapping_amount == null ? '-' : formatCurrency(row.assessment_mapping_amount)}
+                                </div>
+                                <div className="mt-1 text-xs text-[#737373]">Source: {row.source_column_used}</div>
+                              </td>
+                              <td className="py-3 pr-4">
+                                <div className="text-[#111111]">{humanize(row.row_role)}</div>
+                                <div className="mt-1 text-xs text-[#737373]">
+                                  {row.included_in_regular_basis ? 'Included in schedule basis' : 'Outside schedule basis'}
+                                </div>
+                              </td>
+                              <td className="py-3 pr-4">
+                                <div className="text-[#111111]">{recommendationText(row)}</div>
+                                {row.recommended_pool_key && !row.candidates[0] && (
+                                  <div className="mt-1 text-xs text-sky-700">
+                                    Suggested pool: {row.recommended_pool_key}
+                                  </div>
+                                )}
+                                {row.candidates[0] && (
+                                  <div className="mt-1 flex flex-wrap items-center gap-2">
+                                    {recommendationKind && (
+                                      <span className="rounded-full bg-sky-50 px-2 py-0.5 text-xs font-medium text-sky-700 ring-1 ring-inset ring-sky-600/20">
+                                        {recommendationKind}
+                                      </span>
+                                    )}
+                                    <DecisionBadge value={row.candidates[0].decision_level} />
+                                    {row.candidates[0].review_reason && (
+                                      <span className="text-xs text-amber-700">{row.candidates[0].review_reason}</span>
+                                    )}
+                                  </div>
+                                )}
+                                {analysisHint && (
+                                  <div className="mt-2 rounded border border-sky-200 bg-sky-50 p-2">
+                                    <div className="flex flex-wrap items-center gap-2">
+                                      <span className="text-xs font-medium text-sky-800">{analysisHint.title}</span>
+                                      <DecisionBadge value={analysisHint.badge} />
+                                    </div>
+                                    <p className="mt-1 text-xs text-sky-900">{analysisHint.detail}</p>
+                                  </div>
+                                )}
+                              </td>
+                              <td className="py-3 pr-4">
+                                <StatusBadge value={row.current_status} />
+                              </td>
+                              <td className="py-3 pr-4">
+                                <div className="flex min-w-[280px] flex-wrap items-center gap-2">
+                                  {isAssignableRow ? (
+                                    <>
+                                      <select
+                                        value={selectedPoolKey}
+                                        onChange={(event) => setRowPoolSelections((prev) => ({
+                                          ...prev,
+                                          [row.line_key]: event.target.value,
+                                        }))}
+                                        className="min-w-[8rem] flex-1 rounded border border-[#d4d4d4] px-2 py-1 text-sm"
+                                        title="Choose allocation pool"
+                                      >
+                                        <option value="">Select pool</option>
+                                        {row.valid_pool_options.map((option) => (
+                                          <option key={`${row.line_key}-${option.pool_key}`} value={option.pool_key}>
+                                            {option.pool_name}
+                                          </option>
+                                        ))}
+                                      </select>
+                                      <button
+                                        type="button"
+                                        className="rounded border border-[#d4d4d4] px-3 py-1 text-sm hover:bg-[#f5f5f5] disabled:opacity-60"
+                                        disabled={busy !== null || !selectedPoolKey}
+                                        onClick={() => void handleAssign(row)}
+                                        title="Map this line into the selected allocation pool"
+                                      >
+                                        Assign
+                                      </button>
+                                    </>
+                                  ) : (
+                                    <span className="text-xs text-[#737373]">
+                                      {isReserveDetailRole(row)
+                                        ? 'Clear to include for pool assignment'
+                                        : 'Not schedule-basis'}
+                                    </span>
+                                  )}
+                                  {!hideExclude && (
+                                    <button
+                                      type="button"
+                                      className={dispositionButtonClass(effective === 'excluded_non_regular')}
+                                      onClick={() => void handleDisposition(row, 'excluded_non_regular')}
+                                      disabled={busy !== null}
+                                      title="Remove from regular assessment basis (non-dues / informational)"
+                                    >
+                                      Exclude
+                                    </button>
+                                  )}
+                                  <button
+                                    type="button"
+                                    className={dispositionButtonClass(effective === 'reserve_detail')}
+                                    onClick={() => void handleDisposition(row, 'reserve_detail')}
+                                    disabled={busy !== null}
+                                    title="Reserve spend/detail line; outside schedule basis"
+                                  >
+                                    Reserve detail
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className={dispositionButtonClass(effective === 'pending_split')}
+                                    onClick={() => void handleDisposition(row, 'pending_split')}
+                                    disabled={busy !== null}
+                                    title="Hold line; blocks final render until resolved"
+                                  >
+                                    Needs split
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className={dispositionButtonClass(
+                                      effective === 'clear' && !isDefaultReserveDetail && Boolean(row.has_explicit_disposition),
+                                    )}
+                                    onClick={() => void handleDisposition(row, 'clear')}
+                                    disabled={busy !== null}
+                                    title={clearTitle}
+                                  >
+                                    Clear
+                                  </button>
+                                </div>
+                                {row.current_pool_key && (
+                                  <div className="mt-2 text-xs text-[#737373]">Current pool: {row.current_pool_key}</div>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </Fragment>
+                    ))}
                   </tbody>
                 </table>
               </div>
