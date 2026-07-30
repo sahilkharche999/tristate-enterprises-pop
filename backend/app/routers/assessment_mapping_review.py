@@ -880,18 +880,21 @@ def set_review_row_disposition(
         setup_id=setup_id,
         line_key=payload.line_key,
     )
-    result = set_assessment_review_row_disposition(
-        property_id=hoa_id,
-        assessment_setup_id=setup_id,
-        budget_year=budget_year,
-        budget_draft_id=draft_id,
-        row=row,
-        disposition_state=payload.disposition_state,
-        actor=_actor(current_user),
-        note=payload.note,
-        connection=raw_conn,
-        commit=False,
-    )
+    try:
+        result = set_assessment_review_row_disposition(
+            property_id=hoa_id,
+            assessment_setup_id=setup_id,
+            budget_year=budget_year,
+            budget_draft_id=draft_id,
+            row=row,
+            disposition_state=payload.disposition_state,
+            actor=_actor(current_user),
+            note=payload.note,
+            connection=raw_conn,
+            commit=False,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     session.commit()
     return result
 

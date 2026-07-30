@@ -1321,15 +1321,28 @@ def build_assessment_mapping_review_rows(
         )
         normalized, section, category, fund_type, account_code = _line_key(line)
         key = (normalized, section, category, fund_type, account_code)
-        mapped = mapped_by_key.get(key)
+        mapped = _lookup_mapping_row(mapped_by_key, key=key)
         # Distinguish never-touched (missing disposition row) from an
         # operator Clear that UPSERTed disposition_state="clear". Without
         # that distinction, Clear on default reserve detail is a no-op
         # (July 2026 client dogfood).
-        disposition = dispositions_by_key.get(line_key)
+        disposition = _lookup_disposition_for_line(
+            dispositions_by_key,
+            line_key=line_key,
+            normalized_label=normalized,
+            row_role=row_role,
+            account_code=account_code,
+        )
         has_explicit_disposition = disposition is not None
         disposition = disposition or {}
         disposition_state = str(disposition.get("disposition_state") or "clear")
+        # Contribution/transfer lines are schedule-basis; "reserve_detail" is
+        # never a valid end state for them (maps dues into reserves, not spend).
+        if (
+            row_role == _RESERVE_CONTRIBUTION_REVIEW_ROW_ROLE
+            and disposition_state == "reserve_detail"
+        ):
+            disposition_state = "clear"
         # Schedule-basis: operating + reserve contribution when clear, OR a
         # reserve component/cashflow line the operator cleared (opt-in to map).
         included_in_regular_basis = disposition_state == "clear" and (
@@ -1602,6 +1615,15 @@ def set_assessment_review_row_disposition(
     connection: sqlite3.Connection,
     commit: bool = True,
 ) -> dict[str, object]:
+    # Reserve contribution/transfer funds dues into reserves — never "reserve detail".
+    if (
+        str(row.get("row_role") or "") == _RESERVE_CONTRIBUTION_REVIEW_ROW_ROLE
+        and disposition_state == "reserve_detail"
+    ):
+        raise ValueError(
+            "Reserve contribution/transfer lines cannot be marked reserve detail; "
+            "assign them to the reserve contributions pool so the PDF reserve total matches."
+        )
     previous_rows = _review_row_dispositions_by_line_key(
         property_id=property_id,
         assessment_setup_id=assessment_setup_id,
@@ -1612,6 +1634,21 @@ def set_assessment_review_row_disposition(
     previous_state = str(
         previous_rows.get(str(row["line_key"]), {}).get("disposition_state") or "clear"
     )
+    # Prefer prior state from relaxed identity match when exact key drifted.
+    if previous_state == "clear" and str(row["line_key"]) not in previous_rows:
+        prior = _lookup_disposition_for_line(
+            previous_rows,
+            line_key=str(row["line_key"]),
+            normalized_label=str(row.get("normalized_label") or ""),
+            row_role=str(row.get("row_role") or ""),
+            account_code=(
+                str(row["account_code"])
+                if row.get("account_code") not in (None, "")
+                else None
+            ),
+        )
+        if prior:
+            previous_state = str(prior.get("disposition_state") or "clear")
     connection.execute(
         """
         INSERT INTO assessment_review_row_dispositions (
@@ -1962,6 +1999,67 @@ def _line_key(line: dict) -> tuple[str, str, str, str, Optional[str]]:
         str(line.get("fund_type") or ""),
         str(account_code) if account_code not in (None, "") else None,
     )
+
+
+def _lookup_mapping_row(
+    mapped_by_key: dict[tuple[str, str, str, str, Optional[str]], object],
+    *,
+    key: tuple[str, str, str, str, Optional[str]],
+) -> Optional[object]:
+    """Exact mapping key, then fallback by account_code / normalized label.
+
+    Budget lines often lose section/fund_type on re-parse while saved mappings
+    still have section='operating' fund_type='operating', so exact 5-tuple
+    match fails and a correctly mapped Reserve Transfer looks unmapped.
+    """
+    hit = mapped_by_key.get(key)
+    if hit is not None:
+        return hit
+    normalized, _section, category, _fund, account_code = key
+    if account_code not in (None, ""):
+        for mkey, row in mapped_by_key.items():
+            if mkey[4] == account_code and mkey[0] == normalized:
+                return row
+            if mkey[4] == account_code and (
+                not category or mkey[2] == category or not mkey[2]
+            ):
+                return row
+    for mkey, row in mapped_by_key.items():
+        if mkey[0] == normalized:
+            return row
+    return None
+
+
+def _lookup_disposition_for_line(
+    dispositions_by_key: dict[str, dict[str, object]],
+    *,
+    line_key: str,
+    normalized_label: str,
+    row_role: str,
+    account_code: Optional[str],
+) -> Optional[dict[str, object]]:
+    """Exact review_line_key, then role+account / role+label fallback.
+
+    Disposition rows are keyed by a full line_key that embeds section/fund_type.
+    When those fields change on re-upload, Clear/Reserve detail state is lost
+    or mis-applied unless we fall back to stable identity.
+    """
+    hit = dispositions_by_key.get(line_key)
+    if hit is not None:
+        return hit
+    acct = str(account_code) if account_code not in (None, "") else ""
+    for stored_key, payload in dispositions_by_key.items():
+        parts = str(stored_key).split("|")
+        if len(parts) < 6:
+            continue
+        stored_norm, _s, _c, _f, stored_acct, stored_role = parts[:6]
+        if stored_role != row_role:
+            continue
+        if acct and stored_acct == acct:
+            return payload
+        if stored_norm == normalized_label:
+            return payload
+    return None
 
 
 def _existing_mapping_keys(

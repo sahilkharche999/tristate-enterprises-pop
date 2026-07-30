@@ -493,6 +493,9 @@ export function AssessmentMappingReviewScreen() {
                         {section.rows.map((row) => {
                           const isAssignableRow = Boolean(row.included_in_regular_basis);
                           const hideExclude = isReserveDetailRole(row);
+                          // Contribution/transfer maps into reserve dues — not "reserve detail".
+                          const hideReserveDetail =
+                            row.row_role === 'current_year_reserve_contribution_line';
                           const effective = effectiveDisposition(row);
                           const isDefaultReserveDetail =
                             isReserveDetailRole(row)
@@ -613,15 +616,17 @@ export function AssessmentMappingReviewScreen() {
                                       Exclude
                                     </button>
                                   )}
-                                  <button
-                                    type="button"
-                                    className={dispositionButtonClass(effective === 'reserve_detail')}
-                                    onClick={() => void handleDisposition(row, 'reserve_detail')}
-                                    disabled={busy !== null}
-                                    title="Reserve spend/detail line; outside schedule basis"
-                                  >
-                                    Reserve detail
-                                  </button>
+                                  {!hideReserveDetail && (
+                                    <button
+                                      type="button"
+                                      className={dispositionButtonClass(effective === 'reserve_detail')}
+                                      onClick={() => void handleDisposition(row, 'reserve_detail')}
+                                      disabled={busy !== null}
+                                      title="Reserve spend/detail line; outside schedule basis"
+                                    >
+                                      Reserve detail
+                                    </button>
+                                  )}
                                   <button
                                     type="button"
                                     className={dispositionButtonClass(effective === 'pending_split')}
