@@ -364,6 +364,193 @@ class TestProportionalPoolNormalization:
         ).fetchone()[0]
         assert method == "square_footage"
 
+    def test_fills_missing_sqft_denominator_from_complete_unit_table(self, db):
+        # 131 Missouri case: custom_factor → square_footage at adapt, but CCR
+        # extraction left denominator_value null while every unit has sqft.
+        # Promote must freeze the sum so the engine can allocate.
+        pid, setup_id = _seed_property_and_setup(db)
+        payload = _make_extraction_payload(
+            pools=[{
+                "pool_key": "variable_dre_exceptions",
+                "pool_name": "Variable DRE Exceptions",
+                "annual_amount": None,
+                "allocation_method": "square_footage",
+                "recipient_scope": "all_units",
+                "denominator_label": "total square footage",
+                "denominator_value": None,
+                "denominator_source": "unknown",
+                "included_budget_lines": ["utilities"],
+                "excluded_budget_lines": [],
+                "source_pages": [12],
+                "confidence": 0.9,
+            }],
+            units=[
+                {"unit_number": "101", "square_feet": "850"},
+                {"unit_number": "102", "square_feet": "1200"},
+                {"unit_number": "103", "square_feet": "950"},
+            ],
+        )
+        ext = parse_extraction_payload(json.dumps(payload))
+        populate_setup_children(
+            setup_id=setup_id, setup_type="per_unit",
+            extraction=ext, connection=db,
+        )
+        row = db.execute(
+            "SELECT allocation_method, denominator_value, denominator_source "
+            "FROM allocation_pools "
+            "WHERE assessment_setup_id = ? AND pool_key = 'variable_dre_exceptions'",
+            (setup_id,),
+        ).fetchone()
+        assert row[0] == "square_footage"
+        assert Decimal(str(row[1])) == Decimal("3000")  # 850+1200+950
+        assert row[2] == "calculated"
+
+    def test_equal_pool_missing_denom_is_untouched(self, db):
+        # Equal / hybrid residual pools never need a sqft denominator.
+        pid, setup_id = _seed_property_and_setup(db)
+        payload = _make_extraction_payload(
+            pools=[{
+                "pool_key": "equal_base",
+                "pool_name": "Equal Base",
+                "annual_amount": None,
+                "allocation_method": "equal",
+                "recipient_scope": "all_units",
+                "denominator_label": "units",
+                "denominator_value": None,
+                "denominator_source": "unknown",
+                "included_budget_lines": [],
+                "excluded_budget_lines": [],
+                "source_pages": [1],
+                "confidence": 0.9,
+            }],
+            units=[
+                {"unit_number": "101", "square_feet": "850"},
+                {"unit_number": "102", "square_feet": "1200"},
+            ],
+        )
+        ext = parse_extraction_payload(json.dumps(payload))
+        populate_setup_children(
+            setup_id=setup_id, setup_type="per_unit",
+            extraction=ext, connection=db,
+        )
+        row = db.execute(
+            "SELECT allocation_method, denominator_value "
+            "FROM allocation_pools "
+            "WHERE assessment_setup_id = ? AND pool_key = 'equal_base'",
+            (setup_id,),
+        ).fetchone()
+        assert row[0] == "equal"
+        assert row[1] is None
+
+    def test_parking_pool_does_not_inherit_hoa_sqft_denominator(self, db):
+        # Parking / cost-center pools must not get whole-HOA sqft stuffed in —
+        # that invents the wrong basis for limited common elements.
+        pid, setup_id = _seed_property_and_setup(db)
+        payload = _make_extraction_payload(
+            pools=[{
+                "pool_key": "parking_maintenance",
+                "pool_name": "Parking Maintenance",
+                "annual_amount": None,
+                "allocation_method": "square_footage",
+                "recipient_scope": "all_units",
+                "denominator_label": "parking square footage",
+                "denominator_value": None,
+                "denominator_source": "unknown",
+                "included_budget_lines": [],
+                "excluded_budget_lines": [],
+                "source_pages": [4],
+                "confidence": 0.8,
+            }],
+            units=[
+                {"unit_number": "101", "square_feet": "850"},
+                {"unit_number": "102", "square_feet": "1200"},
+            ],
+        )
+        ext = parse_extraction_payload(json.dumps(payload))
+        populate_setup_children(
+            setup_id=setup_id, setup_type="per_unit",
+            extraction=ext, connection=db,
+        )
+        row = db.execute(
+            "SELECT allocation_method, denominator_value "
+            "FROM allocation_pools "
+            "WHERE assessment_setup_id = ? AND pool_key = 'parking_maintenance'",
+            (setup_id,),
+        ).fetchone()
+        assert row[0] == "square_footage"
+        assert row[1] is None
+
+    def test_partial_sqft_table_does_not_invent_denominator(self, db):
+        # If any unit is missing sqft, leave denominator null (operator fix).
+        pid, setup_id = _seed_property_and_setup(db)
+        payload = _make_extraction_payload(
+            pools=[{
+                "pool_key": "variable_exceptions",
+                "pool_name": "Variable Exceptions",
+                "annual_amount": None,
+                "allocation_method": "square_footage",
+                "recipient_scope": "all_units",
+                "denominator_label": "total square footage",
+                "denominator_value": None,
+                "denominator_source": "unknown",
+                "included_budget_lines": [],
+                "excluded_budget_lines": [],
+                "source_pages": [2],
+                "confidence": 0.85,
+            }],
+            units=[
+                {"unit_number": "101", "square_feet": "850"},
+                {"unit_number": "102"},  # missing sqft
+            ],
+        )
+        ext = parse_extraction_payload(json.dumps(payload))
+        populate_setup_children(
+            setup_id=setup_id, setup_type="per_unit",
+            extraction=ext, connection=db,
+        )
+        row = db.execute(
+            "SELECT denominator_value FROM allocation_pools "
+            "WHERE assessment_setup_id = ? AND pool_key = 'variable_exceptions'",
+            (setup_id,),
+        ).fetchone()
+        assert row[0] is None
+
+    def test_existing_denominator_not_overwritten(self, db):
+        # DRE-frozen value wins even when unit sum differs.
+        pid, setup_id = _seed_property_and_setup(db)
+        payload = _make_extraction_payload(
+            pools=[{
+                "pool_key": "variable",
+                "pool_name": "Variable",
+                "annual_amount": None,
+                "allocation_method": "square_footage",
+                "recipient_scope": "all_units",
+                "denominator_label": "total sqft",
+                "denominator_value": "9999",
+                "denominator_source": "dre_shown",
+                "included_budget_lines": [],
+                "excluded_budget_lines": [],
+                "source_pages": [1],
+                "confidence": 0.95,
+            }],
+            units=[
+                {"unit_number": "101", "square_feet": "850"},
+                {"unit_number": "102", "square_feet": "1200"},
+            ],
+        )
+        ext = parse_extraction_payload(json.dumps(payload))
+        populate_setup_children(
+            setup_id=setup_id, setup_type="per_unit",
+            extraction=ext, connection=db,
+        )
+        row = db.execute(
+            "SELECT denominator_value, denominator_source FROM allocation_pools "
+            "WHERE assessment_setup_id = ? AND pool_key = 'variable'",
+            (setup_id,),
+        ).fetchone()
+        assert Decimal(str(row[0])) == Decimal("9999")
+        assert row[1] == "dre_value"
+
 
 class TestSpecifiedValueAllocations:
     def test_per_unit_specified_value_pool_creates_unit_allocations(self, db):

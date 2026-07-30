@@ -402,6 +402,62 @@ class TestDenominatorMismatch:
         result = run(ci)
         assert not any("DenominatorMismatchWarning" in w for w in result.warnings)
 
+    def test_missing_denominator_derived_when_all_recipients_have_sqft(self) -> None:
+        # Already-promoted setups (CCR custom_factor → sqft, empty denom) must
+        # still render when every recipient carries square footage.
+        units = [
+            RecipientReference(
+                ref_type="unit", ref_id=1, label="101",
+                unit_count=1, square_feet=Decimal("1000"),
+            ),
+            RecipientReference(
+                ref_type="unit", ref_id=2, label="102",
+                unit_count=1, square_feet=Decimal("2000"),
+            ),
+        ]
+        ci = CalcInput(
+            setup_type="per_unit",
+            pools=[_pool(1, "variable_dre_exceptions", "square_footage")],
+            recipient_set=RecipientSet(recipients=units),
+            budget_lines=[_line(1, "var", "36000")],
+            mappings=[_mapping("var", "variable_dre_exceptions")],
+            approved_assessment_revenue_annual=Decimal("36000"),
+        )
+        result = run(ci)
+        assert any("DenominatorDerivedWarning" in w for w in result.warnings)
+        # monthly total 3000; unit1 = 1000/3000 * 3000 = 1000; unit2 = 2000
+        by_unit = {
+            t.recipient_ref.ref_id: t.rounded_monthly_total
+            for t in result.recipient_totals
+        }
+        assert by_unit[1] == Decimal("1000.00")
+        assert by_unit[2] == Decimal("2000.00")
+
+    def test_missing_denominator_still_raises_when_sqft_incomplete(self) -> None:
+        from app.assessment_engine.errors import UnsupportedAllocationMethod
+
+        units = [
+            RecipientReference(
+                ref_type="unit", ref_id=1, label="101",
+                unit_count=1, square_feet=Decimal("1000"),
+            ),
+            RecipientReference(
+                ref_type="unit", ref_id=2, label="102",
+                unit_count=1, square_feet=None,
+            ),
+        ]
+        ci = CalcInput(
+            setup_type="per_unit",
+            pools=[_pool(1, "variable", "square_footage")],
+            recipient_set=RecipientSet(recipients=units),
+            budget_lines=[_line(1, "var", "12000")],
+            mappings=[_mapping("var", "variable")],
+            approved_assessment_revenue_annual=Decimal("12000"),
+        )
+        with pytest.raises(UnsupportedAllocationMethod) as exc:
+            run(ci)
+        assert "denominator missing" in str(exc.value)
+
 
 # -- Pattern: grouped ownership (Sharon Ridge-style per-unit interest) -----
 

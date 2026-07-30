@@ -153,10 +153,6 @@ def _allocate_pool(
         return rows, warnings
 
     if pool.allocation_method == "square_footage":
-        if pool.denominator_value is None:
-            raise UnsupportedAllocationMethod(
-                "square_footage (denominator missing)", pool.pool_key
-            )
         recomputed = sum(
             (
                 r.square_feet * Decimal(r.unit_count)
@@ -165,16 +161,35 @@ def _allocate_pool(
             ),
             start=Decimal("0"),
         )
-        if recomputed and recomputed != pool.denominator_value:
+        complete_sqft = bool(recipients) and all(
+            r.square_feet is not None for r in recipients
+        )
+        denom = pool.denominator_value
+        if denom is None:
+            # Promote-time fill is preferred; fall back here so already-promoted
+            # setups (e.g. CCR custom_factor → sqft with empty denom) still render
+            # when every recipient has square footage.
+            if complete_sqft and recomputed > 0:
+                denom = recomputed
+                warnings.append(
+                    f"DenominatorDerivedWarning: pool '{pool.pool_key}' had no "
+                    f"stored denominator; used complete recipient sqft sum "
+                    f"{recomputed}"
+                )
+            else:
+                raise UnsupportedAllocationMethod(
+                    "square_footage (denominator missing)", pool.pool_key
+                )
+        elif recomputed and recomputed != denom:
             warnings.append(
                 f"DenominatorMismatchWarning: pool '{pool.pool_key}' "
-                f"DRE-frozen denominator={pool.denominator_value} differs "
+                f"DRE-frozen denominator={denom} differs "
                 f"from current recipient sum={recomputed} "
-                f"(delta={recomputed - pool.denominator_value}); "
+                f"(delta={recomputed - denom}); "
                 "engine used DRE value verbatim"
             )
         per_unit_within_group = square_footage_allocation(
-            monthly_total, pool.denominator_value, recipients
+            monthly_total, denom, recipients
         )
         # Normalize sqft components to per-recipient (per-group for groups,
         # per-unit for units). The allocator returns per-unit-within-group

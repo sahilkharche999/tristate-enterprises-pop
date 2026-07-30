@@ -738,10 +738,57 @@ def parse_extraction_payload(
         return None
 
 
+_PROPORTIONAL_SQFT_METHODS = frozenset({"square_footage", "custom_factor"})
+
+
+def _is_parking_or_cost_center_pool(pool: AllocationPoolBlock) -> bool:
+    """Pools that must not inherit whole-HOA sqft as a fake denominator."""
+    blob = " ".join(
+        [
+            str(pool.pool_key or ""),
+            str(pool.pool_name or ""),
+            str(pool.denominator_label or ""),
+        ]
+    ).lower()
+    markers = (
+        "parking",
+        "cost_center",
+        "cost center",
+        "limited common",
+        "limited_common",
+    )
+    return any(m in blob for m in markers)
+
+
+def _complete_recipient_sqft_denominator(
+    extraction: DRESetupExtraction,
+) -> Optional[Decimal]:
+    """Sum of unit sqft, or group avg_sqft × unit_count, when coverage is complete.
+
+    Returns None when any recipient is missing sqft (do not invent partial
+    denominators). Matches engine recompute grain for unit and group scopes.
+    """
+    units = extraction.unit_structure.units
+    groups = extraction.unit_structure.groups
+    if units:
+        if any(u.square_feet is None for u in units):
+            return None
+        total = sum((u.square_feet for u in units), start=Decimal("0"))
+        return total if total > 0 else None
+    if groups:
+        total = Decimal("0")
+        for g in groups:
+            if g.average_square_feet is None or g.unit_count is None or g.unit_count <= 0:
+                return None
+            total += g.average_square_feet * Decimal(g.unit_count)
+        return total if total > 0 else None
+    return None
+
+
 def _normalize_proportional_pool_methods(
     extraction: DRESetupExtraction,
 ) -> DRESetupExtraction:
-    """Reconcile a declared ``square_footage`` basis with the per-unit data.
+    """Reconcile a declared ``square_footage`` / ``custom_factor`` basis with unit data.
 
     A governing document may state that costs are split "in proportion to
     square footage" while the only machine-readable per-unit factor it carries
@@ -755,7 +802,8 @@ def _normalize_proportional_pool_methods(
 
     Conservative by design: only rewrites when NO recipient (unit or group)
     carries square footage AND at least one carries a percentage. A setup with
-    genuine per-unit square footage is left untouched.
+    genuine per-unit square footage is left untouched (denominators may still
+    be filled by :func:`_fill_missing_square_footage_denominators`).
     """
     units = extraction.unit_structure.units
     groups = extraction.unit_structure.groups
@@ -772,12 +820,16 @@ def _normalize_proportional_pool_methods(
     new_pools: list[AllocationPoolBlock] = []
     changed = False
     for pool in extraction.allocation_pools:
-        if pool.allocation_method == "square_footage":
+        if pool.allocation_method in _PROPORTIONAL_SQFT_METHODS:
+            if _is_parking_or_cost_center_pool(pool):
+                new_pools.append(pool)
+                continue
             logger.info(
-                "promotion: pool %r declared square_footage but no recipient has "
+                "promotion: pool %r declared %s but no recipient has "
                 "square feet; allocating by ownership_percentage (percentage "
                 "interest is the normalized square-footage share)",
                 pool.pool_key,
+                pool.allocation_method,
             )
             new_pools.append(
                 pool.model_copy(update={"allocation_method": "ownership_percentage"})
@@ -785,6 +837,52 @@ def _normalize_proportional_pool_methods(
             changed = True
         else:
             new_pools.append(pool)
+
+    if not changed:
+        return extraction
+    return extraction.model_copy(update={"allocation_pools": new_pools})
+
+
+def _fill_missing_square_footage_denominators(
+    extraction: DRESetupExtraction,
+) -> DRESetupExtraction:
+    """Set denominator_value from complete unit/group sqft when method needs it.
+
+    Safe for equal / ownership / hybrid residual pools (untouched). Skips
+    parking and cost-center pools (would invent the wrong basis). Only fills
+    when every recipient has sqft so partial tables never become silent truth.
+    """
+    sqft_total = _complete_recipient_sqft_denominator(extraction)
+    if sqft_total is None:
+        return extraction
+
+    new_pools: list[AllocationPoolBlock] = []
+    changed = False
+    for pool in extraction.allocation_pools:
+        if pool.denominator_value is not None:
+            new_pools.append(pool)
+            continue
+        if pool.allocation_method not in _PROPORTIONAL_SQFT_METHODS:
+            new_pools.append(pool)
+            continue
+        if _is_parking_or_cost_center_pool(pool):
+            new_pools.append(pool)
+            continue
+        logger.info(
+            "promotion: pool %r missing denominator_value; "
+            "using complete recipient sqft total %s (source=calculated)",
+            pool.pool_key,
+            sqft_total,
+        )
+        new_pools.append(
+            pool.model_copy(
+                update={
+                    "denominator_value": sqft_total,
+                    "denominator_source": "calculated",
+                }
+            )
+        )
+        changed = True
 
     if not changed:
         return extraction
@@ -811,6 +909,7 @@ def populate_setup_children(
     Returns a count summary for the audit trail.
     """
     extraction = _normalize_proportional_pool_methods(extraction)
+    extraction = _fill_missing_square_footage_denominators(extraction)
 
     counts = {
         "pools": 0, "groups": 0, "units": 0, "unit_pool_allocations": 0,
