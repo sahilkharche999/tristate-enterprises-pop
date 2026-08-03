@@ -271,41 +271,46 @@ def confirm_prior_assessment_schedule(
 async def extract_prior_assessment_schedule(
     hoa_id: int,
     file: UploadFile = File(...),
+    fiscal_year: Optional[int] = None,
     session: Session = Depends(get_session),
     current_user: dict = Depends(get_current_user),
 ) -> dict:
-    """Best-effort extract of unit/monthly rows from a prior final package PDF.
+    """Extract unit/monthly schedule from a prior final package PDF.
+
+    Tries PDF text first; if sparse (scanned packages like Sharon Ridge),
+    uses Gemini Vision (same stack as DRE / income-statement PDF path).
 
     Returns draft rows for operator review — does NOT save until PUT confirm.
     """
     _ = current_user
     _ = session
+    _ = hoa_id
     from ..disclosure_package.prior_assessment_schedule import (
-        extract_schedule_rows_from_pdf_text,
+        extract_prior_schedule_from_pdf_bytes,
     )
 
     content = await file.read()
     if not content:
         raise HTTPException(status_code=422, detail="Empty file")
-    text = ""
-    try:
-        from pypdf import PdfReader
-        from io import BytesIO
-
-        reader = PdfReader(BytesIO(content))
-        text = "\n".join((page.extract_text() or "") for page in reader.pages)
-    except Exception:
-        text = ""
-    rows = extract_schedule_rows_from_pdf_text(text)
+    preferred = (int(fiscal_year) - 1) if fiscal_year is not None else None
+    result = extract_prior_schedule_from_pdf_bytes(
+        content,
+        preferred_year=preferred,
+    )
+    rows = result.get("rows") or []
     return {
         "filename": file.filename,
         "row_count": len(rows),
         "rows": rows,
         "needs_confirmation": True,
-        "message": (
+        "method": result.get("method"),
+        "fiscal_year": result.get("fiscal_year"),
+        "pages_used": result.get("pages_used") or [],
+        "message": result.get("message")
+        or (
             "Review and confirm these rows before saving."
             if rows
-            else "No unit/monthly rows detected automatically — enter the schedule manually."
+            else "No unit/monthly rows detected — enter the schedule manually."
         ),
     }
 

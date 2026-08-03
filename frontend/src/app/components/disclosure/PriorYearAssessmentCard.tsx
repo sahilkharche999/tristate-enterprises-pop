@@ -59,11 +59,18 @@ export function PriorYearAssessmentCard({
     setBusy(true);
     setError(null);
     try {
-      const result = await extractPriorAssessmentSchedule(hoaId, files[0]);
+      const result = await extractPriorAssessmentSchedule(hoaId, files[0], fiscalYear);
       setDraftRows(result.rows.length ? result.rows : [{ recipient_label: '', monthly: '' }]);
-      setDraftYear(fiscalYear - 1);
+      const yearFromExtract =
+        result.fiscal_year != null && Number.isFinite(Number(result.fiscal_year))
+          ? Number(result.fiscal_year)
+          : fiscalYear - 1;
+      setDraftYear(yearFromExtract);
       if (!result.rows.length) {
         setError(result.message);
+      } else if (result.message) {
+        // Soft success note (vision vs text) — not an error
+        setError(null);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Extract failed');
@@ -156,13 +163,17 @@ export function PriorYearAssessmentCard({
       {status?.status !== 'inherited' ? (
         <FileDropzone
           title="Upload prior-year final package PDF"
-          helper="Last year’s full board disclosure package (assessment schedule pages)."
+          helper="Last year’s full board disclosure package. Scanned PDFs use Gemini Vision (may take ~30–90s)."
           accept="application/pdf,.pdf"
           multiple={false}
           fileName={null}
           disabled={disabled || busy}
           status={busy ? 'attention' : 'idle'}
-          statusMessage={busy ? 'Working…' : undefined}
+          statusMessage={
+            busy
+              ? 'Extracting schedule (text, then Vision if needed)…'
+              : undefined
+          }
           actionLabel="Choose PDF"
           onFilesSelected={(files) => void handleExtract(files)}
         />

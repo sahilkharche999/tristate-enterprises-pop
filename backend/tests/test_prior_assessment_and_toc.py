@@ -384,6 +384,103 @@ def test_compile_package_signature_accepts_prior_matrix():
     assert sig.parameters["prior_matrix"].default is None
 
 
+def test_extract_prior_schedule_uses_text_when_dense_enough(monkeypatch):
+    """Text path short-circuits before Vision when enough rows are present."""
+    from app.disclosure_package import prior_assessment_schedule as mod
+
+    lines = "\n".join(f"{100 + i}  2.500  {500 + i}.00" for i in range(5))
+    content = b"%PDF-fake"  # not parsed if we stub pypdf
+
+    class _Page:
+        def extract_text(self):
+            return lines
+
+    class _Reader:
+        def __init__(self, *_a, **_k):
+            self.pages = [_Page()]
+
+    monkeypatch.setattr("pypdf.PdfReader", _Reader)
+    # Vision must not be required
+    monkeypatch.setattr(
+        "app.dre_extraction.gemini_callbacks.gemini_client_from_env",
+        lambda: (_ for _ in ()).throw(AssertionError("vision should not run")),
+    )
+    result = mod.extract_prior_schedule_from_pdf_bytes(content, preferred_year=2025)
+    assert result["method"] == "pdf_text"
+    assert result["row_count"] if "row_count" in result else len(result["rows"]) >= 5
+    assert len(result["rows"]) >= 5
+
+
+def test_extract_prior_schedule_vision_when_text_empty(monkeypatch, tmp_path: Path):
+    """Empty text falls through to Gemini classify + extract."""
+    from app.disclosure_package import prior_assessment_schedule as mod
+
+    class _Page:
+        def extract_text(self):
+            return ""
+
+    class _Reader:
+        def __init__(self, *_a, **_k):
+            self.pages = [_Page(), _Page()]
+
+    monkeypatch.setattr("pypdf.PdfReader", _Reader)
+
+    fake_client = object()
+    monkeypatch.setattr(
+        "app.dre_extraction.gemini_callbacks.gemini_client_from_env",
+        lambda: fake_client,
+    )
+    monkeypatch.setattr(
+        "app.dre_extraction.gemini_callbacks.default_model_name",
+        lambda: "gemini-flash-latest",
+    )
+
+    # Minimal real PDF so fitz can open it after temp write
+    try:
+        import fitz
+    except ImportError:
+        import pytest
+        pytest.skip("pymupdf required")
+    pdf_path = tmp_path / "empty.pdf"
+    doc = fitz.open()
+    doc.new_page()
+    doc.new_page()
+    doc.save(pdf_path)
+    doc.close()
+    content = pdf_path.read_bytes()
+
+    class _RP:
+        def __init__(self, n):
+            self.page_number = n
+            self.content = b"fake-png"
+            self.mime_type = "image/png"
+
+    monkeypatch.setattr(
+        "app.services.pdf_vlm_extractor.render_pdf_pages",
+        lambda path, max_pages=None, dpi=72: [_RP(1), _RP(2)],
+    )
+    monkeypatch.setattr(
+        mod,
+        "_classify_assessment_schedule_pages",
+        lambda *a, **k: [1],
+    )
+    monkeypatch.setattr(
+        mod,
+        "_extract_rows_from_schedule_pages",
+        lambda *a, **k: (
+            [{"recipient_label": "513", "monthly": "553.09", "percent_of_total": "1.780"}],
+            2025,
+        ),
+    )
+    # Avoid real high-DPI fitz path complexity: force fallback classify DPI
+    # by making high-dpi path use our classify stubs — real fitz open still works
+    result = mod.extract_prior_schedule_from_pdf_bytes(content, preferred_year=2025)
+    assert result["method"] == "gemini_vision"
+    assert len(result["rows"]) == 1
+    assert result["rows"][0]["recipient_label"] == "513"
+    assert result["fiscal_year"] == 2025
+
+
 def test_compiler_manifest_only_empty_list_skips_legacy_glob(tmp_path: Path):
     """Production empty manifest must not pick up legacy dir pollution."""
     from app.disclosure_package.compiler import _humanize_filename_title

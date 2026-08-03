@@ -146,6 +146,9 @@ export interface PriorExtractResponse {
   rows: PriorScheduleRow[];
   needs_confirmation: boolean;
   message: string;
+  method?: string;
+  fiscal_year?: number | null;
+  pages_used?: number[];
 }
 
 export async function getPriorAssessmentSchedule(
@@ -174,11 +177,14 @@ export async function confirmPriorAssessmentSchedule(
 export async function extractPriorAssessmentSchedule(
   hoaId: number,
   file: File,
+  fiscalYear?: number,
 ): Promise<PriorExtractResponse> {
   const form = new FormData();
   form.append('file', file);
+  const qs =
+    fiscalYear != null ? `?fiscal_year=${encodeURIComponent(String(fiscalYear))}` : '';
   const res = await fetch(
-    `${BASE_URL}/hoa/${hoaId}/prior-assessment-schedule/extract`,
+    `${BASE_URL}/hoa/${hoaId}/prior-assessment-schedule/extract${qs}`,
     {
       method: 'POST',
       headers: authHeaders(),
