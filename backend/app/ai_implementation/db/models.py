@@ -71,6 +71,9 @@ class Property(Base):
     portfolio_year = Column(Integer)
     workflow_status = Column(Text, default="Not Started")
     assessment_mode = Column(Text, nullable=False, default="variable")
+    # Year-1 prior assessment schedule seed (confirmed rows + fiscal year).
+    prior_assessment_schedule_json = Column(Text)
+    prior_assessment_schedule_year = Column(Integer)
     created_at = Column(Text, server_default=_CREATED_AT_DEFAULT)
 
     runs = relationship("SuggestionRun", back_populates="property", lazy="raise")

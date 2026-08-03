@@ -684,6 +684,30 @@ def run_preflight(
         property_id=hoa_id,
         connection=session.connection().connection,
     )
+    # Soft YoY warning: prior assessment table omitted when no source exists.
+    try:
+        from .prior_assessment_schedule import prior_status
+
+        status = prior_status(
+            session.connection().connection,
+            property_id=hoa_id,
+            fiscal_year=fiscal_year,
+        )
+        if status.get("status") == "missing":
+            errors.append(PreflightError(
+                field_path="prior_assessment_schedule",
+                message=status.get("message")
+                or "Prior-year assessment schedule is not available.",
+                severity="warning",
+                suggested_fix=(
+                    "Upload last year’s final package on the Prior-year "
+                    "assessment schedule card, or finalize that year’s package."
+                ),
+            ))
+    except Exception:
+        logger.exception(
+            "prior schedule preflight check failed for HOA %s", hoa_id,
+        )
     return partition_errors(errors)
 
 
@@ -931,6 +955,34 @@ def assemble_finalize_snapshots(
         assessment_mode=assessment_mode,
     )
 
+    from .prior_assessment_schedule import resolve_prior_assessment_matrix
+
+    prior_matrix = resolve_prior_assessment_matrix(
+        raw_conn,
+        property_id=hoa_id,
+        fiscal_year=fiscal_year,
+        hoa_name=bundle.hoa_metadata.name,
+    )
+    compile_context: dict[str, Any] = {
+        "assessment_matrix": assessment_matrix.model_dump(mode="json"),
+        "hoa_metadata": bundle.hoa_metadata.model_dump(mode="json"),
+        "hoa_settings_overrides": bundle.overrides,
+        # Freeze the *layered* narrative bodies (chips still unresolved,
+        # exactly as the live branch feeds them to the compiler) so a
+        # finalized package re-renders byte-equal no matter how firm or
+        # HOA content changes afterwards.
+        "narrative": bundle.narrative,
+        # Frozen so a finalized package re-renders identically on any later
+        # date. Notes 1 and 7 print this ("information available as of …").
+        "render_date": datetime.now(timezone.utc).strftime("%A %B %-d, %Y"),
+        "assessment_revenue_annual": str(assessment_revenue),
+        "assessment_mode": assessment_mode,
+    }
+    if prior_matrix is not None:
+        compile_context["prior_assessment_matrix"] = prior_matrix.model_dump(
+            mode="json",
+        )
+
     return {
         "assessment_setup": _serialize_assessment_setup_snapshot(
             connection=raw_conn, property_id=hoa_id,
@@ -940,21 +992,7 @@ def assemble_finalize_snapshots(
         "appendix_manifest": [
             entry.model_dump(mode="json") for entry in manifest
         ],
-        "compile_context": {
-            "assessment_matrix": assessment_matrix.model_dump(mode="json"),
-            "hoa_metadata": bundle.hoa_metadata.model_dump(mode="json"),
-            "hoa_settings_overrides": bundle.overrides,
-            # Freeze the *layered* narrative bodies (chips still unresolved,
-            # exactly as the live branch feeds them to the compiler) so a
-            # finalized package re-renders byte-equal no matter how firm or
-            # HOA content changes afterwards.
-            "narrative": bundle.narrative,
-            # Frozen so a finalized package re-renders identically on any later
-            # date. Notes 1 and 7 print this ("information available as of …").
-            "render_date": datetime.now(timezone.utc).strftime("%A %B %-d, %Y"),
-            "assessment_revenue_annual": str(assessment_revenue),
-            "assessment_mode": assessment_mode,
-        },
+        "compile_context": compile_context,
     }
 
 
@@ -1076,9 +1114,17 @@ def run_render_job(
             render_date = context.get("render_date")
 
             from .assessment_schedule_matrix import AssessmentScheduleMatrix
+            from .prior_assessment_schedule import resolve_prior_assessment_matrix
 
             assessment_matrix = AssessmentScheduleMatrix.model_validate(
                 context["assessment_matrix"]
+            )
+            prior_matrix = resolve_prior_assessment_matrix(
+                raw_conn,
+                property_id=hoa_id,
+                fiscal_year=fiscal_year,
+                hoa_name=hoa_metadata.name,
+                frozen_prior=context.get("prior_assessment_matrix"),
             )
 
             _set_status(session, job_id, stage=DISCLOSURE_STAGE_COMPUTING)
@@ -1179,6 +1225,8 @@ def run_render_job(
                         * Decimal("12")
                     ).quantize(Decimal("0.01"))
 
+            from .prior_assessment_schedule import resolve_prior_assessment_matrix
+
             assessment_matrix = build_matrix_for_assessment_mode(
                 connection=raw_conn,
                 property_id=hoa_id,
@@ -1188,6 +1236,12 @@ def run_render_job(
                 unit_count=hoa_metadata.units,
                 approved_assessment_revenue_annual=assessment_revenue,
                 assessment_mode=assessment_mode,
+            )
+            prior_matrix = resolve_prior_assessment_matrix(
+                raw_conn,
+                property_id=hoa_id,
+                fiscal_year=fiscal_year,
+                hoa_name=hoa_metadata.name,
             )
 
             compile_branch_audit = {
@@ -1205,11 +1259,12 @@ def run_render_job(
             output_dir=output_dir,
             appendices_root=appendix_dir_for(hoa_id),
             hoa_settings_overrides=overrides,
-                narrative=narrative,
+            narrative=narrative,
             render_date=render_date,
             extra_appendix_paths=manifest_paths,
             extra_appendix_titles=manifest_titles,
             assessment_matrix=assessment_matrix,
+            prior_matrix=prior_matrix,
             audit_extra=compile_branch_audit,
         )
 

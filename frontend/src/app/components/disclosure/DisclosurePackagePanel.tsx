@@ -27,6 +27,7 @@ import { DisclosureResultBlock } from './DisclosureResultBlock';
 import { DisclosureFailureBlock } from './DisclosureFailureBlock';
 import { DisclosureAuditSheet } from './DisclosureAuditSheet';
 import { DisclosureAppendixManager } from './DisclosureAppendixManager';
+import { PriorYearAssessmentCard } from './PriorYearAssessmentCard';
 import { Button } from '../ui/button';
 
 export interface DisclosurePackagePanelProps {
@@ -192,7 +193,12 @@ export function DisclosurePackagePanel({
         </div>
 
         {isSupportedHoa ? (
-          <div className="mt-6 border-t border-[#e5e5e5] pt-6">
+          <div className="mt-6 space-y-6 border-t border-[#e5e5e5] pt-6">
+            <PriorYearAssessmentCard
+              hoaId={hoaId}
+              fiscalYear={fiscalYear}
+              disabled={state === 'starting' || state === 'running'}
+            />
             <DisclosureAppendixManager
               hoaId={hoaId}
               disabled={state === 'starting' || state === 'running'}

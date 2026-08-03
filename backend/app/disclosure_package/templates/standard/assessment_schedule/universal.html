@@ -1,10 +1,15 @@
 {# Universal Assessment Matrix.
 
    Context:
-     matrix: AssessmentScheduleMatrix
+     matrix: AssessmentScheduleMatrix (package year — required)
+     prior_matrix: optional AssessmentScheduleMatrix (prior year)
 
    The template formats supplied values only. It does not calculate
    component totals, grouped budgets, footer totals, or reconciliation rows.
+
+   When prior_matrix is present, prints the prior-year table first (Sharon
+   Ridge style), then the package-year table. Special assessments and
+   homeowner notes apply only to the package-year block.
 #}
 {% extends "_base.html" %}
 
@@ -56,11 +61,197 @@
   {%- endif -%}
 {%- endmacro %}
 
+{% macro schedule_block(m, show_specials=false, show_notes=false) %}
+<section class="assessment-schedule assessment-schedule--universal assessment-schedule--{{ m.recipient_grain }} assessment-schedule--{{ m.layout_hints.orientation }}">
+  <header>
+    <h2>{{ m.hoa.name | upper }}</h2>
+    {% if m.recipient_grain == "summary" %}
+      <h3>{{ m.fiscal_year }} Regular Assessment Summary</h3>
+    {% elif m.recipient_grain == "group" %}
+      <h3>{{ m.fiscal_year }} Assessments Per Unit Type Per Month</h3>
+    {% elif m.recipient_grain == "unit" %}
+      <h3>{{ m.fiscal_year }} Assessments Per Unit Per Month</h3>
+    {% else %}
+      <h3>{{ m.fiscal_year }} Assessment Schedule Pending Review</h3>
+    {% endif %}
+  </header>
+
+  <div class="assessment-summary-block">
+    <p><strong>Assessment Method:</strong> {{ m.method_summary.assessment_method }}</p>
+    <p><strong>Display Basis:</strong> {{ m.method_summary.display_basis }}</p>
+    {% if m.method_summary.render_source_pages and m.method_summary.source_pages %}
+      <p><strong>Source:</strong> Page{{ "s" if m.method_summary.source_pages | length > 1 else "" }}
+        {{ m.method_summary.source_pages | join(", ") }}</p>
+    {% endif %}
+  </div>
+
+  {% if m.recipient_grain == "manual_review" %}
+    <div class="assessment-review-block">
+      <strong>Draft/operator review only.</strong>
+      {% for row in m.rows %}
+        <p>{{ row.missing_basis_reason }}</p>
+      {% endfor %}
+    </div>
+  {% else %}
+    {% if m.component_summary_rows %}
+      <h4>Assessment Component Summary</h4>
+      <table class="assessment-table">
+        <thead>
+          <tr>
+            <th>Component / Pool</th>
+            <th>Allocation Method</th>
+            <th>Recipient Scope</th>
+            <th>Denominator / Basis</th>
+            <th>Annual Amount</th>
+            <th>Monthly Amount</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for component in m.component_summary_rows %}
+          <tr>
+            <td>{{ component.component_label }}</td>
+            <td>{{ component.allocation_method | replace("_", " ") | title }}</td>
+            <td>{{ component.recipient_scope | replace("_", " ") | title }}</td>
+            <td>{{ component.denominator_basis or "" }}</td>
+            <td class="numeric">{{ display_value(component.annual_amount, "currency") }}</td>
+            <td class="numeric">{{ display_value(component.monthly_amount, "currency") }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% endif %}
+
+    <h4>Universal Assessment Matrix</h4>
+    <table class="assessment-table">
+      <thead>
+        {% if m.component_column_groups %}
+        <tr>
+          <th rowspan="2">Recipient</th>
+          {% for column in m.basis_columns %}
+          <th rowspan="2">{{ column.label }}</th>
+          {% endfor %}
+          {% for column in m.component_columns %}
+          <th>{{ column.parent_label or "" }}</th>
+          {% endfor %}
+          {% for column in m.total_columns %}
+          <th rowspan="2">{{ column.label }}</th>
+          {% endfor %}
+          {% for column in m.optional_columns %}
+          <th rowspan="2">{{ column.label }}</th>
+          {% endfor %}
+        </tr>
+        <tr>
+          {% for column in m.component_columns %}
+          <th>{{ column.label }}</th>
+          {% endfor %}
+        </tr>
+        {% else %}
+        <tr>
+          <th>Recipient</th>
+          {% for column in m.basis_columns %}
+          <th>{{ column.label }}</th>
+          {% endfor %}
+          {% for column in m.component_columns %}
+          <th>{{ column.label }}</th>
+          {% endfor %}
+          {% for column in m.total_columns %}
+          <th>{{ column.label }}</th>
+          {% endfor %}
+          {% for column in m.optional_columns %}
+          <th>{{ column.label }}</th>
+          {% endfor %}
+        </tr>
+        {% endif %}
+      </thead>
+      <tbody>
+        {% for row in m.rows %}
+        <tr>
+          <td>{{ row.recipient_label }}</td>
+          {% for column in m.basis_columns %}
+          <td class="{{ 'numeric' if column.value_type != 'text' else '' }}">
+            {{ display_value(row.basis_values.get(column.key), column.value_type) }}
+          </td>
+          {% endfor %}
+          {% for column in m.component_columns %}
+          <td class="numeric">{{ row_component_value(row, column) }}</td>
+          {% endfor %}
+          {% for column in m.total_columns %}
+          <td class="numeric">{{ row_total_value(row, column) }}</td>
+          {% endfor %}
+          {% for column in m.optional_columns %}
+          <td class="{{ 'numeric' if column.value_type != 'text' else '' }}">
+            {{ display_value(row.optional_values.get(column.key), column.value_type) }}
+          </td>
+          {% endfor %}
+        </tr>
+        {% endfor %}
+      </tbody>
+      {% if m.footer_rows %}
+      <tfoot>
+        {% for footer in m.footer_rows %}
+        <tr>
+          <td>{{ footer.label }}</td>
+          {% for column in m.basis_columns %}
+          <td>{{ display_value(footer.values.get(column.key), column.value_type) }}</td>
+          {% endfor %}
+          {% for column in m.component_columns %}
+          <td class="numeric">{{ display_value(footer.values.get(column.key), column.value_type) }}</td>
+          {% endfor %}
+          {% for column in m.total_columns %}
+          <td class="numeric">{{ display_value(footer.values.get(column.key), column.value_type) }}</td>
+          {% endfor %}
+          {% for column in m.optional_columns %}
+          <td>{{ display_value(footer.values.get(column.key), column.value_type) }}</td>
+          {% endfor %}
+        </tr>
+        {% endfor %}
+      </tfoot>
+      {% endif %}
+    </table>
+  {% endif %}
+
+  {% if show_specials and m.special_assessment_blocks %}
+  <h4>Special Assessment Disclosure</h4>
+  {% for block in m.special_assessment_blocks %}
+    <p>
+      <strong>{{ block.label }}:</strong>
+      {% if block.display_language %}
+        {{ block.display_language }}
+      {% elif block.total is not none %}
+        ${{ '{:,.2f}'.format(block.total) }} total{% if block.due_date %}, due {{ block.due_date }}{% endif %}{% if block.allocations %}, allocated per unit as shown below{% endif %}
+      {% elif block.amount_per_unit is not none %}
+        ${{ '{:,.2f}'.format(block.amount_per_unit) }}{% if block.due_date %}, due {{ block.due_date }}{% endif %}
+      {% endif %}
+    </p>
+    {% if block.allocations %}
+    <table class="assessment-table">
+      <tr><th>Unit</th><th>Special assessment share</th></tr>
+      {% for row in block.allocations %}
+      <tr><td>{{ row.recipient_label }}</td><td>${{ '{:,.2f}'.format(row.amount) }}</td></tr>
+      {% endfor %}
+    </table>
+    {% endif %}
+  {% endfor %}
+  {% endif %}
+
+  {% if show_notes and m.homeowner_visible_notes %}
+  <div class="homeowner-notes">
+    {% for note in m.homeowner_visible_notes %}
+      <p>{{ note }}</p>
+    {% endfor %}
+  </div>
+  {% endif %}
+</section>
+{% endmacro %}
+
 {% block content %}
-<section class="assessment-schedule assessment-schedule--universal assessment-schedule--{{ matrix.recipient_grain }} assessment-schedule--{{ matrix.layout_hints.orientation }}">
   <style>
     .assessment-schedule--universal h2 { margin-bottom: 4px; }
     .assessment-schedule--universal h3 { margin-top: 0; }
+    .assessment-schedule--universal + .assessment-schedule--universal {
+      margin-top: 28px;
+      page-break-before: auto;
+    }
     .assessment-summary-block {
       border-top: 1px solid #333;
       border-bottom: 1px solid #333;
@@ -92,183 +283,8 @@
     .homeowner-notes { margin-top: 10px; }
   </style>
 
-  <header>
-    <h2>{{ matrix.hoa.name | upper }}</h2>
-    {% if matrix.recipient_grain == "summary" %}
-      <h3>{{ matrix.fiscal_year }} Regular Assessment Summary</h3>
-    {% elif matrix.recipient_grain == "group" %}
-      <h3>{{ matrix.fiscal_year }} Assessments Per Unit Type Per Month</h3>
-    {% elif matrix.recipient_grain == "unit" %}
-      <h3>{{ matrix.fiscal_year }} Assessments Per Unit Per Month</h3>
-    {% else %}
-      <h3>{{ matrix.fiscal_year }} Assessment Schedule Pending Review</h3>
-    {% endif %}
-  </header>
-
-  <div class="assessment-summary-block">
-    <p><strong>Assessment Method:</strong> {{ matrix.method_summary.assessment_method }}</p>
-    <p><strong>Display Basis:</strong> {{ matrix.method_summary.display_basis }}</p>
-    {% if matrix.method_summary.render_source_pages and matrix.method_summary.source_pages %}
-      <p><strong>Source:</strong> Page{{ "s" if matrix.method_summary.source_pages | length > 1 else "" }}
-        {{ matrix.method_summary.source_pages | join(", ") }}</p>
-    {% endif %}
-  </div>
-
-  {% if matrix.recipient_grain == "manual_review" %}
-    <div class="assessment-review-block">
-      <strong>Draft/operator review only.</strong>
-      {% for row in matrix.rows %}
-        <p>{{ row.missing_basis_reason }}</p>
-      {% endfor %}
-    </div>
-  {% else %}
-    {% if matrix.component_summary_rows %}
-      <h4>Assessment Component Summary</h4>
-      <table class="assessment-table">
-        <thead>
-          <tr>
-            <th>Component / Pool</th>
-            <th>Allocation Method</th>
-            <th>Recipient Scope</th>
-            <th>Denominator / Basis</th>
-            <th>Annual Amount</th>
-            <th>Monthly Amount</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for component in matrix.component_summary_rows %}
-          <tr>
-            <td>{{ component.component_label }}</td>
-            <td>{{ component.allocation_method | replace("_", " ") | title }}</td>
-            <td>{{ component.recipient_scope | replace("_", " ") | title }}</td>
-            <td>{{ component.denominator_basis or "" }}</td>
-            <td class="numeric">{{ display_value(component.annual_amount, "currency") }}</td>
-            <td class="numeric">{{ display_value(component.monthly_amount, "currency") }}</td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    {% endif %}
-
-    <h4>Universal Assessment Matrix</h4>
-    <table class="assessment-table">
-      <thead>
-        {% if matrix.component_column_groups %}
-        <tr>
-          <th rowspan="2">Recipient</th>
-          {% for column in matrix.basis_columns %}
-          <th rowspan="2">{{ column.label }}</th>
-          {% endfor %}
-          {% for column in matrix.component_columns %}
-          <th>{{ column.parent_label or "" }}</th>
-          {% endfor %}
-          {% for column in matrix.total_columns %}
-          <th rowspan="2">{{ column.label }}</th>
-          {% endfor %}
-          {% for column in matrix.optional_columns %}
-          <th rowspan="2">{{ column.label }}</th>
-          {% endfor %}
-        </tr>
-        <tr>
-          {% for column in matrix.component_columns %}
-          <th>{{ column.label }}</th>
-          {% endfor %}
-        </tr>
-        {% else %}
-        <tr>
-          <th>Recipient</th>
-          {% for column in matrix.basis_columns %}
-          <th>{{ column.label }}</th>
-          {% endfor %}
-          {% for column in matrix.component_columns %}
-          <th>{{ column.label }}</th>
-          {% endfor %}
-          {% for column in matrix.total_columns %}
-          <th>{{ column.label }}</th>
-          {% endfor %}
-          {% for column in matrix.optional_columns %}
-          <th>{{ column.label }}</th>
-          {% endfor %}
-        </tr>
-        {% endif %}
-      </thead>
-      <tbody>
-        {% for row in matrix.rows %}
-        <tr>
-          <td>{{ row.recipient_label }}</td>
-          {% for column in matrix.basis_columns %}
-          <td class="{{ 'numeric' if column.value_type != 'text' else '' }}">
-            {{ display_value(row.basis_values.get(column.key), column.value_type) }}
-          </td>
-          {% endfor %}
-          {% for column in matrix.component_columns %}
-          <td class="numeric">{{ row_component_value(row, column) }}</td>
-          {% endfor %}
-          {% for column in matrix.total_columns %}
-          <td class="numeric">{{ row_total_value(row, column) }}</td>
-          {% endfor %}
-          {% for column in matrix.optional_columns %}
-          <td class="{{ 'numeric' if column.value_type != 'text' else '' }}">
-            {{ display_value(row.optional_values.get(column.key), column.value_type) }}
-          </td>
-          {% endfor %}
-        </tr>
-        {% endfor %}
-      </tbody>
-      {% if matrix.footer_rows %}
-      <tfoot>
-        {% for footer in matrix.footer_rows %}
-        <tr>
-          <td>{{ footer.label }}</td>
-          {% for column in matrix.basis_columns %}
-          <td>{{ display_value(footer.values.get(column.key), column.value_type) }}</td>
-          {% endfor %}
-          {% for column in matrix.component_columns %}
-          <td class="numeric">{{ display_value(footer.values.get(column.key), column.value_type) }}</td>
-          {% endfor %}
-          {% for column in matrix.total_columns %}
-          <td class="numeric">{{ display_value(footer.values.get(column.key), column.value_type) }}</td>
-          {% endfor %}
-          {% for column in matrix.optional_columns %}
-          <td>{{ display_value(footer.values.get(column.key), column.value_type) }}</td>
-          {% endfor %}
-        </tr>
-        {% endfor %}
-      </tfoot>
-      {% endif %}
-    </table>
+  {% if prior_matrix %}
+    {{ schedule_block(prior_matrix, show_specials=false, show_notes=false) }}
   {% endif %}
-
-  {% if matrix.special_assessment_blocks %}
-  <h4>Special Assessment Disclosure</h4>
-  {% for block in matrix.special_assessment_blocks %}
-    <p>
-      <strong>{{ block.label }}:</strong>
-      {% if block.display_language %}
-        {{ block.display_language }}
-      {% elif block.total is not none %}
-        ${{ '{:,.2f}'.format(block.total) }} total{% if block.due_date %}, due {{ block.due_date }}{% endif %}{% if block.allocations %}, allocated per unit as shown below{% endif %}
-      {% elif block.amount_per_unit is not none %}
-        ${{ '{:,.2f}'.format(block.amount_per_unit) }}{% if block.due_date %}, due {{ block.due_date }}{% endif %}
-      {% endif %}
-    </p>
-    {% if block.allocations %}
-    <table class="assessment-table">
-      <tr><th>Unit</th><th>Special assessment share</th></tr>
-      {% for row in block.allocations %}
-      <tr><td>{{ row.recipient_label }}</td><td>${{ '{:,.2f}'.format(row.amount) }}</td></tr>
-      {% endfor %}
-    </table>
-    {% endif %}
-  {% endfor %}
-  {% endif %}
-
-  {% if matrix.homeowner_visible_notes %}
-  <div class="homeowner-notes">
-    {% for note in matrix.homeowner_visible_notes %}
-      <p>{{ note }}</p>
-    {% endfor %}
-  </div>
-  {% endif %}
-</section>
+  {{ schedule_block(matrix, show_specials=true, show_notes=true) }}
 {% endblock %}

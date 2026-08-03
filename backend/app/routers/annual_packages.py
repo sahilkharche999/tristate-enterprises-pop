@@ -5,8 +5,8 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from ..ai_implementation.db import get_session
@@ -200,3 +200,124 @@ def finalize_hoa_package(
                 "field_paths": exc.field_paths,
             },
         ) from exc
+
+
+# ── Prior-year assessment schedule (year-1 seed + status) ───────────────────
+
+
+class PriorScheduleRow(BaseModel):
+    recipient_label: str
+    monthly: str
+    percent_of_total: Optional[str] = None
+
+
+class ConfirmPriorScheduleRequest(BaseModel):
+    fiscal_year: int = Field(..., description="Year the amounts applied (usually Y-1)")
+    rows: list[PriorScheduleRow]
+
+
+@router.get("/hoa/{hoa_id}/prior-assessment-schedule")
+def get_prior_assessment_schedule_status(
+    hoa_id: int,
+    fiscal_year: int,
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """Status of prior schedule for a package fiscal year (inherited / seeded / missing)."""
+    _ = current_user
+    from ..disclosure_package.prior_assessment_schedule import (
+        load_prior_seed,
+        prior_status,
+    )
+
+    raw = session.connection().connection
+    status = prior_status(raw, property_id=hoa_id, fiscal_year=fiscal_year)
+    seed = load_prior_seed(raw, property_id=hoa_id)
+    if seed is not None:
+        year, rows = seed
+        status["seed"] = {"fiscal_year": year, "rows": rows}
+    return status
+
+
+@router.put("/hoa/{hoa_id}/prior-assessment-schedule")
+def confirm_prior_assessment_schedule(
+    hoa_id: int,
+    payload: ConfirmPriorScheduleRequest,
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """Save operator-confirmed prior schedule rows (after PDF extract or manual entry)."""
+    _ = current_user
+    from ..disclosure_package.prior_assessment_schedule import save_prior_seed
+
+    if not payload.rows:
+        raise HTTPException(status_code=422, detail="At least one schedule row is required")
+    rows = [r.model_dump(exclude_none=True) for r in payload.rows]
+    raw = session.connection().connection
+    save_prior_seed(
+        raw,
+        property_id=hoa_id,
+        fiscal_year=payload.fiscal_year,
+        rows=rows,
+    )
+    return {
+        "status": "seeded",
+        "prior_fiscal_year": payload.fiscal_year,
+        "row_count": len(rows),
+    }
+
+
+@router.post("/hoa/{hoa_id}/prior-assessment-schedule/extract")
+async def extract_prior_assessment_schedule(
+    hoa_id: int,
+    file: UploadFile = File(...),
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """Best-effort extract of unit/monthly rows from a prior final package PDF.
+
+    Returns draft rows for operator review — does NOT save until PUT confirm.
+    """
+    _ = current_user
+    _ = session
+    from ..disclosure_package.prior_assessment_schedule import (
+        extract_schedule_rows_from_pdf_text,
+    )
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=422, detail="Empty file")
+    text = ""
+    try:
+        from pypdf import PdfReader
+        from io import BytesIO
+
+        reader = PdfReader(BytesIO(content))
+        text = "\n".join((page.extract_text() or "") for page in reader.pages)
+    except Exception:
+        text = ""
+    rows = extract_schedule_rows_from_pdf_text(text)
+    return {
+        "filename": file.filename,
+        "row_count": len(rows),
+        "rows": rows,
+        "needs_confirmation": True,
+        "message": (
+            "Review and confirm these rows before saving."
+            if rows
+            else "No unit/monthly rows detected automatically — enter the schedule manually."
+        ),
+    }
+
+
+@router.delete("/hoa/{hoa_id}/prior-assessment-schedule")
+def delete_prior_assessment_schedule(
+    hoa_id: int,
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    _ = current_user
+    from ..disclosure_package.prior_assessment_schedule import clear_prior_seed
+
+    clear_prior_seed(session.connection().connection, property_id=hoa_id)
+    return {"status": "cleared"}

@@ -1176,6 +1176,7 @@ def compile_package(
     extra_appendix_paths: Optional[list[Path]] = None,
     extra_appendix_titles: Optional[dict[str, str]] = None,
     assessment_matrix: Optional[AssessmentScheduleMatrix] = None,
+    prior_matrix: Optional[AssessmentScheduleMatrix] = None,
     audit_extra: Optional[dict] = None,
 ) -> CompileResult:
     """Run the full disclosure-package compilation pipeline.
@@ -1500,6 +1501,7 @@ def compile_package(
                                   # prefer hoa.name over static_data.hoa_legal_name
                                   # so the rendered name reflects the live DB row.
             "matrix": assessment_matrix,
+            "prior_matrix": prior_matrix,
             "today": _rendered_today,
             "today_iso": datetime.now(timezone.utc).date().isoformat(),
             "hoa_settings": effective_hoa_settings,
@@ -1513,41 +1515,54 @@ def compile_package(
         #     any rendering — this is the single source of truth both the
         #     TOC page-number computation below and the final merge order
         #     (step 5) read from, so the two can never drift apart.
-        #     Static (spec-declared) appendices keep their position relative
-        #     to spec.entries (interleaving with GeneratedPage entries is
-        #     supported, even though no shipped PackageSpec does this
-        #     today); ad-hoc directory extras and DB-manifest appendices
-        #     always trail after everything else, matching the previous
-        #     5b/5c/5d behavior.
+        #
+        #     Production path (service always passes extra_appendix_paths as a
+        #     list, including empty): Settings appendix manifest ONLY — titles
+        #     from display_title. StaticAppendix + ad-hoc glob of the legacy
+        #     per-HOA dir are skipped so stray full-package PDFs cannot pollute
+        #     the TOC (e.g. "Old Mill …" on a different HOA).
+        #
+        #     Legacy path (extra_appendix_paths is None): StaticAppendix files
+        #     under appendices_root + every other *.pdf in that dir — kept for
+        #     unit tests that exercise the old wiring.
         extra_appendix_titles = extra_appendix_titles or {}
+        use_manifest_only = extra_appendix_paths is not None
         spec_appendix_paths: dict[str, tuple[Path, str]] = {}
         seen_appendix_names: set[str] = set()
-        for entry in spec.entries:
-            if isinstance(entry, StaticAppendix):
-                appendix_path = appendices_root / entry.file
-                if appendix_path.exists():
-                    title = extra_appendix_titles.get(entry.file) or _humanize_filename_title(entry.file)
-                    spec_appendix_paths[entry.file] = (appendix_path, title)
-                    seen_appendix_names.add(entry.file)
-                else:
-                    logger.info(
-                        "compiler: skipping missing static appendix %s", entry.file,
-                    )
-
         adhoc_appendix_entries: list[tuple[Path, str]] = []
-        if appendices_root.is_dir():
-            for extra in sorted(
-                p for p in appendices_root.glob("*.pdf")
-                if p.name not in seen_appendix_names
-            ):
-                title = extra_appendix_titles.get(extra.name) or _humanize_filename_title(extra.name)
-                adhoc_appendix_entries.append((extra, title))
-                seen_appendix_names.add(extra.name)
-                logger.info("compiler: appending ad-hoc appendix %s", extra.name)
-
         manifest_appendix_entries: list[tuple[Path, str]] = []
-        if extra_appendix_paths:
-            for extra in extra_appendix_paths:
+
+        if not use_manifest_only:
+            for entry in spec.entries:
+                if isinstance(entry, StaticAppendix):
+                    appendix_path = appendices_root / entry.file
+                    if appendix_path.exists():
+                        title = (
+                            extra_appendix_titles.get(entry.file)
+                            or _humanize_filename_title(entry.file)
+                        )
+                        spec_appendix_paths[entry.file] = (appendix_path, title)
+                        seen_appendix_names.add(entry.file)
+                    else:
+                        logger.info(
+                            "compiler: skipping missing static appendix %s",
+                            entry.file,
+                        )
+
+            if appendices_root.is_dir():
+                for extra in sorted(
+                    p for p in appendices_root.glob("*.pdf")
+                    if p.name not in seen_appendix_names
+                ):
+                    title = (
+                        extra_appendix_titles.get(extra.name)
+                        or _humanize_filename_title(extra.name)
+                    )
+                    adhoc_appendix_entries.append((extra, title))
+                    seen_appendix_names.add(extra.name)
+                    logger.info("compiler: appending ad-hoc appendix %s", extra.name)
+        else:
+            for extra in extra_appendix_paths or []:
                 if extra.name in seen_appendix_names:
                     logger.info(
                         "compiler: skipping duplicate manifest appendix %s",
@@ -1560,7 +1575,10 @@ def compile_package(
                         extra,
                     )
                     continue
-                title = extra_appendix_titles.get(extra.name) or _humanize_filename_title(extra.name)
+                title = (
+                    extra_appendix_titles.get(extra.name)
+                    or _humanize_filename_title(extra.name)
+                )
                 manifest_appendix_entries.append((extra, title))
                 seen_appendix_names.add(extra.name)
                 logger.info("compiler: appending manifest appendix %s", extra.name)

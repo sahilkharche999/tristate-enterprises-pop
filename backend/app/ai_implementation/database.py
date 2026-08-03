@@ -45,6 +45,10 @@ _PROPERTY_COLUMN_DEFINITIONS: dict[str, str] = {
     # status='approved' so renames/migrations don't require re-querying.
     "default_assessment_setup_id": "INTEGER",
     "assessment_mode": "TEXT NOT NULL DEFAULT 'variable'",
+    # Prior-year assessment schedule seed (year-1 bootstrap when no finalized
+    # package exists for FY-1). Confirmed operator rows; not auto-invented.
+    "prior_assessment_schedule_json": "TEXT",
+    "prior_assessment_schedule_year": "INTEGER",
 }
 
 _BUDGET_UPLOAD_COLUMN_DEFINITIONS: dict[str, str] = {

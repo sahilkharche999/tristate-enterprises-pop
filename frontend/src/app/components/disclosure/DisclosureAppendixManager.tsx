@@ -83,12 +83,16 @@ export function DisclosureAppendixManager({
   };
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-3 rounded border border-[#fde68a] bg-[#fffbeb] p-3">
       <div className="flex items-center justify-between">
         <div>
-          <h3 className="text-sm font-semibold text-[#111111]">Static appendices</h3>
+          <h3 className="text-sm font-semibold text-[#111111]">
+            Legacy static appendices (deprecated)
+          </h3>
           <p className="text-xs text-[#737373]">
-            PDFs uploaded here are appended to every generated package, sorted by filename.
+            Prefer <strong>Settings → Appendices</strong> with a display title — those names
+            appear in the package table of contents. Files uploaded here use the filename only
+            and are no longer merged when Settings appendices are in use.
           </p>
         </div>
       </div>

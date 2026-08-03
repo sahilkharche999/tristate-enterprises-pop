@@ -120,3 +120,80 @@ export async function finalizeAnnualPackage(
   );
   return handleResponse<AnnualPackage>(res);
 }
+
+// ── Prior-year assessment schedule ─────────────────────────────────────────
+
+export type PriorAssessmentStatus = 'inherited' | 'seeded' | 'missing' | 'cleared';
+
+export interface PriorScheduleRow {
+  recipient_label: string;
+  monthly: string;
+  percent_of_total?: string | null;
+}
+
+export interface PriorAssessmentStatusResponse {
+  status: PriorAssessmentStatus;
+  prior_fiscal_year?: number;
+  source?: string | null;
+  message?: string;
+  row_count?: number;
+  seed?: { fiscal_year: number; rows: PriorScheduleRow[] };
+}
+
+export interface PriorExtractResponse {
+  filename?: string;
+  row_count: number;
+  rows: PriorScheduleRow[];
+  needs_confirmation: boolean;
+  message: string;
+}
+
+export async function getPriorAssessmentSchedule(
+  hoaId: number,
+  fiscalYear: number,
+): Promise<PriorAssessmentStatusResponse> {
+  const res = await fetch(
+    `${BASE_URL}/hoa/${hoaId}/prior-assessment-schedule?fiscal_year=${fiscalYear}`,
+    { headers: authHeaders() },
+  );
+  return handleResponse<PriorAssessmentStatusResponse>(res);
+}
+
+export async function confirmPriorAssessmentSchedule(
+  hoaId: number,
+  body: { fiscal_year: number; rows: PriorScheduleRow[] },
+): Promise<{ status: string; prior_fiscal_year: number; row_count: number }> {
+  const res = await fetch(`${BASE_URL}/hoa/${hoaId}/prior-assessment-schedule`, {
+    method: 'PUT',
+    headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return handleResponse(res);
+}
+
+export async function extractPriorAssessmentSchedule(
+  hoaId: number,
+  file: File,
+): Promise<PriorExtractResponse> {
+  const form = new FormData();
+  form.append('file', file);
+  const res = await fetch(
+    `${BASE_URL}/hoa/${hoaId}/prior-assessment-schedule/extract`,
+    {
+      method: 'POST',
+      headers: authHeaders(),
+      body: form,
+    },
+  );
+  return handleResponse<PriorExtractResponse>(res);
+}
+
+export async function deletePriorAssessmentSchedule(
+  hoaId: number,
+): Promise<{ status: string }> {
+  const res = await fetch(`${BASE_URL}/hoa/${hoaId}/prior-assessment-schedule`, {
+    method: 'DELETE',
+    headers: authHeaders(),
+  });
+  return handleResponse(res);
+}
