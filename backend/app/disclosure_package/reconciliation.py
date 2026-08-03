@@ -8,11 +8,22 @@ from __future__ import annotations
 
 import re
 from decimal import Decimal, InvalidOperation
-from typing import Literal, Optional, Sequence
+from typing import Any, Literal, Mapping, Optional, Sequence, Union
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from .schemas import LineItem, ReserveFundingPlanRow
+
+# Strict pool_key allowlist for components with no usable mapped line totals.
+# Used only when line-fund ratios are unavailable — never match display names.
+_STRICT_RESERVE_POOL_KEYS = frozenset(
+    {
+        "reserve_contributions",
+        "reserve_contribution",
+        "replacement_fund",
+        "reserves",
+    }
+)
 
 
 ReserveFundingSource = Literal[
@@ -234,14 +245,179 @@ def is_interfund_reserve_transfer_line(
     return False
 
 
+class PoolLineFundTotals(BaseModel):
+    """Mapped budget-line dollars for one schedule pool, by dual-fund nature.
+
+    Used only for dual-fund P&L assessment columns (Option B). Does not drive
+    the homeowner assessment schedule.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    operating_mapped: Decimal = Decimal("0")
+    reserve_mapped: Decimal = Decimal("0")
+
+    @property
+    def total_mapped(self) -> Decimal:
+        return (self.operating_mapped + self.reserve_mapped).quantize(Decimal("0.01"))
+
+
+def is_strict_reserve_pool_key(component_key: object) -> bool:
+    """True for known pure replacement-fund contribution pool keys only."""
+    return str(component_key or "").strip().lower() in _STRICT_RESERVE_POOL_KEYS
+
+
 def is_reserve_pool_component_key(component_key: object, component_label: object = None) -> bool:
-    """Classify an assessment-matrix component as the reserve-funding pool."""
+    """Deprecated name-based classifier.
+
+    Historically matched any key/label containing \"reserve\"/\"replacement\",
+    which false-positived CCR mixed pools (Missouri: \"Specific Reserves\" in
+    an insurance/utilities pool name). Callers of dual-fund split must use
+    Option B line-fund totals + :func:`is_strict_reserve_pool_key` instead.
+
+    Kept as a strict-key wrapper so accidental callers no longer apply the
+    loose substring rule.
+    """
+    del component_label  # name must not drive classification
     key = str(component_key or "").lower()
-    label = str(component_label or "").lower()
-    blob = f"{key} {label}"
-    if "special" in blob:
+    if "special" in key:
         return False
-    return "reserve" in blob or "replacement" in blob
+    return is_strict_reserve_pool_key(key)
+
+
+def is_line_replacement_share_for_assessment_split(
+    *,
+    fund_type: object = None,
+    category: object = None,
+    label: object = None,
+    account_code: object = None,
+) -> bool:
+    """True when a mapped budget line should count toward Replacement assessments.
+
+    Interfund contribution lines (e.g. ``Reserve - Allocation/Transfer``) are
+    often stored as ``fund_type=operating`` on the income statement; they still
+    fund the Replacement Fund for dual-fund presentation.
+    """
+    ft = str(fund_type or "").strip().lower()
+    cat = str(category or "").strip().lower()
+    if ft == "reserve" or cat in {"reserve", "reserve_expense", "reserve_income"}:
+        # Interest is never replacement *assessment* share (external-ish).
+        if re.search(r"\binterest\b", str(label or ""), re.IGNORECASE):
+            return False
+        # Pure reserve_income that is the 45000 interfund mirror counts;
+        # other reserve_income without interfund signal still counts as
+        # replacement-side for pool routing (rare).
+        return True
+    if is_interfund_reserve_transfer_line(
+        label, section=category, account_code=account_code
+    ):
+        return True
+    return False
+
+
+def build_pool_line_fund_totals_from_mapped_rows(
+    rows: Sequence[Mapping[str, Any] | object],
+) -> dict[str, PoolLineFundTotals]:
+    """Aggregate mapped line amounts per pool_key into ops vs replacement shares.
+
+    Each row may be a mapping or object with:
+    ``pool_key``, ``amount``, and optional ``fund_type``, ``category``,
+    ``label`` / ``normalized_label``, ``account_code``.
+    """
+    acc: dict[str, list[Decimal]] = {}
+    for raw in rows:
+        if isinstance(raw, Mapping):
+            pool_key = str(raw.get("pool_key") or "").strip()
+            amount_raw = raw.get("amount")
+            fund_type = raw.get("fund_type")
+            category = raw.get("category")
+            label = raw.get("label") or raw.get("normalized_label")
+            account_code = raw.get("account_code")
+        else:
+            pool_key = str(
+                getattr(raw, "pool_key", None)
+                or getattr(raw, "component_key", None)
+                or ""
+            ).strip()
+            amount_raw = getattr(raw, "amount", None)
+            fund_type = getattr(raw, "fund_type", None)
+            category = getattr(raw, "category", None)
+            label = (
+                getattr(raw, "label", None)
+                or getattr(raw, "normalized_label", None)
+                or getattr(raw, "budget_line_normalized_label", None)
+            )
+            account_code = getattr(raw, "account_code", None)
+        if not pool_key:
+            continue
+        cat = str(category or "").strip().lower()
+        # Skip external assessment/other income — not pool expense routing.
+        if cat == "income" and not is_interfund_reserve_transfer_line(
+            label, section=category, account_code=account_code
+        ):
+            continue
+        try:
+            amount = Decimal(str(amount_raw or 0))
+        except (InvalidOperation, ValueError, ArithmeticError):
+            amount = Decimal("0")
+        if amount <= 0:
+            continue
+        ops_sum, res_sum = acc.get(pool_key, [Decimal("0"), Decimal("0")])
+        if is_line_replacement_share_for_assessment_split(
+            fund_type=fund_type,
+            category=category,
+            label=label,
+            account_code=account_code,
+        ):
+            res_sum += amount
+        else:
+            ops_sum += amount
+        acc[pool_key] = [ops_sum, res_sum]
+    return {
+        key: PoolLineFundTotals(
+            operating_mapped=vals[0].quantize(Decimal("0.01")),
+            reserve_mapped=vals[1].quantize(Decimal("0.01")),
+        )
+        for key, vals in acc.items()
+    }
+
+
+def _coerce_pool_line_fund_totals(
+    raw: Optional[Mapping[str, Union[PoolLineFundTotals, Mapping[str, Any], object]]],
+) -> dict[str, PoolLineFundTotals]:
+    if not raw:
+        return {}
+    out: dict[str, PoolLineFundTotals] = {}
+    for key, val in raw.items():
+        pk = str(key or "").strip()
+        if not pk:
+            continue
+        if isinstance(val, PoolLineFundTotals):
+            out[pk] = val
+            continue
+        if isinstance(val, Mapping):
+            try:
+                ops = Decimal(str(val.get("operating_mapped") or 0))
+                res = Decimal(str(val.get("reserve_mapped") or 0))
+            except (InvalidOperation, ValueError, ArithmeticError):
+                continue
+            out[pk] = PoolLineFundTotals(
+                operating_mapped=ops.quantize(Decimal("0.01")),
+                reserve_mapped=res.quantize(Decimal("0.01")),
+            )
+            continue
+        ops = getattr(val, "operating_mapped", None)
+        res = getattr(val, "reserve_mapped", None)
+        if ops is None and res is None:
+            continue
+        try:
+            out[pk] = PoolLineFundTotals(
+                operating_mapped=Decimal(str(ops or 0)).quantize(Decimal("0.01")),
+                reserve_mapped=Decimal(str(res or 0)).quantize(Decimal("0.01")),
+            )
+        except (InvalidOperation, ValueError, ArithmeticError):
+            continue
+    return out
 
 
 def assessment_split_from_schedule_components(
@@ -249,24 +425,30 @@ def assessment_split_from_schedule_components(
     *,
     total_regular_assessment_revenue: Decimal,
     fallback_reserve_assessment: Decimal,
+    pool_line_fund_totals: Optional[
+        Mapping[str, Union[PoolLineFundTotals, Mapping[str, Any], object]]
+    ] = None,
 ) -> tuple[Decimal, Decimal, str]:
-    """Policy S (soft): P&L assessment columns follow schedule when reserve exists.
+    """Policy S (Option B): dual-fund P&L assessment columns from line funds.
 
     Returns ``(operating_assessment_annual, reserve_assessment_annual, source)``
     where source is one of:
 
-    - ``\"schedule_matrix\"`` / ``\"schedule_matrix_scaled\"`` — matrix has a
-      positive reserve-named component; P&L reserve share follows the schedule
-      (Sharon Ridge–style ops + reserve pools).
+    - ``\"schedule_matrix\"`` / ``\"schedule_matrix_scaled\"`` /
+      ``\"schedule_matrix_line_fund\"`` — schedule has a positive
+      replacement-share (from mapped reserve/interfund lines or a strict
+      pure-reserve pool key); P&L follows that split.
     - ``\"settings_funding_fallback\"`` — matrix missing/empty/unusable.
-    - ``\"settings_funding_fallback_no_reserve_pool\"`` — matrix has only
-      non-reserve pools (equal/sqft/residential multi-pool HOAs) or a reserve
-      pool at $0. P&L reserve share keeps settings/study/manual funding so the
-      Replacement Fund column is not forced to $0 while Note 6 still shows a
-      funding plan.
+    - ``\"settings_funding_fallback_no_reserve_pool\"`` — schedule components
+      contribute no replacement-share (typical equal/sqft multi-pool HOAs, or
+      Missouri-style mixed CCR pools with only operating lines). Replacement
+      column uses settings/study/manual funding so it is not forced to $0
+      while Note 6 still shows a funding plan.
 
-    Does **not** change assessment schedule math — only reads component
-    annuals already computed by the matrix for dual-fund statement columns.
+    Pool **display names** are never used to decide fund columns (substring
+    \"reserve\" in a label is not enough). Does **not** change assessment
+    schedule math — only reads component annuals + optional mapped line
+    fund totals for dual-fund statement columns.
     """
     total = Decimal(total_regular_assessment_revenue or 0).quantize(Decimal("0.01"))
     fallback_reserve = Decimal(fallback_reserve_assessment or 0).quantize(Decimal("0.01"))
@@ -282,6 +464,8 @@ def assessment_split_from_schedule_components(
     if not component_summary_rows:
         return _settings_fallback("settings_funding_fallback")
 
+    line_totals = _coerce_pool_line_fund_totals(pool_line_fund_totals)
+    used_line_fund = False
     ops = Decimal("0")
     reserve = Decimal("0")
     for row in component_summary_rows:
@@ -297,13 +481,34 @@ def assessment_split_from_schedule_components(
                 or getattr(row, "label", None)
             )
             raw_amount = getattr(row, "annual_amount", None)
+        key_s = str(key or "").strip()
+        label_s = str(label or "")
+        blob = f"{key_s} {label_s}".lower()
+        if "special" in blob:
+            continue
         try:
             amount = Decimal(str(raw_amount or 0))
         except (InvalidOperation, ValueError, ArithmeticError):
             amount = Decimal("0")
         if amount <= 0:
             continue
-        if is_reserve_pool_component_key(key, label):
+
+        ft = line_totals.get(key_s)
+        if ft is not None and ft.total_mapped > 0:
+            used_line_fund = True
+            ratio_res = ft.reserve_mapped / (ft.operating_mapped + ft.reserve_mapped)
+            res_part = (amount * ratio_res).quantize(Decimal("0.01"))
+            if res_part < 0:
+                res_part = Decimal("0.00")
+            if res_part > amount:
+                res_part = amount
+            ops_part = (amount - res_part).quantize(Decimal("0.01"))
+            ops += ops_part
+            reserve += res_part
+            continue
+
+        # No usable mapped line totals: strict pool_key allowlist only.
+        if is_strict_reserve_pool_key(key_s):
             reserve += amount
         else:
             ops += amount
@@ -312,12 +517,15 @@ def assessment_split_from_schedule_components(
     if combined <= 0:
         return _settings_fallback("settings_funding_fallback")
 
-    # Soft Policy S: require a positive reserve-named schedule component.
-    # Without one (Old Mill / Two Worlds / 800 High / LAVS), using the matrix
-    # would put 100% of assessments in Operations and $0 in Replacement —
-    # wrong dual-fund presentation. Keep settings/study funding instead.
+    # Soft Policy S: require a positive replacement-share on the schedule.
+    # Without one (Old Mill / Two Worlds / 800 High / LAVS / Missouri mixed
+    # CCR pools), using the matrix would put 100% of assessments in Operations
+    # and $0 in Replacement — wrong dual-fund presentation. Keep
+    # settings/study funding instead.
     if reserve <= 0:
         return _settings_fallback("settings_funding_fallback_no_reserve_pool")
+
+    source_base = "schedule_matrix_line_fund" if used_line_fund else "schedule_matrix"
 
     # Prefer matrix split when it reconciles to assessment income (Policy S).
     if total > 0 and abs(combined - total) <= _STATEMENT_TOLERANCE:
@@ -327,7 +535,7 @@ def assessment_split_from_schedule_components(
         if res_q < 0:
             res_q = Decimal("0.00")
             ops_q = total
-        return ops_q, res_q, "schedule_matrix"
+        return ops_q, res_q, source_base
 
     # Matrix present with a reserve share but does not reconcile to assessment
     # income — scale relative ops/reserve split to assessment income.
@@ -336,7 +544,12 @@ def assessment_split_from_schedule_components(
     if scale_res < 0:
         scale_res = Decimal("0.00")
         scale_ops = total
-    return scale_ops, scale_res, "schedule_matrix_scaled"
+    scaled_source = (
+        "schedule_matrix_scaled"
+        if not used_line_fund
+        else "schedule_matrix_line_fund"
+    )
+    return scale_ops, scale_res, scaled_source
 
 
 def parse_optional_decimal_setting(value: object) -> Optional[Decimal]:

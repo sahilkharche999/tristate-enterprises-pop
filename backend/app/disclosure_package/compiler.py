@@ -993,13 +993,18 @@ def _compute_all(
     # Replacement Fund column is not forced to $0. Note 6 / 30-yr funding
     # always use reserve_funding_facts (settings / study / manual).
     component_rows = None
+    pool_line_fund_totals = None
     if assessment_matrix is not None:
         component_rows = getattr(assessment_matrix, "component_summary_rows", None)
+        pool_line_fund_totals = getattr(
+            assessment_matrix, "pool_line_fund_totals", None
+        )
     _ops_assess, _res_assess, assessment_split_source = (
         assessment_split_from_schedule_components(
             component_rows,
             total_regular_assessment_revenue=annual_assessment_revenue,
             fallback_reserve_assessment=reserve_funding_facts.annual_contribution,
+            pool_line_fund_totals=pool_line_fund_totals,
         )
     )
     annual_statement_facts = build_annual_statement_facts(

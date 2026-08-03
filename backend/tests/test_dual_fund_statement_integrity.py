@@ -153,6 +153,234 @@ def test_assessment_split_ignores_special_assessment_as_reserve() -> None:
     assert ops == Decimal("380000.00")
 
 
+def test_assessment_split_missouri_mixed_pool_name_does_not_steal_replacement() -> None:
+    """CCR mixed pool titled '...Specific Reserves...' with only ops lines must
+    not paint insurance/utilities into the Replacement Fund column (Option B)."""
+    from app.disclosure_package.reconciliation import PoolLineFundTotals
+
+    rows = [
+        SimpleNamespace(
+            component_key="equal_base",
+            component_label="Equal Base Operating Pool",
+            annual_amount=Decimal("55352.31"),
+        ),
+        SimpleNamespace(
+            component_key="variable_dre_exceptions",
+            component_label="Insurance, Utilities, and Specific Reserves Pool",
+            annual_amount=Decimal("49105.53"),
+        ),
+        SimpleNamespace(
+            component_key="parking_cost_center",
+            component_label="Parking Cost Center Pool",
+            annual_amount=Decimal("0"),
+        ),
+    ]
+    totals = {
+        "equal_base": PoolLineFundTotals(
+            operating_mapped=Decimal("38483"),
+            reserve_mapped=Decimal("0"),
+        ),
+        "variable_dre_exceptions": PoolLineFundTotals(
+            operating_mapped=Decimal("34140"),
+            reserve_mapped=Decimal("0"),
+        ),
+    }
+    total = Decimal("104457.84")
+    fallback = Decimal("39659.00")
+    ops, res, source = assessment_split_from_schedule_components(
+        rows,
+        total_regular_assessment_revenue=total,
+        fallback_reserve_assessment=fallback,
+        pool_line_fund_totals=totals,
+    )
+    assert source == "settings_funding_fallback_no_reserve_pool"
+    assert res == fallback
+    assert ops == (total - fallback).quantize(Decimal("0.01"))
+    # Must not use the ~$49k mixed-pool annual as replacement share.
+    assert res != Decimal("49105.53")
+    assert res < Decimal("45000")
+
+
+def test_assessment_split_substring_reserve_in_label_without_lines_is_ops() -> None:
+    """Bare name containing 'Reserves' is not enough — no allowlist key, no lines."""
+    rows = [
+        SimpleNamespace(
+            component_key="variable_dre_exceptions",
+            component_label="Insurance, Utilities, and Specific Reserves Pool",
+            annual_amount=Decimal("49105.53"),
+        ),
+        SimpleNamespace(
+            component_key="equal_base",
+            component_label="Equal Base Operating Pool",
+            annual_amount=Decimal("55352.31"),
+        ),
+    ]
+    total = Decimal("104457.84")
+    fallback = Decimal("39659.00")
+    ops, res, source = assessment_split_from_schedule_components(
+        rows,
+        total_regular_assessment_revenue=total,
+        fallback_reserve_assessment=fallback,
+        pool_line_fund_totals=None,
+    )
+    assert source == "settings_funding_fallback_no_reserve_pool"
+    assert res == fallback
+    assert ops + res == total
+
+
+def test_assessment_split_mixed_pool_line_ratio() -> None:
+    """When a pool has both ops and reserve mapped lines, split component annual by ratio."""
+    from app.disclosure_package.reconciliation import PoolLineFundTotals
+
+    rows = [
+        SimpleNamespace(
+            component_key="mixed_pool",
+            component_label="Mixed Exceptions",
+            annual_amount=Decimal("100000.00"),
+        ),
+    ]
+    totals = {
+        "mixed_pool": PoolLineFundTotals(
+            operating_mapped=Decimal("70000"),
+            reserve_mapped=Decimal("30000"),
+        ),
+    }
+    ops, res, source = assessment_split_from_schedule_components(
+        rows,
+        total_regular_assessment_revenue=Decimal("100000.00"),
+        fallback_reserve_assessment=Decimal("50000"),
+        pool_line_fund_totals=totals,
+    )
+    assert source in {"schedule_matrix", "schedule_matrix_line_fund"}
+    assert ops == Decimal("70000.00")
+    assert res == Decimal("30000.00")
+
+
+def test_assessment_split_interfund_transfer_counts_as_reserve_mapped() -> None:
+    """Operating fund_type + Reserve Allocation/Transfer label → replacement share."""
+    from app.disclosure_package.reconciliation import (
+        PoolLineFundTotals,
+        build_pool_line_fund_totals_from_mapped_rows,
+        is_line_replacement_share_for_assessment_split,
+    )
+
+    assert is_line_replacement_share_for_assessment_split(
+        fund_type="operating",
+        category="operating",
+        label="Reserve - Allocation/Transfer",
+        account_code="90000",
+    )
+    assert not is_line_replacement_share_for_assessment_split(
+        fund_type="operating",
+        category="operating",
+        label="General Insurance",
+        account_code="55000",
+    )
+
+    totals = build_pool_line_fund_totals_from_mapped_rows(
+        [
+            {
+                "pool_key": "equal_base",
+                "amount": Decimal("7200"),
+                "fund_type": "operating",
+                "category": "operating",
+                "label": "Management Service",
+                "account_code": "50050",
+            },
+            {
+                "pool_key": "equal_base",
+                "amount": Decimal("31935"),
+                "fund_type": "operating",
+                "category": "operating",
+                "label": "Reserve - Allocation/Transfer",
+                "account_code": "90000",
+            },
+        ]
+    )
+    assert totals["equal_base"].operating_mapped == Decimal("7200")
+    assert totals["equal_base"].reserve_mapped == Decimal("31935")
+
+    rows = [
+        SimpleNamespace(
+            component_key="equal_base",
+            component_label="Equal Base Operating Pool",
+            annual_amount=Decimal("39135.00"),
+        ),
+    ]
+    ops, res, source = assessment_split_from_schedule_components(
+        rows,
+        total_regular_assessment_revenue=Decimal("39135.00"),
+        fallback_reserve_assessment=Decimal("10000"),
+        pool_line_fund_totals=totals,
+    )
+    assert source in {"schedule_matrix", "schedule_matrix_line_fund"}
+    assert res == Decimal("31935.00")
+    assert ops == Decimal("7200.00")
+
+
+def test_assessment_split_allowlist_unmapped_reserve_contributions() -> None:
+    """formula_only reserve pool with no line totals still counts via strict key."""
+    rows = [
+        SimpleNamespace(
+            component_key="general_operating",
+            component_label="Operating Expenses",
+            annual_amount=Decimal("80000"),
+        ),
+        SimpleNamespace(
+            component_key="reserve_contributions",
+            component_label="Anything With The Word Reserves In A Weird Name",
+            annual_amount=Decimal("20000"),
+        ),
+    ]
+    ops, res, source = assessment_split_from_schedule_components(
+        rows,
+        total_regular_assessment_revenue=Decimal("100000"),
+        fallback_reserve_assessment=Decimal("99999"),
+        pool_line_fund_totals={},
+    )
+    assert source in {"schedule_matrix", "schedule_matrix_scaled", "schedule_matrix_line_fund"}
+    assert res == Decimal("20000.00")
+    assert ops == Decimal("80000.00")
+
+
+def test_assessment_split_sharon_ridge_with_line_fund_totals() -> None:
+    """Sharon Ridge still follows schedule when line totals match pool annuals."""
+    from app.disclosure_package.reconciliation import PoolLineFundTotals
+
+    rows = [
+        SimpleNamespace(
+            component_key="general_operating",
+            component_label="Operating Expenses",
+            annual_amount=Decimal("268875.09"),
+        ),
+        SimpleNamespace(
+            component_key="reserve_contributions",
+            component_label="Reserve Contributions",
+            annual_amount=Decimal("103992.51"),
+        ),
+    ]
+    totals = {
+        "general_operating": PoolLineFundTotals(
+            operating_mapped=Decimal("268875.09"),
+            reserve_mapped=Decimal("0"),
+        ),
+        "reserve_contributions": PoolLineFundTotals(
+            operating_mapped=Decimal("0"),
+            reserve_mapped=Decimal("103992.51"),
+        ),
+    }
+    ops, res, source = assessment_split_from_schedule_components(
+        rows,
+        total_regular_assessment_revenue=Decimal("372867.60"),
+        fallback_reserve_assessment=Decimal("118132"),
+        pool_line_fund_totals=totals,
+    )
+    assert source in {"schedule_matrix", "schedule_matrix_line_fund"}
+    assert ops + res == Decimal("372867.60")
+    assert ops == Decimal("268875.09")
+    assert res == Decimal("103992.51")
+
+
 def test_annual_statement_excludes_transfer_style_other_revenue_from_inflation() -> None:
     """When transfer is excluded from other_rep and ops expenses, totals stay clean."""
     liab = resolve_reserve_liability_facts(

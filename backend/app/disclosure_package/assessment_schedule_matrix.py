@@ -70,6 +70,7 @@ from app.services.ccr_approval_service import (
 )
 from app.services.dre_review_service import list_review_edits
 
+from .reconciliation import build_pool_line_fund_totals_from_mapped_rows
 from .schemas import PreflightError
 
 
@@ -256,6 +257,10 @@ class AssessmentScheduleMatrix(BaseModel):
     layout_hints: LayoutHints = Field(default_factory=LayoutHints)
     special_assessment_blocks: list[SpecialAssessmentDisclosureBlock] = []
     source_pages_visible: bool = False
+    # Option B: per-pool mapped line ops vs replacement-share totals for the
+    # dual-fund P&L (not used by the homeowner schedule grid). Snapshotted with
+    # the matrix so finalize does not need live mapping rows.
+    pool_line_fund_totals: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
     @property
     def is_final_renderable(self) -> bool:
@@ -828,6 +833,7 @@ def build_universal_assessment_matrix(
     footer_rows: list[FooterRow] | None = None,
     pending_review_issues: list[PreflightError] | None = None,
     manual_review_reason: str = "Assessment allocation basis is not visible or approved.",
+    pool_line_fund_totals: dict[str, dict[str, Any]] | None = None,
 ) -> AssessmentScheduleMatrix:
     """Build one universal assessment schedule matrix from engine output.
 
@@ -1056,6 +1062,7 @@ def build_universal_assessment_matrix(
         component_column_groups=component_groups,
         total_columns=total_columns,
         optional_columns=optional_columns,
+        pool_line_fund_totals=dict(pool_line_fund_totals or {}),
         evidence_refs=evidence_refs,
         rows=rows,
         footer_rows=footer_rows or [],
@@ -1886,6 +1893,56 @@ def _pool_totals_annual_for_mappings(
         if pool_key:
             totals[pool_key] += line.amount
     return dict(totals)
+
+
+def _pool_line_fund_totals_for_dual_fund_split(
+    *,
+    budget_lines: list[BudgetLineInput],
+    mappings: list[BudgetLineMappingInput],
+) -> dict[str, dict[str, Any]]:
+    """Serialize Option B per-pool ops/reserve mapped totals onto the matrix."""
+    routing = {
+        (
+            mapping.budget_line_normalized_label,
+            mapping.section,
+            mapping.category,
+            mapping.fund_type,
+            mapping.account_code,
+        ): mapping.pool_key
+        for mapping in mappings
+        if mapping.active
+    }
+    rows: list[dict[str, Any]] = []
+    for line in budget_lines:
+        pool_key = routing.get(
+            (
+                line.normalized_label,
+                line.section,
+                line.category,
+                line.fund_type,
+                line.account_code,
+            )
+        )
+        if not pool_key:
+            continue
+        rows.append(
+            {
+                "pool_key": pool_key,
+                "amount": line.amount,
+                "fund_type": line.fund_type,
+                "category": line.category,
+                "label": line.normalized_label,
+                "account_code": line.account_code,
+            }
+        )
+    built = build_pool_line_fund_totals_from_mapped_rows(rows)
+    return {
+        key: {
+            "operating_mapped": str(val.operating_mapped),
+            "reserve_mapped": str(val.reserve_mapped),
+        }
+        for key, val in built.items()
+    }
 
 
 def _special_assessment_operator_totals(
@@ -2924,6 +2981,10 @@ def build_matrix_from_approved_assessment_setup(
         pending_review_issues=empty_special_pool_issues + manual_issues,
         source_pages=_source_pages_from_payload(payload),
         internal_review_notes=internal_review_notes,
+        pool_line_fund_totals=_pool_line_fund_totals_for_dual_fund_split(
+            budget_lines=budget_lines,
+            mappings=mappings,
+        ),
         evidence_refs=[
             EvidenceRef(
                 field="recipient_grain",
