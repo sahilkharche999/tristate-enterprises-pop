@@ -9,6 +9,15 @@ from pathlib import Path
 
 import pytest
 
+from app.assessment_engine.schemas import RecipientReference
+from app.disclosure_package.assessment_schedule_matrix import (
+    PRESENTATION_INDIVIDUAL,
+    _expand_group_recipients_to_units,
+    _ownership_match_key,
+    _resolve_presentation_for_setup,
+    save_assessment_schedule_presentation,
+    load_assessment_schedule_presentation,
+)
 from app.disclosure_package.prior_assessment_schedule import (
     extract_schedule_rows_from_pdf_text,
     load_finalized_assessment_matrix,
@@ -498,3 +507,79 @@ def test_compiler_manifest_only_empty_list_skips_legacy_glob(tmp_path: Path):
     # Humanize would produce the bad TOC string — prove we never call it for pollution
     bad = _humanize_filename_title("Old Mill 2026 Disclosure Package (2).pdf")
     assert "Old Mill" in bad  # documents root cause of Bob's bug if path were used
+
+
+def test_expand_groups_to_units_uses_prior_seed_labels():
+    groups = [
+        RecipientReference(
+            ref_type="group",
+            ref_id=1,
+            label="Unit Type A",
+            unit_count=2,
+            ownership_percent=Decimal("0.0178"),
+        ),
+        RecipientReference(
+            ref_type="group",
+            ref_id=2,
+            label="Unit Type B",
+            unit_count=1,
+            ownership_percent=Decimal("0.0242"),
+        ),
+    ]
+    buckets = {
+        _ownership_match_key(Decimal("1.780")): ["513", "523"],
+        _ownership_match_key(Decimal("2.420")): ["534"],
+    }
+    units = _expand_group_recipients_to_units(groups, unit_labels_by_pct=buckets)
+    assert len(units) == 3
+    assert [u.label for u in units] == ["513", "523", "534"]
+    assert all(u.ref_type == "unit" and u.unit_count == 1 for u in units)
+    assert units[0].ownership_percent == Decimal("0.0178")
+
+
+def test_resolve_presentation_property_overrides_setup():
+    assert (
+        _resolve_presentation_for_setup(
+            property_presentation="individual",
+            setup_type="grouped",
+            setup_display_mode="grouped",
+        )
+        == PRESENTATION_INDIVIDUAL
+    )
+    assert (
+        _resolve_presentation_for_setup(
+            property_presentation="auto",
+            setup_type="grouped",
+            setup_display_mode="",
+        )
+        == "group"
+    )
+
+
+def test_save_and_load_presentation_mode():
+    c = _conn()
+    c.execute(
+        "ALTER TABLE properties ADD COLUMN assessment_schedule_presentation "
+        "TEXT NOT NULL DEFAULT 'auto'"
+    )
+    c.commit()
+    assert load_assessment_schedule_presentation(c, property_id=1) == "auto"
+    saved = save_assessment_schedule_presentation(
+        c, property_id=1, presentation="individual"
+    )
+    assert saved == "individual"
+    assert load_assessment_schedule_presentation(c, property_id=1) == "individual"
+
+
+def test_universal_template_page_breaks_before_current_year():
+    tpl = Path(
+        "app/disclosure_package/templates/standard/assessment_schedule/universal.html"
+    ).read_text(encoding="utf-8")
+    assert "page-break" in tpl
+    assert "assessment-schedule--year-break" in tpl
+    # Prior block then break then current matrix
+    prior_idx = tpl.index("prior_matrix")
+    break_idx = tpl.index("assessment-schedule--year-break")
+    # schedule_block(matrix appears after the break
+    current_idx = tpl.rindex("schedule_block(matrix")
+    assert prior_idx < break_idx < current_idx

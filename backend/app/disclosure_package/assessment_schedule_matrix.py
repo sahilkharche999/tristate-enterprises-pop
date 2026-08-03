@@ -2192,6 +2192,208 @@ def _ownership_divisor_or_drop(
         return None, True
 
 
+# Bob (Jul 27): per-association assessment table presentation —
+# fixed (summary), individual (each unit), or group (unit types).
+# Stored on properties.assessment_schedule_presentation.
+PRESENTATION_AUTO = "auto"
+PRESENTATION_INDIVIDUAL = "individual"
+PRESENTATION_GROUP = "group"
+PRESENTATION_COLUMN = "assessment_schedule_presentation"
+
+
+def _normalize_presentation(value: Any) -> str:
+    raw = str(value or PRESENTATION_AUTO).strip().lower()
+    if raw in {PRESENTATION_INDIVIDUAL, "per_unit", "unit", "units"}:
+        return PRESENTATION_INDIVIDUAL
+    if raw in {PRESENTATION_GROUP, "grouped", "groups", "unit_type"}:
+        return PRESENTATION_GROUP
+    return PRESENTATION_AUTO
+
+
+def load_assessment_schedule_presentation(
+    connection: sqlite3.Connection,
+    *,
+    property_id: int,
+) -> str:
+    """Return auto | individual | group for this HOA (default auto)."""
+    try:
+        cols = {
+            str(r[1])
+            for r in connection.execute("PRAGMA table_info(properties)").fetchall()
+        }
+    except sqlite3.Error:
+        return PRESENTATION_AUTO
+    if PRESENTATION_COLUMN not in cols:
+        return PRESENTATION_AUTO
+    try:
+        row = connection.execute(
+            f"SELECT {PRESENTATION_COLUMN} FROM properties WHERE id = ?",
+            (property_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return PRESENTATION_AUTO
+    if not row:
+        return PRESENTATION_AUTO
+    return _normalize_presentation(row[0])
+
+
+def save_assessment_schedule_presentation(
+    connection: sqlite3.Connection,
+    *,
+    property_id: int,
+    presentation: str,
+) -> str:
+    """Persist presentation mode; returns normalized value."""
+    value = _normalize_presentation(presentation)
+    cols = {
+        str(r[1])
+        for r in connection.execute("PRAGMA table_info(properties)").fetchall()
+    }
+    if PRESENTATION_COLUMN not in cols:
+        connection.execute(
+            f"ALTER TABLE properties ADD COLUMN {PRESENTATION_COLUMN} TEXT "
+            f"NOT NULL DEFAULT '{PRESENTATION_AUTO}'"
+        )
+    connection.execute(
+        f"UPDATE properties SET {PRESENTATION_COLUMN} = ? WHERE id = ?",
+        (value, property_id),
+    )
+    connection.commit()
+    return value
+
+
+def _ownership_match_key(value: Optional[Decimal]) -> Optional[str]:
+    """Normalize ownership % (points or fraction) for roster matching."""
+    if value is None:
+        return None
+    try:
+        v = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    if v > 1:
+        v = v / Decimal("100")
+    return format(v.quantize(Decimal("0.000001")), "f")
+
+
+def _unit_label_buckets_from_prior_seed(
+    connection: sqlite3.Connection,
+    *,
+    property_id: int,
+) -> dict[str, list[str]]:
+    """Map ownership-match-key → ordered unit labels from prior-year seed."""
+    try:
+        cols = {
+            str(r[1])
+            for r in connection.execute("PRAGMA table_info(properties)").fetchall()
+        }
+    except sqlite3.Error:
+        return {}
+    if "prior_assessment_schedule_json" not in cols:
+        return {}
+    try:
+        row = connection.execute(
+            "SELECT prior_assessment_schedule_json FROM properties WHERE id = ?",
+            (property_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return {}
+    if not row or not row[0]:
+        return {}
+    try:
+        payload = json.loads(row[0])
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    rows = payload if isinstance(payload, list) else payload.get("rows") or []
+    buckets: dict[str, list[str]] = defaultdict(list)
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        label = str(
+            item.get("recipient_label")
+            or item.get("unit")
+            or item.get("label")
+            or ""
+        ).strip()
+        if not label:
+            continue
+        raw_pct = item.get("percent_of_total")
+        if raw_pct is None:
+            raw_pct = item.get("ownership_percent")
+        if raw_pct is None or str(raw_pct).strip() == "":
+            continue
+        try:
+            key = _ownership_match_key(Decimal(str(raw_pct).replace("%", "").strip()))
+        except (InvalidOperation, TypeError, ValueError):
+            continue
+        if key:
+            buckets[key].append(label)
+    return buckets
+
+
+def _expand_group_recipients_to_units(
+    groups: list[RecipientReference],
+    *,
+    unit_labels_by_pct: Optional[dict[str, list[str]]] = None,
+) -> list[RecipientReference]:
+    """Expand group recipients into one unit row each (same ownership %).
+
+    Prefer labels from prior-year seed (matched by ownership %). Otherwise
+    label as \"{group} unit {i}\". Engine treats each as unit_count=1 with
+    per-unit interest form when Σ pct×count ≈ 1.
+    """
+    labels_by_pct = unit_labels_by_pct or {}
+    used_index: dict[str, int] = defaultdict(int)
+    units: list[RecipientReference] = []
+    next_id = 1
+    for group in groups:
+        n = max(int(group.unit_count or 1), 1)
+        key = _ownership_match_key(group.ownership_percent)
+        roster = labels_by_pct.get(key or "", [])
+        for i in range(n):
+            if key and used_index[key] < len(roster):
+                label = roster[used_index[key]]
+                used_index[key] += 1
+            else:
+                label = f"{group.label} unit {i + 1}"
+            units.append(
+                RecipientReference(
+                    ref_type="unit",
+                    ref_id=next_id,
+                    label=label,
+                    unit_count=1,
+                    square_feet=group.square_feet,
+                    ownership_percent=group.ownership_percent,
+                )
+            )
+            next_id += 1
+    return units
+
+
+def _resolve_presentation_for_setup(
+    *,
+    property_presentation: str,
+    setup_type: str,
+    setup_display_mode: Optional[str],
+) -> str:
+    """Decide auto/individual/group for this package.
+
+    Property setting wins when not auto. Otherwise setup display_mode, then
+    setup_type (grouped → group, per_unit → individual, fixed → auto/summary).
+    """
+    prop = _normalize_presentation(property_presentation)
+    if prop != PRESENTATION_AUTO:
+        return prop
+    mode = _normalize_presentation(setup_display_mode)
+    if mode != PRESENTATION_AUTO:
+        return mode
+    st = str(setup_type or "").strip().lower()
+    if st in {"per_unit", "individual_unit"}:
+        return PRESENTATION_INDIVIDUAL
+    if st in {"grouped", "grouped_category"}:
+        return PRESENTATION_GROUP
+    return PRESENTATION_AUTO
+
+
 def build_matrix_from_approved_assessment_setup(
     *,
     connection: sqlite3.Connection,
@@ -2210,7 +2412,7 @@ def build_matrix_from_approved_assessment_setup(
     """
     setup = connection.execute(
         """
-        SELECT id, setup_type, approved_at
+        SELECT id, setup_type, approved_at, display_mode
           FROM assessment_setups
          WHERE property_id = ? AND status = 'approved'
          ORDER BY id DESC LIMIT 1
@@ -2224,7 +2426,7 @@ def build_matrix_from_approved_assessment_setup(
             reason="No approved DRE assessment setup was found for this HOA.",
         )
 
-    setup_id, setup_type, approved_at = setup
+    setup_id, setup_type, approved_at, setup_display_mode = setup
 
     payload = _payload_for_promoted_setup(
         connection=connection,
@@ -2377,6 +2579,29 @@ def build_matrix_from_approved_assessment_setup(
             reason=f"Assessment matrix needs operator review before rendering: {exc}",
             approved_at=approved_at,
         )
+
+    # Presentation mode (Bob): individual unit table vs unit-type groups.
+    # Math stays the same; we only expand/collapse the recipient grain shown.
+    presentation = _resolve_presentation_for_setup(
+        property_presentation=load_assessment_schedule_presentation(
+            connection, property_id=property_id
+        ),
+        setup_type=str(setup_type or ""),
+        setup_display_mode=str(setup_display_mode or ""),
+    )
+    if (
+        presentation == PRESENTATION_INDIVIDUAL
+        and recipients
+        and all(_get(r, "ref_type") == "group" for r in recipients)
+    ):
+        label_buckets = _unit_label_buckets_from_prior_seed(
+            connection, property_id=property_id
+        )
+        recipients = _expand_group_recipients_to_units(
+            recipients,
+            unit_labels_by_pct=label_buckets,
+        )
+        effective_setup_type = "per_unit"
 
     if not recipients:
         return _fallback_matrix_for_db_issue(

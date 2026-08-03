@@ -49,6 +49,8 @@ _PROPERTY_COLUMN_DEFINITIONS: dict[str, str] = {
     # package exists for FY-1). Confirmed operator rows; not auto-invented.
     "prior_assessment_schedule_json": "TEXT",
     "prior_assessment_schedule_year": "INTEGER",
+    # Bob: assessment schedule PDF grain — auto | individual | group
+    "assessment_schedule_presentation": "TEXT NOT NULL DEFAULT 'auto'",
 }
 
 _BUDGET_UPLOAD_COLUMN_DEFINITIONS: dict[str, str] = {

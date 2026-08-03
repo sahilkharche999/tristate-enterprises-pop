@@ -131,6 +131,8 @@ export interface PriorScheduleRow {
   percent_of_total?: string | null;
 }
 
+export type AssessmentSchedulePresentation = 'auto' | 'individual' | 'group';
+
 export interface PriorAssessmentStatusResponse {
   status: PriorAssessmentStatus;
   prior_fiscal_year?: number;
@@ -138,6 +140,8 @@ export interface PriorAssessmentStatusResponse {
   message?: string;
   row_count?: number;
   seed?: { fiscal_year: number; rows: PriorScheduleRow[] };
+  /** How the current-year unit table is printed: auto | individual | group */
+  assessment_schedule_presentation?: AssessmentSchedulePresentation;
 }
 
 export interface PriorExtractResponse {
@@ -201,5 +205,20 @@ export async function deletePriorAssessmentSchedule(
     method: 'DELETE',
     headers: authHeaders(),
   });
+  return handleResponse(res);
+}
+
+export async function setAssessmentSchedulePresentation(
+  hoaId: number,
+  presentation: AssessmentSchedulePresentation,
+): Promise<{ status: string; assessment_schedule_presentation: AssessmentSchedulePresentation }> {
+  const res = await fetch(
+    `${BASE_URL}/hoa/${hoaId}/assessment-schedule-presentation`,
+    {
+      method: 'PUT',
+      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ presentation }),
+    },
+  );
   return handleResponse(res);
 }

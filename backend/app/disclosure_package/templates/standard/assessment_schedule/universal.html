@@ -248,9 +248,11 @@
   <style>
     .assessment-schedule--universal h2 { margin-bottom: 4px; }
     .assessment-schedule--universal h3 { margin-top: 0; }
-    .assessment-schedule--universal + .assessment-schedule--universal {
-      margin-top: 28px;
-      page-break-before: auto;
+    /* Prior year and package year are separate schedule sections. The current
+       year always starts on a new page when a prior table is present (Bob). */
+    .assessment-schedule--year-break {
+      page-break-before: always;
+      break-before: page;
     }
     .assessment-summary-block {
       border-top: 1px solid #333;
@@ -285,6 +287,7 @@
 
   {% if prior_matrix %}
     {{ schedule_block(prior_matrix, show_specials=false, show_notes=false) }}
+    <div class="page-break assessment-schedule--year-break" aria-hidden="true"></div>
   {% endif %}
   {{ schedule_block(matrix, show_specials=true, show_notes=true) }}
 {% endblock %}

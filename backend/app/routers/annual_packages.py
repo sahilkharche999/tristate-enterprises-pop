@@ -225,6 +225,9 @@ def get_prior_assessment_schedule_status(
 ) -> dict:
     """Status of prior schedule for a package fiscal year (inherited / seeded / missing)."""
     _ = current_user
+    from ..disclosure_package.assessment_schedule_matrix import (
+        load_assessment_schedule_presentation,
+    )
     from ..disclosure_package.prior_assessment_schedule import (
         load_prior_seed,
         prior_status,
@@ -236,7 +239,48 @@ def get_prior_assessment_schedule_status(
     if seed is not None:
         year, rows = seed
         status["seed"] = {"fiscal_year": year, "rows": rows}
+    status["assessment_schedule_presentation"] = load_assessment_schedule_presentation(
+        raw, property_id=hoa_id
+    )
     return status
+
+
+class AssessmentSchedulePresentationRequest(BaseModel):
+    presentation: str = Field(
+        ...,
+        description="auto | individual | group — how the unit table is printed",
+    )
+
+
+@router.put("/hoa/{hoa_id}/assessment-schedule-presentation")
+def put_assessment_schedule_presentation(
+    hoa_id: int,
+    payload: AssessmentSchedulePresentationRequest,
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """Set individual vs group assessment schedule table (Bob presentation mode)."""
+    _ = current_user
+    from ..disclosure_package.assessment_schedule_matrix import (
+        PRESENTATION_AUTO,
+        PRESENTATION_GROUP,
+        PRESENTATION_INDIVIDUAL,
+        save_assessment_schedule_presentation,
+    )
+
+    allowed = {PRESENTATION_AUTO, PRESENTATION_INDIVIDUAL, PRESENTATION_GROUP}
+    value = str(payload.presentation or "").strip().lower()
+    if value not in allowed:
+        raise HTTPException(
+            status_code=422,
+            detail=f"presentation must be one of: {', '.join(sorted(allowed))}",
+        )
+    saved = save_assessment_schedule_presentation(
+        session.connection().connection,
+        property_id=hoa_id,
+        presentation=value,
+    )
+    return {"status": "ok", "assessment_schedule_presentation": saved}
 
 
 @router.put("/hoa/{hoa_id}/prior-assessment-schedule")

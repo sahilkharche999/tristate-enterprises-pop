@@ -9,6 +9,8 @@ import {
   deletePriorAssessmentSchedule,
   extractPriorAssessmentSchedule,
   getPriorAssessmentSchedule,
+  setAssessmentSchedulePresentation,
+  type AssessmentSchedulePresentation,
   type PriorAssessmentStatusResponse,
   type PriorScheduleRow,
 } from '../../api/annualPackages';
@@ -32,6 +34,8 @@ export function PriorYearAssessmentCard({
   const [busy, setBusy] = useState(false);
   const [draftRows, setDraftRows] = useState<PriorScheduleRow[] | null>(null);
   const [draftYear, setDraftYear] = useState(fiscalYear - 1);
+  const [presentation, setPresentation] =
+    useState<AssessmentSchedulePresentation>('auto');
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -39,6 +43,7 @@ export function PriorYearAssessmentCard({
     try {
       const next = await getPriorAssessmentSchedule(hoaId, fiscalYear);
       setStatus(next);
+      setPresentation(next.assessment_schedule_presentation ?? 'auto');
       if (next.seed?.rows?.length) {
         setDraftRows(next.seed.rows);
         setDraftYear(next.seed.fiscal_year);
@@ -49,6 +54,21 @@ export function PriorYearAssessmentCard({
       setLoading(false);
     }
   }, [hoaId, fiscalYear]);
+
+  const handlePresentationChange = async (value: AssessmentSchedulePresentation) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await setAssessmentSchedulePresentation(hoaId, value);
+      setPresentation(result.assessment_schedule_presentation ?? value);
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : 'Failed to save schedule presentation',
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
 
   useEffect(() => {
     void refresh();
@@ -159,6 +179,29 @@ export function PriorYearAssessmentCard({
           {status?.message ? ` — ${status.message}` : ''}
         </p>
       )}
+
+      <div className="rounded border border-[#e5e5e5] bg-[#fafafa] px-3 py-2">
+        <label className="block text-xs font-medium text-[#404040]" htmlFor="schedule-presentation">
+          Assessment schedule table layout
+        </label>
+        <p className="mt-0.5 text-[11px] text-[#737373]">
+          Sharon Ridge–style packages list every unit. Large HOAs like Ryland Muse use unit
+          types/groups. Fixed equal assessments stay one amount either way.
+        </p>
+        <select
+          id="schedule-presentation"
+          className="mt-2 w-full max-w-sm rounded border border-[#d4d4d4] bg-white px-2 py-1.5 text-xs"
+          value={presentation}
+          disabled={disabled || busy || loading}
+          onChange={(e) =>
+            void handlePresentationChange(e.target.value as AssessmentSchedulePresentation)
+          }
+        >
+          <option value="auto">Auto (from DRE setup)</option>
+          <option value="individual">Individual units (each unit row)</option>
+          <option value="group">Unit types / groups</option>
+        </select>
+      </div>
 
       {status?.status !== 'inherited' ? (
         <FileDropzone
