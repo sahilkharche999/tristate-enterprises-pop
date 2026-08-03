@@ -575,11 +575,9 @@ def test_universal_template_page_breaks_before_current_year():
     tpl = Path(
         "app/disclosure_package/templates/standard/assessment_schedule/universal.html"
     ).read_text(encoding="utf-8")
-    assert "page-break" in tpl
-    assert "assessment-schedule--year-break" in tpl
-    # Prior block then break then current matrix
-    prior_idx = tpl.index("prior_matrix")
-    break_idx = tpl.index("assessment-schedule--year-break")
-    # schedule_block(matrix appears after the break
-    current_idx = tpl.rindex("schedule_block(matrix")
-    assert prior_idx < break_idx < current_idx
+    # Single break on current-year section only (no empty .page-break div).
+    assert "assessment-schedule--year-start" in tpl
+    assert "break_before=prior_matrix" in tpl
+    assert "assessment-schedule--year-break" not in tpl
+    # Must not stack .page-break (after) with year-start (before) — blank page.
+    assert 'class="page-break' not in tpl

@@ -61,8 +61,8 @@
   {%- endif -%}
 {%- endmacro %}
 
-{% macro schedule_block(m, show_specials=false, show_notes=false) %}
-<section class="assessment-schedule assessment-schedule--universal assessment-schedule--{{ m.recipient_grain }} assessment-schedule--{{ m.layout_hints.orientation }}">
+{% macro schedule_block(m, show_specials=false, show_notes=false, break_before=false) %}
+<section class="assessment-schedule assessment-schedule--universal assessment-schedule--{{ m.recipient_grain }} assessment-schedule--{{ m.layout_hints.orientation }}{% if break_before %} assessment-schedule--year-start{% endif %}">
   <header>
     <h2>{{ m.hoa.name | upper }}</h2>
     {% if m.recipient_grain == "summary" %}
@@ -248,9 +248,10 @@
   <style>
     .assessment-schedule--universal h2 { margin-bottom: 4px; }
     .assessment-schedule--universal h3 { margin-top: 0; }
-    /* Prior year and package year are separate schedule sections. The current
-       year always starts on a new page when a prior table is present (Bob). */
-    .assessment-schedule--year-break {
+    /* Prior year then package year: single break only (page-break-before on the
+       current-year section). Do NOT also use .page-break (page-break-after) —
+       that double-break produced a blank page between the two tables. */
+    .assessment-schedule--year-start {
       page-break-before: always;
       break-before: page;
     }
@@ -287,7 +288,6 @@
 
   {% if prior_matrix %}
     {{ schedule_block(prior_matrix, show_specials=false, show_notes=false) }}
-    <div class="page-break assessment-schedule--year-break" aria-hidden="true"></div>
   {% endif %}
-  {{ schedule_block(matrix, show_specials=true, show_notes=true) }}
+  {{ schedule_block(matrix, show_specials=true, show_notes=true, break_before=prior_matrix) }}
 {% endblock %}
