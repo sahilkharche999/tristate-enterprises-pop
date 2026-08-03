@@ -1335,6 +1335,9 @@ def compile_package(
         "management_company_phone": "",
         "management_company_fax": "",
         "management_company_web": "",
+        # Letterhead logo layout (Bob): always present for StrictUndefined.
+        "letterhead_logo_mode": "logo_and_text",
+        "logo_filename": None,
     }
     if hoa_settings_overrides:
         for key, value in hoa_settings_overrides.items():

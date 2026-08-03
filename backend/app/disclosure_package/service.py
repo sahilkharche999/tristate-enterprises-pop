@@ -609,10 +609,17 @@ def _resolve_preflight_inputs(
         "replacement_fund_monthly_assessment_per_unit",
         "board_deferrals_json",
         "logo_filename",
+        "letterhead_logo_mode",
     ):
         val = getattr(settings_row, field, None)
         if val not in (None, ""):
             overrides[field] = val
+    # Always surface letterhead mode (default logo_and_text) so StrictUndefined
+    # templates never miss the key even before brownfield migration runs.
+    overrides.setdefault(
+        "letterhead_logo_mode",
+        getattr(settings_row, "letterhead_logo_mode", None) or "logo_and_text",
+    )
 
     pool_overlay = _resolve_pool_forecast_overlay(session=session, property_id=hoa_id)
     overrides.update(pool_overlay)

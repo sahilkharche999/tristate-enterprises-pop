@@ -9,7 +9,9 @@
 
 {# Running letterhead — pulled into every page's @top via position: running()
    letterhead_logo_mode: logo_and_text (default) | logo_only (full brand image). #}
-{% set logo_mode = (hoa_settings.letterhead_logo_mode or 'logo_and_text') | string | lower %}
+{# StrictUndefined: dict keys must exist or use .get — brownfield rows may
+   lack letterhead_logo_mode until overrides are reloaded. #}
+{% set logo_mode = (hoa_settings.get('letterhead_logo_mode') or 'logo_and_text') | string | lower %}
 {% set logo_only = logo_mode == 'logo_only' %}
 <div class="letterhead-left">
   <table class="letterhead-logo-table{% if logo_only %} letterhead-logo-table--only{% endif %}">
