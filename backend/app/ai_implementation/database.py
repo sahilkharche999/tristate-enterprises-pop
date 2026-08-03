@@ -149,10 +149,17 @@ _HOA_SETTINGS_COLUMN_DEFINITIONS: dict[str, str] = {
     # BUDGET_STORAGE_ROOT/hoa-logos/, not an absolute path (mirrors how
     # budget/DRE uploads are stored — see budget_storage_service.py).
     "logo_filename": "TEXT",
+    # letterhead: logo_and_text (default) | logo_only (full brand image, no wordmark)
+    "letterhead_logo_mode": "TEXT NOT NULL DEFAULT 'logo_and_text'",
     # Per-HOA package language overrides + workbench reference PDF
     # (hoa-boilerplate-workbench).
     "boilerplate_overrides_json": "TEXT",
     "boilerplate_reference_filename": "TEXT",
+}
+
+_APPENDIX_DOCUMENTS_COLUMN_DEFINITIONS: dict[str, str] = {
+    # NULL | 'insurance' — insurance PDF merges after insurance cover (Bob).
+    "package_role": "TEXT",
 }
 
 
@@ -583,6 +590,36 @@ def ensure_hoa_settings_columns() -> None:
         for column_name, column_sql in missing_columns:
             logger.info("Adding missing hoa_settings.%s column", column_name)
             raw_conn.execute(f"ALTER TABLE hoa_settings ADD COLUMN {column_name} {column_sql}")
+        raw_conn.commit()
+    finally:
+        raw_conn.close()
+
+
+def _iter_missing_appendix_documents_columns(
+    raw_conn: sqlite3.Connection,
+) -> Iterable[tuple[str, str]]:
+    if not _table_exists(raw_conn, "appendix_documents"):
+        return
+    existing_columns = {
+        row[1]
+        for row in raw_conn.execute("PRAGMA table_info(appendix_documents)").fetchall()
+    }
+    for column_name, column_sql in _APPENDIX_DOCUMENTS_COLUMN_DEFINITIONS.items():
+        if column_name not in existing_columns:
+            yield column_name, column_sql
+
+
+def ensure_appendix_documents_columns() -> None:
+    """Brownfield: package_role (insurance slot) on appendix_documents."""
+    raw_conn = engine.raw_connection()
+    try:
+        for column_name, column_sql in list(
+            _iter_missing_appendix_documents_columns(raw_conn)
+        ):
+            logger.info("Adding missing appendix_documents.%s column", column_name)
+            raw_conn.execute(
+                f"ALTER TABLE appendix_documents ADD COLUMN {column_name} {column_sql}"
+            )
         raw_conn.commit()
     finally:
         raw_conn.close()
@@ -1344,6 +1381,7 @@ def init_db() -> None:
     ensure_suggestion_run_columns()
     ensure_property_columns()
     ensure_hoa_settings_columns()
+    ensure_appendix_documents_columns()
     ensure_annual_package_columns()
     ensure_allocation_pool_columns()
     ensure_assessment_budget_mapping_rule_columns()

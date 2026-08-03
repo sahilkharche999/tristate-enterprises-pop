@@ -31,6 +31,8 @@ export interface AppendixDocument {
   // H7: backing file is gone from storage — re-upload or deselect before it
   // blocks a render.
   file_missing?: boolean;
+  /** null | "insurance" — insurance PDF prints after Insurance Disclosure cover */
+  package_role?: string | null;
 }
 
 export interface AppendixUpdateRequest {
@@ -43,6 +45,7 @@ export interface AppendixUpdateRequest {
   valid_through_year?: number | null;
   required_flag?: boolean;
   needs_cadence_review?: boolean;
+  package_role?: string | null;
 }
 
 export async function listAppendices(
@@ -67,6 +70,7 @@ export async function uploadAppendix(
     validThroughYear?: number | null;
     requiredFlag?: boolean;
     includeByDefault?: boolean;
+    packageRole?: string | null;
   },
 ): Promise<AppendixDocument> {
   const form = new FormData();
@@ -79,6 +83,7 @@ export async function uploadAppendix(
   if (args.requiredFlag != null) form.append('required_flag', String(args.requiredFlag));
   if (args.includeByDefault != null)
     form.append('include_by_default', String(args.includeByDefault));
+  if (args.packageRole) form.append('package_role', args.packageRole);
 
   const res = await fetch(`${BASE_URL}/hoa/${hoaId}/appendices`, {
     method: 'POST',

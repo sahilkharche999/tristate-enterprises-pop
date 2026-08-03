@@ -141,6 +141,8 @@ class HOASettings(Base):
     # special-assessment). Nullable — falls back to the default inline mark
     # when unset. Stores a storage-root-relative filename, not bytes.
     logo_filename = Column(Text)
+    # logo_and_text | logo_only
+    letterhead_logo_mode = Column(Text, default="logo_and_text")
     # Per-HOA package language overrides (hoa-boilerplate-workbench).
     # JSON object of slot_id → plain text. Missing/empty slots use templates.
     boilerplate_overrides_json = Column(Text)

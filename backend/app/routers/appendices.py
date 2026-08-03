@@ -54,6 +54,9 @@ class AppendixUpdateRequest(BaseModel):
     valid_through_year: Optional[int] = None
     required_flag: Optional[bool] = None
     needs_cadence_review: Optional[bool] = None
+    # null | "insurance" — omit field to leave unchanged; send null to clear
+    package_role: Optional[str] = None
+    package_role_set: Optional[bool] = None
 
 
 @router.get(
@@ -85,6 +88,7 @@ async def upload_hoa_appendix(
     valid_through_year: Optional[int] = Form(None),
     required_flag: bool = Form(False),
     include_by_default: bool = Form(True),
+    package_role: Optional[str] = Form(None),
     session: Session = Depends(get_session),
     current_user: dict = Depends(get_current_user),
 ) -> AppendixDocumentResponse:
@@ -101,11 +105,14 @@ async def upload_hoa_appendix(
             valid_through_year=valid_through_year,
             required_flag=required_flag,
             include_by_default=include_by_default,
+            package_role=package_role,
             uploaded_by=_actor_email(current_user),
             connection=raw_conn,
         )
     except PropertyNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get("/hoa/{hoa_id}/appendices/{appendix_id}/download")
@@ -140,6 +147,12 @@ def update_hoa_appendix(
 ) -> AppendixDocumentResponse:
     raw_conn = session.connection().connection
     try:
+        # Pydantic: package_role in body means set (including null to clear)
+        role_set = (
+            payload.package_role_set
+            if payload.package_role_set is not None
+            else "package_role" in payload.model_fields_set
+        )
         return update_appendix(
             property_id=hoa_id,
             appendix_id=appendix_id,
@@ -152,6 +165,8 @@ def update_hoa_appendix(
             valid_through_year=payload.valid_through_year,
             required_flag=payload.required_flag,
             needs_cadence_review=payload.needs_cadence_review,
+            package_role=payload.package_role,
+            package_role_set=bool(role_set),
             connection=raw_conn,
         )
     except AppendixNotFound as exc:
@@ -159,6 +174,8 @@ def update_hoa_appendix(
         if "version mismatch" in str(exc):
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.delete(

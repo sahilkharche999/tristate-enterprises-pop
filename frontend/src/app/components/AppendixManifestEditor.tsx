@@ -36,6 +36,7 @@ export function AppendixManifestEditor({ hoaId }: Props) {
   const [uploadCadence, setUploadCadence] = useState<AppendixCadence>('persistent');
   const [uploadAnnualYear, setUploadAnnualYear] = useState<string>('');
   const [uploadValidThrough, setUploadValidThrough] = useState<string>('');
+  const [uploadAsInsurance, setUploadAsInsurance] = useState(false);
   const [uploading, setUploading] = useState(false);
 
   async function refresh() {
@@ -74,6 +75,18 @@ export function AppendixManifestEditor({ hoaId }: Props) {
         expected_version: row.version_int,
         cadence: next,
         needs_cadence_review: false,
+      });
+      refresh();
+    } catch (exc) {
+      setError(String(exc));
+    }
+  }
+
+  async function onToggleInsurance(row: AppendixDocument, checked: boolean) {
+    try {
+      await updateAppendix(hoaId, row.appendix_id, {
+        expected_version: row.version_int,
+        package_role: checked ? 'insurance' : null,
       });
       refresh();
     } catch (exc) {
@@ -131,12 +144,14 @@ export function AppendixManifestEditor({ hoaId }: Props) {
         cadence: uploadCadence,
         annualYear: uploadAnnualYear ? parseInt(uploadAnnualYear, 10) : null,
         validThroughYear: uploadValidThrough ? parseInt(uploadValidThrough, 10) : null,
+        packageRole: uploadAsInsurance ? 'insurance' : null,
       });
       setUploadFile(null);
       setUploadTitle('');
       setUploadAnnualYear('');
       setUploadValidThrough('');
       setUploadCadence('persistent');
+      setUploadAsInsurance(false);
       refresh();
     } catch (exc) {
       setError(String(exc));
@@ -160,6 +175,10 @@ export function AppendixManifestEditor({ hoaId }: Props) {
           Show retired
         </label>
       </header>
+      <p className="text-xs text-[#737373]">
+        Mark one PDF as <strong>Insurance disclosure</strong> so it prints right after the
+        Insurance Disclosure cover (not only at the end). Each HOA has its own insurance.
+      </p>
 
       {error && (
         <div className="rounded border border-red-300 bg-red-50 p-2 text-sm text-red-700">
@@ -173,7 +192,8 @@ export function AppendixManifestEditor({ hoaId }: Props) {
             <th className="py-2">#</th>
             <th>Display title</th>
             <th>File</th>
-            <th>Include by default</th>
+            <th title="Include by default">Include</th>
+            <th title="Place after Insurance Disclosure cover">Insurance</th>
             <th>Cadence</th>
             <th>Status</th>
             <th>Reorder</th>
@@ -184,7 +204,7 @@ export function AppendixManifestEditor({ hoaId }: Props) {
         <tbody>
           {appendices.length === 0 && (
             <tr>
-              <td colSpan={9} className="py-4 text-center text-gray-500">
+              <td colSpan={10} className="py-4 text-center text-gray-500">
                 No appendices uploaded yet.
               </td>
             </tr>
@@ -207,6 +227,11 @@ export function AppendixManifestEditor({ hoaId }: Props) {
                     File missing
                   </span>
                 )}
+                {row.package_role === 'insurance' && (
+                  <span className="ml-2 inline-block rounded bg-sky-100 px-1 text-xs text-sky-900">
+                    Insurance
+                  </span>
+                )}
               </td>
               <td className="text-[#737373]">{row.file_name}</td>
               <td>
@@ -215,6 +240,15 @@ export function AppendixManifestEditor({ hoaId }: Props) {
                   checked={row.include_by_default}
                   disabled={row.status === 'retired'}
                   onChange={(e) => onToggleIncludeDefault(row, e.target.checked)}
+                />
+              </td>
+              <td>
+                <input
+                  type="checkbox"
+                  title="Place after Insurance Disclosure cover"
+                  checked={row.package_role === 'insurance'}
+                  disabled={row.status === 'retired'}
+                  onChange={(e) => void onToggleInsurance(row, e.target.checked)}
                 />
               </td>
               <td>
@@ -348,6 +382,14 @@ export function AppendixManifestEditor({ hoaId }: Props) {
               </label>
             </>
           )}
+          <label className="col-span-2 flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={uploadAsInsurance}
+              onChange={(e) => setUploadAsInsurance(e.target.checked)}
+            />
+            Use as Insurance disclosure (prints after Insurance cover)
+          </label>
         </div>
         <button
           type="submit"

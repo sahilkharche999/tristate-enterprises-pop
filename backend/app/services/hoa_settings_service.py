@@ -48,6 +48,8 @@ _ALLOWED_FIELDS = {
     # 30-year reserve funding study (drifting-puzzling-grove rebuild)
     "replacement_fund_monthly_assessment_per_unit",
     "board_deferrals_json",
+    # Letterhead logo layout (Bob: logo-only vs logo + text)
+    "letterhead_logo_mode",
 }
 
 
@@ -66,6 +68,13 @@ def update(session: Session, *, hoa_id: int, payload: Dict[str, Any]) -> HOASett
     for key, value in payload.items():
         if key not in _ALLOWED_FIELDS:
             raise ValueError(f"Unknown field: {key!r}")
+        if key == "letterhead_logo_mode":
+            mode = str(value or "logo_and_text").strip().lower()
+            if mode not in ("logo_and_text", "logo_only"):
+                raise ValueError(
+                    "letterhead_logo_mode must be 'logo_and_text' or 'logo_only'"
+                )
+            value = mode
         setattr(row, key, value)
     session.commit()
     session.refresh(row)

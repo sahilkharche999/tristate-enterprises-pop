@@ -135,6 +135,8 @@ export interface HOADisclosureSettings {
   board_deferrals_json: string;                // JSON-encoded BoardDeferralEntry[]
   // Per-HOA disclosure-package logo (fix-disclosure-layout-toc-special-assessment)
   has_logo: boolean;
+  /** logo_and_text (default) | logo_only — full brand image without wordmark */
+  letterhead_logo_mode?: 'logo_and_text' | 'logo_only';
 }
 
 export async function getHOADisclosureSettings(hoaId: number): Promise<HOADisclosureSettings> {

@@ -7,15 +7,18 @@
 </head>
 <body>
 
-{# Running letterhead — pulled into every page's @top via position: running() #}
+{# Running letterhead — pulled into every page's @top via position: running()
+   letterhead_logo_mode: logo_and_text (default) | logo_only (full brand image). #}
+{% set logo_mode = (hoa_settings.letterhead_logo_mode or 'logo_and_text') | string | lower %}
+{% set logo_only = logo_mode == 'logo_only' %}
 <div class="letterhead-left">
-  <table class="letterhead-logo-table">
+  <table class="letterhead-logo-table{% if logo_only %} letterhead-logo-table--only{% endif %}">
     <tr>
-      <td class="letterhead-logo-cell">
+      <td class="letterhead-logo-cell{% if logo_only %} letterhead-logo-cell--wide{% endif %}">
         {% if hoa_logo_data_uri %}
         {# Per-HOA configured logo, embedded as a data URI (no file://
            fetch — see compiler.py::_hoa_logo_data_uri). #}
-        <img src="{{ hoa_logo_data_uri }}" alt="{{ hoa.name }} logo" width="56" height="56">
+        <img src="{{ hoa_logo_data_uri }}" alt="{{ hoa.name }} logo"{% if not logo_only %} width="56" height="56"{% endif %}>
         {% else %}
         {# Default: inline SVG approximation of the TriState Enterprises
            mark. No URL fetch (T-11-03 / _deny_url_fetcher). #}
@@ -27,10 +30,12 @@
         </svg>
         {% endif %}
       </td>
+      {% if not logo_only %}
       <td class="letterhead-logo-text">
         <div class="letterhead-tristate"><span class="letterhead-tri">Tri</span><span class="letterhead-state">State</span></div>
         <div class="letterhead-enterprises">ENTERPRISES, INC.<sup>TM</sup></div>
       </td>
+      {% endif %}
     </tr>
   </table>
 </div>

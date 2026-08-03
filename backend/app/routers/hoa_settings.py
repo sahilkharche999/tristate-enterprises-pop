@@ -62,6 +62,9 @@ def _row_to_dict(row) -> Dict[str, Any]:
         "replacement_fund_monthly_assessment_per_unit": row.replacement_fund_monthly_assessment_per_unit,
         "board_deferrals_json": row.board_deferrals_json or "[]",
         "has_logo": hoa_logo_storage.hoa_logo_exists(row.logo_filename),
+        "letterhead_logo_mode": (
+            getattr(row, "letterhead_logo_mode", None) or "logo_and_text"
+        ),
     }
 
 

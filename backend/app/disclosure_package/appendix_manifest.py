@@ -44,6 +44,19 @@ class ResolvedAppendix(BaseModel):
     display_title: str
     display_order: int
     source: str  # 'override' (from junction row) | 'default' (from appendix_documents)
+    # NULL | 'insurance' — insurance PDFs merge after insurance cover
+    package_role: Optional[str] = None
+
+
+def _package_role_col(connection: sqlite3.Connection) -> bool:
+    try:
+        cols = {
+            str(r[1])
+            for r in connection.execute("PRAGMA table_info(appendix_documents)").fetchall()
+        }
+    except sqlite3.Error:
+        return False
+    return "package_role" in cols
 
 
 def resolve_appendix_manifest(
@@ -62,9 +75,13 @@ def resolve_appendix_manifest(
     ``appendix_id`` so concurrent inserts with the same order still
     sort deterministically.
     """
+    has_role = _package_role_col(connection)
+    role_select = ", ad.package_role" if has_role else ""
+    role_select_plain = ", package_role" if has_role else ""
+
     if package_id is not None:
         overrides = connection.execute(
-            """
+            f"""
             SELECT ap.appendix_id,
                    ap.display_order,
                    ap.included,
@@ -72,6 +89,7 @@ def resolve_appendix_manifest(
                    ad.file_id,
                    ad.file_name,
                    ad.display_title
+                   {role_select}
               FROM annual_package_appendices AS ap
               JOIN appendix_documents AS ad ON ad.id = ap.appendix_id
              WHERE ap.package_id = ?
@@ -88,6 +106,11 @@ def resolve_appendix_manifest(
                     display_title=row[3] or row[6],
                     display_order=row[1],
                     source="override",
+                    package_role=(
+                        str(row[7]).strip().lower()
+                        if has_role and len(row) > 7 and row[7]
+                        else None
+                    ),
                 )
                 for row in overrides
                 if row[2]  # included = 1
@@ -96,8 +119,9 @@ def resolve_appendix_manifest(
             return resolved
 
     defaults = connection.execute(
-        """
+        f"""
         SELECT id, file_id, file_name, display_title, default_display_order
+               {role_select_plain}
           FROM appendix_documents
          WHERE property_id = ?
            AND status = 'active'
@@ -114,6 +138,11 @@ def resolve_appendix_manifest(
             display_title=row[3],
             display_order=row[4],
             source="default",
+            package_role=(
+                str(row[5]).strip().lower()
+                if has_role and len(row) > 5 and row[5]
+                else None
+            ),
         )
         for row in defaults
     ]

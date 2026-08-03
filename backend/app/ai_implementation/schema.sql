@@ -349,6 +349,7 @@ CREATE TABLE IF NOT EXISTS hoa_settings (
     tenant_id                           INTEGER NOT NULL DEFAULT 1,
     version_int                         INTEGER NOT NULL DEFAULT 0,
     logo_filename                       TEXT,
+    letterhead_logo_mode                TEXT NOT NULL DEFAULT 'logo_and_text',
     boilerplate_overrides_json          TEXT,
     boilerplate_reference_filename      TEXT,
     updated_at                          TEXT NOT NULL DEFAULT (datetime('now'))
@@ -1048,7 +1049,9 @@ CREATE TABLE IF NOT EXISTS appendix_documents (
                              CHECK (status IN ('active','retired')),
     uploaded_by              TEXT,
     uploaded_at              TEXT NOT NULL DEFAULT (datetime('now')),
-    version_int              INTEGER NOT NULL DEFAULT 0
+    version_int              INTEGER NOT NULL DEFAULT 0,
+    -- NULL | 'insurance' — placed after insurance disclosure cover in the package
+    package_role             TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_appendix_documents_property

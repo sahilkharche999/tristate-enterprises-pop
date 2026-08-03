@@ -621,7 +621,11 @@ export const HOADisclosureSettingsForm = forwardRef<
       <HOALogoUploadControl
         hoaId={hoaId}
         hasLogo={settings.has_logo}
+        logoMode={settings.letterhead_logo_mode ?? 'logo_and_text'}
         onChanged={(hasLogo) => setSettings({ ...settings, has_logo: hasLogo })}
+        onLogoModeChanged={(mode) =>
+          setSettings({ ...settings, letterhead_logo_mode: mode })
+        }
       />
 
       <p className="text-xs text-[#737373]">

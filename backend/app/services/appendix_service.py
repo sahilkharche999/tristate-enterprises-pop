@@ -24,6 +24,9 @@ class AppendixNotFound(LookupError):
     """Raised when ``appendix_id`` doesn't exist or isn't owned by the property."""
 
 
+PACKAGE_ROLE_INSURANCE = "insurance"
+
+
 class AppendixDocumentResponse(BaseModel):
     """JSON shape returned by the appendix endpoints."""
 
@@ -45,11 +48,61 @@ class AppendixDocumentResponse(BaseModel):
     # badges it so the operator can re-upload or deselect BEFORE a render fails
     # naming this file — the two are the same resolvable fix.
     file_missing: bool = False
+    # NULL | "insurance" — insurance PDFs merge after insurance cover
+    package_role: Optional[str] = None
+
+
+def _has_package_role_column(connection: sqlite3.Connection) -> bool:
+    try:
+        cols = {
+            str(r[1])
+            for r in connection.execute("PRAGMA table_info(appendix_documents)").fetchall()
+        }
+    except sqlite3.Error:
+        return False
+    return "package_role" in cols
+
+
+def _normalize_package_role(value: Optional[str]) -> Optional[str]:
+    if value is None or str(value).strip() == "":
+        return None
+    role = str(value).strip().lower()
+    if role == PACKAGE_ROLE_INSURANCE:
+        return PACKAGE_ROLE_INSURANCE
+    raise ValueError(
+        f"Unknown package_role {value!r}; expected null or '{PACKAGE_ROLE_INSURANCE}'"
+    )
+
+
+def _clear_insurance_role(
+    connection: sqlite3.Connection,
+    *,
+    property_id: int,
+    except_appendix_id: Optional[int] = None,
+) -> None:
+    """At most one active insurance appendix per HOA."""
+    if not _has_package_role_column(connection):
+        return
+    if except_appendix_id is None:
+        connection.execute(
+            "UPDATE appendix_documents SET package_role = NULL "
+            "WHERE property_id = ? AND package_role = ?",
+            (property_id, PACKAGE_ROLE_INSURANCE),
+        )
+    else:
+        connection.execute(
+            "UPDATE appendix_documents SET package_role = NULL "
+            "WHERE property_id = ? AND package_role = ? AND id != ?",
+            (property_id, PACKAGE_ROLE_INSURANCE, except_appendix_id),
+        )
 
 
 def _row_to_response(row: sqlite3.Row | tuple) -> AppendixDocumentResponse:
     # Tuple positional access (works for both raw cursors and Row objects)
     file_id = row[2]
+    package_role = None
+    if len(row) > 14 and row[14] is not None and str(row[14]).strip():
+        package_role = str(row[14]).strip().lower()
     return AppendixDocumentResponse(
         appendix_id=row[0],
         property_id=row[1],
@@ -66,21 +119,26 @@ def _row_to_response(row: sqlite3.Row | tuple) -> AppendixDocumentResponse:
         status=row[12],
         version_int=row[13],
         file_missing=not appendix_storage.appendix_file_exists(file_id),
+        package_role=package_role,
     )
 
 
-_SELECT_FIELDS = (
-    "id, property_id, file_id, file_name, display_title, default_display_order, "
-    "required_flag, include_by_default, cadence, annual_year, valid_through_year, "
-    "needs_cadence_review, status, version_int"
-)
+def _select_fields(connection: sqlite3.Connection) -> str:
+    base = (
+        "id, property_id, file_id, file_name, display_title, default_display_order, "
+        "required_flag, include_by_default, cadence, annual_year, valid_through_year, "
+        "needs_cadence_review, status, version_int"
+    )
+    if _has_package_role_column(connection):
+        return base + ", package_role"
+    return base
 
 
 def _fetch_appendix(
     connection: sqlite3.Connection, property_id: int, appendix_id: int
 ) -> AppendixDocumentResponse:
     row = connection.execute(
-        f"SELECT {_SELECT_FIELDS} FROM appendix_documents "
+        f"SELECT {_select_fields(connection)} FROM appendix_documents "
         "WHERE id = ? AND property_id = ?",
         (appendix_id, property_id),
     ).fetchone()
@@ -109,6 +167,7 @@ def upload_appendix(
     valid_through_year: Optional[int] = None,
     required_flag: bool = False,
     include_by_default: bool = True,
+    package_role: Optional[str] = None,
     uploaded_by: Optional[str],
     connection: sqlite3.Connection,
 ) -> AppendixDocumentResponse:
@@ -126,6 +185,7 @@ def upload_appendix(
         raise ValueError(
             f"Unknown cadence {cadence!r}; expected persistent | annual | one_time"
         )
+    role = _normalize_package_role(package_role)
 
     property_row = connection.execute(
         "SELECT id FROM properties WHERE id = ?", (property_id,)
@@ -133,21 +193,39 @@ def upload_appendix(
     if property_row is None:
         raise PropertyNotFound(f"property_id={property_id} does not exist")
 
-    cur = connection.execute(
-        """
-        INSERT INTO appendix_documents (
-            property_id, file_id, file_name, display_title,
-            default_display_order, required_flag, include_by_default,
-            cadence, annual_year, valid_through_year,
-            needs_cadence_review, status, uploaded_by
-        ) VALUES (?, 'pending', ?, ?, 0, ?, ?, ?, ?, ?, 0, 'active', ?)
-        """,
-        (
-            property_id, original_filename, display_title,
-            int(required_flag), int(include_by_default),
-            cadence, annual_year, valid_through_year, uploaded_by,
-        ),
-    )
+    has_role_col = _has_package_role_column(connection)
+    if has_role_col:
+        cur = connection.execute(
+            """
+            INSERT INTO appendix_documents (
+                property_id, file_id, file_name, display_title,
+                default_display_order, required_flag, include_by_default,
+                cadence, annual_year, valid_through_year,
+                needs_cadence_review, status, uploaded_by, package_role
+            ) VALUES (?, 'pending', ?, ?, 0, ?, ?, ?, ?, ?, 0, 'active', ?, ?)
+            """,
+            (
+                property_id, original_filename, display_title,
+                int(required_flag), int(include_by_default),
+                cadence, annual_year, valid_through_year, uploaded_by, role,
+            ),
+        )
+    else:
+        cur = connection.execute(
+            """
+            INSERT INTO appendix_documents (
+                property_id, file_id, file_name, display_title,
+                default_display_order, required_flag, include_by_default,
+                cadence, annual_year, valid_through_year,
+                needs_cadence_review, status, uploaded_by
+            ) VALUES (?, 'pending', ?, ?, 0, ?, ?, ?, ?, ?, 0, 'active', ?)
+            """,
+            (
+                property_id, original_filename, display_title,
+                int(required_flag), int(include_by_default),
+                cadence, annual_year, valid_through_year, uploaded_by,
+            ),
+        )
     appendix_id = cur.lastrowid
     if appendix_id is None:
         raise RuntimeError("sqlite did not return a lastrowid for appendix_documents")
@@ -163,6 +241,10 @@ def upload_appendix(
         "UPDATE appendix_documents SET file_id = ? WHERE id = ?",
         (file_id, appendix_id),
     )
+    if role == PACKAGE_ROLE_INSURANCE:
+        _clear_insurance_role(
+            connection, property_id=property_id, except_appendix_id=appendix_id
+        )
     connection.commit()
     return _fetch_appendix(connection, property_id, appendix_id)
 
@@ -184,7 +266,7 @@ def list_appendices(
     if not include_retired:
         where += " AND status = 'active'"
     rows = connection.execute(
-        f"SELECT {_SELECT_FIELDS} FROM appendix_documents "
+        f"SELECT {_select_fields(connection)} FROM appendix_documents "
         f"WHERE {where} ORDER BY default_display_order, id",
         params,
     ).fetchall()
@@ -204,6 +286,8 @@ def update_appendix(
     valid_through_year: Optional[int] = None,
     required_flag: Optional[bool] = None,
     needs_cadence_review: Optional[bool] = None,
+    package_role: Optional[str] = None,
+    package_role_set: bool = False,
     connection: sqlite3.Connection,
 ) -> AppendixDocumentResponse:
     """Partial-update an appendix row with optimistic concurrency control.
@@ -251,6 +335,11 @@ def update_appendix(
     if needs_cadence_review is not None:
         updates.append("needs_cadence_review = ?")
         values.append(int(needs_cadence_review))
+    role_to_apply: Optional[str] = None
+    if package_role_set and _has_package_role_column(connection):
+        role_to_apply = _normalize_package_role(package_role)
+        updates.append("package_role = ?")
+        values.append(role_to_apply)
 
     if not updates:
         return current  # no-op update; return current state
@@ -258,11 +347,22 @@ def update_appendix(
     updates.append("version_int = version_int + 1")
     values.extend([appendix_id, property_id, expected_version])
 
-    connection.execute(
+    cursor = connection.execute(
         f"UPDATE appendix_documents SET {', '.join(updates)} "
         "WHERE id = ? AND property_id = ? AND version_int = ?",
         tuple(values),
     )
+    if cursor.rowcount != 1:
+        connection.rollback()
+        refreshed = _fetch_appendix(connection, property_id, appendix_id)
+        raise AppendixNotFound(
+            f"appendix_id={appendix_id} version mismatch "
+            f"(expected={expected_version}, got={refreshed.version_int})"
+        )
+    if package_role_set and role_to_apply == PACKAGE_ROLE_INSURANCE:
+        _clear_insurance_role(
+            connection, property_id=property_id, except_appendix_id=appendix_id
+        )
     connection.commit()
     return _fetch_appendix(connection, property_id, appendix_id)
 

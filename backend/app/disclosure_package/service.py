@@ -1133,6 +1133,7 @@ def run_render_job(
             # hard-fails: a finalized package must never silently shrink.
             manifest_paths = []
             manifest_titles = {}
+            insurance_appendix_entries: list[tuple] = []
             for entry in snaps["appendix_manifest"] or []:
                 file_id = entry["file_id"]
                 if not appendix_file_exists(file_id):
@@ -1143,8 +1144,13 @@ def run_render_job(
                         "appendix set."
                     )
                 path = appendix_file_path(file_id)
-                manifest_paths.append(path)
-                manifest_titles[path.name] = entry.get("display_title") or path.name
+                title = entry.get("display_title") or path.name
+                role = (entry.get("package_role") or "").strip().lower() or None
+                if role == "insurance":
+                    insurance_appendix_entries.append((path, title))
+                else:
+                    manifest_paths.append(path)
+                    manifest_titles[path.name] = title
 
             compile_branch_audit = {
                 "compile_branch": "snapshot",
@@ -1201,8 +1207,15 @@ def run_render_job(
                 package_id=annual_package_id,
                 connection=raw_conn,
             )
-            manifest_paths = [path for path, _title in manifest_entries]
-            manifest_titles = {path.name: title for path, title in manifest_entries}
+            manifest_paths = []
+            manifest_titles = {}
+            insurance_appendix_entries = []
+            for path, title, role in manifest_entries:
+                if role == "insurance":
+                    insurance_appendix_entries.append((path, title))
+                else:
+                    manifest_paths.append(path)
+                    manifest_titles[path.name] = title
 
             assessment_mapping_counts = _materialize_assessment_mappings_for_budget_draft(
                 connection=raw_conn,
@@ -1263,6 +1276,7 @@ def run_render_job(
             render_date=render_date,
             extra_appendix_paths=manifest_paths,
             extra_appendix_titles=manifest_titles,
+            insurance_appendix_entries=insurance_appendix_entries,
             assessment_matrix=assessment_matrix,
             prior_matrix=prior_matrix,
             audit_extra=compile_branch_audit,

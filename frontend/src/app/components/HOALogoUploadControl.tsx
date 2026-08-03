@@ -6,17 +6,27 @@ import { FileDropzone } from './fileDropzone';
 
 const ACCEPTED_TYPES = '.png,.jpg,.jpeg,.svg';
 
+type LogoMode = 'logo_and_text' | 'logo_only';
+
 interface HOALogoUploadControlProps {
   hoaId: number;
   hasLogo: boolean;
+  logoMode?: LogoMode;
   onChanged: (hasLogo: boolean) => void;
+  onLogoModeChanged?: (mode: LogoMode) => void;
 }
 
 /** Per-HOA disclosure-package letterhead logo (task 2.4). The preview image
  * is fetched via an authenticated request (not a bare <img src>, since the
  * GET endpoint requires auth like every other HOA-scoped route in this app)
  * and rendered from a blob: object URL. */
-export function HOALogoUploadControl({ hoaId, hasLogo, onChanged }: HOALogoUploadControlProps) {
+export function HOALogoUploadControl({
+  hoaId,
+  hasLogo,
+  logoMode = 'logo_and_text',
+  onChanged,
+  onLogoModeChanged,
+}: HOALogoUploadControlProps) {
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -76,6 +86,35 @@ export function HOALogoUploadControl({ hoaId, hasLogo, onChanged }: HOALogoUploa
           Replaces the default TriState mark in the letterhead on every page. Leave unset to use
           the default.
         </p>
+      </div>
+      <div className="space-y-1 rounded border border-[#e5e5e5] bg-[#fafafa] px-3 py-2">
+        <p className="text-xs font-medium text-[#404040]">Letterhead layout</p>
+        <p className="text-[11px] text-[#737373]">
+          Use <strong>Logo only</strong> when the image already includes the company name (full
+          brand lockup). Use <strong>Logo + text</strong> for a small mark next to company text.
+        </p>
+        <div className="flex flex-wrap gap-3 text-xs text-[#262626]">
+          <label className="inline-flex items-center gap-1.5">
+            <input
+              type="radio"
+              name="letterhead-logo-mode"
+              checked={logoMode === 'logo_and_text'}
+              disabled={busy}
+              onChange={() => onLogoModeChanged?.('logo_and_text')}
+            />
+            Logo + company text
+          </label>
+          <label className="inline-flex items-center gap-1.5">
+            <input
+              type="radio"
+              name="letterhead-logo-mode"
+              checked={logoMode === 'logo_only'}
+              disabled={busy}
+              onChange={() => onLogoModeChanged?.('logo_only')}
+            />
+            Logo only (full brand image)
+          </label>
+        </div>
       </div>
       <div className="flex items-start gap-3">
         {previewUrl ? (

@@ -115,6 +115,16 @@ p {
 }
 
 .letterhead-logo-cell { width: 56px; }
+/* logo_only mode: full brand lockup may be wider than a square mark */
+.letterhead-logo-cell--wide { width: auto; max-width: 2.5in; }
+.letterhead-logo-table--only .letterhead-logo-cell--wide img {
+    width: auto;
+    height: 56px;
+    max-width: 2.5in;
+    max-height: 56px;
+    object-fit: contain;
+    display: block;
+}
 /* Hard-constrain the letterhead logo. WeasyPrint does NOT honor the
    presentational width/height attributes on <img>, so a large uploaded
    logo (e.g. 1254x1254px) otherwise renders at its full intrinsic size
@@ -129,6 +139,12 @@ p {
     max-height: 56px;
     object-fit: contain;
     display: block;
+}
+.letterhead-logo-table--only .letterhead-logo-cell--wide img {
+    width: auto;
+    height: 56px;
+    max-width: 2.5in;
+    max-height: 56px;
 }
 
 .letterhead-tristate { font-size: 14pt; font-weight: bold; line-height: 1; }

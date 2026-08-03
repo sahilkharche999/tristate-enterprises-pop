@@ -1175,6 +1175,9 @@ def compile_package(
     render_date: Optional[str] = None,
     extra_appendix_paths: Optional[list[Path]] = None,
     extra_appendix_titles: Optional[dict[str, str]] = None,
+    # Insurance PDFs (package_role=insurance) merge right after the insurance
+    # cover template, not at the trailing appendix block.
+    insurance_appendix_entries: Optional[list[tuple[Path, str]]] = None,
     assessment_matrix: Optional[AssessmentScheduleMatrix] = None,
     prior_matrix: Optional[AssessmentScheduleMatrix] = None,
     audit_extra: Optional[dict] = None,
@@ -1583,10 +1586,32 @@ def compile_package(
                 seen_appendix_names.add(extra.name)
                 logger.info("compiler: appending manifest appendix %s", extra.name)
 
-        trailing_appendix_entries = [*adhoc_appendix_entries, *manifest_appendix_entries]
+        # Insurance slot: after cover, before later generated pages (30-year…).
+        insurance_entries: list[tuple[Path, str]] = []
+        insurance_names: set[str] = set()
+        for path, title in insurance_appendix_entries or []:
+            if not path.exists():
+                logger.warning("compiler: insurance appendix missing on disk: %s", path)
+                continue
+            insurance_entries.append((path, title))
+            insurance_names.add(path.name)
+            seen_appendix_names.add(path.name)
+            logger.info("compiler: insurance appendix after cover: %s", path.name)
+
+        # Drop insurance files from trailing list if caller also passed them
+        # in extra_appendix_paths (defensive — service should already split).
+        trailing_appendix_entries = [
+            (path, title)
+            for path, title in [*adhoc_appendix_entries, *manifest_appendix_entries]
+            if path.name not in insurance_names
+        ]
         appendix_page_counts: dict[str, int] = {
             str(path): _pdf_page_count(path.read_bytes())
-            for path, _title in [*spec_appendix_paths.values(), *trailing_appendix_entries]
+            for path, _title in [
+                *spec_appendix_paths.values(),
+                *insurance_entries,
+                *trailing_appendix_entries,
+            ]
         }
 
         # 4. Render every GeneratedPage entry (pass 1), then re-render the
@@ -1605,6 +1630,8 @@ def compile_package(
         #    count feeds every later page number; only adding rows in pass 2
         #    would silently miscount if they spilled onto another page.
         ctx_full["toc_page_numbers"] = {}
+        # Insurance is under the fixed "Insurance Disclosure" TOC row — do not
+        # also list it under dynamic appendix rows (avoids double entry).
         ctx_full["appendix_toc_entries"] = [
             {"title": title, "page": "—"}
             for _path, title in [*spec_appendix_paths.values(), *trailing_appendix_entries]
@@ -1638,10 +1665,15 @@ def compile_package(
         toc_page_numbers: dict[str, int] = {}
         appendix_toc_entries: list[dict[str, Any]] = []
         running_page = 1
+        insurance_cover_template = "insurance_disclosure_cover.html"
         for entry in spec.entries:
             if isinstance(entry, GeneratedPage):
                 toc_page_numbers[entry.template] = running_page
                 running_page += page_counts[entry.template]
+                # Insurance PDF pages immediately follow the cover (not in TOC rows).
+                if entry.template == insurance_cover_template:
+                    for path, _title in insurance_entries:
+                        running_page += appendix_page_counts[str(path)]
             elif isinstance(entry, StaticAppendix) and entry.file in spec_appendix_paths:
                 path, title = spec_appendix_paths[entry.file]
                 appendix_toc_entries.append({"title": title, "page": running_page})
@@ -1702,6 +1734,9 @@ def compile_package(
             if isinstance(entry, GeneratedPage):
                 full_paths.append(intermediate_pdfs[gen_index])
                 gen_index += 1
+                if entry.template == insurance_cover_template:
+                    for path, _title in insurance_entries:
+                        full_paths.append(path)
             elif isinstance(entry, StaticAppendix) and entry.file in spec_appendix_paths:
                 full_paths.append(spec_appendix_paths[entry.file][0])
         for path, _title in trailing_appendix_entries:

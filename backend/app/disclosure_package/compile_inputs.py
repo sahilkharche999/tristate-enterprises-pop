@@ -111,21 +111,28 @@ def resolve_compile_appendix_entries(
     property_id: int,
     package_id: Optional[int],
     connection: sqlite3.Connection,
-) -> list[tuple[Path, str]]:
-    """Resolve the appendix manifest into (path, display_title) pairs.
+) -> list[tuple[Path, str, Optional[str]]]:
+    """Resolve the appendix manifest into (path, display_title, package_role).
 
     Same resolution as :func:`resolve_compile_appendix_paths`, but keeps
     each entry's ``display_title`` (task: appendix TOC page numbers) so
     the compiler can label these appendices in the table of contents.
+    ``package_role`` is ``'insurance'`` for the insurance disclosure slot
+    (merged after the insurance cover), else None.
     """
     manifest = resolve_appendix_manifest(
         property_id=property_id, package_id=package_id, connection=connection,
     )
-    entries: list[tuple[Path, str]] = []
+    entries: list[tuple[Path, str, Optional[str]]] = []
     missing: list[PreflightError] = []
     for entry in manifest:
         if appendix_file_exists(entry.file_id):
-            entries.append((appendix_file_path(entry.file_id), entry.display_title))
+            role = (entry.package_role or None)
+            if role:
+                role = str(role).strip().lower()
+            entries.append(
+                (appendix_file_path(entry.file_id), entry.display_title, role)
+            )
         else:
             # H7: the operator selected this appendix, but its file is gone
             # from storage. NEVER silently drop it — the shipped PDF would
@@ -176,7 +183,7 @@ def resolve_compile_appendix_paths(
     entries = resolve_compile_appendix_entries(
         property_id=property_id, package_id=package_id, connection=connection,
     )
-    return [path for path, _title in entries]
+    return [path for path, _title, _role in entries]
 
 
 def compile_input_summary(
