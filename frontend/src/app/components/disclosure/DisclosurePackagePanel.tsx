@@ -26,7 +26,6 @@ import { DisclosureProgressBlock } from './DisclosureProgressBlock';
 import { DisclosureResultBlock } from './DisclosureResultBlock';
 import { DisclosureFailureBlock } from './DisclosureFailureBlock';
 import { DisclosureAuditSheet } from './DisclosureAuditSheet';
-import { DisclosureAppendixManager } from './DisclosureAppendixManager';
 import { PriorYearAssessmentCard } from './PriorYearAssessmentCard';
 import { Button } from '../ui/button';
 
@@ -46,6 +45,8 @@ function findingsToRows(result: DisclosurePreflightResult): PreflightRow[] {
       label: e.message,
       status: 'fail',
       secondaryText: e.suggested_fix ?? undefined,
+      fixLinkPath: e.fix_path ?? undefined,
+      fixLinkLabel: e.fix_label ?? 'Fix',
     });
   }
   for (const e of result.warnings) {
@@ -53,6 +54,8 @@ function findingsToRows(result: DisclosurePreflightResult): PreflightRow[] {
       label: e.message,
       status: 'warning',
       secondaryText: e.suggested_fix ?? undefined,
+      fixLinkPath: e.fix_path ?? undefined,
+      fixLinkLabel: e.fix_label ?? 'Fix',
     });
   }
   return rows;
@@ -179,6 +182,7 @@ export function DisclosurePackagePanel({
           {state === 'completed' && job ? (
             <DisclosureResultBlock
               job={job}
+              hoaId={hoaId}
               onRegenerate={handleRegenerate}
               onViewAudit={() => setAuditOpen(true)}
             />
@@ -197,10 +201,6 @@ export function DisclosurePackagePanel({
             <PriorYearAssessmentCard
               hoaId={hoaId}
               fiscalYear={fiscalYear}
-              disabled={state === 'starting' || state === 'running'}
-            />
-            <DisclosureAppendixManager
-              hoaId={hoaId}
               disabled={state === 'starting' || state === 'running'}
             />
           </div>

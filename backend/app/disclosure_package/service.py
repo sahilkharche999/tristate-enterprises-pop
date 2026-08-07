@@ -638,6 +638,366 @@ def _resolve_preflight_inputs(
     )
 
 
+def _assessment_mapping_preflight_errors(
+    session: Session,
+    hoa_id: int,
+    fiscal_year: int,
+) -> tuple[list[PreflightError], str]:
+    """Return mapping-related preflight errors and step status.
+
+    Step status is one of ``done``, ``needs_action``, ``not_required``.
+    Fixed mode never blocks solely for missing line-to-pool mappings.
+    """
+    from app.assessment_mode import ASSESSMENT_MODE_FIXED, normalize_assessment_mode
+    from app.services.assessment_budget_mapping_rule_service import (
+        build_assessment_mapping_review_blockers,
+        build_assessment_mapping_review_rows,
+        build_assessment_mapping_review_summary,
+        normalize_budget_label,
+        select_assessment_mapping_amount,
+    )
+
+    conn = session.connection().connection
+    prop = conn.execute(
+        "SELECT assessment_mode, default_assessment_setup_id FROM properties WHERE id = ?",
+        (hoa_id,),
+    ).fetchone()
+    mode = normalize_assessment_mode(prop[0] if prop else None)
+    if mode == ASSESSMENT_MODE_FIXED:
+        return [], "not_required"
+
+    setup_id = int(prop[1]) if prop and prop[1] is not None else None
+    if setup_id is None:
+        setup_row = conn.execute(
+            """
+            SELECT id FROM assessment_setups
+             WHERE property_id = ? AND status = 'approved'
+             ORDER BY id DESC LIMIT 1
+            """,
+            (hoa_id,),
+        ).fetchone()
+        setup_id = int(setup_row[0]) if setup_row else None
+    if setup_id is None:
+        return [
+            PreflightError(
+                field_path="assessment_setup.status",
+                message=(
+                    "Variable mode requires an approved DRE or CC&R assessment "
+                    "setup before the homeowner schedule can render."
+                ),
+                severity="blocking",
+                code="assessment_setup_missing",
+                suggested_fix=(
+                    "Open Settings → DRE & Review, complete extraction, and "
+                    "Approve → Promote to AssessmentSetup."
+                ),
+            )
+        ], "needs_action"
+
+    draft = conn.execute(
+        """
+        SELECT id, line_items_json FROM budget_drafts
+         WHERE property_id = ? AND status = 'active'
+         ORDER BY updated_at DESC, id DESC LIMIT 1
+        """,
+        (hoa_id,),
+    ).fetchone()
+    if not draft:
+        # Budget absence is already a global blocking finding; mapping step waits.
+        return [], "needs_action"
+
+    import json as _json
+
+    try:
+        raw_lines = _json.loads(draft[1] or "[]")
+    except Exception:
+        raw_lines = []
+    budget_lines: list[dict] = []
+    for item in raw_lines:
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("label") or item.get("line_item_key") or "")
+        category = str(item.get("category") or "operating").lower()
+        if category == "income":
+            cat = "income"
+        elif category == "reserve_income":
+            cat = "reserve_income"
+        elif category in {"reserve", "reserve_expense"}:
+            cat = "reserve_expense"
+        else:
+            cat = "operating"
+        fund = "reserve" if cat in {"reserve_income", "reserve_expense"} else "operating"
+        amount, source_col = select_assessment_mapping_amount(item)
+        account_code = item.get("account_code")
+        budget_lines.append(
+            {
+                "label": label,
+                "normalized_label": normalize_budget_label(label),
+                "section": str((item.get("raw") or {}).get("section") or cat),
+                "category": cat,
+                "fund_type": fund,
+                "account_code": str(account_code) if account_code not in (None, "") else None,
+                "annual_budget": item.get("annual_budget"),
+                "proposed_amount": item.get("proposed_amount")
+                if item.get("proposed_amount") is not None
+                else item.get("proposedAmount"),
+                "projection": item.get("projection"),
+                "assessment_mapping_amount": float(amount) if amount is not None else None,
+                "source_column_used": source_col,
+                "amount": float(amount) if amount is not None else None,
+                "reserve_group": item.get("reserve_group") or item.get("reserveGroup"),
+                "active": not bool(item.get("inactive")),
+            }
+        )
+
+    try:
+        review_rows = build_assessment_mapping_review_rows(
+            property_id=hoa_id,
+            assessment_setup_id=setup_id,
+            budget_lines=budget_lines,
+            budget_year=fiscal_year,
+            budget_draft_id=int(draft[0]),
+            connection=conn,
+        )
+        summary = build_assessment_mapping_review_summary(review_rows)
+        blockers = build_assessment_mapping_review_blockers(
+            property_id=hoa_id,
+            assessment_setup_id=setup_id,
+            review_rows=review_rows,
+            connection=conn,
+        )
+    except Exception:
+        logger.exception("assessment mapping preflight failed for HOA %s", hoa_id)
+        return [
+            PreflightError(
+                field_path="assessment_mapping_review",
+                message=(
+                    "Could not evaluate assessment mapping review. Open mapping "
+                    "review and resolve any incomplete assignments."
+                ),
+                severity="blocking",
+                code="assessment_mapping_eval_failed",
+                suggested_fix="Open Assessment Mapping Review and re-check assignments.",
+            )
+        ], "needs_action"
+
+    if not summary.get("final_render_blocked") and not any(blockers.values()):
+        return [], "done"
+
+    parts: list[str] = []
+    unresolved = summary.get("unresolved_required_rows") or []
+    if unresolved:
+        sample = ", ".join(str(x) for x in unresolved[:8])
+        more = len(unresolved) - min(len(unresolved), 8)
+        suffix = f" (+{more} more)" if more > 0 else ""
+        parts.append(f"Unresolved required rows: {sample}{suffix}")
+    if summary.get("pending_split_total"):
+        parts.append(f"Pending split total: {summary.get('pending_split_total')}")
+    failures = summary.get("reconciliation_failures") or []
+    if failures:
+        parts.append("Reconciliation failures: " + ", ".join(str(f) for f in failures))
+    for key, labels in (blockers or {}).items():
+        if labels:
+            parts.append(f"{key}: " + ", ".join(str(x) for x in labels[:6]))
+
+    detail = " ".join(parts) if parts else "Mapping review is incomplete."
+    return [
+        PreflightError(
+            field_path="assessment_mapping_review",
+            message=(
+                "Assessment mapping review required before final rendering. "
+                + detail
+            ),
+            severity="blocking",
+            code="assessment_mapping_blocked",
+            suggested_fix=(
+                "Open Assessment Mapping Review, assign or exclude every required "
+                "budget line, and clear reconciliation blockers."
+            ),
+        )
+    ], "needs_action"
+
+
+def _attach_fix_links(errors: list[PreflightError], hoa_id: int) -> list[PreflightError]:
+    """Return copies of errors with UI deep-link fields populated."""
+    out: list[PreflightError] = []
+    for err in errors:
+        path = err.field_path or ""
+        code = err.code or ""
+        fix_path: Optional[str] = err.fix_path
+        fix_label = err.fix_label or "Fix"
+        if not fix_path:
+            if "assessment_mapping" in path or code.startswith("assessment_mapping"):
+                fix_path = f"/hoa/{hoa_id}/assessment-mapping-review"
+                fix_label = "Open mapping review"
+            elif path.startswith("assessment_setup") or "dre" in path.lower():
+                fix_path = (
+                    f"/hoa/{hoa_id}/settings?section=dre"
+                    f"&returnTo=/hoa/{hoa_id}/disclosure"
+                )
+                fix_label = "Open DRE setup"
+            elif path.startswith("hoa_settings") or path.startswith("reserve_cash"):
+                field = path.split(".")[-1] if "." in path else ""
+                fix_path = (
+                    f"/hoa/{hoa_id}/settings?section=disclosure"
+                    + (f"&field={field}" if field else "")
+                    + f"&returnTo=/hoa/{hoa_id}/disclosure"
+                )
+                fix_label = "Open disclosure settings"
+            elif path.startswith("budget_draft") or path == "budget_draft.line_items":
+                fix_path = f"/hoa/{hoa_id}"
+                fix_label = "Open budget"
+            elif "appendix" in path.lower():
+                fix_path = (
+                    f"/hoa/{hoa_id}/settings?section=appendices"
+                    f"&returnTo=/hoa/{hoa_id}/disclosure"
+                )
+                fix_label = "Open appendices"
+            elif path.startswith("prior_assessment"):
+                fix_path = f"/hoa/{hoa_id}/disclosure"
+                fix_label = "Open disclosure"
+            elif path.startswith("hoa_metadata"):
+                fix_path = (
+                    f"/hoa/{hoa_id}/settings?section=database"
+                    f"&returnTo=/hoa/{hoa_id}/disclosure"
+                )
+                fix_label = "Open HOA database"
+        out.append(
+            err.model_copy(update={"fix_path": fix_path, "fix_label": fix_label})
+            if fix_path
+            else err
+        )
+    return out
+
+
+def _build_readiness_steps(
+    *,
+    hoa_id: int,
+    blocking: list[PreflightError],
+    warnings: list[PreflightError],
+    mapping_step_status: str,
+    has_budget: bool,
+    has_reserve_components: bool,
+) -> list[dict]:
+    """Assemble ordered readiness steps for the disclosure workspace UI."""
+
+    def _has_block(prefix: str) -> bool:
+        return any((e.field_path or "").startswith(prefix) for e in blocking)
+
+    def _has_warn(prefix: str) -> bool:
+        return any((e.field_path or "").startswith(prefix) for e in warnings)
+
+    budget_status = "needs_action" if _has_block("budget_draft") or not has_budget else "done"
+    reserve_status = (
+        "warning"
+        if _has_warn("reserve_study") or (has_budget and not has_reserve_components)
+        else ("done" if has_reserve_components else "warning")
+    )
+    settings_status = (
+        "needs_action"
+        if any(
+            (e.field_path or "").startswith(p)
+            for e in blocking
+            for p in ("hoa_settings", "reserve_cash", "reserve_funding", "hoa_metadata")
+        )
+        else (
+            "warning"
+            if any(
+                (e.field_path or "").startswith(p)
+                for e in warnings
+                for p in ("hoa_settings", "reserve_cash", "reserve_study")
+            )
+            else "done"
+        )
+    )
+    setup_status = (
+        "needs_action"
+        if any(
+            (e.field_path or "").startswith("assessment_setup")
+            or (e.code or "") == "assessment_setup_missing"
+            for e in blocking
+        )
+        else ("not_required" if mapping_step_status == "not_required" else "done")
+    )
+    # If variable and setup missing, setup is needs_action; mapping may also be.
+    if mapping_step_status == "not_required":
+        setup_status = "not_required" if setup_status != "needs_action" else setup_status
+
+    steps = [
+        {
+            "id": "budget_draft",
+            "label": "Budget draft",
+            "status": budget_status,
+            "detail": "Active budget with line items."
+            if budget_status == "done"
+            else "Upload and activate a budget draft.",
+            "fix_path": f"/hoa/{hoa_id}",
+            "fix_label": "Open budget",
+        },
+        {
+            "id": "reserve_study",
+            "label": "Reserve study",
+            "status": reserve_status,
+            "detail": "Reserve components attached."
+            if reserve_status == "done"
+            else "Attach a reserve study for funded reserve disclosures (warning if missing).",
+            "fix_path": f"/hoa/{hoa_id}?view=reserve",
+            "fix_label": "Open reserve study",
+        },
+        {
+            "id": "disclosure_settings",
+            "label": "Disclosure settings",
+            "status": settings_status,
+            "detail": "Cash, funding, and letter defaults for the PDF.",
+            "fix_path": f"/hoa/{hoa_id}/settings?section=disclosure&returnTo=/hoa/{hoa_id}/disclosure",
+            "fix_label": "Open disclosure settings",
+        },
+        {
+            "id": "assessment_setup",
+            "label": "DRE or assessment setup",
+            "status": setup_status,
+            "detail": "Approved allocation setup for variable dues."
+            if setup_status != "not_required"
+            else "Not required in fixed (equal) assessment mode.",
+            "fix_path": f"/hoa/{hoa_id}/settings?section=dre&returnTo=/hoa/{hoa_id}/disclosure",
+            "fix_label": "Open DRE setup",
+        },
+        {
+            "id": "assessment_mapping",
+            "label": "Assessment mapping",
+            "status": mapping_step_status
+            if mapping_step_status in {"done", "needs_action", "not_required", "warning"}
+            else "needs_action",
+            "detail": "Budget lines assigned to assessment pools."
+            if mapping_step_status == "done"
+            else (
+                "Not required in fixed assessment mode."
+                if mapping_step_status == "not_required"
+                else "Assign required lines before generating the owner PDF."
+            ),
+            "fix_path": f"/hoa/{hoa_id}/assessment-mapping-review",
+            "fix_label": "Open mapping review",
+        },
+        {
+            "id": "appendices",
+            "label": "Appendices",
+            "status": "done",
+            "detail": "Optional policy PDFs (insurance, rules). Missing files are skipped at merge.",
+            "fix_path": f"/hoa/{hoa_id}/settings?section=appendices&returnTo=/hoa/{hoa_id}/disclosure",
+            "fix_label": "Open appendices",
+        },
+        {
+            "id": "annual_package",
+            "label": "Annual package lifecycle",
+            "status": "done",
+            "detail": "Optional for live generate; use finalize when freezing snapshots.",
+            "fix_path": f"/hoa/{hoa_id}/settings?section=packages&returnTo=/hoa/{hoa_id}/disclosure",
+            "fix_label": "Open packages",
+        },
+    ]
+    return steps
+
+
 def run_preflight(
     session: Session,
     hoa_id: int,
@@ -647,32 +1007,73 @@ def run_preflight(
 
     Returns ``(blocking, warnings)``. Never raises — resolution failures are
     mapped to blocking PreflightError entries so the caller always gets a list.
+
+    For readiness steps and fix links, use :func:`run_preflight_detailed`.
     """
+    detailed = run_preflight_detailed(session, hoa_id, fiscal_year)
+    return detailed["blocking"], detailed["warnings"]
+
+
+def run_preflight_detailed(
+    session: Session,
+    hoa_id: int,
+    fiscal_year: int,
+) -> dict:
+    """Full preflight payload: blocking, warnings, and readiness steps."""
+    mapping_step_status = "not_required"
+    has_budget = False
+    has_reserve_components = False
     try:
         bundle = _resolve_preflight_inputs(session, hoa_id, fiscal_year)
+        has_budget = bool(bundle.budget_draft and bundle.budget_draft.line_items)
+        has_reserve_components = bool(
+            bundle.reserve_snapshot and bundle.reserve_snapshot.components
+        )
     except CompileError as exc:
         if exc.errors:
-            return exc.errors, []
-        field = exc.field_paths[0] if exc.field_paths else "setup"
-        return [PreflightError(
-            field_path=field,
-            message=str(exc),
-            severity="blocking",
-        )], []
-    except LookupError as exc:
-        return [PreflightError(
+            blocking, warnings = partition_errors(exc.errors)
+        else:
+            field = exc.field_paths[0] if exc.field_paths else "setup"
+            blocking, warnings = [PreflightError(
+                field_path=field,
+                message=str(exc),
+                severity="blocking",
+            )], []
+        _attach_fix_links(blocking + warnings, hoa_id)
+        steps = _build_readiness_steps(
+            hoa_id=hoa_id,
+            blocking=blocking,
+            warnings=warnings,
+            mapping_step_status="needs_action",
+            has_budget=False,
+            has_reserve_components=False,
+        )
+        return {"blocking": blocking, "warnings": warnings, "steps": steps}
+    except LookupError:
+        blocking = [PreflightError(
             field_path="budget_draft.line_items",
-            message=f"No active budget draft found. Upload and activate a budget before generating.",
+            message="No active budget draft found. Upload and activate a budget before generating.",
             severity="blocking",
             suggested_fix="Go to Budget and upload or activate a budget draft.",
-        )], []
+        )]
+        _attach_fix_links(blocking, hoa_id)
+        steps = _build_readiness_steps(
+            hoa_id=hoa_id,
+            blocking=blocking,
+            warnings=[],
+            mapping_step_status="needs_action",
+            has_budget=False,
+            has_reserve_components=False,
+        )
+        return {"blocking": blocking, "warnings": [], "steps": steps}
     except Exception:
         logger.exception("Unexpected error resolving preflight inputs for HOA %s", hoa_id)
-        return [PreflightError(
+        blocking = [PreflightError(
             field_path="setup",
             message="Could not evaluate readiness due to an unexpected error. Please try again.",
             severity="blocking",
-        )], []
+        )]
+        return {"blocking": blocking, "warnings": [], "steps": []}
 
     errors = validate_inputs(
         spec=bundle.spec,
@@ -715,7 +1116,49 @@ def run_preflight(
         logger.exception(
             "prior schedule preflight check failed for HOA %s", hoa_id,
         )
-    return partition_errors(errors)
+
+    # Zero cash warning (allowed, but often unintentional empty default).
+    try:
+        cash = bundle.overrides.get("reserve_cash_balance_eoy_prior")
+        if cash is not None:
+            from decimal import Decimal as _D
+
+            if _D(str(cash)) == 0:
+                errors.append(PreflightError(
+                    field_path="hoa_settings.reserve_cash_balance_eoy_prior",
+                    message=(
+                        "Reserve cash balance (end of prior year) is $0. "
+                        "Generation is allowed, but percent funded will look empty "
+                        "if the association actually holds reserves."
+                    ),
+                    severity="warning",
+                    code="reserve_cash_zero",
+                    suggested_fix=(
+                        "Confirm cash is intentionally zero in Disclosure Defaults, "
+                        "or enter the board’s reserve cash balance."
+                    ),
+                ))
+    except Exception:
+        logger.exception("zero-cash preflight warning failed for HOA %s", hoa_id)
+
+    mapping_errors, mapping_step_status = _assessment_mapping_preflight_errors(
+        session, hoa_id, fiscal_year
+    )
+    errors = errors + mapping_errors
+
+    blocking, warnings = partition_errors(errors)
+    linked = _attach_fix_links(blocking + warnings, hoa_id)
+    blocking = [e for e in linked if e.severity == "blocking"]
+    warnings = [e for e in linked if e.severity == "warning"]
+    steps = _build_readiness_steps(
+        hoa_id=hoa_id,
+        blocking=blocking,
+        warnings=warnings,
+        mapping_step_status=mapping_step_status,
+        has_budget=has_budget,
+        has_reserve_components=has_reserve_components,
+    )
+    return {"blocking": blocking, "warnings": warnings, "steps": steps}
 
 
 def _latest_fiscal_year(session: Session, hoa_id: int) -> int:

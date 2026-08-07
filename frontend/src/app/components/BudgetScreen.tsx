@@ -1824,13 +1824,19 @@ export function BudgetScreen({
             )}
           </div>
           {currentView === 'enriched' && (
-            <Button
-              onClick={handleGenerateBudgetClick}
-              disabled={isGenerating || !draftId}
-              className="bg-[#111111] text-white shadow-sm hover:bg-[#262626]"
-            >
-              {isGenerating ? 'Generating...' : budgetGenerated ? 'Regenerate Budget' : 'Generate Budget'}
-            </Button>
+            <div className="flex flex-col items-end gap-1">
+              <Button
+                onClick={handleGenerateBudgetClick}
+                disabled={isGenerating || !draftId}
+                className="bg-[#111111] text-white shadow-sm hover:bg-[#262626]"
+                title="Builds the budget draft/version — not the homeowner disclosure PDF"
+              >
+                {isGenerating ? 'Generating...' : budgetGenerated ? 'Regenerate Budget' : 'Generate Budget'}
+              </Button>
+              <span className="max-w-[14rem] text-right text-[11px] text-[#737373]">
+                Not the owner PDF — use Disclosure Package for that.
+              </span>
+            </div>
           )}
         </div>
       </div>

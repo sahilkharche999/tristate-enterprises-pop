@@ -254,6 +254,9 @@ class PreflightError(BaseModel):
     code: Optional[str] = None
     affected_value: Optional[Any] = None
     suggested_fix: Optional[str] = None
+    # Optional UI deep-link (package-readiness-and-skip-prevention).
+    fix_path: Optional[str] = None
+    fix_label: Optional[str] = None
 
 
 class FormulaCall(BaseModel):
@@ -330,6 +333,20 @@ class PreflightErrorResponse(BaseModel):
     severity: Literal["blocking", "warning"]
     code: Optional[str] = None
     suggested_fix: Optional[str] = None
+    # Optional deep-link for the disclosure UI Fix control (package-readiness).
+    fix_path: Optional[str] = None
+    fix_label: Optional[str] = None
+
+
+class ReadinessStepResponse(BaseModel):
+    """One ordered readiness step for the disclosure workspace checklist."""
+
+    id: str
+    label: str
+    status: Literal["done", "needs_action", "not_required", "warning"]
+    detail: Optional[str] = None
+    fix_path: Optional[str] = None
+    fix_label: Optional[str] = None
 
 
 class DisclosurePreflightResponse(BaseModel):
@@ -338,3 +355,4 @@ class DisclosurePreflightResponse(BaseModel):
     ready: bool
     blocking: list[PreflightErrorResponse]
     warnings: list[PreflightErrorResponse]
+    steps: list[ReadinessStepResponse] = Field(default_factory=list)

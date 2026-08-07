@@ -358,7 +358,14 @@ export function AssessmentMappingReviewScreen() {
             </Link>
             <div>
               <h1 className="text-xl font-semibold text-[#111111]">Assessment Mapping Review</h1>
-              <p className="text-sm text-[#737373]">Review only eligible current-year rows, assign pools inline, and block final rendering until the filtered regular basis reconciles.</p>
+              <p className="text-sm text-[#737373]">
+                Review only eligible current-year rows, assign pools inline, and block final rendering until the filtered regular basis reconciles.
+              </p>
+              <p className="mt-2 max-w-3xl rounded-md border border-[#e5e5e5] bg-[#fafafa] px-3 py-2 text-sm text-[#525252]">
+                <strong className="text-[#111111]">What this page is for:</strong> assign budget expense lines to
+                assessment pools so unit dues in the owner PDF are correct. For variable HOAs, incomplete mapping
+                blocks Generate Disclosure Package.
+              </p>
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">

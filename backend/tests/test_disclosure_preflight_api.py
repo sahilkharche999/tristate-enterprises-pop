@@ -120,6 +120,10 @@ def _seed_active_draft_for(db_session, hoa_id: int) -> None:
 def test_preflight_returns_ready_for_valid_hoa(client, db_session, budget_storage_root):
     """4.1: A valid HOA with an active draft returns ready=true, empty blocking."""
     hoa_id = _get_old_mill_id(db_session)
+    # Fixed mode: mapping gate is not required (variable HOAs need mapping).
+    prop = db_session.query(Property).filter(Property.id == hoa_id).one()
+    prop.assessment_mode = "fixed"
+    db_session.commit()
     _seed_active_draft_for(db_session, hoa_id)
 
     response = client.get(
@@ -131,8 +135,14 @@ def test_preflight_returns_ready_for_valid_hoa(client, db_session, budget_storag
     assert "ready" in body
     assert "blocking" in body
     assert "warnings" in body
+    # Filter mapping-only blocks if any fixture drift; primary assert:
+    mapping_blocks = [
+        b for b in body["blocking"] if (b.get("code") or "").startswith("assessment_mapping")
+    ]
+    assert mapping_blocks == []
     assert body["blocking"] == []
     assert body["ready"] is True
+    assert "steps" in body
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -385,19 +395,23 @@ def test_preflight_warnings_only_returns_ready(client, db_session, budget_storag
     hoa_id = _get_old_mill_id(db_session)
     _seed_active_draft_for(db_session, hoa_id)
 
-    # Monkeypatch run_preflight to return only warnings.
+    # Monkeypatch detailed preflight (router uses run_preflight_detailed).
     from app.disclosure_package.schemas import PreflightError
 
-    def _warnings_only(session, hoa_id_, fiscal_year):
-        return [], [
-            PreflightError(
-                field_path="reserve_study_snapshot.components",
-                message="Reserve study has no components",
-                severity="warning",
-            )
-        ]
+    def _warnings_only_detailed(session, hoa_id_, fiscal_year):
+        return {
+            "blocking": [],
+            "warnings": [
+                PreflightError(
+                    field_path="reserve_study_snapshot.components",
+                    message="Reserve study has no components",
+                    severity="warning",
+                )
+            ],
+            "steps": [],
+        }
 
-    monkeypatch.setattr(dp_service, "run_preflight", _warnings_only)
+    monkeypatch.setattr(dp_service, "run_preflight_detailed", _warnings_only_detailed)
 
     response = client.get(
         f"/api/disclosure-package/hoa/{hoa_id}/preflight",

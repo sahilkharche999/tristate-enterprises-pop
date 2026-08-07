@@ -143,12 +143,30 @@ export interface PreflightFinding {
   severity: PreflightSeverity;
   code?: string | null;
   suggested_fix?: string | null;
+  fix_path?: string | null;
+  fix_label?: string | null;
+}
+
+export type ReadinessStepStatus =
+  | 'done'
+  | 'needs_action'
+  | 'not_required'
+  | 'warning';
+
+export interface ReadinessStep {
+  id: string;
+  label: string;
+  status: ReadinessStepStatus;
+  detail?: string | null;
+  fix_path?: string | null;
+  fix_label?: string | null;
 }
 
 export interface DisclosurePreflightResult {
   ready: boolean;
   blocking: PreflightFinding[];
   warnings: PreflightFinding[];
+  steps?: ReadinessStep[];
 }
 
 export async function getDisclosurePreflight(

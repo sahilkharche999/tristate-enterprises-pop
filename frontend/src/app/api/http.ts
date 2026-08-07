@@ -25,7 +25,18 @@ async function extractErrorMessage(res: Response): Promise<string> {
   try {
     const body = await res.json();
     if (body?.detail) {
-      message = typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail);
+      if (typeof body.detail === 'string') {
+        message = body.detail;
+      } else if (
+        typeof body.detail === 'object' &&
+        body.detail !== null &&
+        typeof (body.detail as { message?: unknown }).message === 'string'
+      ) {
+        // Structured 422 preflight body: { message, blocking, ... }
+        message = (body.detail as { message: string }).message;
+      } else {
+        message = JSON.stringify(body.detail);
+      }
     }
   } catch {
     // Ignore response parsing failures and fall back to the HTTP status text.

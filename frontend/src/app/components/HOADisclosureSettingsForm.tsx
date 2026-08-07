@@ -628,10 +628,22 @@ export const HOADisclosureSettingsForm = forwardRef<
         }
       />
 
+      <p className="rounded-md border border-[#e5e5e5] bg-[#fafafa] px-3 py-2 text-sm text-[#525252]">
+        <strong className="text-[#111111]">What this page is for:</strong> names, cash, reserve
+        funding defaults, and letter dates the owner PDF uses. Not the full budget line list.
+        Package year lives under{' '}
+        <a className="underline" href={`/hoa/${hoaId}/settings?section=database`}>
+          HOA Database
+        </a>
+        .
+      </p>
       <p className="text-xs text-[#737373]">
         These values drive the rendered disclosure package PDF — every field below is read at
-        generate time. Blank numeric fields mean &ldquo;derive from data&rdquo; (e.g. blank
-        income-tax override → tax = interest revenue × 30%).
+        generate time. Blank optional overrides mean &ldquo;derive from data&rdquo;.
+        <span className="mt-1 block text-[#92400e]">
+          Required band: reserve funding source (dual-fund), cash balance (confirm if $0 is
+          intentional — preflight warns but does not block $0).
+        </span>
       </p>
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -641,7 +653,15 @@ export const HOADisclosureSettingsForm = forwardRef<
           // control a CHIP_SOURCES entry can point at — the backend test
           // `test_settings_field_points_at_a_rendered_input` guards the pairing.
           <label key={key} data-setting-field={key} className="block text-sm">
-            <span className="block text-xs text-[#737373] mb-1">{label}</span>
+            <span className="block text-xs text-[#737373] mb-1">
+              {label}
+              {key === 'reserve_cash_balance_eoy_prior' ? (
+                <span className="mt-0.5 block font-normal text-[#92400e]">
+                  $0 is allowed but usually means the field was never filled — percent funded
+                  will look empty if the HOA holds reserves.
+                </span>
+              ) : null}
+            </span>
             {type === 'textarea' ? (
               <textarea
                 rows={2}

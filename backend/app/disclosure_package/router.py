@@ -31,6 +31,7 @@ from starlette.status import (
     HTTP_409_CONFLICT,
     HTTP_410_GONE,
     HTTP_413_CONTENT_TOO_LARGE,
+    HTTP_422_UNPROCESSABLE_ENTITY,
     HTTP_500_INTERNAL_SERVER_ERROR,
 )
 
@@ -43,6 +44,7 @@ from .schemas import (
     DisclosurePreflightResponse,
     GenerateDisclosurePackageRequest,
     PreflightErrorResponse,
+    ReadinessStepResponse,
 )
 
 router = APIRouter(prefix="/api/disclosure-package", tags=["Disclosure Package"])
@@ -65,6 +67,18 @@ def _session_factory_from(session: Session):
     return _factory
 
 
+def _finding_to_response(e) -> PreflightErrorResponse:
+    return PreflightErrorResponse(
+        field_path=e.field_path,
+        message=e.message,
+        severity=e.severity,
+        code=e.code,
+        suggested_fix=e.suggested_fix,
+        fix_path=getattr(e, "fix_path", None),
+        fix_label=getattr(e, "fix_label", None),
+    )
+
+
 @router.post("/generate", status_code=HTTP_202_ACCEPTED)
 async def generate_disclosure_package(
     payload: GenerateDisclosurePackageRequest,
@@ -75,6 +89,10 @@ async def generate_disclosure_package(
     """Kick off a disclosure-package render. Returns 202 + job_id immediately
     (UI-SPEC §8.1 step 1). The render runs in a BackgroundTask so the HTTP
     request returns in <100 ms regardless of render duration.
+
+    Package-readiness: re-runs preflight before creating a job. Blocking
+    findings (including incomplete assessment mapping for variable HOAs)
+    return HTTP 422 and do not start a job.
     """
     try:
         property_row = (
@@ -86,6 +104,28 @@ async def generate_disclosure_package(
             raise HTTPException(
                 status_code=HTTP_404_NOT_FOUND,
                 detail=f"HOA not found: {payload.hoa_id}",
+            )
+
+        detailed = dp_service.run_preflight_detailed(
+            session, payload.hoa_id, payload.fiscal_year
+        )
+        blocking = detailed.get("blocking") or []
+        if blocking:
+            raise HTTPException(
+                status_code=HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "message": (
+                        f"Resolve {len(blocking)} blocking item"
+                        f"{'' if len(blocking) == 1 else 's'} before generating."
+                    ),
+                    "ready": False,
+                    "blocking": [_finding_to_response(e).model_dump() for e in blocking],
+                    "warnings": [
+                        _finding_to_response(e).model_dump()
+                        for e in (detailed.get("warnings") or [])
+                    ],
+                    "steps": detailed.get("steps") or [],
+                },
             )
 
         job = dp_service.create_job(
@@ -222,28 +262,25 @@ async def get_disclosure_preflight(
     Auth/ownership: requires authentication; HOA access follows the same
     tenant scoping as other disclosure endpoints. No job is created.
     """
-    blocking, warnings = dp_service.run_preflight(session, hoa_id, fiscal_year)
+    detailed = dp_service.run_preflight_detailed(session, hoa_id, fiscal_year)
+    blocking = detailed.get("blocking") or []
+    warnings = detailed.get("warnings") or []
+    steps_raw = detailed.get("steps") or []
     return DisclosurePreflightResponse(
         ready=len(blocking) == 0,
-        blocking=[
-            PreflightErrorResponse(
-                field_path=e.field_path,
-                message=e.message,
-                severity=e.severity,
-                code=e.code,
-                suggested_fix=e.suggested_fix,
+        blocking=[_finding_to_response(e) for e in blocking],
+        warnings=[_finding_to_response(e) for e in warnings],
+        steps=[
+            ReadinessStepResponse(
+                id=str(s.get("id") or ""),
+                label=str(s.get("label") or ""),
+                status=s.get("status") or "needs_action",
+                detail=s.get("detail"),
+                fix_path=s.get("fix_path"),
+                fix_label=s.get("fix_label"),
             )
-            for e in blocking
-        ],
-        warnings=[
-            PreflightErrorResponse(
-                field_path=e.field_path,
-                message=e.message,
-                severity=e.severity,
-                code=e.code,
-                suggested_fix=e.suggested_fix,
-            )
-            for e in warnings
+            for s in steps_raw
+            if s.get("id")
         ],
     )
 

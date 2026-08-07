@@ -13,6 +13,7 @@
 
 import { useState } from 'react';
 import { Download } from 'lucide-react';
+import { Link } from 'react-router';
 
 import type { DisclosurePackageJob } from '../../api/disclosurePackage';
 import { downloadDisclosurePackagePdf } from '../../api/disclosurePackage';
@@ -20,6 +21,7 @@ import { Button } from '../ui/button';
 
 export interface DisclosureResultBlockProps {
   job: DisclosurePackageJob;
+  hoaId?: number;
   onViewAudit?: () => void;
   onRegenerate?: () => void;
 }
@@ -33,6 +35,7 @@ function formatTimestamp(value: string | null | undefined): string | null {
 
 export function DisclosureResultBlock({
   job,
+  hoaId,
   onViewAudit,
   onRegenerate,
 }: DisclosureResultBlockProps) {
@@ -42,6 +45,8 @@ export function DisclosureResultBlock({
   // never hardcode a specific HOA.
   const fallbackFilename = `disclosure-package-${job.fiscal_year}.pdf`;
   const [downloading, setDownloading] = useState(false);
+  const [diagOpen, setDiagOpen] = useState(false);
+  const id = hoaId ?? job.property_id;
 
   async function handleDownload() {
     if (downloading) return;
@@ -77,6 +82,54 @@ export function DisclosureResultBlock({
           <dd className="text-[#111111]">{generated}</dd>
         </dl>
       ) : null}
+      <div className="rounded-lg border border-[#e5e5e5] bg-[#fafafa] p-4">
+        <button
+          type="button"
+          className="cursor-pointer text-left text-sm font-medium text-[#111111] underline-offset-2 hover:underline"
+          onClick={() => setDiagOpen((v) => !v)}
+        >
+          {diagOpen ? 'Hide' : 'PDF looks wrong?'} common causes
+        </button>
+        {diagOpen ? (
+          <ul className="mt-3 space-y-2 text-sm text-[#525252]">
+            <li>
+              <strong className="text-[#111111]">0% funded / empty reserves:</strong> check{' '}
+              <Link
+                className="underline"
+                to={`/hoa/${id}/settings?section=disclosure&field=reserve_cash_balance_eoy_prior`}
+              >
+                reserve cash balance
+              </Link>{' '}
+              and reserve funding source.
+            </li>
+            <li>
+              <strong className="text-[#111111]">Wrong per-unit dues:</strong> check assessment mode,{' '}
+              <Link className="underline" to={`/hoa/${id}/settings?section=dre`}>
+                DRE/CCR setup
+              </Link>
+              , and{' '}
+              <Link className="underline" to={`/hoa/${id}/assessment-mapping-review`}>
+                assessment mapping
+              </Link>
+              .
+            </li>
+            <li>
+              <strong className="text-[#111111]">Missing insurance/policies:</strong>{' '}
+              <Link className="underline" to={`/hoa/${id}/settings?section=appendices`}>
+                upload appendices
+              </Link>
+              .
+            </li>
+            <li>
+              <strong className="text-[#111111]">Wrong year on the cover:</strong> package year on{' '}
+              <Link className="underline" to={`/hoa/${id}/settings?section=database`}>
+                HOA Database
+              </Link>
+              .
+            </li>
+          </ul>
+        ) : null}
+      </div>
       <div className="flex flex-wrap items-center justify-end gap-2">
         {onViewAudit ? (
           <Button variant="ghost" onClick={onViewAudit}>
