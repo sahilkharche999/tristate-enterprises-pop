@@ -263,31 +263,36 @@ export function GeneratedBudgetScreen({
         {readOnly ? (
           <div className="mb-8 rounded-xl border-2 border-[#111111] bg-white p-6 shadow-sm">
             <h2 className="text-lg font-semibold text-[#111111]">
-              What&rsquo;s next?
+              Start the normal {packageYear} budget flow
             </h2>
             <p className="mt-2 max-w-3xl text-sm text-[#525252]">
-              You are looking at a <strong>locked budget snapshot</strong> ({versionCode}) — like a
-              saved Excel version. It is <strong>not</strong> last year&rsquo;s finished disclosure
-              package, and it is <strong>not</strong> the owner PDF.
+              You are only viewing a <strong>locked past budget version</strong> ({versionCode}).
+              There is <strong>no active draft</strong> right now, so the usual path is to{' '}
+              <strong>create a new draft first</strong> — not jump straight to disclosure.
             </p>
-            <p className="mt-3 max-w-3xl text-sm text-[#525252]">
-              <strong>Open {packageYear} disclosure readiness</strong> takes you to the{' '}
-              <em>current workbench</em> for this HOA&rsquo;s package year{' '}
-              <strong>{packageYear}</strong> (from Settings → package year). There you see live
-              steps: budget, mapping, settings, etc., and you generate the{' '}
-              <strong>{packageYear}</strong> homeowner disclosure PDF. It does{' '}
-              <strong>not</strong> open a previous-year archive.
-            </p>
+            <ol className="mt-4 list-decimal space-y-2 pl-5 text-sm text-[#525252]">
+              <li>
+                <strong>New draft</strong> — upload income statement (+ reserve study), or reopen
+                this version as an editable draft.
+              </li>
+              <li>
+                <strong>Review / edit</strong> line items, then <strong>Generate budget version</strong>{' '}
+                (locks numbers — not the owner PDF).
+              </li>
+              <li>
+                <strong>Disclosure Package</strong> — readiness checklist and generate the{' '}
+                <strong>{packageYear}</strong> homeowner PDF (only after the budget is ready).
+              </li>
+            </ol>
             <p className="mt-3 max-w-3xl text-sm text-[#737373]">
-              Need different numbers first? Start a new draft or upload a new budget source, then
-              generate a new budget version. Changing package year (e.g. to 2027) is under Settings
-              → package year / Annual packages.
+              Package year comes from Settings (currently <strong>{packageYear}</strong>). Change it
+              there before starting if you need a different year.
             </p>
             <div className="mt-6 flex flex-wrap gap-3">
-              <Link to={`/hoa/${hoaId}/disclosure`}>
+              <Link to={`/hoa/${hoaId}?create=1`}>
                 <Button className="bg-[#111111] text-white shadow-sm hover:bg-[#262626]">
-                  <PackageCheck className="mr-2 h-4 w-4" />
-                  Open {packageYear} disclosure readiness
+                  <Upload className="mr-2 h-4 w-4" />
+                  Step 1: Upload income statement / reserve study
                 </Button>
               </Link>
               {onReopenAsDraft ? (
@@ -298,16 +303,18 @@ export function GeneratedBudgetScreen({
                   className="border-[#111111] text-[#111111] hover:bg-[#f5f5f5]"
                 >
                   <FileText className="mr-2 h-4 w-4" />
-                  {isReopening ? 'Opening draft…' : 'Edit budget (new draft from this version)'}
+                  {isReopening
+                    ? 'Opening draft…'
+                    : 'Or start draft from this version (no new upload)'}
                 </Button>
               ) : null}
-              <Link to={`/hoa/${hoaId}?create=1`}>
+              <Link to={`/hoa/${hoaId}/disclosure`}>
                 <Button
                   variant="outline"
-                  className="border-[#d4d4d4] text-[#111111] hover:bg-[#f5f5f5]"
+                  className="border-[#d4d4d4] text-[#525252] hover:bg-[#f5f5f5]"
                 >
-                  <Upload className="mr-2 h-4 w-4" />
-                  Upload new budget source
+                  <PackageCheck className="mr-2 h-4 w-4" />
+                  Skip to {packageYear} disclosure (only if budget already final)
                 </Button>
               </Link>
               <Link to={`/hoa/${hoaId}/sync-history`}>
@@ -320,10 +327,7 @@ export function GeneratedBudgetScreen({
                 </Button>
               </Link>
               <Link to={`/hoa/${hoaId}/settings?section=database`}>
-                <Button
-                  variant="ghost"
-                  className="text-[#525252] hover:bg-[#f5f5f5]"
-                >
+                <Button variant="ghost" className="text-[#525252] hover:bg-[#f5f5f5]">
                   Change package year in Settings
                 </Button>
               </Link>
