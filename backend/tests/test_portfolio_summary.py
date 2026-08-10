@@ -68,6 +68,32 @@ def test_readiness_counts_after_budget_draft_done():
     assert pct == 86
 
 
+def test_readiness_zero_when_reopened_prev_version_not_regenerated():
+    """Starting next package from a reopened prior version must show 0%."""
+    steps = [
+        {"id": "budget_draft", "status": "done", "label": "Budget draft"},
+        {"id": "reserve_study", "status": "done", "label": "Reserve study"},
+        {"id": "disclosure_settings", "status": "done", "label": "Settings"},
+        {"id": "assessment_setup", "status": "done", "label": "Setup"},
+        {"id": "assessment_mapping", "status": "done", "label": "Mapping"},
+        {"id": "appendices", "status": "done", "label": "Appendices"},
+        {"id": "annual_package", "status": "done", "label": "Packages"},
+    ]
+    done, total, pct = ps._readiness_score(
+        steps,
+        has_active_draft=True,
+        reopened_draft_not_regenerated=True,
+    )
+    assert total == 7
+    assert done == 0
+    assert pct == 0
+    action = ps._next_action_from_steps(
+        steps, 3, reopened_draft_not_regenerated=True
+    )
+    assert action is not None
+    assert "budget" in action["label"].lower()
+
+
 def test_portfolio_status_never_completed_when_needs_action():
     steps = [
         {"id": "budget_draft", "status": "needs_action", "label": "Budget draft", "fix_path": "/hoa/1"},

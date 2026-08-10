@@ -85,16 +85,34 @@ def _activity_timestamps(conn, hoa_id: int) -> list[Optional[str]]:
     return out
 
 
-def _draft_and_version_flags(conn, hoa_id: int) -> tuple[bool, Optional[int]]:
+def _draft_and_version_flags(conn, hoa_id: int) -> tuple[bool, Optional[int], bool]:
+    """Return (has_active_draft, latest_version_id, reopened_draft_not_regenerated).
+
+    ``reopened_draft_not_regenerated`` is True when the operator reopened a prior
+    locked version into an active draft but has not yet generated a **new**
+    budget version from that draft. Portfolio % must stay 0% in that state so
+    "start next year from last version" does not look package-ready.
+    """
     has_active = False
     latest_version_id: Optional[int] = None
+    reopened_not_regenerated = False
+    active_draft_id: Optional[int] = None
+    reopened_from: Optional[int] = None
     try:
         row = conn.execute(
-            "SELECT id FROM budget_drafts WHERE property_id = ? AND status = 'active' "
+            "SELECT id, reopened_from_version_id FROM budget_drafts "
+            "WHERE property_id = ? AND status = 'active' "
             "ORDER BY id DESC LIMIT 1",
             (hoa_id,),
         ).fetchone()
-        has_active = bool(row)
+        if row:
+            has_active = True
+            active_draft_id = int(row[0])
+            if row[1] is not None:
+                try:
+                    reopened_from = int(row[1])
+                except (TypeError, ValueError):
+                    reopened_from = None
     except Exception:
         logger.debug("active draft lookup failed for %s", hoa_id, exc_info=True)
     try:
@@ -107,7 +125,24 @@ def _draft_and_version_flags(conn, hoa_id: int) -> tuple[bool, Optional[int]]:
             latest_version_id = int(row[0])
     except Exception:
         logger.debug("latest version lookup failed for %s", hoa_id, exc_info=True)
-    return has_active, latest_version_id
+
+    if has_active and reopened_from is not None and active_draft_id is not None:
+        # A new version generated from *this* draft ends the "starting from prev" state.
+        try:
+            gen = conn.execute(
+                "SELECT id FROM budget_versions WHERE property_id = ? "
+                "AND source_draft_id = ? LIMIT 1",
+                (hoa_id, active_draft_id),
+            ).fetchone()
+            reopened_not_regenerated = gen is None
+        except Exception:
+            # If we can't prove a regenerate, assume still in reopened start state.
+            logger.debug(
+                "reopened regenerate check failed for HOA %s", hoa_id, exc_info=True
+            )
+            reopened_not_regenerated = True
+
+    return has_active, latest_version_id, reopened_not_regenerated
 
 
 def _portfolio_status_from_steps(
@@ -152,6 +187,7 @@ def _readiness_score(
     steps: list[dict],
     *,
     has_active_draft: bool,
+    reopened_draft_not_regenerated: bool = False,
 ) -> tuple[int, int, int]:
     """Return (done, total, pct) for portfolio cards.
 
@@ -159,6 +195,10 @@ def _readiness_score(
     make a green bar when the operator still has to start with income/reserve
     upload. Until the budget-draft step is done (or an active draft exists),
     report 0% complete.
+
+    Also 0% when the active draft was reopened from a prior locked version and
+    has not yet produced a new generated version — starting next package year
+    from last year's snapshot must not look fully ready.
     """
     actionable = [s for s in steps if s.get("status") != "not_required"]
     total = len(actionable) if actionable else 0
@@ -169,12 +209,27 @@ def _readiness_score(
     if _budget_draft_incomplete(steps) and not has_active_draft:
         return 0, total, 0
 
+    # Reopened previous version as draft, not yet re-generated → still "starting".
+    if reopened_draft_not_regenerated:
+        return 0, total, 0
+
     done = sum(1 for s in actionable if s.get("status") == "done")
     pct = int(round(100.0 * done / total)) if total else 0
     return done, total, pct
 
 
-def _next_action_from_steps(steps: list[dict], hoa_id: int) -> Optional[dict[str, str]]:
+def _next_action_from_steps(
+    steps: list[dict],
+    hoa_id: int,
+    *,
+    reopened_draft_not_regenerated: bool = False,
+) -> Optional[dict[str, str]]:
+    if reopened_draft_not_regenerated:
+        return {
+            "label": "Next: Finish budget draft / generate new version",
+            "href": f"/hoa/{hoa_id}",
+            "code": "budget_reopened",
+        }
     priority = (
         "needs_action",
         "warning",
@@ -210,12 +265,15 @@ def build_hoa_portfolio_summary(session: Session, hoa_id: int, portfolio_year: O
     """
     has_active_draft = False
     latest_version_id: Optional[int] = None
+    reopened_draft_not_regenerated = False
     last_worked_at: Optional[str] = None
     steps: list[dict] = []
 
     try:
         conn = session.connection().connection
-        has_active_draft, latest_version_id = _draft_and_version_flags(conn, hoa_id)
+        has_active_draft, latest_version_id, reopened_draft_not_regenerated = (
+            _draft_and_version_flags(conn, hoa_id)
+        )
         try:
             last_worked_at = _max_iso(_activity_timestamps(conn, hoa_id))
         except Exception:
@@ -239,6 +297,7 @@ def build_hoa_portfolio_summary(session: Session, hoa_id: int, portfolio_year: O
     done, total, readiness_pct = _readiness_score(
         steps,
         has_active_draft=has_active_draft,
+        reopened_draft_not_regenerated=reopened_draft_not_regenerated,
     )
 
     portfolio_status = _portfolio_status_from_steps(
@@ -253,8 +312,15 @@ def build_hoa_portfolio_summary(session: Session, hoa_id: int, portfolio_year: O
     # even if optional steps (appendices / annual package) report "done".
     if _budget_draft_incomplete(steps) and not has_active_draft:
         portfolio_status = STATUS_NOT_STARTED
+    # Reopened prior version for a new cycle — in progress, not package-ready.
+    if reopened_draft_not_regenerated:
+        portfolio_status = STATUS_IN_PROGRESS
 
-    next_action = _next_action_from_steps(steps, hoa_id)
+    next_action = _next_action_from_steps(
+        steps,
+        hoa_id,
+        reopened_draft_not_regenerated=reopened_draft_not_regenerated,
+    )
 
     return {
         "portfolio_status": portfolio_status,
