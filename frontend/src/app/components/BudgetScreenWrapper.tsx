@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useParams, useSearchParams } from 'react-router';
+import { useNavigate, useParams, useSearchParams } from 'react-router';
 import { toast } from 'sonner';
 
 import { BudgetScreen } from './BudgetScreen';
@@ -32,6 +32,7 @@ import { getErrorMessage } from '../lib/errors';
 
 export function BudgetScreenWrapper() {
   const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const showGeneratedBudget = searchParams.get('generated') === 'true';
   const versionId = searchParams.get('versionId');
@@ -239,6 +240,7 @@ export function BudgetScreenWrapper() {
       return;
     }
 
+    // Active draft exists — open the editor for that draft.
     if (activeDraft?.status === 'active') {
       const params = new URLSearchParams();
       params.set('view', 'enriched');
@@ -247,6 +249,7 @@ export function BudgetScreenWrapper() {
       return;
     }
 
+    // Writable generated version (not read-only): reopen as a new editable draft.
     if (generatedVersion && !readOnly) {
       try {
         const response = await reopenBudgetVersion(id, generatedVersion.id);
@@ -260,12 +263,14 @@ export function BudgetScreenWrapper() {
         return;
       } catch (error) {
         toast.error(getErrorMessage(error, 'Failed to reopen this version as a draft.'));
+        // Fall through to portfolio — do not clear params onto bare /hoa/:id.
       }
     }
 
-    const params = new URLSearchParams();
-    params.set('view', 'enriched');
-    setSearchParams(params);
+    // Read-only latest-generated (typical after Generate) or no draft to open:
+    // leave the HOA. Clearing params alone re-triggers auto-open of the latest
+    // generated version and traps the operator in a back-button loop.
+    navigate('/workspace');
   };
 
   if (isHoaLoading) {

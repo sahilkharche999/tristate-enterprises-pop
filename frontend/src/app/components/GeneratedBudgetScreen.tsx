@@ -150,14 +150,25 @@ export function GeneratedBudgetScreen({
       <header className="sticky top-0 z-10 border-b border-[#e5e5e5] bg-white shadow-sm">
         <div className="flex items-center justify-between px-8 py-6">
           <div className="flex items-center gap-6">
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={onBackToDraft}
-              className="hover:bg-[#f5f5f5]"
-            >
-              <ArrowLeft className="h-5 w-5 text-[#525252]" />
-            </Button>
+            {readOnly ? (
+              <Link
+                to="/workspace"
+                className="rounded-lg p-2 transition-colors hover:bg-[#f5f5f5]"
+                aria-label="Back to portfolio"
+              >
+                <ArrowLeft className="h-5 w-5 text-[#525252]" />
+              </Link>
+            ) : (
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={onBackToDraft}
+                className="hover:bg-[#f5f5f5]"
+                aria-label="Back to draft"
+              >
+                <ArrowLeft className="h-5 w-5 text-[#525252]" />
+              </Button>
+            )}
             <div>
               <h1 className="text-xl font-semibold text-[#111111]">{hoa.name}</h1>
               <p className="text-sm text-[#737373]">Fiscal Year: {fiscalYearLabel}</p>
@@ -292,13 +303,24 @@ export function GeneratedBudgetScreen({
         </div>
 
         <div className="mb-8 flex items-center justify-between border-b border-[#e5e5e5] pb-8">
-          <Button
-            variant="outline"
-            onClick={onBackToDraft}
-            className="border-[#e5e5e5] text-[#525252] hover:bg-[#f5f5f5] hover:text-[#111111]"
-          >
-            {readOnly ? 'Return to Budget Workspace' : 'Back to Draft'}
-          </Button>
+          {readOnly ? (
+            <Link to="/workspace">
+              <Button
+                variant="outline"
+                className="border-[#e5e5e5] text-[#525252] hover:bg-[#f5f5f5] hover:text-[#111111]"
+              >
+                Return to portfolio
+              </Button>
+            </Link>
+          ) : (
+            <Button
+              variant="outline"
+              onClick={onBackToDraft}
+              className="border-[#e5e5e5] text-[#525252] hover:bg-[#f5f5f5] hover:text-[#111111]"
+            >
+              Back to Draft
+            </Button>
+          )}
           <div className="flex items-center gap-3">
             <Button
               variant="outline"
