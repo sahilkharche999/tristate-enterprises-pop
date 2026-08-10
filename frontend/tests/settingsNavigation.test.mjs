@@ -37,6 +37,8 @@ const {
   wantsOpenPackageLanguage,
   stripOpenPackageLanguageParam,
   OPEN_PACKAGE_LANGUAGE_PARAM,
+  disclosureTabForField,
+  resolveDisclosureDefaultsTab,
 } = await import('../src/app/lib/settingsNavigation.ts');
 
 test('resolveSettingsSection: known and unknown', () => {
@@ -210,4 +212,19 @@ test('property anchors exist in SettingsScreen.tsx', () => {
       `missing data-setting-field="${field}" in SettingsScreen`,
     );
   }
+});
+
+test('disclosureTabForField maps cash to money tab', () => {
+  assert.equal(disclosureTabForField('reserve_cash_balance_eoy_prior'), 'money');
+  assert.equal(disclosureTabForField('special_assessments_json'), 'section5570');
+  assert.equal(disclosureTabForField('letter_date'), 'letterhead');
+  assert.equal(resolveDisclosureDefaultsTab('forecast'), 'forecast');
+  assert.equal(resolveDisclosureDefaultsTab('nope'), 'money');
+});
+
+test('withRevealField sets disclosure tab for field', () => {
+  const next = withRevealField(new URLSearchParams(), 'disclosure', 'reserve_cash_balance_eoy_prior');
+  assert.equal(next.get('section'), 'disclosure');
+  assert.equal(next.get('field'), 'reserve_cash_balance_eoy_prior');
+  assert.equal(next.get('tab'), 'money');
 });

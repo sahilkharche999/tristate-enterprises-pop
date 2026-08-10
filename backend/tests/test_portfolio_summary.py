@@ -1,0 +1,64 @@
+"""Portfolio readiness summary — status honesty for HOA list cards."""
+
+from __future__ import annotations
+
+from app.services import portfolio_summary as ps
+
+
+def test_portfolio_status_never_completed_when_needs_action():
+    steps = [
+        {"id": "budget_draft", "status": "needs_action", "label": "Budget draft", "fix_path": "/hoa/1"},
+        {"id": "appendices", "status": "done", "label": "Appendices"},
+    ]
+    status = ps._portfolio_status_from_steps(
+        steps, has_active_draft=False, latest_version_id=None
+    )
+    assert status != "Completed"
+    assert status in {ps.STATUS_NOT_STARTED, ps.STATUS_IN_PROGRESS}
+
+
+def test_portfolio_status_ready_when_all_done():
+    steps = [
+        {"id": "budget_draft", "status": "done", "label": "Budget"},
+        {"id": "mapping", "status": "not_required", "label": "Mapping"},
+        {"id": "settings", "status": "done", "label": "Settings"},
+    ]
+    status = ps._portfolio_status_from_steps(
+        steps, has_active_draft=True, latest_version_id=1
+    )
+    assert status == ps.STATUS_READY
+
+
+def test_next_action_prefers_needs_action():
+    steps = [
+        {"id": "budget_draft", "status": "done", "label": "Budget draft", "fix_path": "/hoa/3"},
+        {
+            "id": "assessment_mapping",
+            "status": "needs_action",
+            "label": "Assessment mapping",
+            "fix_path": "/hoa/3/assessment-mapping-review",
+            "fix_label": "Open mapping review",
+        },
+    ]
+    action = ps._next_action_from_steps(steps, 3)
+    assert action is not None
+    assert "Assessment mapping" in action["label"]
+    assert action["href"] == "/hoa/3/assessment-mapping-review"
+
+
+def test_list_hoa_includes_portfolio_fields(client):
+    response = client.get("/hoa")
+    assert response.status_code == 200
+    rows = response.json()
+    assert isinstance(rows, list)
+    if not rows:
+        return
+    row = rows[0]
+    assert "portfolio_status" in row
+    assert row["portfolio_status"] != "Completed" or row.get("readiness_pct", 0) == 100
+    # Incomplete readiness must never show Completed
+    if (row.get("readiness_pct") or 0) < 100 and row.get("readiness_total"):
+        assert row["portfolio_status"] != "Completed"
+    assert "readiness_pct" in row
+    assert "next_action" in row
+    assert "has_active_draft" in row

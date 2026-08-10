@@ -9,11 +9,13 @@ import {
   generateBudgetVersion,
   getBudgetDraft,
   getActiveBudgetDraft,
+  getBudgetHistory,
   getBudgetVersion,
   mapBudgetHistoryLineItems,
   mapEditorLineItemsToBudgetHistory,
   type BudgetDraftPayload,
   type BudgetVersionDetail,
+  type BudgetVersionSummary,
 } from '../api/budgetHistory';
 import { getHOA, type HOARecord } from '../api/hoa';
 import type { SheetTable } from '../api/macros';
@@ -35,6 +37,7 @@ export function BudgetScreenWrapper() {
   const versionId = searchParams.get('versionId');
   const draftId = searchParams.get('draftId');
   const readOnly = searchParams.get('readOnly') === '1';
+  const forceCreateDraft = searchParams.get('create') === '1';
   const initialView = (searchParams.get('view') || 'enriched') as 'enriched' | 'budget' | 'ai';
 
   const [hoa, setHoa] = useState<HOARecord | null>(null);
@@ -43,6 +46,7 @@ export function BudgetScreenWrapper() {
   const [lineItems, setLineItems] = useState<LineItem[]>([]);
   const [activeDraft, setActiveDraft] = useState<BudgetDraftPayload | null>(null);
   const [generatedVersion, setGeneratedVersion] = useState<BudgetVersionDetail | null>(null);
+  const [latestVersionSummary, setLatestVersionSummary] = useState<BudgetVersionSummary | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
   const [aiResponse, setAiResponse] = useState<AISuggestionResponse | null>(null);
   const reopenedFromVersionId = activeDraft?.reopened_from_version_id ?? null;
@@ -107,11 +111,42 @@ export function BudgetScreenWrapper() {
         if (cancelled) return;
         setActiveDraft(draft);
 
+        // History is used for honest empty-state when no active draft exists.
+        let latestSummary: BudgetVersionSummary | null = null;
+        try {
+          const history = await getBudgetHistory(id);
+          if (!cancelled) {
+            latestSummary = history.versions?.[0] ?? null;
+            setLatestVersionSummary(latestSummary);
+          }
+        } catch {
+          if (!cancelled) {
+            setLatestVersionSummary(null);
+          }
+        }
+
         if (versionId) {
           const version = await getBudgetVersion(id, versionId);
           if (cancelled) return;
           setGeneratedVersion(version);
           setLineItems(mapBudgetHistoryLineItems(version.line_items));
+        } else if (
+          !draft &&
+          !forceCreateDraft &&
+          latestSummary &&
+          !showGeneratedBudget
+        ) {
+          // No active draft but a generated version exists — open latest
+          // generated view instead of empty Create Budget Draft upload.
+          const version = await getBudgetVersion(id, latestSummary.id);
+          if (cancelled) return;
+          setGeneratedVersion(version);
+          setLineItems(mapBudgetHistoryLineItems(version.line_items));
+          const params = new URLSearchParams();
+          params.set('generated', 'true');
+          params.set('versionId', String(latestSummary.id));
+          params.set('readOnly', '1');
+          setSearchParams(params, { replace: true });
         } else {
           setGeneratedVersion(null);
           setLineItems(draft ? mapBudgetHistoryLineItems(draft.line_items) : []);
@@ -131,7 +166,7 @@ export function BudgetScreenWrapper() {
     return () => {
       cancelled = true;
     };
-  }, [draftId, id, versionId]);
+  }, [draftId, forceCreateDraft, id, setSearchParams, showGeneratedBudget, versionId]);
 
   const handleDraftChange = (draft: BudgetDraftPayload) => {
     setActiveDraft(draft);
@@ -303,6 +338,7 @@ export function BudgetScreenWrapper() {
       savedAiResponse={aiResponse}
       onAiResponseChange={setAiResponse}
       activeDraft={activeDraft}
+      latestVersionSummary={latestVersionSummary}
       key={reopenedFromVersionId ? `reopened-${reopenedFromVersionId}-${activeDraft?.id ?? 'none'}` : 'active-draft'}
     />
   );

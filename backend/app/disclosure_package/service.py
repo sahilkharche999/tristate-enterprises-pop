@@ -838,8 +838,17 @@ def _attach_fix_links(errors: list[PreflightError], hoa_id: int) -> list[Preflig
                 fix_label = "Open DRE setup"
             elif path.startswith("hoa_settings") or path.startswith("reserve_cash"):
                 field = path.split(".")[-1] if "." in path else ""
+                # Progressive Disclosure Defaults tabs: cash/funding → money
+                money_fields = {
+                    "reserve_cash_balance_eoy_prior",
+                    "reserve_funding_source",
+                    "reserve_funding_manual_amount",
+                    "financial_packet_archetype",
+                    "approved_monthly_assessment_per_unit",
+                }
+                tab = "money" if not field or field in money_fields else "money"
                 fix_path = (
-                    f"/hoa/{hoa_id}/settings?section=disclosure"
+                    f"/hoa/{hoa_id}/settings?section=disclosure&tab={tab}"
                     + (f"&field={field}" if field else "")
                     + f"&returnTo=/hoa/{hoa_id}/disclosure"
                 )

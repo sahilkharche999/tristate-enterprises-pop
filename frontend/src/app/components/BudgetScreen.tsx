@@ -1,6 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router';
-import { AlertTriangle, ArrowLeft, Download, FileText, PackageCheck, Settings, Trash2, Upload } from 'lucide-react';
+import {
+  AlertTriangle,
+  ArrowLeft,
+  Download,
+  FileText,
+  MoreHorizontal,
+  PackageCheck,
+  Settings,
+  Trash2,
+  Upload,
+} from 'lucide-react';
 import { toast } from 'sonner';
 
 import { Button } from './ui/button';
@@ -9,6 +19,7 @@ import { Label } from './ui/label';
 import {
   AlertDialog,
   AlertDialogAction,
+  AlertDialogCancel,
   AlertDialogContent,
   AlertDialogDescription,
   AlertDialogFooter,
@@ -47,6 +58,7 @@ import {
   type BudgetSourceMode,
   type BudgetBundleUploadResponse,
   type BudgetDraftPayload,
+  type BudgetVersionSummary,
   type ExtractionDebugInfo,
   type ExtractionQualityWarning,
   type ReserveStudyRow,
@@ -118,6 +130,8 @@ interface BudgetScreenProps {
   savedAiResponse?: AISuggestionResponse | null;
   onAiResponseChange?: (response: AISuggestionResponse | null) => void;
   activeDraft?: BudgetDraftPayload | null;
+  /** Latest generated version when no active draft (for honest empty-state CTAs). */
+  latestVersionSummary?: BudgetVersionSummary | null;
 }
 
 const DRAFT_AUTO_SAVE_INTERVAL_MS = 30_000;
@@ -194,10 +208,16 @@ export function BudgetScreen({
   savedAiResponse = null,
   onAiResponseChange,
   activeDraft = null,
+  latestVersionSummary = null,
 }: BudgetScreenProps) {
   const [uploadState, setUploadState] = useState<'initial' | 'uploading' | 'complete'>(
     activeDraft ? 'complete' : 'initial',
   );
+  const [confirmAction, setConfirmAction] = useState<
+    null | 'discard' | 'replace' | 'generate'
+  >(null);
+  const [moreActionsOpen, setMoreActionsOpen] = useState(false);
+  const pendingReplaceFileRef = useRef<File | null>(null);
   // Table thead sticky offset: the tab bar's own `top-[140px]` (its sticky CSS offset, a
   // constant regardless of scroll position) plus its *measured* rendered height, so the
   // Enriched/Reserve Study tables' sticky headers land flush below it. Deliberately NOT
@@ -671,22 +691,18 @@ export function BudgetScreen({
     handleReserveStudyReplaced(updatedDraft);
   };
 
-  const handleReplaceBudgetFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    event.target.value = ''; // allow re-selecting the same filename later
-    if (!file || !draftId) return;
+  const executeReplaceBudgetFile = async (file: File) => {
+    if (!draftId) return;
     setIsReplacingBudgetFile(true);
     try {
       const result = await replaceBudgetSource(hoaId, draftId, file);
       if (result.review_required || result.draft === null) {
-        // Extraction needs review — the prior draft is left intact.
         toast.error(
           result.review_reason ||
             'The replacement file needs review; the current budget was left unchanged.',
         );
         return;
       }
-      // Success: reload so the screen re-fetches and shows the new budget.
       toast.success('Budget file replaced.');
       window.location.reload();
     } catch (error) {
@@ -694,6 +710,14 @@ export function BudgetScreen({
     } finally {
       setIsReplacingBudgetFile(false);
     }
+  };
+
+  const handleReplaceBudgetFile = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = ''; // allow re-selecting the same filename later
+    if (!file || !draftId) return;
+    pendingReplaceFileRef.current = file;
+    setConfirmAction('replace');
   };
 
   const handleReadOnlyOverride = (itemId: string, override: boolean | null) => {
@@ -722,10 +746,8 @@ export function BudgetScreen({
     }
   };
 
-  const handleDiscardDraft = async () => {
+  const executeDiscardDraft = async () => {
     if (!draftId) return;
-    if (!window.confirm('Discard this draft? This cannot be undone.')) return;
-
     setIsDeletingDraft(true);
     try {
       await deleteActiveDraft(hoaId);
@@ -735,6 +757,11 @@ export function BudgetScreen({
     } finally {
       setIsDeletingDraft(false);
     }
+  };
+
+  const handleDiscardDraft = () => {
+    if (!draftId) return;
+    setConfirmAction('discard');
   };
 
   const persistDraftSnapshot = async (): Promise<BudgetDraftPayload> => {
@@ -1129,7 +1156,7 @@ export function BudgetScreen({
     }
   };
 
-  const handleGenerateBudgetClick = async () => {
+  const executeGenerateBudgetVersion = async () => {
     if (!draftId) {
       toast.error(budgetSourceModeGenericDraftError());
       return;
@@ -1149,8 +1176,16 @@ export function BudgetScreen({
         growthFactorNote,
       });
     } catch (error) {
-      toast.error(getErrorMessage(error, 'Failed to generate budget. Please try again.'));
+      toast.error(getErrorMessage(error, 'Failed to generate budget version. Please try again.'));
     }
+  };
+
+  const handleGenerateBudgetClick = () => {
+    if (!draftId) {
+      toast.error(budgetSourceModeGenericDraftError());
+      return;
+    }
+    setConfirmAction('generate');
   };
 
   const handleReserveStudyRowChange = (index: number, field: keyof ReserveStudyRow, value: string) => {
@@ -1387,6 +1422,18 @@ export function BudgetScreen({
                     ? 'Processing the selected file...'
                     : 'Select a budget source. Add a reserve study PDF if available.'}
                 </p>
+                {latestVersionSummary && uploadState === 'initial' ? (
+                  <p className="mt-3 rounded-lg border border-[#e5e5e5] bg-[#fafafa] px-3 py-2 text-left text-xs text-[#525252]">
+                    A generated version ({latestVersionSummary.version_code}) already exists.{' '}
+                    <Link
+                      to={`/hoa/${hoaId}?generated=true&versionId=${latestVersionSummary.id}&readOnly=1`}
+                      className="font-medium underline"
+                    >
+                      Open latest generated
+                    </Link>{' '}
+                    instead of starting from an empty upload, or continue below to create a new draft.
+                  </p>
+                ) : null}
               </div>
               <div className="w-full rounded-xl border border-[#e5e5e5] bg-[#fafafa] p-5 text-left">
                 <div className="mb-5 rounded-xl border border-[#e5e5e5] bg-white p-4">
@@ -1628,6 +1675,72 @@ export function BudgetScreen({
           </AlertDialogContent>
         </AlertDialog>
       ) : null}
+      <AlertDialog
+        open={confirmAction != null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setConfirmAction(null);
+            pendingReplaceFileRef.current = null;
+          }
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {confirmAction === 'discard'
+                ? 'Discard this draft?'
+                : confirmAction === 'replace'
+                  ? 'Replace budget file?'
+                  : 'Generate budget version?'}
+            </AlertDialogTitle>
+            <AlertDialogDescription className="text-[#525252]">
+              {confirmAction === 'discard'
+                ? 'This cannot be undone. The active draft and its unsaved edits will be removed.'
+                : confirmAction === 'replace'
+                  ? 'The primary budget source file will be replaced and draft line items may change. Continue only if you intend to re-extract from a new file.'
+                  : 'This creates an immutable budget version (not the homeowner disclosure PDF). The draft may be superseded. Use Disclosure Package separately for the owner PDF.'}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel
+              onClick={() => {
+                setConfirmAction(null);
+                pendingReplaceFileRef.current = null;
+              }}
+            >
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              className={
+                confirmAction === 'discard' || confirmAction === 'replace'
+                  ? 'bg-red-600 text-white hover:bg-red-700'
+                  : undefined
+              }
+              onClick={() => {
+                const action = confirmAction;
+                setConfirmAction(null);
+                if (action === 'discard') {
+                  void executeDiscardDraft();
+                } else if (action === 'replace') {
+                  const file = pendingReplaceFileRef.current;
+                  pendingReplaceFileRef.current = null;
+                  if (file) void executeReplaceBudgetFile(file);
+                } else if (action === 'generate') {
+                  void executeGenerateBudgetVersion();
+                }
+              }}
+            >
+              {confirmAction === 'discard'
+                ? 'Discard draft'
+                : confirmAction === 'replace'
+                  ? 'Replace file'
+                  : budgetGenerated
+                    ? 'Regenerate version'
+                    : 'Generate version'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
       <header className="sticky top-0 z-10 border-b border-[#e5e5e5] bg-white shadow-sm">
         <div className="px-8 py-6">
           <div className="mb-4 flex items-center justify-between">
@@ -1684,28 +1797,65 @@ export function BudgetScreen({
                 className="hidden"
                 onChange={(e) => void handleReplaceBudgetFile(e)}
               />
-              {draftId && !budgetGenerated && (
+              <div className="relative">
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={() => void handleDiscardDraft()}
-                  disabled={isDeletingDraft || isSavingDraft || isGenerating}
-                  className="border-red-200 text-red-600 hover:border-red-300 hover:bg-red-50"
+                  onClick={() => setMoreActionsOpen((open) => !open)}
+                  disabled={isDeletingDraft || isSavingDraft || isGenerating || isReplacingBudgetFile}
+                  className="border-[#d4d4d4] text-[#111111] hover:border-[#a3a3a3] hover:bg-[#f5f5f5]"
+                  aria-expanded={moreActionsOpen}
+                  aria-haspopup="menu"
                 >
-                  <Trash2 className="mr-1.5 h-3.5 w-3.5" />
-                  {isDeletingDraft ? 'Discarding...' : 'Discard Draft'}
+                  <MoreHorizontal className="mr-1.5 h-3.5 w-3.5" />
+                  More actions
                 </Button>
-              )}
+                {moreActionsOpen ? (
+                  <div
+                    role="menu"
+                    className="absolute right-0 z-30 mt-1 min-w-[14rem] rounded-lg border border-[#e5e5e5] bg-white py-1 shadow-lg"
+                  >
+                    {draftId ? (
+                      <button
+                        type="button"
+                        role="menuitem"
+                        className="flex w-full items-center px-3 py-2 text-left text-sm text-[#111111] hover:bg-[#f5f5f5]"
+                        onClick={() => {
+                          setMoreActionsOpen(false);
+                          replaceBudgetFileInputRef.current?.click();
+                        }}
+                        disabled={isReplacingBudgetFile}
+                      >
+                        {isReplacingBudgetFile ? 'Replacing…' : 'Replace budget file…'}
+                      </button>
+                    ) : null}
+                    {draftId && !budgetGenerated ? (
+                      <button
+                        type="button"
+                        role="menuitem"
+                        className="flex w-full items-center px-3 py-2 text-left text-sm text-red-600 hover:bg-red-50"
+                        onClick={() => {
+                          setMoreActionsOpen(false);
+                          handleDiscardDraft();
+                        }}
+                        disabled={isDeletingDraft}
+                      >
+                        <Trash2 className="mr-1.5 h-3.5 w-3.5" />
+                        {isDeletingDraft ? 'Discarding…' : 'Discard draft'}
+                      </button>
+                    ) : null}
+                    <Link
+                      to={`/hoa/${hoaId}/sync-history`}
+                      role="menuitem"
+                      className="block px-3 py-2 text-sm text-[#111111] hover:bg-[#f5f5f5]"
+                      onClick={() => setMoreActionsOpen(false)}
+                    >
+                      View past sync
+                    </Link>
+                  </div>
+                ) : null}
+              </div>
               <div className="h-8 w-px bg-[#e5e5e5]"></div>
-              <Link to={`/hoa/${hoaId}/sync-history`}>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="border-[#d4d4d4] px-4 font-medium text-[#111111] hover:border-[#a3a3a3] hover:bg-[#f5f5f5]"
-                >
-                  View Past Sync
-                </Button>
-              </Link>
               <Link to={`/hoa/${hoaId}/disclosure`}>
                 <Button
                   variant="outline"
@@ -1829,12 +1979,16 @@ export function BudgetScreen({
                 onClick={handleGenerateBudgetClick}
                 disabled={isGenerating || !draftId}
                 className="bg-[#111111] text-white shadow-sm hover:bg-[#262626]"
-                title="Builds the budget draft/version — not the homeowner disclosure PDF"
+                title="Creates an immutable budget version — not the homeowner disclosure PDF"
               >
-                {isGenerating ? 'Generating...' : budgetGenerated ? 'Regenerate Budget' : 'Generate Budget'}
+                {isGenerating
+                  ? 'Generating…'
+                  : budgetGenerated
+                    ? 'Regenerate budget version'
+                    : 'Generate budget version'}
               </Button>
-              <span className="max-w-[14rem] text-right text-[11px] text-[#737373]">
-                Not the owner PDF — use Disclosure Package for that.
+              <span className="max-w-[16rem] text-right text-[11px] text-[#737373]">
+                Locks a budget version — not the owner PDF. Use Disclosure Package for that.
               </span>
             </div>
           )}

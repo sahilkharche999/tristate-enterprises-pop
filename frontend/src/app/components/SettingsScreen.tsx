@@ -20,18 +20,23 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 import { toast } from 'sonner';
 import { exportData } from '../api/macros';
+import { getBudgetHistory } from '../api/budgetHistory';
 import { getHOA, updateHOA, type HOARecord } from '../api/hoa';
 import { getErrorMessage } from '../lib/errors';
+import { resolveBudgetEntryCta } from '../lib/budgetEntryState';
 import { MONTH_NAMES, monthNameToNumber, monthNumberToName } from '../lib/hoa';
 import {
   clearFieldParam,
+  disclosureTabForField,
   pathWantsOpenPackageLanguage,
+  resolveDisclosureDefaultsTab,
   resolveSettingsBackHref,
   resolveSettingsSection,
   revealSettingElement,
   waitForSettingField,
   withRevealField,
   withSection,
+  type DisclosureDefaultsTab,
   type SettingsEditTab,
   type SettingsSection,
 } from '../lib/settingsNavigation';
@@ -209,6 +214,9 @@ export function SettingsScreen() {
   const [disclosureReady, setDisclosureReady] = useState(false);
   const [disclosureDirty, setDisclosureDirty] = useState(false);
   const [databaseBaseline, setDatabaseBaseline] = useState<string | null>(null);
+  const [budgetEntry, setBudgetEntry] = useState(() =>
+    resolveBudgetEntryCta({ hoaId: id ?? '', hasActiveDraft: false, latestVersionId: null }),
+  );
   const disclosureFormRef = useRef<HOADisclosureSettingsFormHandle>(null);
   const flashCleanupRef = useRef<(() => void) | null>(null);
   const returnTo = searchParams.get('returnTo');
@@ -216,8 +224,26 @@ export function SettingsScreen() {
   // Cross-route: disclosure (or other host) asked Back to reopen package wording.
   const returnToOpensPackageLanguage = pathWantsOpenPackageLanguage(returnTo);
   const selectedSection = resolveSettingsSection(searchParams.get('section'));
+  const disclosureTab = resolveDisclosureDefaultsTab(
+    searchParams.get('tab') ??
+      (searchParams.get('field')
+        ? disclosureTabForField(searchParams.get('field'))
+        : 'money'),
+  );
   const databaseDirty =
     databaseBaseline != null && databaseFormFingerprint(hoaConfig) !== databaseBaseline;
+
+  const setDisclosureTab = (tab: DisclosureDefaultsTab) => {
+    setSearchParams(
+      (current) => {
+        const next = new URLSearchParams(current);
+        next.set('section', 'disclosure');
+        next.set('tab', tab);
+        return next;
+      },
+      { replace: true },
+    );
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -232,12 +258,24 @@ export function SettingsScreen() {
       setIsLoading(true);
       setLoadError(null);
       try {
-        const response = await getHOA(id);
+        const [response, history] = await Promise.all([
+          getHOA(id),
+          getBudgetHistory(id).catch(() => null),
+        ]);
         if (!cancelled) {
           setHoa(response);
           const form = buildFormState(response);
           setHoaConfig(form);
           setDatabaseBaseline(databaseFormFingerprint(form));
+          const latest = history?.versions?.[0] ?? null;
+          setBudgetEntry(
+            resolveBudgetEntryCta({
+              hoaId: id,
+              hasActiveDraft: Boolean(history?.active_draft),
+              latestVersionId: latest?.id ?? null,
+              latestVersionCode: latest?.version_code ?? null,
+            }),
+          );
         }
       } catch (error) {
         if (!cancelled) {
@@ -325,6 +363,26 @@ export function SettingsScreen() {
     revealSettingField(tab, field);
   };
 
+  // Ensure disclosure sub-tab matches the target field before waiting for DOM.
+  useEffect(() => {
+    const field = searchParams.get('field');
+    if (!field || isLoading) return;
+    const section = resolveSettingsSection(searchParams.get('section'));
+    if (section !== 'disclosure') return;
+    const needed = disclosureTabForField(field);
+    if (searchParams.get('tab') !== needed) {
+      setSearchParams(
+        (current) => {
+          const next = new URLSearchParams(current);
+          next.set('section', 'disclosure');
+          next.set('tab', needed);
+          return next;
+        },
+        { replace: true },
+      );
+    }
+  }, [searchParams, isLoading, setSearchParams]);
+
   // Scroll to and flash the requested field once the hosting form is ready,
   // then drop `field` (success or failure) so refresh does not replay the jump.
   useEffect(() => {
@@ -333,6 +391,10 @@ export function SettingsScreen() {
 
     const section = resolveSettingsSection(searchParams.get('section'));
     if (section === 'disclosure' && !disclosureReady) return;
+    if (section === 'disclosure') {
+      const needed = disclosureTabForField(field);
+      if (resolveDisclosureDefaultsTab(searchParams.get('tab')) !== needed) return;
+    }
 
     const controller = new AbortController();
     let cancelled = false;
@@ -475,7 +537,7 @@ export function SettingsScreen() {
             disabled={isSaving}
             className="bg-[#111111] text-white hover:bg-[#262626] shadow-sm disabled:opacity-60"
           >
-            {isSaving ? 'Saving...' : 'Save Changes'}
+            {isSaving ? 'Saving…' : 'Save changes'}
           </Button>
         </div>
       </header>
@@ -526,16 +588,23 @@ export function SettingsScreen() {
                 <div>
                   <h3 className="text-lg font-medium text-[#111111]">Budget Workflow Shortcuts</h3>
                   <p className="mt-1 text-sm text-[#666666]">
-                    Jump back into the active draft or review historical sync artifacts without turning Settings into a file-management screen.
+                    {budgetEntry.description}
                   </p>
                 </div>
                 <div className="flex flex-wrap items-center gap-3">
-                  <Link to={`/hoa/${id}`}>
+                  <Link to={budgetEntry.href}>
                     <Button variant="outline" className="border-[#E5E5E5]">
                       <Eye className="mr-2 h-4 w-4" />
-                      Open Current Draft
+                      {budgetEntry.label}
                     </Button>
                   </Link>
+                  {budgetEntry.secondaryHref && budgetEntry.secondaryLabel ? (
+                    <Link to={budgetEntry.secondaryHref}>
+                      <Button variant="ghost" className="text-[#525252]">
+                        {budgetEntry.secondaryLabel}
+                      </Button>
+                    </Link>
+                  ) : null}
                   <Link to={`/hoa/${id}/sync-history`}>
                     <Button variant="outline" className="border-[#E5E5E5]">
                       <FolderOpen className="mr-2 h-4 w-4" />
@@ -713,6 +782,9 @@ export function SettingsScreen() {
                   hoa.portfolio_year ??
                   (Number(hoaConfig.packageYear) || undefined)
                 }
+                activeTab={disclosureTab}
+                onTabChange={setDisclosureTab}
+                hideLocalSave
                 ref={disclosureFormRef}
                 onReadyChange={setDisclosureReady}
                 onDirtyChange={setDisclosureDirty}

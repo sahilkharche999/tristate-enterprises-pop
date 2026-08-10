@@ -60,6 +60,7 @@ export function HOAWorkspace() {
   const [filterStatus, setFilterStatus] = useState<string>('all');
   const [filterUnits, setFilterUnits] = useState<string>('all');
   const [filterCity, setFilterCity] = useState<string>('all');
+  const [sortMode, setSortMode] = useState<'recent' | 'year' | 'readiness'>('recent');
   const [hoas, setHoas] = useState<HOAViewModel[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -106,26 +107,41 @@ export function HOAWorkspace() {
   const uniqueYears = Array.from(new Set(hoas.map((hoa) => hoa.year))).sort((a, b) => b - a);
   const uniqueCities = Array.from(new Set(hoas.map((hoa) => hoa.city))).sort();
 
-  const filteredHOAs = hoas.filter((hoa) => {
-    const matchesSearch =
-      hoa.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      hoa.fiscalYear.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      hoa.units.toString().includes(searchQuery) ||
-      hoa.year.toString().includes(searchQuery) ||
-      hoa.city.toLowerCase().includes(searchQuery.toLowerCase());
+  const filteredHOAs = hoas
+    .filter((hoa) => {
+      const matchesSearch =
+        hoa.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        hoa.fiscalYear.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        hoa.units.toString().includes(searchQuery) ||
+        hoa.year.toString().includes(searchQuery) ||
+        hoa.city.toLowerCase().includes(searchQuery.toLowerCase());
 
-    const matchesYear = filterYear === 'all' || hoa.year.toString() === filterYear;
-    const matchesStatus = filterStatus === 'all' || hoa.status === filterStatus;
+      const matchesYear = filterYear === 'all' || hoa.year.toString() === filterYear;
+      const matchesStatus = filterStatus === 'all' || hoa.status === filterStatus;
 
-    let matchesUnits = true;
-    if (filterUnits === 'small') matchesUnits = hoa.units < 100;
-    else if (filterUnits === 'medium') matchesUnits = hoa.units >= 100 && hoa.units < 150;
-    else if (filterUnits === 'large') matchesUnits = hoa.units >= 150;
+      let matchesUnits = true;
+      if (filterUnits === 'small') matchesUnits = hoa.units < 100;
+      else if (filterUnits === 'medium') matchesUnits = hoa.units >= 100 && hoa.units < 150;
+      else if (filterUnits === 'large') matchesUnits = hoa.units >= 150;
 
-    const matchesCity = filterCity === 'all' || hoa.city === filterCity;
+      const matchesCity = filterCity === 'all' || hoa.city === filterCity;
 
-    return matchesSearch && matchesYear && matchesStatus && matchesUnits && matchesCity;
-  });
+      return matchesSearch && matchesYear && matchesStatus && matchesUnits && matchesCity;
+    })
+    .slice()
+    .sort((a, b) => {
+      if (sortMode === 'year') {
+        return b.year - a.year || a.name.localeCompare(b.name);
+      }
+      if (sortMode === 'readiness') {
+        return a.readinessPct - b.readinessPct || a.name.localeCompare(b.name);
+      }
+      // recently worked — nulls last
+      const at = a.lastWorkedAt ? Date.parse(a.lastWorkedAt) : 0;
+      const bt = b.lastWorkedAt ? Date.parse(b.lastWorkedAt) : 0;
+      if (bt !== at) return bt - at;
+      return a.name.localeCompare(b.name);
+    });
 
   const activeFiltersCount = [
     filterYear !== 'all',
@@ -325,14 +341,25 @@ export function HOAWorkspace() {
           </Select>
 
           <Select value={filterStatus} onValueChange={setFilterStatus}>
-            <SelectTrigger className="w-[160px] h-9 bg-white border-[#e5e5e5]">
+            <SelectTrigger className="w-[180px] h-9 bg-white border-[#e5e5e5]">
               <SelectValue placeholder="Status" />
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="all">All Status</SelectItem>
               <SelectItem value="Not Started">Not Started</SelectItem>
               <SelectItem value="In Progress">In Progress</SelectItem>
-              <SelectItem value="Completed">Completed</SelectItem>
+              <SelectItem value="Ready for package">Ready for package</SelectItem>
+            </SelectContent>
+          </Select>
+
+          <Select value={sortMode} onValueChange={(v) => setSortMode(v as typeof sortMode)}>
+            <SelectTrigger className="w-[180px] h-9 bg-white border-[#e5e5e5]">
+              <SelectValue placeholder="Sort" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="recent">Recently worked</SelectItem>
+              <SelectItem value="year">Package year</SelectItem>
+              <SelectItem value="readiness">Readiness % (low first)</SelectItem>
             </SelectContent>
           </Select>
 
@@ -395,10 +422,10 @@ export function HOAWorkspace() {
                 to={`/hoa/${hoa.id}`}
                 className="block bg-white border border-[#e5e5e5] rounded-lg p-6 hover:border-[#737373] hover:shadow-md transition-all duration-200"
               >
-                <div className="flex items-center justify-between">
-                  <div className="flex-1">
+                <div className="flex items-center justify-between gap-4">
+                  <div className="flex-1 min-w-0">
                     <h3 className="text-lg font-semibold text-[#111111] mb-1.5">{hoa.name}</h3>
-                    <div className="flex items-center gap-4 text-sm text-[#737373]">
+                    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-[#737373]">
                       <span>{hoa.city}</span>
                       <span className="text-[#d4d4d4]">•</span>
                       <span>Year: {hoa.year}</span>
@@ -406,9 +433,21 @@ export function HOAWorkspace() {
                       <span>Fiscal: {hoa.fiscalYear}</span>
                       <span className="text-[#d4d4d4]">•</span>
                       <span>{hoa.units > 0 ? `${hoa.units} Units` : 'Pending DRE'}</span>
+                      <span className="text-[#d4d4d4]">•</span>
+                      <span>
+                        Ready {hoa.readinessPct}%
+                        {hoa.readinessTotal > 0
+                          ? ` (${hoa.readinessDone}/${hoa.readinessTotal})`
+                          : ''}
+                      </span>
                     </div>
+                    {hoa.nextActionLabel ? (
+                      <p className="mt-2 text-sm font-medium text-[#111111]">
+                        {hoa.nextActionLabel}
+                      </p>
+                    ) : null}
                   </div>
-                  <div className={`px-3 py-1.5 rounded-md text-xs font-medium border ${getStatusColor(hoa.status)}`}>
+                  <div className={`shrink-0 px-3 py-1.5 rounded-md text-xs font-medium border ${getStatusColor(hoa.status)}`}>
                     {hoa.status}
                   </div>
                 </div>
@@ -429,6 +468,11 @@ export function HOAWorkspace() {
                     <div className={`inline-flex px-3 py-1.5 rounded-md text-xs font-medium border ${getStatusColor(hoa.status)}`}>
                       {hoa.status}
                     </div>
+                    {hoa.nextActionLabel ? (
+                      <p className="mt-2 text-sm font-medium text-[#111111] line-clamp-2">
+                        {hoa.nextActionLabel}
+                      </p>
+                    ) : null}
                   </div>
                   <div className="pt-4 border-t border-[#e5e5e5] space-y-2">
                     <div className="flex items-center justify-between text-sm">
@@ -440,8 +484,13 @@ export function HOAWorkspace() {
                       <span className="font-medium text-[#111111]">{hoa.year}</span>
                     </div>
                     <div className="flex items-center justify-between text-sm">
-                      <span className="text-[#737373]">Fiscal Year</span>
-                      <span className="font-medium text-[#111111]">{hoa.fiscalYear}</span>
+                      <span className="text-[#737373]">Readiness</span>
+                      <span className="font-medium text-[#111111]">
+                        {hoa.readinessPct}%
+                        {hoa.readinessTotal > 0
+                          ? ` (${hoa.readinessDone}/${hoa.readinessTotal})`
+                          : ''}
+                      </span>
                     </div>
                     <div className="flex items-center justify-between text-sm">
                       <span className="text-[#737373]">Total Units</span>

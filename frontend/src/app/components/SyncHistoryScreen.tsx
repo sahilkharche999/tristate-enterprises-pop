@@ -34,6 +34,7 @@ import { assessmentModeLabel } from '../lib/assessmentMode';
 import { budgetSourceModeLabel } from '../lib/budgetSourceMode';
 import { getErrorMessage } from '../lib/errors';
 import { formatFiscalYearLabel } from '../lib/hoa';
+import { resolveBudgetEntryCta } from '../lib/budgetEntryState';
 
 function eventMetadata(event: BudgetTimelineEvent) {
   const payload = event.payload ?? {};
@@ -499,11 +500,31 @@ export function SyncHistoryScreen() {
                 Historical draft states can download their persisted enriched workbook. Only the active draft can reopen in the editor.
               </p>
             </div>
-            <Link to={`/hoa/${id}`}>
-              <Button variant="outline" className="border-[#d4d4d4] text-[#111111] hover:bg-[#f5f5f5]">
-                Open Current Draft
-              </Button>
-            </Link>
+            {(() => {
+              const latest = history.versions?.[0] ?? null;
+              const entry = resolveBudgetEntryCta({
+                hoaId: id ?? '',
+                hasActiveDraft: Boolean(history.active_draft),
+                latestVersionId: latest?.id ?? null,
+                latestVersionCode: latest?.version_code ?? null,
+              });
+              return (
+                <div className="flex flex-wrap items-center gap-2">
+                  <Link to={entry.href}>
+                    <Button variant="outline" className="border-[#d4d4d4] text-[#111111] hover:bg-[#f5f5f5]">
+                      {entry.label}
+                    </Button>
+                  </Link>
+                  {entry.secondaryHref && entry.secondaryLabel ? (
+                    <Link to={entry.secondaryHref}>
+                      <Button variant="ghost" className="text-[#525252]">
+                        {entry.secondaryLabel}
+                      </Button>
+                    </Link>
+                  ) : null}
+                </div>
+              );
+            })()}
           </div>
           <div className="overflow-x-auto">
             <table className="w-full">

@@ -22,8 +22,63 @@ import {
   listSpecialAssessmentPools,
   previewSpecialAssessment,
 } from '../api/hoaSettings';
+import {
+  type DisclosureDefaultsTab,
+  resolveDisclosureDefaultsTab,
+} from '../lib/settingsNavigation';
 import { HOALogoUploadControl } from './HOALogoUploadControl';
 import { Button } from './ui/button';
+
+const REQUIRED_MONEY_FIELDS = new Set<string>([
+  'reserve_cash_balance_eoy_prior',
+  'reserve_funding_source',
+]);
+
+const LETTERHEAD_SCALAR_KEYS = new Set<string>([
+  'management_company',
+  'management_company_address',
+  'management_company_phone',
+  'management_company_fax',
+  'management_company_web',
+  'cpa_firm_name',
+  'cpa_firm_address',
+  'reserve_study_expert_name',
+  'reserve_study_date',
+  'letter_signed_by',
+  'letter_date',
+  'accountant_report_date',
+  'reserve_funding_plan_date',
+]);
+
+const MONEY_SCALAR_KEYS = new Set<string>([
+  'reserve_cash_balance_eoy_prior',
+  'fund_balance_boy_operations',
+  'monthly_assessment_per_unit_prior',
+  'interest_rate_after_tax',
+  'replacement_fund_monthly_assessment_per_unit',
+  'approved_monthly_assessment_per_unit',
+  'reserve_interest_income_override',
+  'income_tax_provision_override',
+  'reserve_funding_manual_amount',
+]);
+
+const TAB_LABELS: Record<DisclosureDefaultsTab, string> = {
+  letterhead: 'Letterhead',
+  money: 'Money defaults',
+  section5570: '§5570 tables',
+  forecast: 'Forecast',
+  wording: 'Wording',
+};
+
+const TAB_INTROS: Record<DisclosureDefaultsTab, string> = {
+  letterhead: 'Logo, management/CPA names, and letter dates for the PDF letterhead.',
+  money:
+    'Cash, funding source, and assessment money the package needs. Required fields are marked.',
+  section5570: 'Special assessments, additional assessments, and outstanding loans for §5570.',
+  forecast: '30-year escalation brackets and board-approved deferrals (advanced).',
+  wording:
+    'Legal wording controls live mostly on assessment rows and package language workbench. Use Advanced on §5570 rows for status language.',
+};
 
 /** Stable fingerprint of editable disclosure settings for dirty detection. */
 function disclosureFingerprint(settings: HOADisclosureSettings): string {
@@ -119,6 +174,11 @@ export type HOADisclosureSettingsFormProps = {
   hoaId: number;
   /** Package year for allocation previews (portfolio_year). */
   packageYear?: number;
+  /** Controlled Disclosure Defaults sub-tab (from URL `tab=`). */
+  activeTab?: DisclosureDefaultsTab | string | null;
+  onTabChange?: (tab: DisclosureDefaultsTab) => void;
+  /** When true, parent header owns Save — hide the form footer button. */
+  hideLocalSave?: boolean;
   /** Fired when the form finishes loading (true) or resets / errors (false). */
   onReadyChange?: (ready: boolean) => void;
   /** Fired when dirty state relative to last load/save changes. */
@@ -129,13 +189,27 @@ export const HOADisclosureSettingsForm = forwardRef<
   HOADisclosureSettingsFormHandle,
   HOADisclosureSettingsFormProps
 >(function HOADisclosureSettingsForm(
-  { hoaId, packageYear, onReadyChange, onDirtyChange },
+  {
+    hoaId,
+    packageYear,
+    activeTab: activeTabProp,
+    onTabChange,
+    hideLocalSave = false,
+    onReadyChange,
+    onDirtyChange,
+  },
   ref,
 ) {
   const [settings, setSettings] = useState<HOADisclosureSettings | null>(null);
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [internalTab, setInternalTab] = useState<DisclosureDefaultsTab>('money');
+  const activeTab = resolveDisclosureDefaultsTab(activeTabProp ?? internalTab);
+  const setActiveTab = (tab: DisclosureDefaultsTab) => {
+    setInternalTab(tab);
+    onTabChange?.(tab);
+  };
   // Special-assessment pools of the approved setup (add-variable-special-assessments):
   // the operator links a §5570 row to one so its per-unit allocation comes from the
   // pool's basis. `previews` holds the last fetched allocation table per pool_key.
@@ -616,78 +690,47 @@ export const HOADisclosureSettingsForm = forwardRef<
     </div>
   );
 
-  return (
-    <div className="space-y-4">
-      <HOALogoUploadControl
-        hoaId={hoaId}
-        hasLogo={settings.has_logo}
-        logoMode={settings.letterhead_logo_mode ?? 'logo_and_text'}
-        onChanged={(hasLogo) => setSettings({ ...settings, has_logo: hasLogo })}
-        onLogoModeChanged={(mode) =>
-          setSettings({ ...settings, letterhead_logo_mode: mode })
-        }
-      />
-
-      <p className="rounded-md border border-[#e5e5e5] bg-[#fafafa] px-3 py-2 text-sm text-[#525252]">
-        <strong className="text-[#111111]">What this page is for:</strong> names, cash, reserve
-        funding defaults, and letter dates the owner PDF uses. Not the full budget line list.
-        Package year lives under{' '}
-        <a className="underline" href={`/hoa/${hoaId}/settings?section=database`}>
-          HOA Database
-        </a>
-        .
-      </p>
-      <p className="text-xs text-[#737373]">
-        These values drive the rendered disclosure package PDF — every field below is read at
-        generate time. Blank optional overrides mean &ldquo;derive from data&rdquo;.
-        <span className="mt-1 block text-[#92400e]">
-          Required band: reserve funding source (dual-fund), cash balance (confirm if $0 is
-          intentional — preflight warns but does not block $0).
-        </span>
-      </p>
-
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-        {scalarFields.map(([key, label, type]) => (
-          // `data-setting-field` is how the editor's chip popover finds the
-          // field behind a chip ("Edit in settings →"). Keep it on every
-          // control a CHIP_SOURCES entry can point at — the backend test
-          // `test_settings_field_points_at_a_rendered_input` guards the pairing.
-          <label key={key} data-setting-field={key} className="block text-sm">
-            <span className="block text-xs text-[#737373] mb-1">
-              {label}
-              {key === 'reserve_cash_balance_eoy_prior' ? (
-                <span className="mt-0.5 block font-normal text-[#92400e]">
-                  $0 is allowed but usually means the field was never filled — percent funded
-                  will look empty if the HOA holds reserves.
-                </span>
-              ) : null}
-            </span>
-            {type === 'textarea' ? (
-              <textarea
-                rows={2}
-                value={settings[key] === null || settings[key] === undefined ? '' : String(settings[key])}
-                onChange={(e) => update(key, e.target.value as never)}
-                className="w-full border border-[#d4d4d4] rounded px-2 py-1 text-sm"
-              />
-            ) : (
+  const renderScalarFields = (keys: Set<string>) =>
+    scalarFields
+      .filter(([key]) => keys.has(key))
+      .map(([key, label, type]) => (
+        <label key={key} data-setting-field={key} className="block text-sm">
+          <span className="block text-xs text-[#737373] mb-1">
+            {label}
+            {REQUIRED_MONEY_FIELDS.has(key) ? (
+              <span className="ml-1 font-semibold text-[#92400e]">Required for package</span>
+            ) : null}
+            {key === 'reserve_cash_balance_eoy_prior' ? (
+              <span className="mt-0.5 block font-normal text-[#92400e]">
+                $0 is allowed but usually means the field was never filled — percent funded
+                will look empty if the HOA holds reserves.
+              </span>
+            ) : null}
+          </span>
+          {type === 'textarea' ? (
+            <textarea
+              rows={2}
+              value={settings[key] === null || settings[key] === undefined ? '' : String(settings[key])}
+              onChange={(e) => update(key, e.target.value as never)}
+              className="w-full border border-[#d4d4d4] rounded px-2 py-1 text-sm"
+            />
+          ) : (
             <input
               type={type}
               step={type === 'number' ? 'any' : undefined}
               value={settings[key] === null || settings[key] === undefined ? '' : String(settings[key])}
               onChange={(e) => {
                 if (type === 'number') {
-                  // Empty string is a meaningful "unset" for overrideable
-                  // numeric fields (approved_monthly_assessment_per_unit,
-                  // income_tax_provision_override, reserve_funding_manual_amount).
-                  // For required fields (rates, cash balance) treat as 0.
-                  const v = e.target.value === ''
-                    ? (key === 'approved_monthly_assessment_per_unit'
-                       || key === 'reserve_interest_income_override'
-                       || key === 'income_tax_provision_override'
-                       || key === 'reserve_funding_manual_amount'
-                       || key === 'replacement_fund_monthly_assessment_per_unit'
-                        ? null : 0)
-                    : Number(e.target.value);
+                  const v =
+                    e.target.value === ''
+                      ? key === 'approved_monthly_assessment_per_unit' ||
+                        key === 'reserve_interest_income_override' ||
+                        key === 'income_tax_provision_override' ||
+                        key === 'reserve_funding_manual_amount' ||
+                        key === 'replacement_fund_monthly_assessment_per_unit'
+                        ? null
+                        : 0
+                      : Number(e.target.value);
                   update(key, v as never);
                 } else {
                   update(key, e.target.value as never);
@@ -695,234 +738,311 @@ export const HOADisclosureSettingsForm = forwardRef<
               }}
               className="w-full border border-[#d4d4d4] rounded px-2 py-1 text-sm"
             />
-            )}
-          </label>
+          )}
+        </label>
+      ));
+
+  const forecastScheduleBlock = (() => {
+    const schedule = parseAssessmentSchedule(settings.assessment_increase_schedule_json);
+    const update_schedule = (next: AssessmentIncreaseBracket[]) =>
+      update('assessment_increase_schedule_json', JSON.stringify(next));
+    return (
+      <div
+        data-setting-field="assessment_increase_schedule_json"
+        className="space-y-2 border border-[#e5e5e5] rounded p-3"
+      >
+        <div className="flex items-center justify-between">
+          <div>
+            <h4 className="text-sm font-semibold text-[#111]">
+              Assessment escalation schedule (30-year forecast)
+            </h4>
+            <details className="mt-1">
+              <summary className="cursor-pointer text-xs text-[#737373]">Why this matters</summary>
+              <p className="mt-1 text-xs text-[#737373]">
+                Year-bracket rates that escalate the replacement-fund monthly assessment in the
+                30-year cash-flow forecast. Rate is decimal (0.03 = 3%).
+              </p>
+            </details>
+          </div>
+          <Button
+            variant="outline"
+            onClick={() =>
+              update_schedule([...schedule, { start_year: 2026, end_year: 2035, rate: 0.03 }])
+            }
+            className="text-xs"
+          >
+            + Add bracket
+          </Button>
+        </div>
+        {schedule.length === 0 ? (
+          <p className="text-xs text-[#a3a3a3] italic">
+            No brackets — assessment will not escalate over the 30-year window.
+          </p>
+        ) : (
+          schedule.map((row, i) => (
+            <div key={i} className="grid gap-2 sm:grid-cols-[1fr_1fr_1fr_auto]">
+              <input
+                type="number"
+                placeholder="Start year"
+                value={row.start_year ?? ''}
+                onChange={(e) => {
+                  const next = [...schedule];
+                  next[i] = { ...row, start_year: Number(e.target.value) };
+                  update_schedule(next);
+                }}
+                className="border border-[#d4d4d4] rounded px-2 py-1 text-sm"
+              />
+              <input
+                type="number"
+                placeholder="End year"
+                value={row.end_year ?? ''}
+                onChange={(e) => {
+                  const next = [...schedule];
+                  next[i] = { ...row, end_year: Number(e.target.value) };
+                  update_schedule(next);
+                }}
+                className="border border-[#d4d4d4] rounded px-2 py-1 text-sm"
+              />
+              <input
+                type="number"
+                step="0.001"
+                placeholder="Rate (decimal, e.g. 0.03)"
+                value={row.rate ?? ''}
+                onChange={(e) => {
+                  const next = [...schedule];
+                  next[i] = { ...row, rate: Number(e.target.value) };
+                  update_schedule(next);
+                }}
+                className="border border-[#d4d4d4] rounded px-2 py-1 text-sm"
+              />
+              <Button
+                variant="ghost"
+                onClick={() => update_schedule(schedule.filter((_, j) => j !== i))}
+                className="text-xs text-[#b91c1c]"
+              >
+                Remove
+              </Button>
+            </div>
+          ))
+        )}
+      </div>
+    );
+  })();
+
+  const forecastDeferralsBlock = (() => {
+    const deferrals = parseDeferrals(settings.board_deferrals_json);
+    const update_deferrals = (next: BoardDeferralEntry[]) =>
+      update('board_deferrals_json', JSON.stringify(next));
+    return (
+      <div
+        data-setting-field="board_deferrals_json"
+        className="space-y-2 border border-[#e5e5e5] rounded p-3"
+      >
+        <div className="flex items-center justify-between">
+          <div>
+            <h4 className="text-sm font-semibold text-[#111]">
+              Board-approved deferrals (30-year forecast)
+            </h4>
+            <p className="text-xs text-[#737373]">Usually empty.</p>
+          </div>
+          <Button
+            variant="outline"
+            onClick={() => update_deferrals([...deferrals, { year: 2026, amount: 0 }])}
+            className="text-xs"
+          >
+            + Add deferral
+          </Button>
+        </div>
+        {deferrals.length === 0 ? (
+          <p className="text-xs text-[#a3a3a3] italic">
+            No deferrals — full scheduled expenditures will flow into the forecast.
+          </p>
+        ) : (
+          deferrals.map((row, i) => (
+            <div key={i} className="grid gap-2 sm:grid-cols-[1fr_1fr_auto]">
+              <input
+                type="number"
+                placeholder="Year"
+                value={row.year ?? ''}
+                onChange={(e) => {
+                  const next = [...deferrals];
+                  next[i] = { ...row, year: Number(e.target.value) };
+                  update_deferrals(next);
+                }}
+                className="border border-[#d4d4d4] rounded px-2 py-1 text-sm"
+              />
+              <input
+                type="number"
+                step="0.01"
+                placeholder="Amount ($)"
+                value={row.amount ?? ''}
+                onChange={(e) => {
+                  const next = [...deferrals];
+                  next[i] = { ...row, amount: Number(e.target.value) };
+                  update_deferrals(next);
+                }}
+                className="border border-[#d4d4d4] rounded px-2 py-1 text-sm"
+              />
+              <Button
+                variant="ghost"
+                onClick={() => update_deferrals(deferrals.filter((_, j) => j !== i))}
+                className="text-xs text-[#b91c1c]"
+              >
+                Remove
+              </Button>
+            </div>
+          ))
+        )}
+      </div>
+    );
+  })();
+
+  return (
+    <div className="space-y-4">
+      <p className="rounded-md border border-[#e5e5e5] bg-[#fafafa] px-3 py-2 text-sm text-[#525252]">
+        <strong className="text-[#111111]">What this page is for:</strong> names, cash, reserve
+        funding defaults, and letter dates the owner PDF uses. Values are saved on this HOA and{' '}
+        <strong>prefill every package year</strong> until you edit them. Package year lives under{' '}
+        <a className="underline" href={`/hoa/${hoaId}/settings?section=database`}>
+          HOA Database
+        </a>
+        .
+      </p>
+
+      <div className="flex flex-wrap gap-2 border-b border-[#e5e5e5] pb-2">
+        {(Object.keys(TAB_LABELS) as DisclosureDefaultsTab[]).map((tab) => (
+          <button
+            key={tab}
+            type="button"
+            onClick={() => setActiveTab(tab)}
+            className={
+              activeTab === tab
+                ? 'rounded-md bg-[#111111] px-3 py-1.5 text-xs font-medium text-white'
+                : 'rounded-md border border-[#e5e5e5] bg-white px-3 py-1.5 text-xs font-medium text-[#525252] hover:bg-[#f5f5f5]'
+            }
+          >
+            {TAB_LABELS[tab]}
+          </button>
         ))}
-
-        <label data-setting-field="financial_packet_archetype" className="block text-sm">
-          <span className="block text-xs text-[#737373] mb-1">
-            Financial packet archetype
-          </span>
-          <select
-            value={settings.financial_packet_archetype}
-            onChange={(e) =>
-              update('financial_packet_archetype', e.target.value as FinancialPacketArchetype)
-            }
-            className="w-full border border-[#d4d4d4] rounded px-2 py-1 text-sm"
-          >
-            <option value="dual-fund">Dual-fund accountant statement</option>
-            <option value="reserve-only">Reserve-only accountant statement</option>
-          </select>
-        </label>
-
-        <label data-setting-field="reserve_funding_source" className="block text-sm">
-          <span className="block text-xs text-[#737373] mb-1">
-            Reserve funding source (which value drives Note 6 monthly funding)
-          </span>
-          <select
-            value={settings.reserve_funding_source}
-            onChange={(e) =>
-              update('reserve_funding_source', e.target.value as ReserveFundingSource)
-            }
-            className="w-full border border-[#d4d4d4] rounded px-2 py-1 text-sm"
-          >
-            <option value="reserve_study_provision">
-              Reserve study annual provision ÷ 12 (default)
-            </option>
-            <option value="budget_allocation_line">
-              Budget &ldquo;Reserve - Allocation/Transfer&rdquo; line ÷ 12
-            </option>
-            <option value="manual">
-              Manual override (use field above)
-            </option>
-          </select>
-        </label>
       </div>
 
-      {renderAssessmentEditor(
-        'Special assessments scheduled (§5570 item 2)',
-        'Already-approved special assessments. Each row prints in the §5570 disclosure summary; cents preserved.',
-        specialAssessments,
-        'special_assessments_json',
-        true,
-      )}
+      <p className="text-sm text-[#525252]">{TAB_INTROS[activeTab]}</p>
 
-      {renderAssessmentEditor(
-        'Additional assessments needed (§5570 item 4)',
-        'Future assessments needed to keep reserves sufficient. No "purpose" column on this form.',
-        additionalAssessments,
-        'additional_assessments_needed_json',
-        false,
-      )}
-
-      {renderLoanEditor()}
-
-      {/* 30-year reserve funding study — assessment escalation schedule */}
-      {(() => {
-        const schedule = parseAssessmentSchedule(settings.assessment_increase_schedule_json);
-        const update_schedule = (next: AssessmentIncreaseBracket[]) =>
-          update('assessment_increase_schedule_json', JSON.stringify(next));
-        return (
-          <div
-            data-setting-field="assessment_increase_schedule_json"
-            className="space-y-2 border border-[#e5e5e5] rounded p-3"
-          >
-            <div className="flex items-center justify-between">
-              <div>
-                <h4 className="text-sm font-semibold text-[#111]">
-                  Assessment escalation schedule (30-year forecast)
-                </h4>
-                <p className="text-xs text-[#737373]">
-                  Year-bracket rates that escalate the replacement-fund monthly
-                  assessment in the 30-year cash-flow forecast. Rate is decimal
-                  (0.03 = 3%). Old Mill default: 3% through 2035, 3% through 2045, 0% thru 2055.
-                </p>
-              </div>
-              <Button
-                variant="outline"
-                onClick={() =>
-                  update_schedule([
-                    ...schedule,
-                    { start_year: 2026, end_year: 2035, rate: 0.03 },
-                  ])
-                }
-                className="text-xs"
-              >
-                + Add bracket
-              </Button>
-            </div>
-            {schedule.length === 0 ? (
-              <p className="text-xs text-[#a3a3a3] italic">
-                No brackets — assessment will not escalate over the 30-year window.
-              </p>
-            ) : (
-              schedule.map((row, i) => (
-                <div key={i} className="grid gap-2 sm:grid-cols-[1fr_1fr_1fr_auto]">
-                  <input
-                    type="number"
-                    placeholder="Start year"
-                    value={row.start_year ?? ''}
-                    onChange={(e) => {
-                      const next = [...schedule];
-                      next[i] = { ...row, start_year: Number(e.target.value) };
-                      update_schedule(next);
-                    }}
-                    className="border border-[#d4d4d4] rounded px-2 py-1 text-sm"
-                  />
-                  <input
-                    type="number"
-                    placeholder="End year"
-                    value={row.end_year ?? ''}
-                    onChange={(e) => {
-                      const next = [...schedule];
-                      next[i] = { ...row, end_year: Number(e.target.value) };
-                      update_schedule(next);
-                    }}
-                    className="border border-[#d4d4d4] rounded px-2 py-1 text-sm"
-                  />
-                  <input
-                    type="number"
-                    step="0.001"
-                    placeholder="Rate (decimal, e.g. 0.03)"
-                    value={row.rate ?? ''}
-                    onChange={(e) => {
-                      const next = [...schedule];
-                      next[i] = { ...row, rate: Number(e.target.value) };
-                      update_schedule(next);
-                    }}
-                    className="border border-[#d4d4d4] rounded px-2 py-1 text-sm"
-                  />
-                  <Button
-                    variant="ghost"
-                    onClick={() => update_schedule(schedule.filter((_, j) => j !== i))}
-                    className="text-xs text-[#b91c1c]"
-                  >
-                    Remove
-                  </Button>
-                </div>
-              ))
-            )}
+      {activeTab === 'letterhead' ? (
+        <div className="space-y-4">
+          <HOALogoUploadControl
+            hoaId={hoaId}
+            hasLogo={settings.has_logo}
+            logoMode={settings.letterhead_logo_mode ?? 'logo_and_text'}
+            onChanged={(hasLogo) => setSettings({ ...settings, has_logo: hasLogo })}
+            onLogoModeChanged={(mode) =>
+              setSettings({ ...settings, letterhead_logo_mode: mode })
+            }
+          />
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            {renderScalarFields(LETTERHEAD_SCALAR_KEYS)}
           </div>
-        );
-      })()}
+        </div>
+      ) : null}
 
-      {/* 30-year reserve funding study — board-approved deferrals */}
-      {(() => {
-        const deferrals = parseDeferrals(settings.board_deferrals_json);
-        const update_deferrals = (next: BoardDeferralEntry[]) =>
-          update('board_deferrals_json', JSON.stringify(next));
-        return (
-          <div className="space-y-2 border border-[#e5e5e5] rounded p-3">
-            <div className="flex items-center justify-between">
-              <div>
-                <h4 className="text-sm font-semibold text-[#111]">
-                  Board-approved deferrals (30-year forecast)
-                </h4>
-                <p className="text-xs text-[#737373]">
-                  Year-by-year reductions to scheduled reserve expenditures
-                  approved by the board. Usually empty.
-                </p>
-              </div>
-              <Button
-                variant="outline"
-                onClick={() =>
-                  update_deferrals([...deferrals, { year: 2026, amount: 0 }])
+      {activeTab === 'money' ? (
+        <div className="space-y-4">
+          <p className="text-xs text-[#92400e]">
+            Required for package: reserve funding source and cash balance (confirm if $0 is
+            intentional — preflight warns but does not block $0).
+          </p>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            {renderScalarFields(MONEY_SCALAR_KEYS)}
+            <label data-setting-field="financial_packet_archetype" className="block text-sm">
+              <span className="block text-xs text-[#737373] mb-1">
+                Financial packet archetype
+              </span>
+              <select
+                value={settings.financial_packet_archetype}
+                onChange={(e) =>
+                  update('financial_packet_archetype', e.target.value as FinancialPacketArchetype)
                 }
-                className="text-xs"
+                className="w-full border border-[#d4d4d4] rounded px-2 py-1 text-sm"
               >
-                + Add deferral
-              </Button>
-            </div>
-            {deferrals.length === 0 ? (
-              <p className="text-xs text-[#a3a3a3] italic">
-                No deferrals — full scheduled expenditures will flow into the forecast.
-              </p>
-            ) : (
-              deferrals.map((row, i) => (
-                <div key={i} className="grid gap-2 sm:grid-cols-[1fr_1fr_auto]">
-                  <input
-                    type="number"
-                    placeholder="Year"
-                    value={row.year ?? ''}
-                    onChange={(e) => {
-                      const next = [...deferrals];
-                      next[i] = { ...row, year: Number(e.target.value) };
-                      update_deferrals(next);
-                    }}
-                    className="border border-[#d4d4d4] rounded px-2 py-1 text-sm"
-                  />
-                  <input
-                    type="number"
-                    step="0.01"
-                    placeholder="Amount ($)"
-                    value={row.amount ?? ''}
-                    onChange={(e) => {
-                      const next = [...deferrals];
-                      next[i] = { ...row, amount: Number(e.target.value) };
-                      update_deferrals(next);
-                    }}
-                    className="border border-[#d4d4d4] rounded px-2 py-1 text-sm"
-                  />
-                  <Button
-                    variant="ghost"
-                    onClick={() => update_deferrals(deferrals.filter((_, j) => j !== i))}
-                    className="text-xs text-[#b91c1c]"
-                  >
-                    Remove
-                  </Button>
-                </div>
-              ))
-            )}
+                <option value="dual-fund">Dual-fund accountant statement</option>
+                <option value="reserve-only">Reserve-only accountant statement</option>
+              </select>
+            </label>
+            <label data-setting-field="reserve_funding_source" className="block text-sm">
+              <span className="block text-xs text-[#737373] mb-1">
+                Reserve funding source{' '}
+                <span className="font-semibold text-[#92400e]">Required for package</span>
+              </span>
+              <select
+                value={settings.reserve_funding_source}
+                onChange={(e) =>
+                  update('reserve_funding_source', e.target.value as ReserveFundingSource)
+                }
+                className="w-full border border-[#d4d4d4] rounded px-2 py-1 text-sm"
+              >
+                <option value="reserve_study_provision">
+                  Reserve study annual provision ÷ 12 (default)
+                </option>
+                <option value="budget_allocation_line">
+                  Budget &ldquo;Reserve - Allocation/Transfer&rdquo; line ÷ 12
+                </option>
+                <option value="manual">Manual override (use field above)</option>
+              </select>
+            </label>
           </div>
-        );
-      })()}
+        </div>
+      ) : null}
 
-      <div className="flex items-center gap-3">
-        <Button onClick={save} disabled={saving} className="bg-[#111] text-white hover:bg-[#262626]">
-          {saving ? 'Saving…' : 'Save changes'}
-        </Button>
-        {savedAt ? <span className="text-xs text-[#737373]">Saved at {savedAt}</span> : null}
-      </div>
+      {activeTab === 'section5570' ? (
+        <div className="space-y-4">
+          {renderAssessmentEditor(
+            'Special assessments scheduled (§5570 item 2)',
+            'Already-approved special assessments. Each row prints in the §5570 disclosure summary; cents preserved.',
+            specialAssessments,
+            'special_assessments_json',
+            true,
+          )}
+          {renderAssessmentEditor(
+            'Additional assessments needed (§5570 item 4)',
+            'Future assessments needed to keep reserves sufficient. No "purpose" column on this form.',
+            additionalAssessments,
+            'additional_assessments_needed_json',
+            false,
+          )}
+          {renderLoanEditor()}
+        </div>
+      ) : null}
+
+      {activeTab === 'forecast' ? (
+        <div className="space-y-4">
+          {forecastScheduleBlock}
+          {forecastDeferralsBlock}
+        </div>
+      ) : null}
+
+      {activeTab === 'wording' ? (
+        <div className="space-y-3 rounded-lg border border-[#e5e5e5] bg-[#fafafa] p-4 text-sm text-[#525252]">
+          <p>
+            Package language / boilerplate edits live in the Package Language workbench (Settings
+            tools path). §5570 legal status language is under each assessment row&rsquo;s{' '}
+            <strong>Advanced — legal disclosure</strong> toggle on the §5570 tables tab.
+          </p>
+          <p className="text-xs text-[#737373]">
+            Letter signature name and dates are on the Letterhead tab.
+          </p>
+        </div>
+      ) : null}
+
+      {!hideLocalSave ? (
+        <div className="flex items-center gap-3">
+          <Button onClick={save} disabled={saving} className="bg-[#111] text-white hover:bg-[#262626]">
+            {saving ? 'Saving…' : 'Save changes'}
+          </Button>
+          {savedAt ? <span className="text-xs text-[#737373]">Saved at {savedAt}</span> : null}
+        </div>
+      ) : savedAt ? (
+        <p className="text-xs text-[#737373]">Saved at {savedAt}</p>
+      ) : null}
     </div>
   );
 });

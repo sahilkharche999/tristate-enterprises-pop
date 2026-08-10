@@ -15,6 +15,83 @@ export type SettingsSection =
 
 export type SettingsEditTab = 'disclosure' | 'database';
 
+/** Sub-tabs inside Disclosure Defaults progressive UI. */
+export type DisclosureDefaultsTab =
+  | 'letterhead'
+  | 'money'
+  | 'section5570'
+  | 'forecast'
+  | 'wording';
+
+export const DISCLOSURE_DEFAULTS_TABS: readonly DisclosureDefaultsTab[] = [
+  'letterhead',
+  'money',
+  'section5570',
+  'forecast',
+  'wording',
+] as const;
+
+const MONEY_FIELDS = new Set([
+  'reserve_cash_balance_eoy_prior',
+  'fund_balance_boy_operations',
+  'monthly_assessment_per_unit_prior',
+  'interest_rate_after_tax',
+  'replacement_fund_monthly_assessment_per_unit',
+  'approved_monthly_assessment_per_unit',
+  'reserve_interest_income_override',
+  'income_tax_provision_override',
+  'reserve_funding_manual_amount',
+  'reserve_funding_source',
+  'financial_packet_archetype',
+]);
+
+const LETTERHEAD_FIELDS = new Set([
+  'management_company',
+  'management_company_address',
+  'management_company_phone',
+  'management_company_fax',
+  'management_company_web',
+  'cpa_firm_name',
+  'cpa_firm_address',
+  'reserve_study_expert_name',
+  'reserve_study_date',
+  'letter_signed_by',
+  'letter_date',
+  'accountant_report_date',
+  'reserve_funding_plan_date',
+  'letterhead_logo_mode',
+]);
+
+const SECTION_5570_FIELDS = new Set([
+  'special_assessments_json',
+  'additional_assessments_needed_json',
+  'outstanding_loan_json',
+]);
+
+const FORECAST_FIELDS = new Set([
+  'assessment_increase_schedule_json',
+  'board_deferrals_json',
+]);
+
+export function resolveDisclosureDefaultsTab(
+  raw: string | null | undefined,
+): DisclosureDefaultsTab {
+  if (raw && (DISCLOSURE_DEFAULTS_TABS as readonly string[]).includes(raw)) {
+    return raw as DisclosureDefaultsTab;
+  }
+  return 'money';
+}
+
+/** Map a settings field key to the Disclosure Defaults sub-tab that hosts it. */
+export function disclosureTabForField(field: string | null | undefined): DisclosureDefaultsTab {
+  if (!field) return 'money';
+  if (MONEY_FIELDS.has(field)) return 'money';
+  if (LETTERHEAD_FIELDS.has(field)) return 'letterhead';
+  if (SECTION_5570_FIELDS.has(field)) return 'section5570';
+  if (FORECAST_FIELDS.has(field)) return 'forecast';
+  return 'money';
+}
+
 export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
   'database',
   'disclosure',
@@ -154,6 +231,9 @@ export function withRevealField(
 ): URLSearchParams {
   const next = withSection(params, tab === 'database' ? 'database' : 'disclosure');
   next.set('field', field);
+  if (tab === 'disclosure') {
+    next.set('tab', disclosureTabForField(field));
+  }
   return next;
 }
 

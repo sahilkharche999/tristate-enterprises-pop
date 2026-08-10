@@ -1,6 +1,6 @@
 """Query and update helpers for Phase 1 HOA settings."""
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional  # noqa: F401 — Optional used in _hoa_payload
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -12,6 +12,7 @@ from ..assessment_mode import (
 from ..ai_implementation.db import Property
 from ..models.hoa import HOACreateRequest, HOADetail, HOAListItem, HOAUpdateRequest
 from . import app_settings_service
+from . import portfolio_summary
 
 
 def _derive_fiscal_year_end(start_month: int) -> int:
@@ -19,8 +20,14 @@ def _derive_fiscal_year_end(start_month: int) -> int:
     return ((start_month + 10) % 12) + 1
 
 
-def _hoa_payload(property_row: Property, *, reserve_inflation_rate: float) -> dict[str, object]:
-    return {
+def _hoa_payload(
+    property_row: Property,
+    *,
+    reserve_inflation_rate: float,
+    session: Optional[Session] = None,
+    include_portfolio_summary: bool = False,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
         "id": property_row.id,
         "hoa_code": property_row.hoa_code or "",
         "name": property_row.name,
@@ -36,6 +43,9 @@ def _hoa_payload(property_row: Property, *, reserve_inflation_rate: float) -> di
             getattr(property_row, "assessment_mode", ASSESSMENT_MODE_VARIABLE)
         ),
     }
+    if include_portfolio_summary and session is not None:
+        payload = portfolio_summary.enrich_hoa_payload(session, payload)
+    return payload
 
 
 def _serialize_hoa(property_row: Property, *, reserve_inflation_rate: float) -> HOADetail:
@@ -49,7 +59,14 @@ def list_hoas(session: Session) -> List[HOAListItem]:
     reserve_inflation_rate = app_settings_service.get_global_reserve_inflation_rate(session)
     rows = session.scalars(select(Property).order_by(Property.id)).all()
     return [
-        HOAListItem(**_hoa_payload(row, reserve_inflation_rate=reserve_inflation_rate))
+        HOAListItem(
+            **_hoa_payload(
+                row,
+                reserve_inflation_rate=reserve_inflation_rate,
+                session=session,
+                include_portfolio_summary=True,
+            )
+        )
         for row in rows
     ]
 

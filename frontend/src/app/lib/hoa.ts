@@ -26,6 +26,14 @@ export interface HOAViewModel {
   fiscalYearStart: string;
   year: number;
   city: string;
+  readinessPct: number;
+  readinessDone: number;
+  readinessTotal: number;
+  nextActionLabel: string | null;
+  nextActionHref: string | null;
+  lastWorkedAt: string | null;
+  hasActiveDraft: boolean;
+  latestBudgetVersionId: number | null;
 }
 
 export function monthNumberToName(month: number): string {
@@ -57,16 +65,29 @@ export function formatFiscalYearRangeLabel(
 }
 
 export function toHOAViewModel(hoa: HOARecord): HOAViewModel {
+  // Prefer derived portfolio_status so the card never lies with seeded "Completed".
+  const status =
+    hoa.portfolio_status ||
+    (hoa.workflow_status === 'Completed' ? 'In Progress' : hoa.workflow_status) ||
+    'Not Started';
   return {
     id: String(hoa.id),
     hoaCode: hoa.hoa_code,
     name: hoa.name,
     fiscalYear: formatFiscalYearLabel(hoa.fiscal_year_start_month, hoa.fiscal_year_end_month),
-    status: hoa.workflow_status || 'Not Started',
+    status,
     units: hoa.units ?? 0,
     taxId: hoa.tax_id || '',
     fiscalYearStart: monthNumberToName(hoa.fiscal_year_start_month),
     year: hoa.portfolio_year ?? new Date().getFullYear(),
     city: hoa.city || 'Unknown',
+    readinessPct: hoa.readiness_pct ?? 0,
+    readinessDone: hoa.readiness_done ?? 0,
+    readinessTotal: hoa.readiness_total ?? 0,
+    nextActionLabel: hoa.next_action?.label ?? null,
+    nextActionHref: hoa.next_action?.href ?? null,
+    lastWorkedAt: hoa.last_worked_at ?? null,
+    hasActiveDraft: Boolean(hoa.has_active_draft),
+    latestBudgetVersionId: hoa.latest_budget_version_id ?? null,
   };
 }

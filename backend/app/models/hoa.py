@@ -6,6 +6,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from ..assessment_mode import AssessmentMode, ASSESSMENT_MODE_VARIABLE
 
 
+class PortfolioNextAction(BaseModel):
+    label: str
+    href: str
+    code: str = ""
+
+
 class HOAListItem(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -21,6 +27,15 @@ class HOAListItem(BaseModel):
     portfolio_year: Optional[int] = None
     workflow_status: str = "Not Started"
     assessment_mode: AssessmentMode = ASSESSMENT_MODE_VARIABLE
+    # Derived portfolio readiness (package year) — optional for older clients
+    portfolio_status: Optional[str] = None
+    readiness_pct: Optional[int] = None
+    readiness_done: Optional[int] = None
+    readiness_total: Optional[int] = None
+    next_action: Optional[PortfolioNextAction] = None
+    last_worked_at: Optional[str] = None
+    has_active_draft: Optional[bool] = None
+    latest_budget_version_id: Optional[int] = None
 
 
 class HOADetail(HOAListItem):

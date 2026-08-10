@@ -2,6 +2,12 @@ import { BASE_URL } from './config';
 import { authHeaders, handleResponse } from './http';
 import type { AssessmentMode } from '../lib/assessmentMode';
 
+export interface PortfolioNextAction {
+  label: string;
+  href: string;
+  code?: string;
+}
+
 export interface HOARecord {
   id: number;
   hoa_code: string;
@@ -16,6 +22,15 @@ export interface HOARecord {
   workflow_status: string;
   assessment_mode: AssessmentMode;
   created_at?: string | null;
+  /** Derived from package readiness — prefer over workflow_status on portfolio. */
+  portfolio_status?: string | null;
+  readiness_pct?: number | null;
+  readiness_done?: number | null;
+  readiness_total?: number | null;
+  next_action?: PortfolioNextAction | null;
+  last_worked_at?: string | null;
+  has_active_draft?: boolean | null;
+  latest_budget_version_id?: number | null;
 }
 
 export interface HOAUpdatePayload {

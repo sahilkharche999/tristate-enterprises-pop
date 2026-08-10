@@ -182,11 +182,14 @@ function DREDocumentsTab({ hoaId }: Props) {
   }
 
   async function onDemote(runId: number) {
-    if (!window.confirm(
-      'Demote this promoted DRE? Its assessment setup will be unseated and ' +
-      'the prior setup (if any) restored. You can re-promote or switch to a ' +
-      'CC&R afterward.',
-    )) {
+    // Confirm before irreversible demote (same guardrail pattern as budget discard).
+    if (
+      !window.confirm(
+        'Demote this promoted DRE?\n\n' +
+          'Its assessment setup will be unseated and the prior setup (if any) restored. ' +
+          'You can re-promote or switch to a CC&R afterward. This is a high-impact action.',
+      )
+    ) {
       return;
     }
     setDemotingRunId(runId);

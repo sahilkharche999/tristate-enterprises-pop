@@ -1,5 +1,6 @@
 export function getStatusColor(status: string): string {
   switch (status) {
+    case 'Ready for package':
     case 'Completed':
       return 'bg-[#d1fae5] text-[#065f46] border-[#a7f3d0]';
     case 'In Progress':

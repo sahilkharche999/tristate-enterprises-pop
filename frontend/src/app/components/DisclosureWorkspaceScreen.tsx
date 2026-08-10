@@ -220,7 +220,7 @@ export function DisclosureWorkspaceScreen() {
               </h2>
               <p className="rounded-md border border-[#e5e5e5] bg-[#fafafa] px-3 py-2 text-sm text-[#525252]">
                 <strong className="text-[#111111]">What this page is for:</strong> final gate to
-                build the homeowner disclosure package PDF. This is not the Budget “Generate Budget”
+                build the homeowner disclosure package PDF. This is not the Budget “Generate budget version”
                 action — finish mapping and disclosure settings first when the checklist says so.
               </p>
               <p className="text-sm text-[#666666]">
