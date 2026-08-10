@@ -8,7 +8,7 @@ portfolios; each HOA runs DB-side preflight only (no PDF/Gemini).
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from sqlalchemy.orm import Session
@@ -23,18 +23,29 @@ STATUS_READY = "Ready for package"
 
 
 def _parse_ts(value: Any) -> Optional[datetime]:
+    """Parse a timestamp and normalize to UTC-aware for safe comparisons.
+
+    Production SQLite mixes naive ``YYYY-MM-DD HH:MM:SS`` strings with
+    ISO offsets / ``Z``. Comparing those without normalization raises
+    ``TypeError: can't compare offset-naive and offset-aware datetimes``
+    and 500s the entire ``GET /hoa`` list.
+    """
     if value is None:
         return None
     if isinstance(value, datetime):
-        return value
-    text = str(value).strip()
-    if not text:
-        return None
-    try:
-        # Support SQLite-ish and ISO forms
-        return datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError:
-        return None
+        dt = value
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            # Support SQLite-ish and ISO forms
+            dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
 def _max_iso(timestamps: list[Optional[str]]) -> Optional[str]:
@@ -158,24 +169,38 @@ def _next_action_from_steps(steps: list[dict], hoa_id: int) -> Optional[dict[str
 
 
 def build_hoa_portfolio_summary(session: Session, hoa_id: int, portfolio_year: Optional[int]) -> dict:
-    """Return portfolio enrichment fields for one HOA."""
-    conn = session.connection().connection
-    has_active_draft, latest_version_id = _draft_and_version_flags(conn, hoa_id)
-    last_worked_at = _max_iso(_activity_timestamps(conn, hoa_id))
+    """Return portfolio enrichment fields for one HOA.
 
-    fiscal_year = (
-        int(portfolio_year)
-        if portfolio_year is not None
-        else dp_service._latest_fiscal_year(session, hoa_id)
-    )
-
+    Best-effort: individual steps may fail (schema drift, missing tables) but
+    this function must never raise into the HOA list endpoint.
+    """
+    has_active_draft = False
+    latest_version_id: Optional[int] = None
+    last_worked_at: Optional[str] = None
     steps: list[dict] = []
+
     try:
-        detailed = dp_service.run_preflight_detailed(session, hoa_id, fiscal_year)
-        steps = list(detailed.get("steps") or [])
+        conn = session.connection().connection
+        has_active_draft, latest_version_id = _draft_and_version_flags(conn, hoa_id)
+        try:
+            last_worked_at = _max_iso(_activity_timestamps(conn, hoa_id))
+        except Exception:
+            logger.exception("portfolio last_worked_at failed for HOA %s", hoa_id)
+            last_worked_at = None
+
+        fiscal_year = (
+            int(portfolio_year)
+            if portfolio_year is not None
+            else dp_service._latest_fiscal_year(session, hoa_id)
+        )
+        try:
+            detailed = dp_service.run_preflight_detailed(session, hoa_id, fiscal_year)
+            steps = list(detailed.get("steps") or [])
+        except Exception:
+            logger.exception("portfolio preflight failed for HOA %s", hoa_id)
+            steps = []
     except Exception:
-        logger.exception("portfolio preflight failed for HOA %s", hoa_id)
-        steps = []
+        logger.exception("portfolio summary bootstrap failed for HOA %s", hoa_id)
 
     actionable = [s for s in steps if s.get("status") != "not_required"]
     done = sum(1 for s in actionable if s.get("status") == "done")
@@ -208,9 +233,26 @@ def build_hoa_portfolio_summary(session: Session, hoa_id: int, portfolio_year: O
 def enrich_hoa_payload(session: Session, payload: dict) -> dict:
     """Mutate/copy HOA dict with portfolio summary fields."""
     hoa_id = int(payload["id"])
-    summary = build_hoa_portfolio_summary(
-        session,
-        hoa_id,
-        payload.get("portfolio_year"),
-    )
+    try:
+        summary = build_hoa_portfolio_summary(
+            session,
+            hoa_id,
+            payload.get("portfolio_year"),
+        )
+    except Exception:
+        logger.exception("enrich_hoa_payload failed for HOA %s", hoa_id)
+        summary = {
+            "portfolio_status": STATUS_IN_PROGRESS,
+            "readiness_pct": 0,
+            "readiness_done": 0,
+            "readiness_total": 0,
+            "next_action": {
+                "label": "Open HOA workspace",
+                "href": f"/hoa/{hoa_id}",
+                "code": "error",
+            },
+            "last_worked_at": None,
+            "has_active_draft": False,
+            "latest_budget_version_id": None,
+        }
     return {**payload, **summary}
