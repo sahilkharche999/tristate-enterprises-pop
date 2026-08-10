@@ -49,6 +49,7 @@ export function BudgetScreenWrapper() {
   const [generatedVersion, setGeneratedVersion] = useState<BudgetVersionDetail | null>(null);
   const [latestVersionSummary, setLatestVersionSummary] = useState<BudgetVersionSummary | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [isReopening, setIsReopening] = useState(false);
   const [aiResponse, setAiResponse] = useState<AISuggestionResponse | null>(null);
   const reopenedFromVersionId = activeDraft?.reopened_from_version_id ?? null;
 
@@ -235,6 +236,28 @@ export function BudgetScreenWrapper() {
     });
   };
 
+  const handleReopenAsDraft = async () => {
+    if (!id || !generatedVersion) {
+      toast.error('No generated version available to reopen.');
+      return;
+    }
+    setIsReopening(true);
+    try {
+      const response = await reopenBudgetVersion(id, generatedVersion.id);
+      setActiveDraft(response.draft);
+      setLineItems(mapBudgetHistoryLineItems(response.draft.line_items));
+      const params = new URLSearchParams();
+      params.set('view', 'enriched');
+      params.set('draftId', String(response.draft.id));
+      setSearchParams(params);
+      toast.success('Opened a new editable draft from this version.');
+    } catch (error) {
+      toast.error(getErrorMessage(error, 'Failed to reopen this version as a draft.'));
+    } finally {
+      setIsReopening(false);
+    }
+  };
+
   const handleBackToDraft = async () => {
     if (!id) {
       return;
@@ -251,20 +274,8 @@ export function BudgetScreenWrapper() {
 
     // Writable generated version (not read-only): reopen as a new editable draft.
     if (generatedVersion && !readOnly) {
-      try {
-        const response = await reopenBudgetVersion(id, generatedVersion.id);
-        setActiveDraft(response.draft);
-        setLineItems(mapBudgetHistoryLineItems(response.draft.line_items));
-        const params = new URLSearchParams();
-        params.set('view', 'enriched');
-        params.set('draftId', String(response.draft.id));
-        setSearchParams(params);
-        toast.success('Opened a new editable draft from the generated version.');
-        return;
-      } catch (error) {
-        toast.error(getErrorMessage(error, 'Failed to reopen this version as a draft.'));
-        // Fall through to portfolio — do not clear params onto bare /hoa/:id.
-      }
+      await handleReopenAsDraft();
+      return;
     }
 
     // Read-only latest-generated (typical after Generate) or no draft to open:
@@ -314,6 +325,7 @@ export function BudgetScreenWrapper() {
         sourceMode={generatedVersion.source_mode ?? activeDraft?.source_mode ?? null}
         onRegenerateSnapshot={handleRegenerateSnapshot}
         onBackToDraft={handleBackToDraft}
+        onReopenAsDraft={handleReopenAsDraft}
         budgetPreview={
           generatedVersion.budget_preview && typeof generatedVersion.budget_preview === 'object'
             ? (generatedVersion.budget_preview as SheetTable)
@@ -323,6 +335,7 @@ export function BudgetScreenWrapper() {
         growthFactorNote={generatedVersion.growth_factor_note ?? undefined}
         reserveInflationRate={generatedVersion.reserve_inflation_rate}
         isRegenerating={isGenerating}
+        isReopening={isReopening}
         readOnly={readOnly}
       />
     );

@@ -1,6 +1,16 @@
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router';
-import { ArrowLeft, CheckCircle2, Download, Lock, Settings } from 'lucide-react';
+import {
+  ArrowLeft,
+  CheckCircle2,
+  Download,
+  FileText,
+  History,
+  Lock,
+  PackageCheck,
+  Settings,
+  Upload,
+} from 'lucide-react';
 import { toast } from 'sonner';
 
 import { Button } from './ui/button';
@@ -71,12 +81,15 @@ interface GeneratedBudgetScreenProps {
   sourceMode?: BudgetSourceMode | null;
   onRegenerateSnapshot: () => Promise<void> | void;
   onBackToDraft: () => Promise<void> | void;
+  /** Reopen this version as a new editable draft (no active draft case). */
+  onReopenAsDraft?: () => Promise<void> | void;
   budgetPreview?: SheetTable | null;
   growthFactor?: number;
   growthFactorNote?: string;
   reserveInflationRate?: number;
   isRegenerating?: boolean;
   readOnly?: boolean;
+  isReopening?: boolean;
 }
 
 export function GeneratedBudgetScreen({
@@ -92,15 +105,18 @@ export function GeneratedBudgetScreen({
   sourceMode,
   onRegenerateSnapshot,
   onBackToDraft,
+  onReopenAsDraft,
   budgetPreview,
   growthFactor,
   growthFactorNote,
   reserveInflationRate,
   isRegenerating = false,
   readOnly = false,
+  isReopening = false,
 }: GeneratedBudgetScreenProps) {
   const navigate = useNavigate();
   const [isDownloading, setIsDownloading] = useState(false);
+  const packageYear = hoa.portfolio_year ?? new Date().getFullYear();
   const fiscalYearLabel = formatFiscalYearRangeLabel(
     hoa.fiscal_year_start_month,
     hoa.fiscal_year_end_month,
@@ -227,7 +243,7 @@ export function GeneratedBudgetScreen({
               </h2>
               <p className="text-sm text-[#737373]">
                 {readOnly
-                  ? `You are reviewing ${versionCode} in read-only mode. Historical versions stay immutable.`
+                  ? `You are reviewing ${versionCode} in read-only mode. Historical versions stay immutable. This is the budget snapshot — not the homeowner disclosure PDF.`
                   : `This snapshot was persisted as ${versionCode}. Regenerating creates a new immutable version.`}
               </p>
               {label ? <p className="mt-2 text-sm text-[#525252]">Label: {label}</p> : null}
@@ -243,6 +259,77 @@ export function GeneratedBudgetScreen({
             </div>
           </div>
         </div>
+
+        {readOnly ? (
+          <div className="mb-8 rounded-xl border-2 border-[#111111] bg-white p-6 shadow-sm">
+            <h2 className="text-lg font-semibold text-[#111111]">
+              What&rsquo;s next for package year {packageYear}?
+            </h2>
+            <p className="mt-2 max-w-3xl text-sm text-[#525252]">
+              This screen only shows a past budget version. The owner disclosure PDF and readiness
+              checklist live under <strong>Disclosure Package</strong>. To revise numbers for a new
+              package, open a new editable draft (from this version or a fresh upload).
+            </p>
+            <ol className="mt-4 list-decimal space-y-2 pl-5 text-sm text-[#525252]">
+              <li>
+                <strong>Disclosure Package</strong> — readiness steps, mapping, and Generate
+                Disclosure Package (homeowner PDF).
+              </li>
+              <li>
+                <strong>New budget draft</strong> — edit line items again, then generate a new
+                budget version if numbers change.
+              </li>
+              <li>
+                <strong>Settings</strong> — package year, disclosure defaults, DRE, annual packages.
+              </li>
+            </ol>
+            <div className="mt-6 flex flex-wrap gap-3">
+              <Link to={`/hoa/${hoaId}/disclosure`}>
+                <Button className="bg-[#111111] text-white shadow-sm hover:bg-[#262626]">
+                  <PackageCheck className="mr-2 h-4 w-4" />
+                  Continue to Disclosure Package
+                </Button>
+              </Link>
+              {onReopenAsDraft ? (
+                <Button
+                  variant="outline"
+                  disabled={isReopening}
+                  onClick={() => void onReopenAsDraft()}
+                  className="border-[#111111] text-[#111111] hover:bg-[#f5f5f5]"
+                >
+                  <FileText className="mr-2 h-4 w-4" />
+                  {isReopening ? 'Opening draft…' : 'Start new draft from this version'}
+                </Button>
+              ) : null}
+              <Link to={`/hoa/${hoaId}?create=1`}>
+                <Button
+                  variant="outline"
+                  className="border-[#d4d4d4] text-[#111111] hover:bg-[#f5f5f5]"
+                >
+                  <Upload className="mr-2 h-4 w-4" />
+                  Upload new budget source
+                </Button>
+              </Link>
+              <Link to={`/hoa/${hoaId}/sync-history`}>
+                <Button
+                  variant="outline"
+                  className="border-[#d4d4d4] text-[#525252] hover:bg-[#f5f5f5]"
+                >
+                  <History className="mr-2 h-4 w-4" />
+                  Sync History
+                </Button>
+              </Link>
+              <Link to={`/hoa/${hoaId}/settings?section=packages`}>
+                <Button
+                  variant="ghost"
+                  className="text-[#525252] hover:bg-[#f5f5f5]"
+                >
+                  Annual packages / package year
+                </Button>
+              </Link>
+            </div>
+          </div>
+        ) : null}
 
         <div className="mb-8 grid grid-cols-3 gap-6">
           <div className="rounded-lg border border-[#e5e5e5] bg-white p-6">
