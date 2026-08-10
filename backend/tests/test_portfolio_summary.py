@@ -35,6 +35,39 @@ def test_parse_ts_normalizes_to_utc_aware():
     assert aware.tzinfo == timezone.utc or aware.utcoffset() is not None
 
 
+def test_readiness_zero_when_budget_draft_still_needed():
+    """Appendices/packages marked done must not inflate % before upload starts."""
+    steps = [
+        {"id": "budget_draft", "status": "needs_action", "label": "Budget draft"},
+        {"id": "reserve_study", "status": "warning", "label": "Reserve study"},
+        {"id": "disclosure_settings", "status": "done", "label": "Settings"},
+        {"id": "assessment_setup", "status": "done", "label": "Setup"},
+        {"id": "assessment_mapping", "status": "needs_action", "label": "Mapping"},
+        {"id": "appendices", "status": "done", "label": "Appendices"},
+        {"id": "annual_package", "status": "done", "label": "Packages"},
+    ]
+    done, total, pct = ps._readiness_score(steps, has_active_draft=False)
+    assert total == 7
+    assert done == 0
+    assert pct == 0
+
+
+def test_readiness_counts_after_budget_draft_done():
+    steps = [
+        {"id": "budget_draft", "status": "done", "label": "Budget draft"},
+        {"id": "reserve_study", "status": "done", "label": "Reserve study"},
+        {"id": "disclosure_settings", "status": "done", "label": "Settings"},
+        {"id": "assessment_setup", "status": "done", "label": "Setup"},
+        {"id": "assessment_mapping", "status": "needs_action", "label": "Mapping"},
+        {"id": "appendices", "status": "done", "label": "Appendices"},
+        {"id": "annual_package", "status": "done", "label": "Packages"},
+    ]
+    done, total, pct = ps._readiness_score(steps, has_active_draft=True)
+    assert total == 7
+    assert done == 6
+    assert pct == 86
+
+
 def test_portfolio_status_never_completed_when_needs_action():
     steps = [
         {"id": "budget_draft", "status": "needs_action", "label": "Budget draft", "fix_path": "/hoa/1"},

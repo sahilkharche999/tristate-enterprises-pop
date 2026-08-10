@@ -140,6 +140,40 @@ def _portfolio_status_from_steps(
     return STATUS_READY
 
 
+def _budget_draft_incomplete(steps: list[dict]) -> bool:
+    """True when the operator still needs to create/upload an active budget draft."""
+    budget = next((s for s in steps if s.get("id") == "budget_draft"), None)
+    if budget is None:
+        return True
+    return budget.get("status") != "done"
+
+
+def _readiness_score(
+    steps: list[dict],
+    *,
+    has_active_draft: bool,
+) -> tuple[int, int, int]:
+    """Return (done, total, pct) for portfolio cards.
+
+    Free "done" steps (appendices, annual package, leftover settings) must not
+    make a green bar when the operator still has to start with income/reserve
+    upload. Until the budget-draft step is done (or an active draft exists),
+    report 0% complete.
+    """
+    actionable = [s for s in steps if s.get("status") != "not_required"]
+    total = len(actionable) if actionable else 0
+    if total == 0:
+        return 0, 0, 0
+
+    # No active draft / budget step incomplete → always 0% (start of seasonal flow).
+    if _budget_draft_incomplete(steps) and not has_active_draft:
+        return 0, total, 0
+
+    done = sum(1 for s in actionable if s.get("status") == "done")
+    pct = int(round(100.0 * done / total)) if total else 0
+    return done, total, pct
+
+
 def _next_action_from_steps(steps: list[dict], hoa_id: int) -> Optional[dict[str, str]]:
     priority = (
         "needs_action",
@@ -202,10 +236,10 @@ def build_hoa_portfolio_summary(session: Session, hoa_id: int, portfolio_year: O
     except Exception:
         logger.exception("portfolio summary bootstrap failed for HOA %s", hoa_id)
 
-    actionable = [s for s in steps if s.get("status") != "not_required"]
-    done = sum(1 for s in actionable if s.get("status") == "done")
-    total = len(actionable) if actionable else 0
-    readiness_pct = int(round(100.0 * done / total)) if total else 0
+    done, total, readiness_pct = _readiness_score(
+        steps,
+        has_active_draft=has_active_draft,
+    )
 
     portfolio_status = _portfolio_status_from_steps(
         steps,
@@ -215,6 +249,10 @@ def build_hoa_portfolio_summary(session: Session, hoa_id: int, portfolio_year: O
     # Never surface legacy "Completed" from this path.
     if portfolio_status == "Completed":
         portfolio_status = STATUS_READY
+    # No active budget work → treat as not started on the portfolio card
+    # even if optional steps (appendices / annual package) report "done".
+    if _budget_draft_incomplete(steps) and not has_active_draft:
+        portfolio_status = STATUS_NOT_STARTED
 
     next_action = _next_action_from_steps(steps, hoa_id)
 
