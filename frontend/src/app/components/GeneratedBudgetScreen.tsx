@@ -263,31 +263,31 @@ export function GeneratedBudgetScreen({
         {readOnly ? (
           <div className="mb-8 rounded-xl border-2 border-[#111111] bg-white p-6 shadow-sm">
             <h2 className="text-lg font-semibold text-[#111111]">
-              What&rsquo;s next for package year {packageYear}?
+              What&rsquo;s next?
             </h2>
             <p className="mt-2 max-w-3xl text-sm text-[#525252]">
-              This screen only shows a past budget version. The owner disclosure PDF and readiness
-              checklist live under <strong>Disclosure Package</strong>. To revise numbers for a new
-              package, open a new editable draft (from this version or a fresh upload).
+              You are looking at a <strong>locked budget snapshot</strong> ({versionCode}) — like a
+              saved Excel version. It is <strong>not</strong> last year&rsquo;s finished disclosure
+              package, and it is <strong>not</strong> the owner PDF.
             </p>
-            <ol className="mt-4 list-decimal space-y-2 pl-5 text-sm text-[#525252]">
-              <li>
-                <strong>Disclosure Package</strong> — readiness steps, mapping, and Generate
-                Disclosure Package (homeowner PDF).
-              </li>
-              <li>
-                <strong>New budget draft</strong> — edit line items again, then generate a new
-                budget version if numbers change.
-              </li>
-              <li>
-                <strong>Settings</strong> — package year, disclosure defaults, DRE, annual packages.
-              </li>
-            </ol>
+            <p className="mt-3 max-w-3xl text-sm text-[#525252]">
+              <strong>Open {packageYear} disclosure readiness</strong> takes you to the{' '}
+              <em>current workbench</em> for this HOA&rsquo;s package year{' '}
+              <strong>{packageYear}</strong> (from Settings → package year). There you see live
+              steps: budget, mapping, settings, etc., and you generate the{' '}
+              <strong>{packageYear}</strong> homeowner disclosure PDF. It does{' '}
+              <strong>not</strong> open a previous-year archive.
+            </p>
+            <p className="mt-3 max-w-3xl text-sm text-[#737373]">
+              Need different numbers first? Start a new draft or upload a new budget source, then
+              generate a new budget version. Changing package year (e.g. to 2027) is under Settings
+              → package year / Annual packages.
+            </p>
             <div className="mt-6 flex flex-wrap gap-3">
               <Link to={`/hoa/${hoaId}/disclosure`}>
                 <Button className="bg-[#111111] text-white shadow-sm hover:bg-[#262626]">
                   <PackageCheck className="mr-2 h-4 w-4" />
-                  Continue to Disclosure Package
+                  Open {packageYear} disclosure readiness
                 </Button>
               </Link>
               {onReopenAsDraft ? (
@@ -298,7 +298,7 @@ export function GeneratedBudgetScreen({
                   className="border-[#111111] text-[#111111] hover:bg-[#f5f5f5]"
                 >
                   <FileText className="mr-2 h-4 w-4" />
-                  {isReopening ? 'Opening draft…' : 'Start new draft from this version'}
+                  {isReopening ? 'Opening draft…' : 'Edit budget (new draft from this version)'}
                 </Button>
               ) : null}
               <Link to={`/hoa/${hoaId}?create=1`}>
@@ -319,12 +319,12 @@ export function GeneratedBudgetScreen({
                   Sync History
                 </Button>
               </Link>
-              <Link to={`/hoa/${hoaId}/settings?section=packages`}>
+              <Link to={`/hoa/${hoaId}/settings?section=database`}>
                 <Button
                   variant="ghost"
                   className="text-[#525252] hover:bg-[#f5f5f5]"
                 >
-                  Annual packages / package year
+                  Change package year in Settings
                 </Button>
               </Link>
             </div>
