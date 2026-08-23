@@ -1,5 +1,5 @@
 // Manual assessment setup entry form — for an HOA with no formal DRE or
-// CC&R on file. Operator picks a setup type, then enters pools and
+// CC&R on file. Operator picks a setup type, then enters assessment categories and
 // (depending on setup type) groups or units directly. Submitting creates
 // a synthetic extraction run that flows into the same Review Workbench
 // as any Gemini-derived run.
@@ -76,7 +76,7 @@ export function ManualSetupEntryForm({ hoaId, onCreated, onCancel }: Props) {
       .filter((p) => p.pool_key.trim() !== '')
       .map((p) => ({ ...p, pool_key: p.pool_key.trim() }));
     if (cleanedPools.length === 0) {
-      setError('Enter at least one pool with a pool key.');
+      setError('Enter at least one assessment category with a category key.');
       return;
     }
 
@@ -113,7 +113,7 @@ export function ManualSetupEntryForm({ hoaId, onCreated, onCancel }: Props) {
         <div>
           <h3 className="text-sm font-semibold text-[#111111]">Manual assessment setup entry</h3>
           <p className="text-xs text-[#737373]">
-            For an HOA with no formal DRE or governing document on file. Enter pools and
+            For an HOA with no formal DRE or governing document on file. Enter assessment categories and
             {setupType === 'grouped_category' ? ' groups' : setupType === 'individual_unit' ? ' units' : ''}
             {' '}directly — you'll review and approve this in the same Workbench as any other run.
           </p>
@@ -148,23 +148,23 @@ export function ManualSetupEntryForm({ hoaId, onCreated, onCancel }: Props) {
         </select>
       </div>
 
-      {/* ── Pools ─────────────────────────────────────────────────── */}
+      {/* ── Assessment categories ────────────────────────────────── */}
       <div className="space-y-2">
         <div className="flex items-center justify-between">
-          <label className={labelCls}>Allocation pools</label>
+          <label className={labelCls}>Assessment categories</label>
           <button
             type="button"
             onClick={() => setPools((cur) => [...cur, emptyPool()])}
             className="rounded border border-[#d4d4d4] px-2 py-0.5 text-xs text-[#111111] hover:bg-[#f5f5f5]"
           >
-            + Add pool
+            + Add category
           </button>
         </div>
         <div className="space-y-2">
           {pools.map((p, i) => (
             <div key={i} className="grid grid-cols-12 items-end gap-2 rounded border border-[#e5e5e5] p-2">
               <div className="col-span-3">
-                <label className={labelCls}>Pool key</label>
+                <label className={labelCls}>Category key</label>
                 <input
                   className={inputCls}
                   value={p.pool_key}

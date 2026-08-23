@@ -128,7 +128,70 @@ class TestPoolOverride:
         assert entry.scope_ref_id == 10
         assert entry.original_calculated_monthly == Decimal("300.00")
         assert entry.override_monthly == Decimal("50.00")
-        assert entry.delta_monthly == Decimal("-250.00")
+        assert entry.delta_monthly == Decimal("-150.00")
+
+
+def _grouped_calc_input(overrides=None) -> CalcInput:
+    """Two GROUP recipients, 5 units each (total_units=10, recipient_count=2).
+
+    Guards M1: the pool-override delta must scale by recipient COUNT, not by
+    the summed ``unit_count``. Per-unit fixtures can't tell the two apart
+    because there unit_count==1 for every recipient.
+    """
+    recipients = [
+        RecipientReference(
+            ref_type="group", ref_id=i + 1, label=f"Group {i+1}", unit_count=5
+        )
+        for i in range(2)
+    ]
+    return CalcInput(
+        setup_type="fixed",
+        pools=[
+            PoolDefinition(
+                pool_id=10, pool_key="operating", pool_name="Operating",
+                allocation_method="equal", recipient_scope="all_units",
+                display_order=0,
+            ),
+        ],
+        recipient_set=RecipientSet(recipients=recipients),
+        budget_lines=[
+            BudgetLineInput(
+                line_id=1, normalized_label="dues", section="income",
+                category="income", fund_type="operating",
+                amount=Decimal("3600"),
+            ),
+        ],
+        mappings=[
+            BudgetLineMappingInput(
+                budget_line_normalized_label="dues", section="income",
+                category="income", fund_type="operating",
+                pool_key="operating",
+            ),
+        ],
+        approved_assessment_revenue_annual=Decimal("3600"),
+        overrides=overrides or [],
+    )
+
+
+class TestPoolOverrideGroupedGrain:
+    def test_delta_scales_by_recipient_count_not_unit_count(self):
+        ov = AssessmentOverride(
+            scope="pool",
+            scope_ref_id=10,
+            override_type="manual_correction",
+            override_monthly_amount=Decimal("50.00"),
+            reason="Grouped pool override",
+            approved_by="ops",
+        )
+        result = run(_grouped_calc_input(overrides=[ov]))
+        assert len(result.applied_overrides) == 1
+        entry = result.applied_overrides[0]
+        original = entry.original_calculated_monthly
+        # Correct pool-wide delta: override * recipient_count(2) - original.
+        assert entry.delta_monthly == entry.override_monthly * 2 - original
+        # The pre-fix bug multiplied by total_units(10); that value must NOT
+        # be what we report.
+        assert entry.delta_monthly != entry.override_monthly * 10 - original
 
 
 class TestNeverEntersHomeownerPDF:
@@ -151,3 +214,21 @@ class TestNeverEntersHomeownerPDF:
             assert not hasattr(t, "applied_override")
         # The audit is on the result envelope ONLY
         assert hasattr(result, "applied_overrides")
+
+
+class TestMissingRecipientPhantom:
+    """Test that overrides on non-existent recipients produce no phantom audit entries (eliminates
+    stale/deleted recipient noise in audit logs)."""
+
+    def test_no_audit_created_for_nonexistent_unit(self):
+        ov = AssessmentOverride(
+            scope="unit",
+            scope_ref_id=99,  # non-existent in this setup
+            override_type="manual_correction",
+            override_monthly_amount=Decimal("200.00"),
+            reason="Should skip phantom",
+            approved_by="ops",
+        )
+        result = run(_calc_input_for_fixed_setup(overrides=[ov]))
+        assert len(result.applied_overrides) == 0
+        # Override itself is skipped since recipient doesn't exist; no error or audit noise.

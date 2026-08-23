@@ -131,12 +131,49 @@ def _allocate_pool(
     monthly_total: Decimal,
     recipients: list[RecipientReference],
     specified_value_lookup: dict[tuple[int, str], Decimal],
+    pool_recipient_weights: dict[str, dict[tuple[str, int], Decimal]],
 ) -> tuple[list[PoolAllocationResult], list[str]]:
     """Run the right allocator for one pool. Returns
     (pool_allocation_rows, warnings).
     """
     warnings: list[str] = []
     rows: list[PoolAllocationResult] = []
+
+    approved_weights = pool_recipient_weights.get(pool.pool_key)
+    if approved_weights is not None:
+        missing = [
+            r.label
+            for r in recipients
+            if (r.ref_type, r.ref_id) not in approved_weights
+        ]
+        if missing:
+            raise NeedsHumanReview(
+                f"Approved factor snapshot for assessment category '{pool.pool_key}' is missing "
+                f"recipient(s): {', '.join(missing)}"
+            )
+        total_weight = sum(
+            (approved_weights[(r.ref_type, r.ref_id)] for r in recipients),
+            start=Decimal("0"),
+        )
+        if total_weight <= 0:
+            raise NeedsHumanReview(
+                f"Approved factor snapshot for assessment category '{pool.pool_key}' has no "
+                "positive recipient weights"
+            )
+        for r in recipients:
+            rows.append(
+                PoolAllocationResult(
+                    recipient_ref=r,
+                    pool_id=pool.pool_id,
+                    pool_key=pool.pool_key,
+                    unrounded_component_monthly=(
+                        monthly_total
+                        * approved_weights[(r.ref_type, r.ref_id)]
+                        / total_weight
+                    ),
+                )
+            )
+        return rows, warnings
 
     if pool.allocation_method == "equal":
         total_units = sum((r.unit_count for r in recipients), start=0)
@@ -172,7 +209,7 @@ def _allocate_pool(
             if complete_sqft and recomputed > 0:
                 denom = recomputed
                 warnings.append(
-                    f"DenominatorDerivedWarning: pool '{pool.pool_key}' had no "
+                    f"DenominatorDerivedWarning: assessment category '{pool.pool_key}' had no "
                     f"stored denominator; used complete recipient sqft sum "
                     f"{recomputed}"
                 )
@@ -182,7 +219,7 @@ def _allocate_pool(
                 )
         elif recomputed and recomputed != denom:
             warnings.append(
-                f"DenominatorMismatchWarning: pool '{pool.pool_key}' "
+                f"DenominatorMismatchWarning: assessment category '{pool.pool_key}' "
                 f"DRE-frozen denominator={denom} differs "
                 f"from current recipient sum={recomputed} "
                 f"(delta={recomputed - denom}); "
@@ -397,7 +434,7 @@ def _apply_special_assessments(
 
             if pool is None:
                 warnings.append(
-                    f"SpecialAssessmentNoAllocationDataWarning: no allocation_pools "
+                    f"SpecialAssessmentNoAllocationDataWarning: no assessment category "
                     f"entry found for recipient_scope '{scope}'; special assessment "
                     f"'{entry.label or ''}' fell back to equal-per-unit allocation"
                 )
@@ -785,6 +822,7 @@ def run(calc_input: CalcInput) -> CalcResultSet:
             monthly_total,
             recipients,
             calc_input.specified_value_lookup,
+            calc_input.pool_recipient_weights,
         )
         pool_allocations.extend(rows)
         warnings.extend(pool_warnings)

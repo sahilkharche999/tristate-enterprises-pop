@@ -62,6 +62,16 @@ export interface ReviewRowPoolOption {
   pool_name: string;
 }
 
+export interface ReviewRowSlice {
+  id?: number | null;
+  pool_key: string;
+  semantic_category: string;
+  source_annual_amount: number | string;
+  slice_annual_amount: number | string;
+  slice_percent?: number | string | null;
+  status: 'draft' | 'approved' | 'superseded' | string;
+}
+
 export interface ReviewRow {
   line_key: string;
   line_label: string;
@@ -90,6 +100,15 @@ export interface ReviewRow {
   review_state: string | null;
   valid_pool_options: ReviewRowPoolOption[];
   recommended_pool_key: string | null;
+  allocation_mode?: 'whole_line' | 'split_required' | string;
+  split_status?: 'not_applicable' | 'required' | 'draft' | 'approved' | string;
+  split_saved?: boolean;
+  split_approved?: boolean;
+  split_balance?: number | null;
+  split_balance_status?: 'not_applicable' | 'balanced' | 'unbalanced' | string;
+  source_annual_amount: number | null;
+  combined_categories: string[];
+  saved_slices: ReviewRowSlice[];
   candidates: LineReviewCandidate[];
 }
 
@@ -108,6 +127,13 @@ export interface MappingReviewState {
   budget_year: number | null;
   budget_draft_id: number | null;
   pools: Array<{
+    pool_key: string;
+    pool_name: string;
+    allocation_method: string;
+    recipient_scope: string;
+    budget_line_derivation: string;
+  }>;
+  assessment_categories: Array<{
     pool_key: string;
     pool_name: string;
     allocation_method: string;
@@ -373,10 +399,52 @@ export async function assignAssessmentMappingReviewRow(
   payload: {
     line_key: string;
     pool_key: string;
+    source_annual_amount?: string;
     note?: string;
   },
 ) {
   const res = await fetch(`${BASE_URL}/hoa/${hoaId}/assessment-mapping-review/rows/assign`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(payload),
+  });
+  return handleResponse(res);
+}
+
+export async function saveAssessmentMappingReviewSplit(
+  hoaId: number,
+  payload: {
+    line_key: string;
+    source_line_label: string;
+    source_line_account_code?: string | null;
+    source_line_section?: string;
+    source_line_category?: string;
+    source_line_fund_type?: string;
+    source_annual_amount: string;
+    slices: Array<{
+      pool_key: string;
+      semantic_category: string;
+      slice_annual_amount: string;
+    }>;
+  },
+) {
+  const res = await fetch(`${BASE_URL}/hoa/${hoaId}/allocation-resolution/slices`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(payload),
+  });
+  return handleResponse(res);
+}
+
+export async function approveAssessmentMappingReviewSplit(
+  hoaId: number,
+  payload: {
+    line_key: string;
+    source_line_label: string;
+    source_line_account_code?: string | null;
+  },
+) {
+  const res = await fetch(`${BASE_URL}/hoa/${hoaId}/allocation-resolution/slices/approve`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify(payload),

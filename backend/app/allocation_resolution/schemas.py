@@ -112,6 +112,7 @@ class BudgetLineSlice(BaseModel):
     property_id: int
     assessment_setup_id: int
     source_line_normalized_label: str
+    source_line_key: Optional[str] = None
     source_line_account_code: Optional[str] = None
     source_annual_amount: Decimal
     slice_annual_amount: Decimal
@@ -161,5 +162,6 @@ class ReadinessReport(BaseModel):
     ready_for_final: bool = False
     preview_available: bool = False
     enforcement: EnforcementLevel = "new_governing_docs"
+    has_new_unresolved: bool = False
     issues: list[ReadinessIssue] = Field(default_factory=list)
     gates: list[dict[str, Any]] = Field(default_factory=list)

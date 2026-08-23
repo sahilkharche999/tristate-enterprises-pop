@@ -82,6 +82,7 @@ class BudgetLineInput(BaseModel):
     fund_type: Literal["operating", "reserve"]
     account_code: Optional[str] = None
     amount: Decimal
+    source_line_key: Optional[str] = None
 
 
 class BudgetLineMappingInput(BaseModel):
@@ -171,6 +172,10 @@ class CalcInput(BaseModel):
     mappings: list[BudgetLineMappingInput] = []
     approved_assessment_revenue_annual: Decimal
     specified_value_lookup: dict[tuple[int, str], Decimal] = {}
+    # Approved governing-document factors keyed by pool and recipient identity.
+    # Values are normalized weights; the engine applies them at the pool
+    # boundary after converting annual pool totals to monthly totals.
+    pool_recipient_weights: dict[str, dict[tuple[str, int], Decimal]] = {}
     pool_custom_recipients: dict[str, list[int]] = {}
     overrides: list[AssessmentOverride] = []
     special_assessments: list[SpecialAssessmentInput] = []

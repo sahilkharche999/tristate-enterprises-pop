@@ -58,7 +58,13 @@ from app.services.assessment_budget_mapping_rule_service import (
     build_assessment_mapping_review_rows,
     build_assessment_mapping_review_summary,
     normalize_budget_label,
+    build_budget_line_slice_key,
+    resolve_active_assessment_setup_id,
     select_assessment_mapping_amount,
+)
+from app.allocation_resolution.service import (
+    list_current_resolutions,
+    list_slices,
 )
 from app.services.assessment_mapping_category import (
     _assessment_mapping_category,
@@ -759,7 +765,8 @@ def _money_routing_issue_messages(result: Any) -> list[str]:
     """Turn the engine's H1/H2 money-routing reports into named,
     operator-resolvable messages.
 
-    Each message names the specific budget line(s), the specific pool, the
+    Each message names the specific budget line(s), the specific assessment
+    category, the
     dollars at stake, and the in-app action to take — so the operator can
     resolve it on the Assessment Mapping Review screen rather than
     re-running the exact same failing generation (an unresolvable loop).
@@ -768,18 +775,29 @@ def _money_routing_issue_messages(result: Any) -> list[str]:
     for orphan in getattr(result, "orphaned_pool_lines", []) or []:
         lines = ", ".join(orphan.contributing_line_labels) or "(unnamed lines)"
         messages.append(
-            f"Budget line(s) [{lines}] are mapped to pool "
+            f"Budget line(s) [{lines}] are mapped to assessment category "
             f"'{orphan.pool_key}', which no longer exists in the approved "
             f"setup (${orphan.annual_total} annual). Remap them to a current "
-            f"pool or exclude them on the Assessment Mapping Review screen."
+            f"assessment category or exclude them on the Assessment Mapping Review screen."
         )
     for zero in getattr(result, "zero_recipient_pools", []) or []:
         lines = ", ".join(zero.contributing_line_labels) or "(unnamed lines)"
+        # A generated Assessment Income component can preserve a DRE split for
+        # a category that this year's roster does not use (for example, a
+        # parking-only category in an HOA with no parking users). It is not an
+        # operator-routed budget line; direct mappings still fail loudly below.
+        if zero.contributing_line_labels and all(
+            label.startswith(
+                ("assessment_revenue_component:", "generated_assessment_revenue:")
+            )
+            for label in zero.contributing_line_labels
+        ):
+            continue
         messages.append(
-            f"Pool '{zero.pool_key}' (scope '{zero.recipient_scope}') carries "
+            f"Assessment category '{zero.pool_key}' (scope '{zero.recipient_scope}') carries "
             f"${zero.annual_total} annual from budget line(s) [{lines}] but no "
             f"units match its scope, so those dollars cannot be billed. Remap "
-            f"the line(s) to a pool that has recipients, exclude them, or fix "
+            f"the line(s) to an assessment category that has recipients, exclude them, or fix "
             f"the unit categories in the DRE Review Workbench and repromote."
         )
     return messages
@@ -799,7 +817,7 @@ def _child_pool_mapping_issues(pool_definitions: list[Any]) -> list[PreflightErr
             issues.append(PreflightError(
                 field_path=f"assessment_schedule.component_pools.{_pool_key(pool)}",
                 message=(
-                    f"Child pool {_pool_label(pool)!r} needs approved child-level "
+                    f"Child assessment category {_pool_label(pool)!r} needs approved child-level "
                     "budget-line mappings before final rendering."
                 ),
                 severity="blocking",
@@ -808,7 +826,7 @@ def _child_pool_mapping_issues(pool_definitions: list[Any]) -> list[PreflightErr
             issues.append(PreflightError(
                 field_path=f"assessment_schedule.component_pools.{_pool_key(pool)}",
                 message=(
-                    f"Child pool {_pool_label(pool)!r} has budget lines but they "
+                    f"Child assessment category {_pool_label(pool)!r} has budget lines but they "
                     "are not approved for child-level display."
                 ),
                 severity="blocking",
@@ -1112,7 +1130,7 @@ def validate_assessment_matrix_finalization(
     if required_budget_lines_unmapped:
         errors.append(PreflightError(
             field_path="assessment_schedule.budget_line_mappings",
-            message="Required budget lines are not mapped to assessment pools.",
+            message="Required budget lines are not mapped to assessment categories.",
             severity="blocking",
         ))
     for category, details in (mapping_review_blockers or {}).items():
@@ -1186,14 +1204,30 @@ def _line_to_engine_input(line_id: int, line: Any) -> BudgetLineInput:
         or ("income" if category == "income" else "operating")
     )
     account_code = _get(line, "account_code")
+    normalized_label = normalize_budget_label(label)
+    fund_type = (
+        "reserve"
+        if is_reserve or category in {"reserve_income", "reserve_expense"}
+        else "operating"
+    )
+    source_line_key = build_budget_line_slice_key(
+        normalized_label=normalized_label,
+        section=str(section),
+        category=category,
+        fund_type=fund_type,
+        account_code=(
+            str(account_code) if account_code not in (None, "") else None
+        ),
+    )
     return BudgetLineInput(
         line_id=line_id,
-        normalized_label=normalize_budget_label(label),
+        normalized_label=normalized_label,
         section=str(section),
         category=category,  # type: ignore[arg-type]
-        fund_type="reserve" if is_reserve else "operating",
+        fund_type=fund_type,
         account_code=str(account_code) if account_code not in (None, "") else None,
         amount=amount if amount is not None else _zero(),
+        source_line_key=source_line_key,
     )
 
 
@@ -1383,15 +1417,22 @@ def build_matrix_for_assessment_mode(
             approved_assessment_revenue_annual=approved_assessment_revenue_annual,
         )
 
-    setup_row = connection.execute(
-        """
-        SELECT id
-          FROM assessment_setups
-         WHERE property_id = ? AND status = 'approved'
-         ORDER BY id DESC LIMIT 1
-        """,
-        (property_id,),
-    ).fetchone()
+    active_setup_id = resolve_active_assessment_setup_id(
+        connection,
+        property_id=property_id,
+    )
+    setup_row = (
+        connection.execute(
+            """
+            SELECT id
+              FROM assessment_setups
+             WHERE id = ? AND property_id = ? AND status = 'approved'
+            """,
+            (active_setup_id, property_id),
+        ).fetchone()
+        if active_setup_id is not None
+        else None
+    )
     if setup_row is None:
         return _blocking_matrix_for_issue(
             hoa_name=hoa_name,
@@ -2188,18 +2229,31 @@ def _line_item_to_review_budget_line(item: Any) -> dict[str, Any]:
         }
     )
     raw = _get(item, "raw", {}) or {}
+    normalized_label = normalize_budget_label(label)
+    section = str(
+        _get(item, "section", None)
+        or (raw.get("section") if isinstance(raw, dict) else None)
+        or (raw.get("Section") if isinstance(raw, dict) else None)
+        or category
+    )
+    fund_type = _assessment_mapping_fund_type(category)
+    normalized_account_code = (
+        str(account_code) if account_code not in (None, "") else None
+    )
     return {
         "label": label,
-        "normalized_label": normalize_budget_label(label),
-        "section": str(
-            _get(item, "section", None)
-            or (raw.get("section") if isinstance(raw, dict) else None)
-            or (raw.get("Section") if isinstance(raw, dict) else None)
-            or category
-        ),
+        "normalized_label": normalized_label,
+        "section": section,
         "category": category,
-        "fund_type": _assessment_mapping_fund_type(category),
-        "account_code": str(account_code) if account_code not in (None, "") else None,
+        "fund_type": fund_type,
+        "account_code": normalized_account_code,
+        "source_line_key": build_budget_line_slice_key(
+            normalized_label=normalized_label,
+            section=section,
+            category=category,
+            fund_type=fund_type,
+            account_code=normalized_account_code,
+        ),
         "amount": float(amount) if amount is not None else None,
         "annual_budget": _get(item, "annual_budget", None),
         "proposed_amount": (
@@ -2451,6 +2505,261 @@ def _resolve_presentation_for_setup(
     return PRESENTATION_AUTO
 
 
+def _apply_approved_allocation_resolutions(
+    *,
+    connection: sqlite3.Connection,
+    setup_id: int,
+    pools: list[PoolDefinition],
+    recipients: list[RecipientReference],
+) -> tuple[
+    list[PoolDefinition],
+    dict[str, dict[tuple[str, int], Decimal]],
+    dict[tuple[int, str], Decimal],
+    set[str],
+    list[str],
+]:
+    """Apply approved rule snapshots before the engine receives its inputs."""
+    has_resolution_table = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'allocation_resolutions'"
+    ).fetchone()
+    resolutions = (
+        {
+            resolution.pool_key: resolution
+            for resolution in list_current_resolutions(
+                connection,
+                assessment_setup_id=setup_id,
+            )
+            if resolution.status == "approved" and resolution.resolved_method
+        }
+        if has_resolution_table
+        else {}
+    )
+    updated_pools: list[PoolDefinition] = []
+    recipient_weights: dict[str, dict[tuple[str, int], Decimal]] = {}
+    specified_values: dict[tuple[int, str], Decimal] = {}
+    audit_notes: list[str] = []
+    recipient_by_key = {
+        key: recipient
+        for recipient in recipients
+        for key in (recipient.label, str(recipient.ref_id))
+    }
+
+    for pool in pools:
+        resolution = resolutions.get(pool.pool_key)
+        if resolution is None:
+            updated_pools.append(pool)
+            continue
+        snapshot = resolution.factor_snapshot
+        updated_pools.append(
+            pool.model_copy(
+                update={
+                    "allocation_method": resolution.resolved_method,
+                    "denominator_value": (
+                        snapshot.denominator_value
+                        if snapshot.denominator_value is not None
+                        else pool.denominator_value
+                    ),
+                }
+            )
+        )
+        if resolution.resolved_method == "equal":
+            audit_notes.append(
+                f"Approved allocation resolution applied for {pool.pool_key}: equal."
+            )
+            continue
+        if resolution.resolved_method == "specified_value":
+            missing = [
+                recipient.label
+                for recipient in recipients
+                if recipient.ref_type != "unit"
+                or (
+                    recipient.label not in snapshot.recipients
+                    and str(recipient.ref_id) not in snapshot.recipients
+                )
+            ]
+            if missing:
+                raise EngineSetupError(
+                    f"Approved specified values for assessment category '{pool.pool_key}' "
+                    f"are missing recipient(s): {', '.join(missing)}"
+                )
+            for recipient in recipients:
+                raw_value = snapshot.recipients.get(
+                    recipient.label,
+                    snapshot.recipients.get(str(recipient.ref_id)),
+                )
+                if raw_value is not None:
+                    specified_values[(recipient.ref_id, pool.pool_key)] = _money(raw_value)
+            audit_notes.append(
+                f"Approved allocation resolution applied for {pool.pool_key}: "
+                "specified recipient values."
+            )
+            continue
+        if not snapshot.recipients:
+            raise EngineSetupError(
+                f"Approved allocation resolution for assessment category '{pool.pool_key}' "
+                "has no recipient factor snapshot"
+            )
+        weights: dict[tuple[str, int], Decimal] = {}
+        missing: list[str] = []
+        scoped_recipients = resolve_recipients(
+            RecipientSet(recipients=recipients),
+            pool.recipient_scope,
+        )
+        for snapshot_key, value in snapshot.recipients.items():
+            recipient = recipient_by_key.get(str(snapshot_key))
+            if recipient is not None:
+                weights[(recipient.ref_type, recipient.ref_id)] = _money(value)
+        for recipient in scoped_recipients:
+            if (
+                _get(recipient, "ref_type") in {"unit", "group"}
+                and (recipient.ref_type, recipient.ref_id) not in weights
+            ):
+                missing.append(recipient.label)
+        if missing:
+            raise EngineSetupError(
+                f"Approved factor snapshot for assessment category '{pool.pool_key}' is missing "
+                f"recipient(s): {', '.join(missing)}"
+            )
+        if sum(
+            (
+                weights[(recipient.ref_type, recipient.ref_id)]
+                for recipient in scoped_recipients
+                if (recipient.ref_type, recipient.ref_id) in weights
+            ),
+            start=Decimal("0"),
+        ) <= 0:
+            raise EngineSetupError(
+                f"Approved factor snapshot for assessment category '{pool.pool_key}' has no "
+                "positive recipient weights"
+            )
+        recipient_weights[pool.pool_key] = weights
+        audit_notes.append(
+            f"Approved allocation resolution applied for {pool.pool_key}: "
+            f"{resolution.resolved_method} recipient snapshot."
+        )
+    return (
+        updated_pools,
+        recipient_weights,
+        specified_values,
+        set(resolutions),
+        audit_notes,
+    )
+
+
+def _expand_approved_line_slices(
+    *,
+    connection: sqlite3.Connection,
+    setup_id: int,
+    budget_lines: list[BudgetLineInput],
+    mappings: list[BudgetLineMappingInput],
+) -> tuple[list[BudgetLineInput], list[BudgetLineMappingInput], list[str]]:
+    """Replace approved combined source lines with uniquely routed engine lines."""
+    has_slice_table = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'budget_line_allocation_slices'"
+    ).fetchone()
+    if not has_slice_table:
+        return budget_lines, mappings, []
+    approved_slices = list_slices(
+        connection,
+        assessment_setup_id=setup_id,
+        statuses=("approved",),
+    )
+    if not approved_slices:
+        return budget_lines, mappings, []
+
+    by_source: dict[tuple[str, Optional[str]], list[Any]] = defaultdict(list)
+    by_source_key: dict[str, list[Any]] = defaultdict(list)
+    for slice_row in approved_slices:
+        if slice_row.source_line_key:
+            by_source_key[slice_row.source_line_key].append(slice_row)
+        else:
+            by_source[
+                (
+                    slice_row.source_line_normalized_label,
+                    slice_row.source_line_account_code,
+                )
+            ].append(slice_row)
+
+    expanded: list[BudgetLineInput] = []
+    expanded_mappings: list[BudgetLineMappingInput] = []
+    audit_notes: list[str] = []
+    next_line_id = max((line.line_id for line in budget_lines), default=0) + 1
+    legacy_source_counts = Counter(
+        (line.normalized_label, line.account_code)
+        for line in budget_lines
+        if line.source_line_key
+    )
+    for line in budget_lines:
+        key = (line.normalized_label, line.account_code)
+        source_slices = (
+            by_source_key.get(line.source_line_key or "")
+            if line.source_line_key
+            else by_source.get(key)
+        )
+        if (
+            not source_slices
+            and line.source_line_key
+            and legacy_source_counts[key] == 1
+        ):
+            source_slices = by_source.get(key)
+        if not source_slices:
+            expanded.append(line)
+            expanded_mappings.extend(
+                mapping
+                for mapping in mappings
+                if (
+                    mapping.budget_line_normalized_label == line.normalized_label
+                    and mapping.section == line.section
+                    and mapping.category == line.category
+                    and mapping.fund_type == line.fund_type
+                    and mapping.account_code == line.account_code
+                )
+            )
+            continue
+        if any(
+            slice_row.source_annual_amount != line.amount
+            for slice_row in source_slices
+        ) or sum(
+            (slice_row.slice_annual_amount for slice_row in source_slices),
+            start=Decimal("0"),
+        ) != line.amount:
+            raise EngineSetupError(
+                f"Approved slices for '{line.normalized_label}' do not match "
+                "the active source amount"
+            )
+
+        for slice_row in source_slices:
+            routed_label = (
+                f"{line.normalized_label} allocation slice {slice_row.id or next_line_id}"
+            )
+            expanded.append(
+                line.model_copy(
+                    update={
+                        "line_id": next_line_id,
+                        "normalized_label": routed_label,
+                        "amount": slice_row.slice_annual_amount,
+                    }
+                )
+            )
+            expanded_mappings.append(
+                BudgetLineMappingInput(
+                    budget_line_normalized_label=routed_label,
+                    section=line.section,
+                    category=line.category,
+                    fund_type=line.fund_type,
+                    account_code=line.account_code,
+                    pool_key=slice_row.pool_key,
+                    active=True,
+                )
+            )
+            next_line_id += 1
+        audit_notes.append(
+            f"Approved slices replaced source line '{line.normalized_label}' "
+            f"with {len(source_slices)} uniquely routed engine lines."
+        )
+    return expanded, expanded_mappings, audit_notes
+
+
 def build_matrix_from_approved_assessment_setup(
     *,
     connection: sqlite3.Connection,
@@ -2467,15 +2776,39 @@ def build_matrix_from_approved_assessment_setup(
     matrix instead of raising for missing setup/mapping data so the generated
     package makes the missing assessment basis visible during preview.
     """
-    setup = connection.execute(
-        """
-        SELECT id, setup_type, approved_at, display_mode
-          FROM assessment_setups
-         WHERE property_id = ? AND status = 'approved'
-         ORDER BY id DESC LIMIT 1
-        """,
-        (property_id,),
-    ).fetchone()
+    has_setup_display_mode = any(
+        row[1] == "display_mode"
+        for row in connection.execute("PRAGMA table_info(assessment_setups)").fetchall()
+    )
+    display_mode_col = "display_mode" if has_setup_display_mode else "NULL AS display_mode"
+    try:
+        active_setup_id = resolve_active_assessment_setup_id(
+            connection,
+            property_id=property_id,
+        )
+    except sqlite3.OperationalError:
+        # Keep isolated legacy fixtures usable when they omit the properties
+        # table; production databases always go through the shared resolver.
+        active_setup_id = None
+    if active_setup_id is None:
+        setup = connection.execute(
+            f"""
+            SELECT id, setup_type, approved_at, {display_mode_col}
+              FROM assessment_setups
+             WHERE property_id = ? AND status = 'approved'
+             ORDER BY id DESC LIMIT 1
+            """,
+            (property_id,),
+        ).fetchone()
+    else:
+        setup = connection.execute(
+            f"""
+            SELECT id, setup_type, approved_at, {display_mode_col}
+              FROM assessment_setups
+             WHERE id = ?
+            """,
+            (active_setup_id,),
+        ).fetchone()
     if setup is None:
         return _fallback_matrix_for_db_issue(
             hoa_name=hoa_name,
@@ -2791,6 +3124,28 @@ def build_matrix_from_approved_assessment_setup(
             line.account_code,
         ) in regular_review_keys
     ]
+    try:
+        budget_lines, mappings, slice_audit_notes = _expand_approved_line_slices(
+            connection=connection,
+            setup_id=setup_id,
+            budget_lines=budget_lines,
+            mappings=mappings,
+        )
+    except EngineSetupError as exc:
+        return _fallback_matrix_for_db_issue(
+            hoa_name=hoa_name,
+            fiscal_year=fiscal_year,
+            reason=f"Assessment matrix needs operator review before rendering: {exc}",
+            approved_at=approved_at,
+        )
+    internal_review_notes.extend(
+        ReviewNote(message=note, severity="info")
+        for note in slice_audit_notes
+    )
+    pool_totals_before_rebase = _pool_totals_annual_for_mappings(
+        budget_lines=budget_lines,
+        mappings=mappings,
+    )
     if not mappings:
         generated_revenue_split = _generated_revenue_split_by_dre_pool_proportions(
             payload=payload,
@@ -2865,11 +3220,39 @@ def build_matrix_from_approved_assessment_setup(
         mappings=mappings,
     )
     try:
+        (
+            engine_pools,
+            approved_pool_weights,
+            approved_specified_values,
+            approved_resolution_pool_keys,
+            resolution_audit_notes,
+        ) = (
+            _apply_approved_allocation_resolutions(
+                connection=connection,
+                setup_id=setup_id,
+                pools=pools,
+                recipients=recipients,
+            )
+        )
+    except (EngineSetupError, ValueError) as exc:
+        return _fallback_matrix_for_db_issue(
+            hoa_name=hoa_name,
+            fiscal_year=fiscal_year,
+            reason=f"Assessment matrix needs operator review before rendering: {exc}",
+            approved_at=approved_at,
+        )
+    internal_review_notes.extend(
+        ReviewNote(message=note, severity="info")
+        for note in resolution_audit_notes
+    )
+    try:
+        factor_pool_totals = dict(pool_totals_annual)
+        factor_pool_totals.update(pool_totals_before_rebase)
         payload_factor_lookup, payload_factor_pool_keys = _per_unit_factor_value_lookup_from_payload(
             payload=payload,
             pools=pools,
             unit_id_by_number=unit_id_by_number,
-            pool_totals_annual=pool_totals_annual,
+            pool_totals_annual=factor_pool_totals,
         )
     except AmbiguousPercentColumn as exc:
         return _fallback_matrix_for_db_issue(
@@ -2891,15 +3274,17 @@ def build_matrix_from_approved_assessment_setup(
         ).fetchall()
     }
     specified_lookup.update(payload_factor_lookup)
+    specified_lookup.update(approved_specified_values)
 
     engine_pools = [
         pool.model_copy(
             update={"allocation_method": "specified_value"}
         ) if (
             pool.pool_key in payload_factor_pool_keys
+            and pool.pool_key not in approved_resolution_pool_keys
             and pool.pool_kind != SPECIAL_ASSESSMENT_POOL_KIND
         ) else pool
-        for pool in pools
+        for pool in engine_pools
     ]
 
     try:
@@ -2912,6 +3297,7 @@ def build_matrix_from_approved_assessment_setup(
                 mappings=mappings,
                 approved_assessment_revenue_annual=approved_assessment_revenue_annual,
                 specified_value_lookup=specified_lookup,
+                pool_recipient_weights=approved_pool_weights,
             )
         )
     except (NeedsHumanReview, EngineSetupError, ValueError) as exc:

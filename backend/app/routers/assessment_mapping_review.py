@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import json
+from decimal import Decimal, InvalidOperation
 from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -13,6 +13,7 @@ from ..ai_implementation.db import get_session
 from ..auth.dependencies import get_current_user
 from ..services.assessment_budget_mapping_rule_service import (
     assign_assessment_review_row_pool,
+    active_budget_lines_for_property,
     build_assessment_mapping_review_blockers,
     build_assessment_mapping_review_rows,
     build_assessment_mapping_review_summary,
@@ -21,7 +22,7 @@ from ..services.assessment_budget_mapping_rule_service import (
     materialize_budget_line_pool_mappings,
     normalize_budget_label,
     record_scoped_alias,
-    select_assessment_mapping_amount,
+    resolve_active_assessment_setup_id,
     set_assessment_review_row_disposition,
     set_exemption_decision_state,
 )
@@ -89,6 +90,7 @@ class ApplySafeAnalysisRequest(BaseModel):
 class AssignReviewRowRequest(BaseModel):
     line_key: str
     pool_key: str
+    source_annual_amount: Optional[str] = None
     note: str = ""
 
 
@@ -103,34 +105,14 @@ class ReviewRowDispositionRequest(BaseModel):
     note: str = ""
 
 
-def _json_loads(value: Optional[str], default: Any) -> Any:
-    if not value:
-        return default
-    return json.loads(value)
-
-
 def _setup_id_for_hoa(raw_conn, hoa_id: int) -> int:
-    row = raw_conn.execute(
-        "SELECT default_assessment_setup_id FROM properties WHERE id = ?",
-        (hoa_id,),
-    ).fetchone()
-    setup_id = row[0] if row else None
-    if setup_id:
-        return int(setup_id)
-    setup_row = raw_conn.execute(
-        """
-        SELECT id
-          FROM assessment_setups
-         WHERE property_id = ?
-           AND status = 'approved'
-         ORDER BY id DESC
-         LIMIT 1
-        """,
-        (hoa_id,),
-    ).fetchone()
-    if not setup_row:
+    setup_id = resolve_active_assessment_setup_id(
+        raw_conn,
+        property_id=hoa_id,
+    )
+    if setup_id is None:
         raise HTTPException(status_code=404, detail="Approved assessment setup not found")
-    return int(setup_row[0])
+    return setup_id
 
 
 def _budget_year_for_hoa(raw_conn, hoa_id: int) -> Optional[int]:
@@ -143,73 +125,14 @@ def _budget_year_for_hoa(raw_conn, hoa_id: int) -> Optional[int]:
     return int(row[0])
 
 
-def _active_draft(raw_conn, hoa_id: int):
-    row = raw_conn.execute(
-        """
-        SELECT id, line_items_json
-          FROM budget_drafts
-         WHERE property_id = ?
-           AND status = 'active'
-         ORDER BY updated_at DESC, id DESC
-         LIMIT 1
-        """,
-        (hoa_id,),
-    ).fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail="Active budget draft not found")
-    return row
-
-
-def _mapping_category(raw_category: object) -> str:
-    category = str(raw_category or "").lower()
-    if category == "income":
-        return "income"
-    if category == "reserve_income":
-        return "reserve_income"
-    if category in {"reserve", "reserve_expense"}:
-        return "reserve_expense"
-    return "operating"
-
-
-def _fund_type(category: str) -> str:
-    return "reserve" if category in {"reserve_income", "reserve_expense"} else "operating"
-
-
-def _line_item_to_mapping_line(item: dict[str, Any]) -> dict[str, Any]:
-    label = str(item.get("label") or item.get("line_item_key") or "")
-    category = _mapping_category(item.get("category"))
-    account_code = item.get("account_code")
-    amount, source_column_used = select_assessment_mapping_amount(item)
-    return {
-        "label": label,
-        "normalized_label": normalize_budget_label(label),
-        "section": str((item.get("raw") or {}).get("section") or category),
-        "category": category,
-        "fund_type": _fund_type(category),
-        "account_code": str(account_code) if account_code not in (None, "") else None,
-        "annual_budget": item.get("annual_budget"),
-        "proposed_amount": (
-            item.get("proposed_amount")
-            if item.get("proposed_amount") is not None
-            else item.get("proposedAmount")
-        ),
-        "projection": item.get("projection"),
-        "assessment_mapping_amount": float(amount) if amount is not None else None,
-        "source_column_used": source_column_used,
-        "amount": float(amount) if amount is not None else None,
-        "reserve_group": item.get("reserve_group") or item.get("reserveGroup"),
-        "active": not bool(item.get("inactive")),
-    }
-
-
 def _budget_lines_for_active_draft(raw_conn, hoa_id: int) -> tuple[int, list[dict[str, Any]]]:
-    draft = _active_draft(raw_conn, hoa_id)
-    line_items = _json_loads(draft[1], [])
-    return int(draft[0]), [
-        _line_item_to_mapping_line(item)
-        for item in line_items
-        if isinstance(item, dict)
-    ]
+    draft_id, budget_lines = active_budget_lines_for_property(
+        raw_conn,
+        property_id=hoa_id,
+    )
+    if draft_id is None:
+        raise HTTPException(status_code=404, detail="Active budget draft not found")
+    return int(draft_id), budget_lines
 
 
 def _review_scope(raw_conn, hoa_id: int) -> tuple[int, Optional[int], list[dict[str, Any]]]:
@@ -536,6 +459,16 @@ def get_assessment_mapping_review(
         """,
         (setup_id,),
     ).fetchall()
+    assessment_categories = [
+        {
+            "pool_key": row[0],
+            "pool_name": row[1],
+            "allocation_method": row[2],
+            "recipient_scope": row[3],
+            "budget_line_derivation": row[4],
+        }
+        for row in pools
+    ]
     existing_mappings = raw_conn.execute(
         """
         SELECT budget_line_normalized_label, section, category, fund_type,
@@ -575,16 +508,10 @@ def get_assessment_mapping_review(
         "assessment_setup_id": setup_id,
         "budget_year": budget_year,
         "budget_draft_id": draft_id,
-        "pools": [
-            {
-                "pool_key": row[0],
-                "pool_name": row[1],
-                "allocation_method": row[2],
-                "recipient_scope": row[3],
-                "budget_line_derivation": row[4],
-            }
-            for row in pools
-        ],
+        # ``pools`` remains as a compatibility alias for older clients;
+        # operators receive the domain term used by the mapping workflow.
+        "pools": assessment_categories,
+        "assessment_categories": assessment_categories,
         "rules": [
             {
                 "id": int(row[0]),
@@ -849,18 +776,38 @@ def assign_review_row(
         setup_id=setup_id,
         line_key=payload.line_key,
     )
-    result = assign_assessment_review_row_pool(
-        property_id=hoa_id,
-        assessment_setup_id=setup_id,
-        budget_year=budget_year,
-        budget_draft_id=draft_id,
-        row=row,
-        pool_key=payload.pool_key,
-        actor=_actor(current_user),
-        note=payload.note,
-        connection=raw_conn,
-        commit=False,
-    )
+    if payload.source_annual_amount is not None:
+        try:
+            supplied_amount = Decimal(payload.source_annual_amount)
+        except (InvalidOperation, ValueError) as exc:
+            raise HTTPException(
+                status_code=422,
+                detail="Source annual amount must be a valid number.",
+            ) from exc
+        actual_amount = Decimal(str(row.get("source_annual_amount") or 0))
+        if supplied_amount < 0 or abs(supplied_amount - actual_amount) > Decimal("0.01"):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Source annual amount does not match the active budget. "
+                    "Refresh the mapping review and try again."
+                ),
+            )
+    try:
+        result = assign_assessment_review_row_pool(
+            property_id=hoa_id,
+            assessment_setup_id=setup_id,
+            budget_year=budget_year,
+            budget_draft_id=draft_id,
+            row=row,
+            pool_key=payload.pool_key,
+            actor=_actor(current_user),
+            note=payload.note,
+            connection=raw_conn,
+            commit=False,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     session.commit()
     return result
 

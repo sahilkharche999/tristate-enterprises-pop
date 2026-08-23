@@ -1,1 +1,1 @@
-"""Test support helpers (not production)."""
+"""Shared test fixtures."""

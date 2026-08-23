@@ -437,9 +437,10 @@ export const HOADisclosureSettingsForm = forwardRef<
             </div>
             {/* Variable special assessment (add-variable-special-assessments):
                 enter a TOTAL and choose how to split it across the HOA's existing
-                units — Equal / Square footage / Ownership %. No pool needed; the
+                units — Equal / Square footage / Ownership %. No linked assessment
+                category needed; the
                 backend allocates from the approved setup's per-unit data. Advanced:
-                if the DRE/CC&R defined a special-assessment pool, link to it
+                if the DRE/CC&R defined a special-assessment category, link to it
                 instead. "Preview allocation" shows the per-unit table. */}
             {key === 'special_assessments_json' ? (() => {
               const previewKey = row.pool_key
@@ -476,7 +477,7 @@ export const HOADisclosureSettingsForm = forwardRef<
                 {specialPools.length > 0 && !row.allocation_basis ? (
                   <label className="block">
                     <span className="block text-[10px] text-[#a3a3a3]">
-                      Or link a special-assessment pool (DRE/CC&amp;R)
+                      Or link a special-assessment category (DRE/CC&amp;R)
                     </span>
                     <select
                       value={row.pool_key || ''}
@@ -609,7 +610,7 @@ export const HOADisclosureSettingsForm = forwardRef<
                 className="border border-[#d4d4d4] rounded px-2 py-1 text-xs"
               />
               <input
-                placeholder="Label (e.g. Pool deck repair)"
+                placeholder="Label (e.g. Courtyard repair)"
                 value={row.label || ''}
                 onChange={(e) => {
                   const next = [...rows];

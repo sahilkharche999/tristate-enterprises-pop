@@ -273,6 +273,95 @@ def select_assessment_mapping_amount(
     return None, "none"
 
 
+def active_budget_lines_for_property(
+    connection: sqlite3.Connection,
+    *,
+    property_id: int,
+) -> tuple[Optional[int], list[dict]]:
+    """Load the active draft in the canonical shape used by mapping review.
+
+    Every consumer that evaluates allocation readiness must inspect the same
+    current-year lines as the operator mapping screen. Returning the draft id
+    alongside the lines also prevents a caller from accidentally mixing an
+    older draft with current setup data.
+    """
+    draft = connection.execute(
+        """
+        SELECT id, line_items_json
+          FROM budget_drafts
+         WHERE property_id = ? AND status = 'active'
+         ORDER BY updated_at DESC, id DESC
+         LIMIT 1
+        """,
+        (property_id,),
+    ).fetchone()
+    if draft is None:
+        return None, []
+    try:
+        line_items = json.loads(draft[1] or "[]")
+    except (TypeError, json.JSONDecodeError):
+        return int(draft[0]), []
+    lines: list[dict] = []
+    for item in line_items:
+        if not isinstance(item, dict):
+            continue
+        raw_category = str(item.get("category") or "").lower()
+        category = (
+            "income"
+            if raw_category == "income"
+            else "reserve_income"
+            if raw_category == "reserve_income"
+            else "reserve_expense"
+            if raw_category in {"reserve", "reserve_expense"}
+            else "operating"
+        )
+        label = str(item.get("label") or item.get("line_item_key") or "")
+        normalized_label = normalize_budget_label(label)
+        section = str((item.get("raw") or {}).get("section") or category)
+        fund_type = (
+            "reserve" if category in {"reserve_income", "reserve_expense"}
+            else "operating"
+        )
+        account_code = (
+            str(item["account_code"])
+            if item.get("account_code") not in (None, "")
+            else None
+        )
+        amount, source_column_used = select_assessment_mapping_amount(item)
+        lines.append(
+            {
+                "label": label,
+                "normalized_label": normalized_label,
+                "section": section,
+                "category": category,
+                "fund_type": fund_type,
+                "account_code": account_code,
+                "source_line_key": build_budget_line_slice_key(
+                    normalized_label=normalized_label,
+                    section=section,
+                    category=category,
+                    fund_type=fund_type,
+                    account_code=account_code,
+                ),
+                "annual_budget": item.get("annual_budget"),
+                "proposed_amount": (
+                    item.get("proposed_amount")
+                    if item.get("proposed_amount") is not None
+                    else item.get("proposedAmount")
+                ),
+                "projection": item.get("projection"),
+                "assessment_mapping_amount": (
+                    float(amount) if amount is not None else None
+                ),
+                "source_column_used": source_column_used,
+                "amount": float(amount) if amount is not None else None,
+                "reserve_group": item.get("reserve_group") or item.get("reserveGroup"),
+                "active": not bool(item.get("inactive")),
+            }
+        )
+    return int(draft[0]), lines
+
+
 def classify_assessment_mapping_review_row_role(line: dict) -> str:
     label = str(line.get("label") or line.get("normalized_label") or "")
     normalized = normalize_budget_label(label)
@@ -353,6 +442,27 @@ def build_assessment_mapping_review_line_key(
     )
 
 
+def build_budget_line_slice_key(
+    *,
+    normalized_label: str,
+    section: str,
+    category: str,
+    fund_type: str,
+    account_code: Optional[str],
+) -> str:
+    """Build the durable identity used to attach slices to one budget row."""
+    return json.dumps(
+        [
+            normalize_budget_label(normalized_label),
+            normalize_budget_label(section),
+            str(category or "").strip().lower(),
+            str(fund_type or "").strip().lower(),
+            str(account_code or ""),
+        ],
+        separators=(",", ":"),
+    )
+
+
 def _with_assessment_mapping_amounts(budget_lines: list[dict]) -> list[dict]:
     enriched: list[dict] = []
     for line in budget_lines:
@@ -368,6 +478,76 @@ def _with_assessment_mapping_amounts(budget_lines: list[dict]) -> list[dict]:
             enriched_line["amount"] = float(amount) if amount is not None else None
         enriched.append(enriched_line)
     return canonicalize_budget_lines_for_mapping(enriched)
+
+
+def _saved_slices_for_line(
+    *,
+    connection: sqlite3.Connection,
+    assessment_setup_id: int,
+    normalized_label: str,
+    account_code: Optional[str],
+    source_line_key: Optional[str],
+) -> list[dict[str, object]]:
+    """Return the current saved split rows for one source budget line.
+
+    Allocation-resolution owns the slice row model. This adapter deliberately
+    keeps the mapping-review service independent of its Pydantic types while
+    still applying the same normalized-label/account identity used by the
+    active budget mapping.
+    """
+    if not _sqlite_table_exists(connection, "budget_line_allocation_slices"):
+        return []
+    from app.allocation_resolution.service import list_slices
+
+    normalized_account = (
+        str(account_code) if account_code not in (None, "") else None
+    )
+    slices = list_slices(
+        connection,
+        assessment_setup_id=assessment_setup_id,
+        source_line_normalized_label=normalized_label,
+        source_line_key=source_line_key,
+        source_line_account_code=normalized_account,
+    )
+    if not slices and source_line_key is not None:
+        # Keep slices created before durable row identities were introduced.
+        slices = list_slices(
+            connection,
+            assessment_setup_id=assessment_setup_id,
+            source_line_normalized_label=normalized_label,
+            source_line_account_code=normalized_account,
+        )
+        slices = [item for item in slices if not item.source_line_key]
+    return [
+        item.model_dump(mode="json")
+        for item in slices
+    ]
+
+
+def _combined_line_categories(
+    *,
+    connection: sqlite3.Connection,
+    assessment_setup_id: int,
+    line_label: str,
+) -> list[str]:
+    """Find governing-document categories that only partially match a line."""
+    if not _sqlite_table_exists(connection, "allocation_resolutions"):
+        return []
+    from app.allocation_resolution.semantic_mapping import classify_label_match
+    from app.allocation_resolution.service import list_current_resolutions
+
+    categories: list[str] = []
+    for resolution in list_current_resolutions(
+        connection,
+        assessment_setup_id=assessment_setup_id,
+    ):
+        for category in resolution.included_categories:
+            if (
+                classify_label_match(str(category), line_label) == "combined"
+                and str(category) not in categories
+            ):
+                categories.append(str(category))
+    return categories
 
 
 def _sqlite_table_exists(connection: sqlite3.Connection, table_name: str) -> bool:
@@ -426,6 +606,40 @@ def _review_scope(
         if draft_row is not None:
             resolved_budget_draft_id = int(draft_row[0])
     return resolved_budget_year, resolved_budget_draft_id
+
+
+def resolve_active_assessment_setup_id(
+    connection: sqlite3.Connection,
+    *,
+    property_id: int,
+) -> Optional[int]:
+    """Resolve the setup shared by mapping, readiness, and finalization."""
+    row = connection.execute(
+        """
+        SELECT s.id
+          FROM assessment_setups AS s
+          JOIN properties AS p ON p.default_assessment_setup_id = s.id
+         WHERE p.id = ?
+           AND s.property_id = p.id
+           AND s.status IN ('approved', 'draft')
+         LIMIT 1
+        """,
+        (property_id,),
+    ).fetchone()
+    if row is not None:
+        return int(row[0])
+    row = connection.execute(
+        """
+        SELECT id
+          FROM assessment_setups
+         WHERE property_id = ?
+           AND status IN ('approved', 'draft')
+         ORDER BY CASE status WHEN 'approved' THEN 0 ELSE 1 END, id DESC
+         LIMIT 1
+        """,
+        (property_id,),
+    ).fetchone()
+    return int(row[0]) if row is not None else None
 
 
 def _review_row_dispositions_by_line_key(
@@ -1436,6 +1650,60 @@ def build_assessment_mapping_review_rows(
         ):
             recommended_pool_key = preferred_reserve_key
 
+        combined_categories = _combined_line_categories(
+            connection=connection,
+            assessment_setup_id=assessment_setup_id,
+            line_label=classification.line_label,
+        ) if included_in_regular_basis else []
+        saved_slices = _saved_slices_for_line(
+            connection=connection,
+            assessment_setup_id=assessment_setup_id,
+            normalized_label=normalized,
+            account_code=account_code,
+            source_line_key=build_budget_line_slice_key(
+                normalized_label=normalized,
+                section=str(line.get("section") or ""),
+                category=str(line.get("category") or ""),
+                fund_type=str(line.get("fund_type") or ""),
+                account_code=account_code,
+            ),
+        )
+        split_balanced = bool(saved_slices)
+        split_balance: Optional[Decimal] = None
+        split_approved = False
+        if split_balanced:
+            from app.allocation_resolution.service import validate_slice_sum
+
+            source_amount = Decimal(str(amount or 0))
+            split_balance = validate_slice_sum(
+                source_amount,
+                [
+                    Decimal(str(item.get("slice_annual_amount") or 0))
+                    for item in saved_slices
+                ],
+            )
+            split_balanced = (
+                all(
+                    Decimal(str(item.get("source_annual_amount") or 0))
+                    == source_amount
+                    for item in saved_slices
+                )
+                and split_balance == Decimal("0")
+            )
+            split_approved = split_balanced and all(
+                str(item.get("status") or "") == "approved"
+                for item in saved_slices
+            )
+        allocation_mode = "split_required" if combined_categories else "whole_line"
+        split_status = (
+            "approved" if split_approved
+            else "draft" if split_balanced
+            else "required" if combined_categories
+            else "not_applicable"
+        )
+        if combined_categories and included_in_regular_basis:
+            status = "split_saved" if split_balanced else "split_required"
+
         rows.append(
             {
                 "line_key": line_key,
@@ -1464,6 +1732,21 @@ def build_assessment_mapping_review_rows(
                 "review_state": str(mapped[7] or "") if mapped else None,
                 "valid_pool_options": row_pool_options,
                 "recommended_pool_key": recommended_pool_key,
+                "allocation_mode": allocation_mode,
+                "split_status": split_status,
+                "split_saved": split_balanced,
+                "split_approved": split_approved,
+                "split_balance": (
+                    float(split_balance) if split_balance is not None else None
+                ),
+                "split_balance_status": (
+                    "balanced" if split_balanced
+                    else "unbalanced" if saved_slices
+                    else "not_applicable"
+                ),
+                "source_annual_amount": float(amount) if amount is not None else None,
+                "combined_categories": combined_categories,
+                "saved_slices": saved_slices,
                 "candidates": [
                     {
                         "rule_id": candidate.rule_id,
@@ -1546,13 +1829,19 @@ def build_assessment_mapping_review_summary(
         # total; treat it as unresolved so reconciliation blocks until the
         # operator remaps or excludes it.
         stale_pool_mapping = bool(row.get("stale_pool_mapping"))
+        split_required = row.get("allocation_mode") == "split_required"
+        split_approved = row.get("split_status") == "approved"
 
         if included_in_regular_basis:
             target_regular_assessment_basis += amount
-            if current_pool_key and not stale_pool_mapping:
+            if split_required and split_approved:
+                mapped_regular_total += amount
+            elif current_pool_key and not stale_pool_mapping and not split_required:
                 mapped_regular_total += amount
             else:
                 unresolved_required_rows.append(str(row.get("line_label") or ""))
+                if split_required:
+                    pending_split_total += amount
         elif disposition_state == "pending_split":
             pending_split_total += amount
         else:
@@ -1589,17 +1878,29 @@ def build_assessment_mapping_review_blockers(
         str(row["line_label"])
         for row in review_rows
         if bool(row["included_in_regular_basis"])
-        and not row.get("current_pool_key")
+        and (
+            (
+                not row.get("current_pool_key")
+                and not (
+                    row.get("allocation_mode") == "split_required"
+                    and row.get("split_status") == "approved"
+                )
+            )
+            or (
+                row.get("allocation_mode") == "split_required"
+                and row.get("split_status") != "approved"
+            )
+        )
     ]
     if unresolved_regular_rows:
         blockers["unresolved_eligible_lines"] = unresolved_regular_rows
 
-    # H1: lines whose active mapping targets a pool that no longer exists.
-    # Name the line and the stale pool so the operator knows exactly what to
+    # H1: lines whose active mapping targets a category that no longer exists.
+    # Name the line and the stale category so the operator knows exactly what to
     # remap (or exclude) on the review screen — not a generic "review needed".
     stale_mapping_rows = [
-        f"{row.get('line_label')} (mapped to removed pool "
-        f"'{row.get('current_pool_key')}' — remap to a current pool or exclude)"
+        f"{row.get('line_label')} (mapped to removed assessment category "
+        f"'{row.get('current_pool_key')}' — remap to a current category or exclude)"
         for row in review_rows
         if row.get("stale_pool_mapping")
     ]
@@ -1609,7 +1910,13 @@ def build_assessment_mapping_review_blockers(
     pending_split_rows = [
         str(row["line_label"])
         for row in review_rows
-        if str(row.get("disposition_state") or "") == "pending_split"
+        if (
+            str(row.get("disposition_state") or "") == "pending_split"
+            or (
+                row.get("allocation_mode") == "split_required"
+                and row.get("split_status") != "approved"
+            )
+        )
     ]
     if pending_split_rows:
         blockers["pending_split"] = pending_split_rows
@@ -1637,7 +1944,7 @@ def set_assessment_review_row_disposition(
     ):
         raise ValueError(
             "Reserve contribution/transfer lines cannot be marked reserve detail; "
-            "assign them to the reserve contributions pool so the PDF reserve total matches."
+            "assign them to the reserve contributions category so the PDF reserve total matches."
         )
     previous_rows = _review_row_dispositions_by_line_key(
         property_id=property_id,
@@ -1739,6 +2046,19 @@ def assign_assessment_review_row_pool(
     connection: sqlite3.Connection,
     commit: bool = True,
 ) -> dict[str, object]:
+    if row.get("allocation_mode") == "split_required":
+        raise ValueError(
+            "This budget line contains multiple assessment categories; save and approve a split instead."
+        )
+    valid_pool_keys = {
+        str(option.get("pool_key") or "")
+        for option in row.get("valid_pool_options", [])
+        if isinstance(option, dict)
+    }
+    if pool_key not in valid_pool_keys:
+        raise ValueError(
+            f"Assessment category {pool_key!r} is not available for this setup."
+        )
     existing = connection.execute(
         """
         SELECT pool_key
@@ -1763,6 +2083,22 @@ def assign_assessment_review_row_pool(
         ),
     ).fetchone()
     previous_pool_key = str(existing[0]) if existing is not None else None
+    if _sqlite_table_exists(connection, "budget_line_allocation_slices"):
+        connection.execute(
+            """
+            UPDATE budget_line_allocation_slices
+               SET status = 'superseded'
+             WHERE assessment_setup_id = ?
+               AND source_line_normalized_label = ?
+               AND COALESCE(source_line_account_code, '') = COALESCE(?, '')
+               AND status IN ('draft', 'approved')
+            """,
+            (
+                assessment_setup_id,
+                str(row["normalized_label"]),
+                row["account_code"],
+            ),
+        )
     connection.execute(
         """
         INSERT INTO budget_line_pool_mappings (
@@ -2509,6 +2845,7 @@ __all__ = [
     "is_remainder_eligible_budget_line",
     "materialize_budget_line_pool_mappings",
     "normalize_budget_label",
+    "resolve_active_assessment_setup_id",
     "record_scoped_alias",
     "select_assessment_mapping_amount",
     "set_exemption_decision_state",

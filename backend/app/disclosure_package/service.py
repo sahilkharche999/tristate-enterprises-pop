@@ -1332,15 +1332,35 @@ def _serialize_assessment_setup_snapshot(
     the frozen COMPUTED matrix from the compile-context snapshot, not this
     payload — this preserves what the setup rows said at finalize time.
     """
-    setup_row = connection.execute(
-        """
-        SELECT s.id, s.setup_type, s.display_mode, s.status, s.approved_at
-          FROM assessment_setups s
-          JOIN properties p ON p.default_assessment_setup_id = s.id
-         WHERE p.id = ?
-        """,
-        (property_id,),
-    ).fetchone()
+    from app.services.assessment_budget_mapping_rule_service import (
+        resolve_active_assessment_setup_id,
+    )
+
+    setup_id = resolve_active_assessment_setup_id(
+        connection,
+        property_id=property_id,
+    )
+    setup_columns = {
+        row[1]
+        for row in connection.execute(
+            "PRAGMA table_info(assessment_setups)"
+        ).fetchall()
+    }
+    display_mode_sql = (
+        "display_mode" if "display_mode" in setup_columns else "NULL AS display_mode"
+    )
+    setup_row = (
+        connection.execute(
+            f"""
+            SELECT id, setup_type, {display_mode_sql}, status, approved_at
+              FROM assessment_setups
+             WHERE id = ?
+            """,
+            (setup_id,),
+        ).fetchone()
+        if setup_id is not None
+        else None
+    )
     if setup_row is None:
         return {}
     setup_id = setup_row[0]
@@ -1464,14 +1484,17 @@ def assemble_finalize_snapshots(
         )
     try:
         from app.allocation_resolution.service import freeze_resolution_snapshot
+        from app.services.assessment_budget_mapping_rule_service import (
+            resolve_active_assessment_setup_id,
+        )
 
-        setup_row = raw_conn.execute(
-            "SELECT default_assessment_setup_id FROM properties WHERE id = ?",
-            (hoa_id,),
-        ).fetchone()
-        if setup_row and setup_row[0] is not None:
+        setup_id = resolve_active_assessment_setup_id(
+            raw_conn,
+            property_id=hoa_id,
+        )
+        if setup_id is not None:
             compile_context["allocation_resolution"] = freeze_resolution_snapshot(
-                raw_conn, assessment_setup_id=int(setup_row[0])
+                raw_conn, assessment_setup_id=int(setup_id)
             )
     except Exception:
         logger.exception("allocation resolution freeze failed for HOA %s", hoa_id)
@@ -1833,18 +1856,21 @@ def list_special_assessment_pools(
     matrix builder does, so the ``pool_key`` set can't drift. Empty when there is
     no approved setup or no special pools."""
     raw_conn = session.connection().connection
-    setup = raw_conn.execute(
-        "SELECT id FROM assessment_setups "
-        "WHERE property_id = ? AND status = 'approved' ORDER BY id DESC LIMIT 1",
-        (hoa_id,),
-    ).fetchone()
-    if setup is None:
+    from app.services.assessment_budget_mapping_rule_service import (
+        resolve_active_assessment_setup_id,
+    )
+
+    setup_id = resolve_active_assessment_setup_id(
+        raw_conn,
+        property_id=hoa_id,
+    )
+    if setup_id is None:
         return []
     rows = raw_conn.execute(
         "SELECT pool_key, pool_name, allocation_method, recipient_scope "
         "FROM allocation_pools WHERE assessment_setup_id = ? AND pool_kind = ? "
         "ORDER BY display_order, id",
-        (setup[0], "separately_billed_special_assessment"),
+        (setup_id, "separately_billed_special_assessment"),
     ).fetchall()
     return [
         {
@@ -1904,7 +1930,7 @@ def preview_special_assessment_allocation(
     return {
         "available": False,
         "reason": (
-            "No allocation for this pool yet — enter a total or map a budget line, "
+            "No allocation for this assessment category yet — enter a total or map a budget line, "
             "and make sure the DRE setup is approved."
         ),
     }

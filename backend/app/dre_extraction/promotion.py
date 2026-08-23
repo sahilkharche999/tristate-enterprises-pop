@@ -1020,6 +1020,11 @@ def populate_setup_children(
                 counts["groups"] += 1
             elif f"group:{group_key}" in edited_entity_keys:
                 failed_edited_entities.append(f"group:{group_key}")
+        _refresh_proportional_resolution_snapshots(
+            setup_id=setup_id,
+            extraction=extraction,
+            connection=connection,
+        )
 
     unit_id_by_number: dict[str, int] = {}
     if setup_type == "per_unit":
@@ -1033,6 +1038,12 @@ def populate_setup_children(
                 counts["units"] += 1
             elif f"unit:{unit.unit_number}" in edited_entity_keys:
                 failed_edited_entities.append(f"unit:{unit.unit_number}")
+
+        _refresh_proportional_resolution_snapshots(
+            setup_id=setup_id,
+            extraction=extraction,
+            connection=connection,
+        )
 
         # For each specified_value pool (C7): promote the extraction's
         # per-unit dollar_amount factors when they pass the sum test;
@@ -1062,11 +1073,263 @@ def populate_setup_children(
                 counts.setdefault("specified_value_placeholders", []).append(
                     {"pool_key": pool.pool_key, "reason": outcome["reason"]}
                 )
+            _refresh_specified_resolution_snapshot(
+                setup_id=setup_id,
+                pool_key=pool.pool_key,
+                connection=connection,
+            )
 
     if failed_edited_entities:
         raise EditedEntityFailedToPromote(failed_edited_entities)
 
+    try:
+        unresolved_row = connection.execute(
+            """
+            SELECT 1
+              FROM allocation_resolutions
+             WHERE assessment_setup_id = ?
+               AND status IN ('unresolved', 'draft')
+             LIMIT 1
+            """,
+            (setup_id,),
+        ).fetchone()
+        connection.execute(
+            """
+            UPDATE assessment_setups
+               SET allocation_readiness_status = ?
+             WHERE id = ?
+            """,
+            ("needs_review" if unresolved_row else "ok", setup_id),
+        )
+    except sqlite3.OperationalError:
+        logger.warning(
+            "promotion: allocation readiness column/table unavailable for setup %s",
+            setup_id,
+        )
+
     return counts
+
+
+def _refresh_proportional_resolution_snapshots(
+    *,
+    setup_id: int,
+    extraction: DRESetupExtraction,
+    connection: sqlite3.Connection,
+) -> None:
+    """Persist complete promoted factors for approved proportional rules.
+
+    Promotion creates the resolution record while the pool is being inserted,
+    before the unit rows exist.  Fill the snapshot after those rows are
+    available, but never replace a non-empty operator snapshot.
+    """
+    try:
+        resolution_rows = connection.execute(
+            """
+            SELECT pool_key, resolved_method, factor_snapshot_json
+              FROM allocation_resolutions
+             WHERE assessment_setup_id = ? AND status = 'approved'
+            """,
+            (setup_id,),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return
+
+    unit_rows = connection.execute(
+        """
+        SELECT unit_number, square_feet, ownership_percent
+          FROM assessment_units
+         WHERE assessment_setup_id = ?
+         ORDER BY id
+        """,
+        (setup_id,),
+    ).fetchall()
+    group_rows = connection.execute(
+        """
+        SELECT group_name, unit_count, average_square_feet, ownership_percent
+          FROM assessment_groups
+         WHERE assessment_setup_id = ?
+         ORDER BY id
+        """,
+        (setup_id,),
+    ).fetchall()
+    if not unit_rows and not group_rows:
+        return
+    pool_denominators = {
+        str(row[0]): (
+            Decimal(str(row[1])) if row[1] not in (None, "") else None
+        )
+        for row in connection.execute(
+            """
+            SELECT pool_key, denominator_value
+              FROM allocation_pools
+             WHERE assessment_setup_id = ?
+            """,
+            (setup_id,),
+        ).fetchall()
+    }
+
+    payload_factor_values: dict[str, dict[str, Decimal]] = {}
+    for unit in extraction.unit_structure.units:
+        for factor in unit.pool_factors:
+            try:
+                value = Decimal(str(factor.factor_value))
+            except (InvalidOperation, TypeError, ValueError):
+                continue
+            payload_factor_values.setdefault(str(factor.pool_key), {})[
+                str(unit.unit_number)
+            ] = value
+
+    def _stored_snapshot(raw: Any) -> dict[str, Any]:
+        if not raw:
+            return {}
+        try:
+            value = json.loads(str(raw))
+        except (TypeError, json.JSONDecodeError):
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    for pool_key, method, raw_snapshot in resolution_rows:
+        if method not in {"square_footage", "ownership_percentage"}:
+            continue
+        if _stored_snapshot(raw_snapshot).get("recipients"):
+            continue
+
+        denominator: Optional[Decimal] = None
+        denominator_source: Optional[str] = None
+        recipients: dict[str, Decimal] = {}
+        if group_rows:
+            if method == "square_footage":
+                recipients = {
+                    str(row[0]): Decimal(str(row[2])) * Decimal(str(row[1] or 1))
+                    for row in group_rows
+                    if row[2] not in (None, "")
+                }
+            else:
+                raw_recipients = {
+                    str(row[0]): Decimal(str(row[3]))
+                    for row in group_rows
+                    if row[3] not in (None, "")
+                }
+                weighted_recipients = {
+                    str(row[0]): Decimal(str(row[3])) * Decimal(str(row[1] or 1))
+                    for row in group_rows
+                    if row[3] not in (None, "")
+                }
+                raw_total = sum(raw_recipients.values(), start=Decimal("0"))
+                weighted_total = sum(
+                    weighted_recipients.values(), start=Decimal("0")
+                )
+                recipients = (
+                    raw_recipients
+                    if abs(raw_total - Decimal("1"))
+                    <= abs(weighted_total - Decimal("1"))
+                    else weighted_recipients
+                )
+        else:
+            if method == "square_footage":
+                recipients = {
+                    str(row[0]): Decimal(str(row[1]))
+                    for row in unit_rows
+                    if row[1] not in (None, "")
+                }
+            else:
+                recipients = {
+                    str(row[0]): Decimal(str(row[2]))
+                    for row in unit_rows
+                    if row[2] not in (None, "")
+                }
+                # Multi-factor DRE schedules carry a different ownership
+                # column per category, not on assessment_units. Use that
+                # category-specific column when the canonical unit column is
+                # absent or incomplete.
+                if len(recipients) != len(unit_rows):
+                    recipients = payload_factor_values.get(str(pool_key), {})
+
+        if len(recipients) != (len(group_rows) if group_rows else len(unit_rows)):
+            continue
+        if method == "square_footage":
+            stored_denominator = pool_denominators.get(str(pool_key))
+            denominator = stored_denominator or sum(
+                recipients.values(), start=Decimal("0")
+            )
+            denominator_source = (
+                "dre_value" if stored_denominator is not None else "calculated"
+            )
+            if denominator <= 0:
+                continue
+        elif sum(recipients.values(), start=Decimal("0")) <= 0:
+            continue
+
+        snapshot = {
+            "method": method,
+            "denominator_value": str(denominator) if denominator is not None else None,
+            "denominator_source": denominator_source,
+            "recipients": {key: str(value) for key, value in recipients.items()},
+        }
+        connection.execute(
+            """
+            UPDATE allocation_resolutions
+               SET factor_snapshot_json = ?,
+                   denominator_value = COALESCE(?, denominator_value),
+                   denominator_source = COALESCE(?, denominator_source)
+             WHERE assessment_setup_id = ?
+               AND pool_key = ?
+               AND status = 'approved'
+            """,
+            (
+                json.dumps(snapshot, separators=(",", ":")),
+                str(denominator) if denominator is not None else None,
+                denominator_source,
+                setup_id,
+                pool_key,
+            ),
+        )
+
+
+def _refresh_specified_resolution_snapshot(
+    *,
+    setup_id: int,
+    pool_key: str,
+    connection: sqlite3.Connection,
+) -> None:
+    """Persist promoted per-unit values as the approved resolution snapshot."""
+    try:
+        rows = connection.execute(
+            """
+            SELECT u.unit_number, a.specified_monthly_amount
+              FROM assessment_unit_pool_allocations a
+              JOIN assessment_units u ON u.id = a.assessment_unit_id
+             WHERE a.assessment_setup_id = ? AND a.pool_key = ?
+            """,
+            (setup_id, pool_key),
+        ).fetchall()
+        if not rows:
+            return
+        snapshot = json.dumps({
+            "method": "specified_value",
+            "denominator_value": None,
+            "denominator_source": None,
+            "recipients": {str(row[0]): str(row[1]) for row in rows},
+        })
+        connection.execute(
+            """
+            UPDATE allocation_resolutions
+               SET factor_snapshot_json = ?,
+                   denominator_value = NULL,
+                   denominator_source = NULL
+             WHERE assessment_setup_id = ?
+               AND pool_key = ?
+               AND status = 'approved'
+            """,
+            (snapshot, setup_id, pool_key),
+        )
+    except sqlite3.OperationalError:
+        # Legacy databases can promote before the allocation-resolution tables
+        # have been created; their normal specified-value lookup remains valid.
+        logger.warning(
+            "promotion: could not refresh specified-value resolution snapshot for %s",
+            pool_key,
+        )
 
 
 __all__ = [

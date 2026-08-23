@@ -699,6 +699,84 @@ def test_clear_disposition_restores_row_to_regular_review(client, db_session):
     assert refreshed_landscape["included_in_regular_basis"] is True
 
 
+def test_combined_budget_row_uses_mapping_review_split_contract(client, db_session):
+    hoa_id, setup_id = _seed_assignment_review_data(db_session)
+    raw = db_session.connection().connection
+    raw.execute(
+        """
+        UPDATE budget_drafts
+           SET line_items_json = ?
+         WHERE property_id = ? AND status = 'active'
+        """,
+        (
+            json.dumps([
+                {
+                    "label": "Grounds & Landscaping",
+                    "category": "operating",
+                    "annual_budget": 900,
+                    "raw": {"section": "operating"},
+                },
+            ]),
+            hoa_id,
+        ),
+    )
+    raw.execute(
+        """
+        INSERT INTO allocation_resolutions (
+            property_id, assessment_setup_id, pool_key, version_int, status,
+            declared_method, included_categories_json
+        ) VALUES (?, ?, 'pool_a', 1, 'unresolved', 'custom_factor', ?)
+        """,
+        (hoa_id, setup_id, json.dumps(["landscaping"])),
+    )
+    db_session.commit()
+
+    state = client.get(f"/hoa/{hoa_id}/assessment-mapping-review").json()
+    row = state["review_rows"][0]
+    assert row["allocation_mode"] == "split_required"
+    assert row["split_status"] == "required"
+    assert row["source_annual_amount"] == 900.0
+
+    stale = client.post(
+        f"/hoa/{hoa_id}/allocation-resolution/slices",
+        json={
+            "source_line_label": "Grounds & Landscaping",
+            "source_annual_amount": "901",
+            "slices": [
+                {"pool_key": "pool_a", "semantic_category": "landscaping", "slice_annual_amount": "400"},
+                {"pool_key": "pool_b", "semantic_category": "grounds", "slice_annual_amount": "500"},
+            ],
+        },
+    )
+    assert stale.status_code == 422
+    assert "active budget" in stale.json()["detail"].lower()
+
+    saved = client.post(
+        f"/hoa/{hoa_id}/allocation-resolution/slices",
+        json={
+            "line_key": row["line_key"],
+            "source_line_label": "Grounds & Landscaping",
+            "source_annual_amount": "900",
+            "slices": [
+                {"pool_key": "pool_a", "semantic_category": "landscaping", "slice_annual_amount": "400"},
+                {"pool_key": "pool_b", "semantic_category": "grounds", "slice_annual_amount": "500"},
+            ],
+        },
+    )
+    assert saved.status_code == 200, saved.text
+    refreshed = client.get(f"/hoa/{hoa_id}/assessment-mapping-review").json()
+    assert refreshed["review_rows"][0]["split_status"] == "draft"
+    assert refreshed["review_rows"][0]["split_saved"] is True
+
+    approved = client.post(
+        f"/hoa/{hoa_id}/allocation-resolution/slices/approve",
+        json={"line_key": row["line_key"]},
+    )
+    assert approved.status_code == 200, approved.text
+    final_row = client.get(f"/hoa/{hoa_id}/assessment-mapping-review").json()["review_rows"][0]
+    assert final_row["split_status"] == "approved"
+
+
 def test_approve_line_review_suggestion_creates_alias_and_current_year_mapping(client, db_session):
     hoa_id, _setup_id = _seed_evidence_review_data(db_session)
     state = client.get(f"/hoa/{hoa_id}/assessment-mapping-review").json()

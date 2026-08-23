@@ -4,6 +4,8 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 from sqlalchemy.orm import Session
 
+MAX_UPLOAD_SIZE = 100 * 1024 * 1024  # 100 MB
+
 from ..assessment_mode import AssessmentMode
 from ..ai_implementation.db import get_session
 from ..auth.dependencies import get_current_user
@@ -173,13 +175,16 @@ async def upload_budget(
     current_user: dict = Depends(get_current_user),
 ) -> BudgetUploadResponse:
     try:
+        if file.size and file.size > MAX_UPLOAD_SIZE:
+            raise HTTPException(status_code=413, detail="Uploaded file too large (max 100MB)")
+        file_bytes = await file.read()
         return budget_history_service.create_upload(
             session,
             hoa_id=hoa_id,
             actor=current_user,
             original_filename=file.filename or "upload.xlsx",
             content_type=file.content_type,
-            file_bytes=await file.read(),
+            file_bytes=file_bytes,
             source_mode=source_mode,
             assessment_mode=assessment_mode,
         )
@@ -200,16 +205,22 @@ async def upload_budget_bundle(
     current_user: dict = Depends(get_current_user),
 ) -> BudgetBundleUploadResponse:
     try:
+        if budget_file.size and budget_file.size > MAX_UPLOAD_SIZE:
+            raise HTTPException(status_code=413, detail="Budget file too large (max 100MB)")
+        if reserve_study_file.size and reserve_study_file.size > MAX_UPLOAD_SIZE:
+            raise HTTPException(status_code=413, detail="Reserve study file too large (max 100MB)")
+        budget_file_bytes = await budget_file.read()
+        reserve_file_bytes = await reserve_study_file.read()
         return budget_history_service.create_upload_bundle(
             session,
             hoa_id=hoa_id,
             actor=current_user,
             budget_filename=budget_file.filename or "budget-upload.xlsx",
             budget_content_type=budget_file.content_type,
-            budget_file_bytes=await budget_file.read(),
+            budget_file_bytes=budget_file_bytes,
             reserve_filename=reserve_study_file.filename or "reserve-study.pdf",
             reserve_content_type=reserve_study_file.content_type,
-            reserve_file_bytes=await reserve_study_file.read(),
+            reserve_file_bytes=reserve_file_bytes,
             source_mode=source_mode,
             assessment_mode=assessment_mode,
         )

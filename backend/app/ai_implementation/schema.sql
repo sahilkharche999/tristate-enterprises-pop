@@ -649,6 +649,7 @@ CREATE TABLE IF NOT EXISTS budget_line_allocation_slices (
     assessment_setup_id             INTEGER NOT NULL
                                     REFERENCES assessment_setups(id) ON DELETE CASCADE,
     source_line_normalized_label    TEXT NOT NULL,
+    source_line_key                  TEXT,
     source_line_account_code        TEXT,
     source_annual_amount            NUMERIC NOT NULL,
     slice_annual_amount             NUMERIC NOT NULL,

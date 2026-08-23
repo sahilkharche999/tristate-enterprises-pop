@@ -5,6 +5,13 @@ export type AllocationResolutionState = {
   property_id: number;
   assessment_setup_id: number;
   resolutions: Array<Record<string, unknown>>;
+  assessment_categories: Array<{
+    pool_key: string;
+    pool_name: string;
+    allocation_method: string;
+    recipient_scope: string;
+    budget_line_derivation: string;
+  }>;
   slices: Array<Record<string, unknown>>;
   category_decisions: Array<Record<string, unknown>>;
   candidate_factors: {

@@ -6,16 +6,23 @@ import {
   draftAllocationResolution,
   getAllocationPreview,
   getAllocationResolution,
-  saveAllocationSlices,
   saveCategoryDecision,
   type AllocationResolutionState,
 } from '../api/allocationResolution';
 import { getErrorMessage } from '../lib/errors';
-import { combinedLineHint, issueAnchor, slicesBalance } from '../lib/allocationResolution';
+import { issueAnchor } from '../lib/allocationResolution';
 
 type Props = {
   hoaId: number;
 };
+
+function assessmentCategoryName(
+  categories: AllocationResolutionState['assessment_categories'],
+  key: string | null | undefined,
+) {
+  if (!key) return '';
+  return categories.find((category) => category.pool_key === key)?.pool_name || humanize(key);
+}
 
 export function AllocationResolutionPanel({ hoaId }: Props) {
   const [state, setState] = useState<AllocationResolutionState | null>(null);
@@ -24,15 +31,6 @@ export function AllocationResolutionPanel({ hoaId }: Props) {
   const [busy, setBusy] = useState<string | null>(null);
   const [reason, setReason] = useState('');
   const [methodByPool, setMethodByPool] = useState<Record<string, string>>({});
-  const [splitLabel, setSplitLabel] = useState('');
-  const [splitAmount, setSplitAmount] = useState('');
-  const [splitLeft, setSplitLeft] = useState('');
-  const [splitRight, setSplitRight] = useState('');
-  const [leftPool, setLeftPool] = useState('');
-  const [rightPool, setRightPool] = useState('');
-  const [leftCategory, setLeftCategory] = useState('');
-  const [rightCategory, setRightCategory] = useState('');
-  const [hintApplied, setHintApplied] = useState(false);
 
   async function load() {
     setBusy('load');
@@ -56,31 +54,15 @@ export function AllocationResolutionPanel({ hoaId }: Props) {
     void load();
   }, [hoaId]);
 
-  const poolKeys = useMemo(
-    () => (state?.resolutions ?? []).map((row) => String(row.pool_key)).filter(Boolean),
-    [state],
-  );
-
   const unresolvedPools = useMemo(
     () => (state?.resolutions ?? []).filter((row) => {
       const declared = String(row.declared_method || '');
       const status = String(row.status || '');
-      return ['custom_factor', 'external_schedule', 'unknown'].includes(declared) && status !== 'approved';
+      return ['custom_factor', 'external_schedule', 'unknown', 'category'].includes(declared)
+        && status !== 'approved';
     }),
     [state],
   );
-
-  useEffect(() => {
-    if (!state || hintApplied) return;
-    const hint = combinedLineHint(state.readiness.issues);
-    if (!hint) return;
-    setSplitLabel((current) => current || hint.lineLabel);
-    setLeftCategory((current) => current || hint.category);
-    setLeftPool((current) => current || hint.poolKey);
-    const residual = poolKeys.find((key) => key !== hint.poolKey) || '';
-    setRightPool((current) => current || residual);
-    setHintApplied(true);
-  }, [hintApplied, poolKeys, state]);
 
   if (error && !state) {
     return null;
@@ -93,14 +75,6 @@ export function AllocationResolutionPanel({ hoaId }: Props) {
     );
   }
 
-  const splitDelta = slicesBalance(Number(splitAmount || 0), [
-    { pool_key: leftPool, semantic_category: leftCategory, slice_annual_amount: splitLeft },
-    { pool_key: rightPool, semantic_category: rightCategory, slice_annual_amount: splitRight },
-  ]);
-  const canSaveSplit = Boolean(splitLabel && splitAmount && leftPool && rightPool && leftCategory && splitLeft && splitRight)
-    && splitDelta === 0
-    && busy === null;
-
   const monthlyByUnit = ((preview as { preview?: { monthly_by_unit?: Record<string, string> } } | null)
     ?.preview?.monthly_by_unit) || {};
   const hasPreviewDollars = Object.values(monthlyByUnit).some((value) => Number(value) !== 0);
@@ -112,7 +86,7 @@ export function AllocationResolutionPanel({ hoaId }: Props) {
           <h2 className="text-lg font-semibold text-[#111111]">Allocation resolution</h2>
           <p className="mt-1 text-sm text-[#525252]">
             Keep the governing-document rule, then choose an executable method. Final PDFs stay blocked until
-            categories, slices, factors, and approval reconcile.
+            assessment categories, factors, and approval reconcile.
           </p>
         </div>
         <span className={`rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset ${
@@ -139,14 +113,21 @@ export function AllocationResolutionPanel({ hoaId }: Props) {
 
       {state.resolutions.length === 0 && (
         <p className="text-sm text-[#525252]">
-          No allocation-resolution records for this setup yet. Re-promote the governing document, or run
-          the migration report, to create them from the extracted rules.
+          {state.assessment_categories.length === 0
+            ? 'This setup has no available assessment categories. Complete the governing-document setup and mapping step before assigning budget costs.'
+            : 'This setup has no governing-document rules that need a separate decision. Use the mapping table below to assign budget costs to assessment categories.'}
+          {state.assessment_categories.length === 0 && (
+            <Link className="ml-1 underline" to={`/hoa/${hoaId}/settings?section=dre`}>
+              Open setup and mapping
+            </Link>
+          )}
         </p>
       )}
 
       <div className="grid gap-4 lg:grid-cols-2">
         {state.resolutions.map((row) => {
           const poolKey = String(row.pool_key);
+          const categoryName = assessmentCategoryName(state.assessment_categories, poolKey);
           const declared = String(row.declared_method);
           const selected = methodByPool[poolKey] || String(row.resolved_method || '');
           return (
@@ -155,24 +136,24 @@ export function AllocationResolutionPanel({ hoaId }: Props) {
               id={issueAnchor(`pool:${poolKey}`)}
               className="rounded-lg border border-[#eeeeee] p-4"
             >
-              <h3 className="font-medium text-[#111111]">{poolKey}</h3>
+              <h3 className="font-medium text-[#111111]">Assessment category rule: {categoryName}</h3>
               <p className="mt-1 text-sm text-[#525252]">
-                Declared <strong>{declared}</strong>
+                Governing document says <strong>{humanize(declared)}</strong>
                 {row.declared_denominator_label ? ` — ${String(row.declared_denominator_label)}` : ''}
               </p>
               <p className="mt-1 text-xs text-[#737373]">
-                Status {String(row.status)} · source pages {JSON.stringify((row.evidence as { source_pages?: number[] })?.source_pages || [])}
+                Decision status: {humanize(String(row.status))} · source pages {JSON.stringify((row.evidence as { source_pages?: number[] })?.source_pages || [])}
               </p>
-              {['custom_factor', 'external_schedule', 'unknown'].includes(declared) && (
+              {['custom_factor', 'external_schedule', 'unknown', 'category'].includes(declared) && (
                 <div className="mt-3 space-y-2">
                   <label className="block text-xs font-medium text-[#525252]">
-                    Executable basis
+                    How this category is shared
                     <select
                       className="mt-1 w-full rounded-md border border-[#d4d4d4] px-2 py-1.5 text-sm"
                       value={selected}
                       onChange={(event) => setMethodByPool((prev) => ({ ...prev, [poolKey]: event.target.value }))}
                     >
-                      <option value="">Select…</option>
+                      <option value="">Choose a sharing method</option>
                       <option value="ownership_percentage">Use ownership percentage (confirm)</option>
                       <option value="square_footage">Use square footage (confirm)</option>
                       <option value="specified_value">Enter custom / specified factors</option>
@@ -242,98 +223,7 @@ export function AllocationResolutionPanel({ hoaId }: Props) {
       </div>
 
       <div className="rounded-lg border border-[#eeeeee] p-4">
-        <h3 className="font-medium text-[#111111]">Combined-line splitter</h3>
-        <p className="mt-1 text-sm text-[#525252]">
-          Use this when one budget line covers more than one declared category. The source amount stays
-          immutable; the slices must sum to it. Fields start empty and only prefill from a readiness
-          combined-line issue for this setup.
-        </p>
-        <div className="mt-3 grid gap-3 md:grid-cols-2">
-          <label className="text-xs text-[#525252]">
-            Source line
-            <input
-              className="mt-1 w-full rounded-md border px-2 py-1.5 text-sm"
-              placeholder="Budget line label"
-              value={splitLabel}
-              onChange={(e) => setSplitLabel(e.target.value)}
-            />
-          </label>
-          <label className="text-xs text-[#525252]">
-            Source annual
-            <input
-              className="mt-1 w-full rounded-md border px-2 py-1.5 text-sm"
-              placeholder="0.00"
-              value={splitAmount}
-              onChange={(e) => setSplitAmount(e.target.value)}
-            />
-          </label>
-          <label className="text-xs text-[#525252]">
-            Slice 1 category
-            <input className="mt-1 w-full rounded-md border px-2 py-1.5 text-sm" placeholder="Category from the governing document" value={leftCategory} onChange={(e) => setLeftCategory(e.target.value)} />
-          </label>
-          <label className="text-xs text-[#525252]">
-            Slice 1 amount
-            <input className="mt-1 w-full rounded-md border px-2 py-1.5 text-sm" placeholder="0.00" value={splitLeft} onChange={(e) => setSplitLeft(e.target.value)} />
-          </label>
-          <label className="text-xs text-[#525252]">
-            Slice 1 pool
-            <select className="mt-1 w-full rounded-md border px-2 py-1.5 text-sm" value={leftPool} onChange={(e) => setLeftPool(e.target.value)}>
-              <option value="">Select pool…</option>
-              {poolKeys.map((key) => <option key={key} value={key}>{key}</option>)}
-            </select>
-          </label>
-          <label className="text-xs text-[#525252]">
-            Slice 2 category
-            <input className="mt-1 w-full rounded-md border px-2 py-1.5 text-sm" placeholder="Remaining category" value={rightCategory} onChange={(e) => setRightCategory(e.target.value)} />
-          </label>
-          <label className="text-xs text-[#525252]">
-            Slice 2 amount
-            <input className="mt-1 w-full rounded-md border px-2 py-1.5 text-sm" placeholder="0.00" value={splitRight} onChange={(e) => setSplitRight(e.target.value)} />
-          </label>
-          <label className="text-xs text-[#525252]">
-            Slice 2 pool
-            <select className="mt-1 w-full rounded-md border px-2 py-1.5 text-sm" value={rightPool} onChange={(e) => setRightPool(e.target.value)}>
-              <option value="">Select pool…</option>
-              {poolKeys.map((key) => <option key={key} value={key}>{key}</option>)}
-            </select>
-          </label>
-        </div>
-        <p className="mt-2 text-xs text-[#737373]">
-          {!splitAmount
-            ? 'Enter the source amount and both slices.'
-            : splitDelta === 0
-              ? 'Slices balance the source line.'
-              : `Slices are off by ${splitDelta}.`}
-        </p>
-        <button
-          type="button"
-          className="mt-2 rounded-md border border-[#d4d4d4] px-3 py-1.5 text-sm"
-          disabled={!canSaveSplit}
-          onClick={async () => {
-            setBusy('slices');
-            try {
-              await saveAllocationSlices(hoaId, {
-                source_line_label: splitLabel,
-                source_annual_amount: splitAmount,
-                slices: [
-                  { pool_key: leftPool, semantic_category: leftCategory, slice_annual_amount: splitLeft },
-                  { pool_key: rightPool, semantic_category: rightCategory, slice_annual_amount: splitRight },
-                ],
-              });
-              await load();
-            } catch (err) {
-              setError(getErrorMessage(err, 'Could not save slices.'));
-            } finally {
-              setBusy(null);
-            }
-          }}
-        >
-          Save split
-        </button>
-      </div>
-
-      <div className="rounded-lg border border-[#eeeeee] p-4">
-        <h3 className="font-medium text-[#111111]">Required categories</h3>
+        <h3 className="font-medium text-[#111111]">Required assessment categories</h3>
         {unresolvedPools.length === 0 ? (
           <p className="mt-2 text-sm text-[#666666]">No unresolved exception categories on this setup.</p>
         ) : (
@@ -341,7 +231,9 @@ export function AllocationResolutionPanel({ hoaId }: Props) {
             {unresolvedPools.flatMap((row) => (
               ((row.included_categories as string[]) || []).map((category) => (
                 <div key={`${row.pool_key}-${category}`} id={issueAnchor(`category:${row.pool_key}:${category}`)} className="flex flex-wrap items-center justify-between gap-2 text-sm">
-                  <span>{String(row.pool_key)} · {category}</span>
+                  <span>
+                    {assessmentCategoryName(state.assessment_categories, String(row.pool_key))} · {category}
+                  </span>
                   <div className="flex gap-2">
                     {(['mapped', 'zero', 'not_applicable'] as const).map((decision) => (
                       <button

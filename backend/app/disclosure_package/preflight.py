@@ -25,6 +25,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
+import sqlite3
 from typing import Optional
 
 from .schemas import (
@@ -665,7 +666,7 @@ def check_special_assessments(
                         field_path=f"special_assessments[{i}].amount_per_unit",
                         message=(
                             f"Special assessment {label!r} status='approved_scheduled' "
-                            "but has no amount_per_unit, total_amount, or pool link."
+                            "but has no amount_per_unit, total_amount, or category link."
                         ),
                         severity="blocking",
                     )
@@ -710,52 +711,80 @@ def check_allocation_resolution_readiness(
     connection,
 ) -> list[PreflightError]:
     """Block final generation when governing-document allocation is unresolved."""
+    from app.allocation_resolution.readiness import (
+        evaluate_readiness,
+        readiness_blocks_final,
+    )
+    from app.services.assessment_budget_mapping_rule_service import (
+        active_budget_lines_for_property,
+        resolve_active_assessment_setup_id,
+    )
+
+    setup_id = resolve_active_assessment_setup_id(
+        connection,
+        property_id=property_id,
+    )
+    if setup_id is None:
+        return []
+    _draft_id, budget_lines = active_budget_lines_for_property(
+        connection,
+        property_id=property_id,
+    )
+    residual = {
+        str(r[0])
+        for r in connection.execute(
+            "SELECT pool_key FROM allocation_pools "
+            "WHERE assessment_setup_id = ? AND budget_line_derivation = 'residual_default'",
+            (setup_id,),
+        ).fetchall()
+    }
     try:
-        from app.allocation_resolution.readiness import (
-            evaluate_readiness,
-            readiness_blocks_final,
-        )
-        row = connection.execute(
-            "SELECT default_assessment_setup_id FROM properties WHERE id = ?",
-            (property_id,),
-        ).fetchone()
-        setup_id = int(row[0]) if row and row[0] is not None else None
-        if setup_id is None:
-            return []
-        residual = {
-            str(r[0])
-            for r in connection.execute(
-                "SELECT pool_key FROM allocation_pools "
-                "WHERE assessment_setup_id = ? AND budget_line_derivation = 'residual_default'",
-                (setup_id,),
-            ).fetchall()
-        }
         report = evaluate_readiness(
             connection,
             property_id=property_id,
             assessment_setup_id=setup_id,
+            budget_lines=budget_lines,
             residual_pool_keys=residual,
         )
-        if not readiness_blocks_final(report):
-            return []
-        out: list[PreflightError] = []
-        for issue in report.issues:
-            if issue.severity != "blocking":
-                continue
-            out.append(
-                PreflightError(
-                    field_path=f"allocation_resolution.{issue.target or issue.code}",
-                    message=issue.message,
-                    severity="blocking",
-                    code=issue.code,
-                    suggested_fix=issue.fix_label,
-                    fix_path=issue.fix_path,
-                    fix_label=issue.fix_label,
-                )
+    except (
+        AttributeError,
+        IndexError,
+        KeyError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+        sqlite3.Error,
+    ) as exc:
+        return [
+            PreflightError(
+                field_path="allocation_resolution.readiness",
+                message=(
+                    "Allocation readiness could not be evaluated. "
+                    "Refresh the mapping review or contact an administrator."
+                ),
+                severity="blocking",
+                code="allocation_readiness_evaluation_failed",
+                suggested_fix="Refresh the assessment mapping review and retry.",
+                fix_path=f"/hoa/{property_id}/assessment-mapping-review",
+                fix_label="Open assessment mapping review",
+                affected_value=str(exc) or None,
             )
-        return out
-    except Exception:
+        ]
+    if not readiness_blocks_final(report):
         return []
+    return [
+        PreflightError(
+            field_path=f"allocation_resolution.{issue.target or issue.code}",
+            message=issue.message,
+            severity="blocking",
+            code=issue.code,
+            suggested_fix=issue.fix_label,
+            fix_path=issue.fix_path,
+            fix_label=issue.fix_label,
+        )
+        for issue in report.issues
+        if issue.severity == "blocking"
+    ]
 
 
 def check_specified_value_placeholders(
@@ -775,19 +804,26 @@ def check_specified_value_placeholders(
 
     Scopes to the property's default (active) assessment setup.
     """
+    from app.services.assessment_budget_mapping_rule_service import (
+        resolve_active_assessment_setup_id,
+    )
+
+    setup_id = resolve_active_assessment_setup_id(
+        connection,
+        property_id=property_id,
+    )
+    if setup_id is None:
+        return []
     rows = connection.execute(
         """
-        SELECT aupa.pool_key,
-               COUNT(*) AS placeholder_count
-          FROM assessment_unit_pool_allocations aupa
-          JOIN properties p
-            ON p.default_assessment_setup_id = aupa.assessment_setup_id
-         WHERE p.id = ?
-           AND aupa.source = 'equal_split_placeholder'
-         GROUP BY aupa.pool_key
-         ORDER BY aupa.pool_key
+        SELECT pool_key, COUNT(*) AS placeholder_count
+          FROM assessment_unit_pool_allocations
+         WHERE assessment_setup_id = ?
+           AND source = 'equal_split_placeholder'
+         GROUP BY pool_key
+         ORDER BY pool_key
         """,
-        (property_id,),
+        (setup_id,),
     ).fetchall()
 
     out: list[PreflightError] = []
@@ -796,7 +832,7 @@ def check_specified_value_placeholders(
             PreflightError(
                 field_path=f"assessment_setup.pools.{pool_key}.unit_allocations",
                 message=(
-                    f"Pool {pool_key!r} uses specified per-unit values, but "
+                    f"Assessment category {pool_key!r} uses specified per-unit values, but "
                     f"{placeholder_count} unit(s) still carry the auto-generated "
                     "equal-split placeholder. Enter each unit's actual amount "
                     "in the Review Workbench before generating the package."
@@ -805,7 +841,7 @@ def check_specified_value_placeholders(
                 code="specified_value_placeholder",
                 suggested_fix=(
                     "Open the DRE Review Workbench and enter the per-unit "
-                    "specified amounts for this pool, then re-approve."
+                    "specified amounts for this assessment category, then re-approve."
                 ),
             )
         )

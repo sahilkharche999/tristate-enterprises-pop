@@ -268,6 +268,112 @@ def test_slices_and_zero_category_decisions(db: sqlite3.Connection) -> None:
     )
 
 
+def test_review_rows_expose_combined_line_split_state(db: sqlite3.Connection) -> None:
+    pid, setup_id = _seed_setup(db)
+    db.executemany(
+        """
+        INSERT INTO allocation_pools
+            (assessment_setup_id, pool_key, pool_name, allocation_method,
+             recipient_scope, budget_line_derivation)
+        VALUES (?, ?, ?, 'equal', 'all_units', 'explicit_lines')
+        """,
+        [
+            (setup_id, "variable_costs", "Variable Costs"),
+            (setup_id, "equal_costs", "Equal Costs"),
+        ],
+    )
+    db.execute(
+        """
+        INSERT INTO allocation_resolutions (
+            property_id, assessment_setup_id, pool_key, version_int, status,
+            declared_method, included_categories_json
+        ) VALUES (?, ?, 'variable_costs', 1, 'unresolved',
+                  'custom_factor', ?)
+        """,
+        (pid, setup_id, json.dumps(["gas"])),
+    )
+
+    from app.services.assessment_budget_mapping_rule_service import (
+        build_assessment_mapping_review_rows,
+    )
+
+    rows = build_assessment_mapping_review_rows(
+        property_id=pid,
+        assessment_setup_id=setup_id,
+        budget_lines=[{
+            "label": "Electricity & Gas",
+            "category": "operating",
+            "fund_type": "operating",
+            "amount": 16800,
+        }],
+        connection=db,
+    )
+
+    row = rows[0]
+    assert row["allocation_mode"] == "split_required"
+    assert row["split_status"] == "required"
+    assert row["source_annual_amount"] == 16800.0
+    assert row["saved_slices"] == []
+    assert {option["pool_key"] for option in row["valid_pool_options"]} == {
+        "variable_costs",
+        "equal_costs",
+    }
+
+
+def test_slice_service_rejects_invalid_destinations_and_duplicate_destinations(
+    db: sqlite3.Connection,
+) -> None:
+    pid, setup_id = _seed_setup(db)
+
+    with pytest.raises(ValueError, match="not available"):
+        upsert_slices_for_line(
+            db,
+            property_id=pid,
+            assessment_setup_id=setup_id,
+            source_line_normalized_label="combined utilities",
+            source_line_account_code=None,
+            source_annual_amount=Decimal("100"),
+            slices=[
+                {
+                    "pool_key": "missing_pool",
+                    "semantic_category": "gas",
+                    "slice_annual_amount": "40",
+                },
+                {
+                    "pool_key": "other_pool",
+                    "semantic_category": "electricity",
+                    "slice_annual_amount": "60",
+                },
+            ],
+            actor="tester",
+            valid_pool_keys={"other_pool"},
+        )
+
+    with pytest.raises(ValueError, match="unique"):
+        upsert_slices_for_line(
+            db,
+            property_id=pid,
+            assessment_setup_id=setup_id,
+            source_line_normalized_label="combined utilities",
+            source_line_account_code=None,
+            source_annual_amount=Decimal("100"),
+            slices=[
+                {
+                    "pool_key": "other_pool",
+                    "semantic_category": "gas",
+                    "slice_annual_amount": "40",
+                },
+                {
+                    "pool_key": "other_pool",
+                    "semantic_category": "electricity",
+                    "slice_annual_amount": "60",
+                },
+            ],
+            actor="tester",
+            valid_pool_keys={"other_pool"},
+        )
+
+
 def test_classifier_explicit_vs_ambiguous_vs_missing_provenance() -> None:
     assert classify_pool(
         declared_method="equal",

@@ -348,6 +348,12 @@ def approve_resolution(
     included_categories: Optional[list[str]] = None,
     apply_to_pool: bool = True,
 ) -> AllocationResolutionRecord:
+    if resolved_method != "equal" and not factor_snapshot.recipients:
+        raise ValueError(
+            f"Approved {resolved_method} resolution requires recipient factors."
+        )
+    if resolved_method == "square_footage" and factor_snapshot.denominator_value is None:
+        raise ValueError("Square-footage approval requires a denominator.")
     existing = current_resolution(
         connection, assessment_setup_id=assessment_setup_id, pool_key=pool_key
     )
@@ -408,18 +414,40 @@ def list_slices(
     *,
     assessment_setup_id: int,
     source_line_normalized_label: Optional[str] = None,
+    source_line_key: Optional[str] = None,
+    source_line_account_code: Optional[str] = None,
+    statuses: tuple[str, ...] = ("draft", "approved"),
 ) -> list[BudgetLineSlice]:
+    if not statuses:
+        return []
+    columns = _slice_table_columns(connection)
+    placeholders = ", ".join("?" for _ in statuses)
     sql = """
         SELECT * FROM budget_line_allocation_slices
-         WHERE assessment_setup_id = ? AND status IN ('draft', 'approved')
-    """
-    params: list[Any] = [assessment_setup_id]
+         WHERE assessment_setup_id = ? AND status IN (
+    """ + placeholders + ")"
+    params: list[Any] = [assessment_setup_id, *statuses]
     if source_line_normalized_label:
         sql += " AND source_line_normalized_label = ?"
         params.append(source_line_normalized_label)
+    if source_line_key is not None and "source_line_key" in columns:
+        sql += " AND COALESCE(source_line_key, '') = COALESCE(?, '')"
+        params.append(source_line_key)
+    if source_line_account_code is not None:
+        sql += " AND COALESCE(source_line_account_code, '') = COALESCE(?, '')"
+        params.append(source_line_account_code)
     sql += " ORDER BY id"
     cur = connection.execute(sql, params)
     return [_row_to_slice(_row_dict(row, cur.description)) for row in cur.fetchall()]
+
+
+def _slice_table_columns(connection: sqlite3.Connection) -> set[str]:
+    return {
+        str(row[1])
+        for row in connection.execute(
+            "PRAGMA table_info(budget_line_allocation_slices)"
+        ).fetchall()
+    }
 
 
 def _row_to_slice(row: sqlite3.Row | dict) -> BudgetLineSlice:
@@ -429,6 +457,7 @@ def _row_to_slice(row: sqlite3.Row | dict) -> BudgetLineSlice:
         property_id=int(data["property_id"]),
         assessment_setup_id=int(data["assessment_setup_id"]),
         source_line_normalized_label=str(data["source_line_normalized_label"]),
+        source_line_key=data.get("source_line_key"),
         source_line_account_code=data.get("source_line_account_code"),
         source_annual_amount=Decimal(str(data["source_annual_amount"])),
         slice_annual_amount=Decimal(str(data["slice_annual_amount"])),
@@ -462,29 +491,83 @@ def upsert_slices_for_line(
     property_id: int,
     assessment_setup_id: int,
     source_line_normalized_label: str,
-    source_line_account_code: Optional[str],
+    source_line_key: Optional[str] = None,
+    source_line_account_code: Optional[str] = None,
     source_annual_amount: Decimal,
     slices: list[dict[str, Any]],
     actor: str,
     replace: bool = True,
+    valid_pool_keys: Optional[set[str]] = None,
+    commit: bool = True,
 ) -> list[BudgetLineSlice]:
-    amounts = [Decimal(str(item["slice_annual_amount"])) for item in slices]
+    if not str(source_line_normalized_label or "").strip():
+        raise ValueError("A source budget line is required.")
+    setup_row = connection.execute(
+        "SELECT property_id FROM assessment_setups WHERE id = ?",
+        (assessment_setup_id,),
+    ).fetchone()
+    if setup_row is not None and int(setup_row[0]) != int(property_id):
+        raise ValueError("The assessment setup does not belong to this HOA.")
+    if not source_annual_amount.is_finite():
+        raise ValueError("Source annual amount must be finite.")
+    if source_annual_amount < 0:
+        raise ValueError("Source annual amount cannot be negative.")
+    if len(slices) < 2:
+        raise ValueError("A split must contain at least two slices.")
+    if any(not isinstance(item, dict) for item in slices):
+        raise ValueError("Each split entry must be an object.")
+    try:
+        amounts = [Decimal(str(item["slice_annual_amount"])) for item in slices]
+    except (KeyError, InvalidOperation, TypeError, ValueError) as exc:
+        raise ValueError("Each slice must have a valid annual amount.") from exc
+    if any(not amount.is_finite() for amount in amounts):
+        raise ValueError("Slice amounts must be finite numbers.")
+    if any(amount < 0 for amount in amounts):
+        raise ValueError("Slice amounts cannot be negative.")
+    destinations = [str(item.get("pool_key") or "").strip() for item in slices]
+    if any(not destination for destination in destinations):
+        raise ValueError("Each slice must have an assessment category destination.")
+    if any(not str(item.get("semantic_category") or "").strip() for item in slices):
+        raise ValueError("Each slice must name the governing-document category.")
+    if len(set(destinations)) != len(destinations):
+        raise ValueError("Slice destinations must be unique.")
+    if valid_pool_keys is not None:
+        unknown = sorted(set(destinations) - set(valid_pool_keys))
+        if unknown:
+            raise ValueError(
+                f"Assessment category {unknown[0]!r} is not available in this setup."
+            )
     residual = validate_slice_sum(source_annual_amount, amounts)
     if residual != Decimal("0"):
         raise ValueError(
             f"Slices for {source_line_normalized_label!r} differ from source "
             f"{source_annual_amount} by {residual}"
         )
+    slice_columns = _slice_table_columns(connection)
     if replace:
+        source_key_filter = (
+            "AND COALESCE(source_line_key, '') = COALESCE(?, '')"
+            if "source_line_key" in slice_columns
+            else ""
+        )
+        replace_params: list[Any] = [
+            assessment_setup_id,
+            source_line_normalized_label,
+        ]
+        if "source_line_key" in slice_columns:
+            replace_params.append(source_line_key)
+        replace_params.append(source_line_account_code)
         connection.execute(
-            """
+            f"""
             UPDATE budget_line_allocation_slices
                SET status = 'superseded'
              WHERE assessment_setup_id = ?
                AND source_line_normalized_label = ?
+               {source_key_filter}
+               AND COALESCE(source_line_account_code, '') = COALESCE(?, '')
                AND status IN ('draft', 'approved')
             """,
-            (assessment_setup_id, source_line_normalized_label),
+            replace_params,
         )
     created: list[BudgetLineSlice] = []
     for item in slices:
@@ -494,16 +577,37 @@ def upsert_slices_for_line(
             if source_annual_amount != 0
             else Decimal("0")
         )
-        cur = connection.execute(
-            """
-            INSERT INTO budget_line_allocation_slices (
-                property_id, assessment_setup_id,
-                source_line_normalized_label, source_line_account_code,
-                source_annual_amount, slice_annual_amount, slice_percent,
-                pool_key, semantic_category, status, evidence_text, reason, created_by
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?)
-            """,
-            (
+        if "source_line_key" in slice_columns:
+            insert_columns = (
+                "property_id, assessment_setup_id, "
+                "source_line_normalized_label, source_line_key, "
+                "source_line_account_code, source_annual_amount, "
+                "slice_annual_amount, slice_percent, pool_key, "
+                "semantic_category, status, evidence_text, reason, created_by"
+            )
+            insert_values = (
+                property_id,
+                assessment_setup_id,
+                source_line_normalized_label,
+                source_line_key,
+                source_line_account_code,
+                str(source_annual_amount),
+                str(amount),
+                str(pct),
+                destinations[len(created)],
+                str(item.get("semantic_category") or ""),
+                str(item.get("evidence_text") or ""),
+                str(item.get("reason") or ""),
+                actor,
+            )
+        else:
+            insert_columns = (
+                "property_id, assessment_setup_id, "
+                "source_line_normalized_label, source_line_account_code, "
+                "source_annual_amount, slice_annual_amount, slice_percent, "
+                "pool_key, semantic_category, status, evidence_text, reason, created_by"
+            )
+            insert_values = (
                 property_id,
                 assessment_setup_id,
                 source_line_normalized_label,
@@ -511,12 +615,21 @@ def upsert_slices_for_line(
                 str(source_annual_amount),
                 str(amount),
                 str(pct),
-                str(item["pool_key"]),
+                destinations[len(created)],
                 str(item.get("semantic_category") or ""),
                 str(item.get("evidence_text") or ""),
                 str(item.get("reason") or ""),
                 actor,
-            ),
+            )
+        cur = connection.execute(
+            f"""
+            INSERT INTO budget_line_allocation_slices ({insert_columns})
+            VALUES (
+                {", ".join("?" for _ in insert_values[:-3])},
+                'draft', ?, ?, ?
+            )
+            """,
+            insert_values,
         )
         created.append(
             BudgetLineSlice(
@@ -524,6 +637,7 @@ def upsert_slices_for_line(
                 property_id=property_id,
                 assessment_setup_id=assessment_setup_id,
                 source_line_normalized_label=source_line_normalized_label,
+                source_line_key=source_line_key,
                 source_line_account_code=source_line_account_code,
                 source_annual_amount=source_annual_amount,
                 slice_annual_amount=amount,
@@ -536,8 +650,96 @@ def upsert_slices_for_line(
                 created_by=actor,
             )
         )
-    connection.commit()
+    if commit:
+        connection.commit()
     return created
+
+
+def approve_slices_for_line(
+    connection: sqlite3.Connection,
+    *,
+    assessment_setup_id: int,
+    source_line_normalized_label: str,
+    source_line_key: Optional[str] = None,
+    source_line_account_code: Optional[str] = None,
+    actor: str,
+    source_annual_amount: Optional[Decimal] = None,
+) -> list[BudgetLineSlice]:
+    """Approve a previously validated draft split for final assessment math."""
+    drafts = list_slices(
+        connection,
+        assessment_setup_id=assessment_setup_id,
+        source_line_normalized_label=source_line_normalized_label,
+        source_line_key=source_line_key,
+        source_line_account_code=source_line_account_code,
+        statuses=("draft",),
+    )
+    saved_source_amount = drafts[0].source_annual_amount if drafts else None
+    expected_source_amount = (
+        source_annual_amount
+        if source_annual_amount is not None
+        else saved_source_amount
+    )
+    if (
+        expected_source_amount is None
+        or len(drafts) < 2
+        or any(item.source_annual_amount != expected_source_amount for item in drafts)
+        or any(
+            not item.semantic_category.strip() or not item.pool_key.strip()
+            for item in drafts
+        )
+        or len({item.pool_key for item in drafts}) != len(drafts)
+        or validate_slice_sum(
+            expected_source_amount,
+            [item.slice_annual_amount for item in drafts],
+        ) != Decimal("0")
+        or (
+            source_annual_amount is not None
+            and saved_source_amount != source_annual_amount
+        )
+    ):
+        raise ValueError(
+            "Saved split no longer matches the active budget amount. "
+            "Refresh the mapping review and save it again."
+        )
+    slice_columns = _slice_table_columns(connection)
+    source_key_filter = (
+        "AND COALESCE(source_line_key, '') = COALESCE(?, '')"
+        if "source_line_key" in slice_columns
+        else ""
+    )
+    approve_params: list[Any] = [
+        actor,
+        assessment_setup_id,
+        source_line_normalized_label,
+    ]
+    if "source_line_key" in slice_columns:
+        approve_params.append(source_line_key)
+    approve_params.append(source_line_account_code)
+    cur = connection.execute(
+        f"""
+        UPDATE budget_line_allocation_slices
+           SET status = 'approved',
+               approved_by = ?,
+               approved_at = datetime('now')
+         WHERE assessment_setup_id = ?
+           AND source_line_normalized_label = ?
+           {source_key_filter}
+           AND COALESCE(source_line_account_code, '') = COALESCE(?, '')
+           AND status = 'draft'
+        """,
+        approve_params,
+    )
+    if cur.rowcount == 0:
+        raise ValueError("No draft split found for this budget line.")
+    connection.commit()
+    return list_slices(
+        connection,
+        assessment_setup_id=assessment_setup_id,
+        source_line_normalized_label=source_line_normalized_label,
+        source_line_key=source_line_key,
+        source_line_account_code=source_line_account_code,
+    )
 
 
 def delete_slices_for_line(
@@ -545,16 +747,33 @@ def delete_slices_for_line(
     *,
     assessment_setup_id: int,
     source_line_normalized_label: str,
+    source_line_key: Optional[str] = None,
+    source_line_account_code: Optional[str] = None,
 ) -> None:
+    slice_columns = _slice_table_columns(connection)
+    source_key_filter = (
+        "AND COALESCE(source_line_key, '') = COALESCE(?, '')"
+        if "source_line_key" in slice_columns
+        else ""
+    )
+    delete_params: list[Any] = [
+        assessment_setup_id,
+        source_line_normalized_label,
+    ]
+    if "source_line_key" in slice_columns:
+        delete_params.append(source_line_key)
+    delete_params.append(source_line_account_code)
     connection.execute(
-        """
+        f"""
         UPDATE budget_line_allocation_slices
            SET status = 'superseded'
          WHERE assessment_setup_id = ?
            AND source_line_normalized_label = ?
+           {source_key_filter}
+           AND COALESCE(source_line_account_code, '') = COALESCE(?, '')
            AND status IN ('draft', 'approved')
         """,
-        (assessment_setup_id, source_line_normalized_label),
+        delete_params,
     )
     connection.commit()
 
@@ -684,11 +903,19 @@ def freeze_resolution_snapshot(
     """JSON-ready freeze of approved resolutions, slices, and category decisions."""
     resolutions = [
         rec.model_dump(mode="json")
-        for rec in list_current_resolutions(connection, assessment_setup_id=assessment_setup_id)
+        for rec in list_current_resolutions(
+            connection,
+            assessment_setup_id=assessment_setup_id,
+        )
+        if rec.status == "approved"
     ]
     slices = [
         sl.model_dump(mode="json")
-        for sl in list_slices(connection, assessment_setup_id=assessment_setup_id)
+        for sl in list_slices(
+            connection,
+            assessment_setup_id=assessment_setup_id,
+            statuses=("approved",),
+        )
     ]
     decisions = [
         d.model_dump(mode="json")

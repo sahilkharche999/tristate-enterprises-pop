@@ -1213,6 +1213,17 @@ def ensure_allocation_resolution_tables() -> None:
     raw_conn = engine.raw_connection()
     try:
         raw_conn.executescript(_ALLOCATION_RESOLUTION_DDL)
+        slice_columns = {
+            row[1]
+            for row in raw_conn.execute(
+                "PRAGMA table_info(budget_line_allocation_slices)"
+            ).fetchall()
+        }
+        if "source_line_key" not in slice_columns:
+            raw_conn.execute(
+                "ALTER TABLE budget_line_allocation_slices "
+                "ADD COLUMN source_line_key TEXT"
+            )
         raw_conn.commit()
     finally:
         raw_conn.close()

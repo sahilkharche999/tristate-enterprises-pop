@@ -148,8 +148,8 @@ function FactorEditor({
 
       <p className="text-xs text-[#737373]">
         Enter per-unit square footage (or ownership percentage) for proportional
-        pools. These values are used during promotion to populate the per-unit
-        allocation rows.
+        assessment categories. These values are used during promotion to
+        populate the per-unit allocation rows.
       </p>
 
       {error && (

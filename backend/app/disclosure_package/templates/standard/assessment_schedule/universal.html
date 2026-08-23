@@ -286,8 +286,8 @@
     .homeowner-notes { margin-top: 10px; }
   </style>
 
-  {% if prior_matrix %}
+  {% if prior_matrix|default(None) %}
     {{ schedule_block(prior_matrix, show_specials=false, show_notes=false) }}
   {% endif %}
-  {{ schedule_block(matrix, show_specials=true, show_notes=true, break_before=prior_matrix) }}
+  {{ schedule_block(matrix, show_specials=true, show_notes=true, break_before=prior_matrix|default(None)) }}
 {% endblock %}

@@ -4,6 +4,7 @@ import { ArrowLeft, Ban, Check, Pencil, Play, RotateCw, Save, Sparkles, X } from
 
 import {
   analyzeAssessmentMappingReview,
+  approveAssessmentMappingReviewSplit,
   applyAssessmentMappings,
   approveMappingRule,
   approveResidualRouting,
@@ -14,6 +15,7 @@ import {
   getAssessmentMappingReview,
   rejectMappingRule,
   revokeMappingAlias,
+  saveAssessmentMappingReviewSplit,
   setAssessmentMappingReviewRowDisposition,
   setExemptionDecision,
   type MappingReviewAnalysis,
@@ -22,10 +24,11 @@ import {
 } from '../api/assessmentMappingReview';
 import { formatCurrency } from '../lib/budget';
 import { getErrorMessage } from '../lib/errors';
+import { slicesBalance } from '../lib/allocationResolution';
 import { AllocationResolutionPanel } from './AllocationResolutionPanel';
 
 function humanize(value: string) {
-  return value.replaceAll('_', ' ');
+  return value.replaceAll('_', ' ').replace(/\bpool\b/gi, 'assessment category');
 }
 
 function StatusBadge({ value }: { value: string }) {
@@ -64,6 +67,14 @@ function recommendationLabel(row: ReviewRow) {
   return 'Rule suggestion';
 }
 
+function assessmentCategoryName(
+  categories: MappingReviewState['assessment_categories'],
+  key: string | null | undefined,
+) {
+  if (!key) return '';
+  return categories.find((category) => category.pool_key === key)?.pool_name || humanize(key);
+}
+
 type AnalysisSubject = {
   line_label: string;
   normalized_label: string;
@@ -75,6 +86,45 @@ type InlineAnalysisHint = {
   detail: string;
   badge: string;
 };
+
+type SplitDraftSlice = {
+  pool_key: string;
+  semantic_category: string;
+  slice_annual_amount: string;
+};
+
+type SplitDraft = {
+  source_annual_amount: string;
+  slices: SplitDraftSlice[];
+};
+
+function splitDraftForRow(row: ReviewRow): SplitDraft {
+  if (row.saved_slices.length > 0) {
+    return {
+      source_annual_amount: String(row.source_annual_amount ?? ''),
+      slices: row.saved_slices.map((slice) => ({
+        pool_key: String(slice.pool_key || ''),
+        semantic_category: String(slice.semantic_category || ''),
+        slice_annual_amount: String(slice.slice_annual_amount ?? ''),
+      })),
+    };
+  }
+  return {
+    source_annual_amount: String(row.source_annual_amount ?? ''),
+    slices: [
+      {
+        pool_key: '',
+        semantic_category: row.combined_categories[0] || '',
+        slice_annual_amount: '',
+      },
+      {
+        pool_key: '',
+        semantic_category: row.combined_categories[1] || '',
+        slice_annual_amount: '',
+      },
+    ],
+  };
+}
 
 const MAIN_BLOCKER_CATEGORIES = new Set(['unresolved_eligible_lines', 'pending_split', 'stale_pool_mapping']);
 
@@ -169,7 +219,7 @@ function inlineAnalysisHint(row: ReviewRow, analysis: MappingReviewAnalysis | nu
   const safe = analysis.safe_to_stage.find((item) => matchesAnalysisSubject(row, item));
   if (safe) {
     return {
-      title: `AI: ${humanize(safe.suggested_pool_key)}`,
+      title: `AI assessment category: ${humanize(safe.suggested_pool_key)}`,
       detail: safe.explanation,
       badge: safe.action_kind,
     };
@@ -177,7 +227,7 @@ function inlineAnalysisHint(row: ReviewRow, analysis: MappingReviewAnalysis | nu
 
   const decision = analysis.needs_decision.find((item) => matchesAnalysisSubject(row, item));
   if (decision) {
-    const prefix = decision.recommended_pool_key ? `Recommended: ${humanize(decision.recommended_pool_key)}. ` : '';
+    const prefix = decision.recommended_pool_key ? `Recommended assessment category: ${humanize(decision.recommended_pool_key)}. ` : '';
     return {
       title: 'AI needs decision',
       detail: `${prefix}${decision.explanation}`,
@@ -198,7 +248,7 @@ function inlineAnalysisHint(row: ReviewRow, analysis: MappingReviewAnalysis | nu
   if (residual) {
     return {
       title: analysis.residual_equal_preview.residual_pool_key
-        ? `AI residual: ${humanize(analysis.residual_equal_preview.residual_pool_key)}`
+        ? `AI residual category: ${humanize(analysis.residual_equal_preview.residual_pool_key)}`
         : 'AI residual preview',
       detail: residual.reason || analysis.residual_equal_preview.explanation,
       badge: 'residual_equal_preview',
@@ -223,6 +273,8 @@ export function AssessmentMappingReviewScreen() {
   const [aliasDraft, setAliasDraft] = useState({ pool_key: '', dre_label: '', budget_label: '' });
   const [exemptionNotes, setExemptionNotes] = useState<Record<string, string>>({});
   const [rowPoolSelections, setRowPoolSelections] = useState<Record<string, string>>({});
+  const [splitDrafts, setSplitDrafts] = useState<Record<string, SplitDraft>>({});
+  const [expandedSplits, setExpandedSplits] = useState<Record<string, boolean>>({});
   const analysis = analysisState.hoaId === hoaId ? analysisState.analysis : readCachedAnalysis(hoaId);
 
   async function load() {
@@ -253,6 +305,20 @@ export function AssessmentMappingReviewScreen() {
           ?? row.recommended_pool_key
           ?? row.valid_pool_options[0]?.pool_key
           ?? '';
+      }
+      return next;
+    });
+  }, [state]);
+
+  useEffect(() => {
+    if (!state) return;
+    setSplitDrafts((previous) => {
+      const next = { ...previous };
+      for (const row of state.review_rows) {
+        if (row.allocation_mode !== 'split_required') continue;
+        if (row.saved_slices.length > 0 || !next[row.line_key]) {
+          next[row.line_key] = splitDraftForRow(row);
+        }
       }
       return next;
     });
@@ -335,6 +401,39 @@ export function AssessmentMappingReviewScreen() {
     await runAction(`assign-${row.line_key}`, () => assignAssessmentMappingReviewRow(hoaId, {
       line_key: row.line_key,
       pool_key: poolKey,
+      source_annual_amount: row.source_annual_amount == null ? undefined : String(row.source_annual_amount),
+    }));
+  }
+
+  function updateSplitDraft(lineKey: string, update: (draft: SplitDraft) => SplitDraft) {
+    setSplitDrafts((previous) => ({
+      ...previous,
+      [lineKey]: update(previous[lineKey] || {
+        source_annual_amount: '',
+        slices: [],
+      }),
+    }));
+  }
+
+  async function handleSaveSplit(row: ReviewRow) {
+    const draft = splitDrafts[row.line_key] || splitDraftForRow(row);
+    await runAction(`save-split-${row.line_key}`, () => saveAssessmentMappingReviewSplit(hoaId, {
+      line_key: row.line_key,
+      source_line_label: row.line_label,
+      source_line_account_code: row.account_code,
+      source_line_section: row.section,
+      source_line_category: row.category,
+      source_line_fund_type: row.fund_type,
+      source_annual_amount: draft.source_annual_amount,
+      slices: draft.slices,
+    }));
+  }
+
+  async function handleApproveSplit(row: ReviewRow) {
+    await runAction(`approve-split-${row.line_key}`, () => approveAssessmentMappingReviewSplit(hoaId, {
+      line_key: row.line_key,
+      source_line_label: row.line_label,
+      source_line_account_code: row.account_code,
     }));
   }
 
@@ -360,12 +459,12 @@ export function AssessmentMappingReviewScreen() {
             <div>
               <h1 className="text-xl font-semibold text-[#111111]">Assessment Mapping Review</h1>
               <p className="text-sm text-[#737373]">
-                Review only eligible current-year rows, assign pools inline, and block final rendering until the filtered regular basis reconciles.
+                Review eligible current-year rows, assign assessment categories, and clear every blocker before final rendering.
               </p>
               <p className="mt-2 max-w-3xl rounded-md border border-[#e5e5e5] bg-[#fafafa] px-3 py-2 text-sm text-[#525252]">
                 <strong className="text-[#111111]">What this page is for:</strong> assign budget expense lines to
-                assessment pools so unit dues in the owner PDF are correct. For variable HOAs, incomplete mapping
-                blocks Generate Disclosure Package.
+                assessment categories so unit dues in the owner PDF are correct. Use “Split this line” only when
+                one budget description contains more than one category.
               </p>
             </div>
           </div>
@@ -451,7 +550,7 @@ export function AssessmentMappingReviewScreen() {
               <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                 <div>
                   <h2 className="text-lg font-semibold text-[#111111]">Review Table</h2>
-                  <p className="text-sm text-[#737373]">Primary workflow: review rows, choose pool, or mark a special current-year disposition.</p>
+                  <p className="text-sm text-[#737373]">Primary workflow: assign a whole cost, split a combined description, or choose a clear disposition.</p>
                 </div>
                 <div className="flex items-center gap-2">
                   {showAnalyzeButton && (
@@ -515,10 +614,16 @@ export function AssessmentMappingReviewScreen() {
                             || row.recommended_pool_key
                             || row.current_pool_key
                             || '';
+                          const splitDraft = splitDrafts[row.line_key] || splitDraftForRow(row);
+                          const splitDelta = slicesBalance(
+                            Number(splitDraft.source_annual_amount || 0),
+                            splitDraft.slices,
+                          );
+                          const splitIsBalanced = splitDelta === 0 && splitDraft.slices.length >= 2;
                           const recommendationKind = recommendationLabel(row);
                           const analysisHint = inlineAnalysisHint(row, analysis);
                           const clearTitle = isReserveDetailRole(row)
-                            ? 'Include this line for pool assignment (un-default reserve detail)'
+                            ? 'Include this line for assessment-category assignment (un-default reserve detail)'
                             : 'Return to normal schedule-basis review';
                           return (
                             <tr key={row.line_key} className="align-top">
@@ -548,7 +653,7 @@ export function AssessmentMappingReviewScreen() {
                                 <div className="text-[#111111]">{recommendationText(row)}</div>
                                 {row.recommended_pool_key && !row.candidates[0] && (
                                   <div className="mt-1 text-xs text-sky-700">
-                                    Suggested pool: {row.recommended_pool_key}
+                                    Suggested assessment category: {assessmentCategoryName(state.assessment_categories, row.recommended_pool_key)}
                                   </div>
                                 )}
                                 {row.candidates[0] && (
@@ -579,39 +684,196 @@ export function AssessmentMappingReviewScreen() {
                               </td>
                               <td className="py-3 pr-4">
                                 <div className="flex min-w-[280px] flex-wrap items-center gap-2">
-                                  {isAssignableRow ? (
+                                  {row.allocation_mode === 'split_required' ? (
+                                    <div className="w-full rounded-md border border-sky-200 bg-sky-50 p-3">
+                                      <div className="flex flex-wrap items-center justify-between gap-2">
+                                        <div>
+                                          <p className="font-medium text-sky-950">Split this line</p>
+                                          <p className="mt-1 text-xs text-sky-900">
+                                            This description contains more than one assessment category. Divide the
+                                            source amount below; the original line will not be routed separately.
+                                          </p>
+                                        </div>
+                                        <button
+                                          type="button"
+                                          className="rounded border border-sky-300 bg-white px-2 py-1 text-xs font-medium text-sky-900"
+                                          onClick={() => setExpandedSplits((previous) => ({
+                                            ...previous,
+                                            [row.line_key]: !previous[row.line_key],
+                                          }))}
+                                        >
+                                          {expandedSplits[row.line_key] ? 'Hide editor' : 'Open editor'}
+                                        </button>
+                                      </div>
+                                      <div className="mt-2 text-sm text-sky-950">
+                                        Source annual amount:{' '}
+                                        <strong>
+                                          {row.source_annual_amount == null
+                                            ? 'Unavailable'
+                                            : formatCurrency(row.source_annual_amount)}
+                                        </strong>
+                                      </div>
+                                      <div className="mt-2 text-xs text-sky-900">
+                                        Status: {row.split_status === 'approved'
+                                          ? 'Approved — included in final assessment math'
+                                          : row.split_status === 'draft'
+                                            ? 'Saved — approve this split to use it in final math'
+                                            : 'Required'}
+                                      </div>
+                                      {expandedSplits[row.line_key] && (
+                                        <div className="mt-3 space-y-2">
+                                          {splitDraft.slices.map((slice, index) => (
+                                            <div key={`${row.line_key}-slice-${index}`} className="grid gap-2 md:grid-cols-[1fr_1fr_8rem_auto]">
+                                              <select
+                                                value={slice.pool_key}
+                                                onChange={(event) => updateSplitDraft(row.line_key, (current) => ({
+                                                  ...current,
+                                                  slices: current.slices.map((item, itemIndex) => (
+                                                    itemIndex === index
+                                                      ? { ...item, pool_key: event.target.value }
+                                                      : item
+                                                  )),
+                                                }))}
+                                                className="rounded border border-[#d4d4d4] bg-white px-2 py-1 text-sm"
+                                                aria-label={`Split ${index + 1} assessment category`}
+                                              >
+                                                <option value="">Choose an assessment category</option>
+                                                {row.valid_pool_options.map((option) => (
+                                                  <option key={`${row.line_key}-${index}-${option.pool_key}`} value={option.pool_key}>
+                                                    {option.pool_name}
+                                                  </option>
+                                                ))}
+                                              </select>
+                                              <input
+                                                value={slice.semantic_category}
+                                                onChange={(event) => updateSplitDraft(row.line_key, (current) => ({
+                                                  ...current,
+                                                  slices: current.slices.map((item, itemIndex) => (
+                                                    itemIndex === index
+                                                      ? { ...item, semantic_category: event.target.value }
+                                                      : item
+                                                  )),
+                                                }))}
+                                                className="rounded border border-[#d4d4d4] px-2 py-1 text-sm"
+                                                placeholder="Category in governing document"
+                                                aria-label={`Split ${index + 1} category description`}
+                                              />
+                                              <input
+                                                type="number"
+                                                min="0"
+                                                step="0.01"
+                                                value={slice.slice_annual_amount}
+                                                onChange={(event) => updateSplitDraft(row.line_key, (current) => ({
+                                                  ...current,
+                                                  slices: current.slices.map((item, itemIndex) => (
+                                                    itemIndex === index
+                                                      ? { ...item, slice_annual_amount: event.target.value }
+                                                      : item
+                                                  )),
+                                                }))}
+                                                className="rounded border border-[#d4d4d4] px-2 py-1 text-sm"
+                                                placeholder="Annual amount"
+                                                aria-label={`Split ${index + 1} annual amount`}
+                                              />
+                                              <button
+                                                type="button"
+                                                className="rounded border border-[#d4d4d4] px-2 py-1 text-xs"
+                                                disabled={splitDraft.slices.length <= 2}
+                                                onClick={() => updateSplitDraft(row.line_key, (current) => ({
+                                                  ...current,
+                                                  slices: current.slices.filter((_item, itemIndex) => itemIndex !== index),
+                                                }))}
+                                              >
+                                                Remove
+                                              </button>
+                                            </div>
+                                          ))}
+                                          <button
+                                            type="button"
+                                            className="rounded border border-[#d4d4d4] bg-white px-2 py-1 text-xs"
+                                            onClick={() => updateSplitDraft(row.line_key, (current) => ({
+                                              ...current,
+                                              slices: [
+                                                ...current.slices,
+                                                { pool_key: '', semantic_category: '', slice_annual_amount: '' },
+                                              ],
+                                            }))}
+                                          >
+                                            Add category
+                                          </button>
+                                          <div className={`text-xs ${splitIsBalanced ? 'text-emerald-700' : 'text-amber-800'}`}>
+                                            {splitIsBalanced
+                                              ? 'Balance: $0.00 — source amount is fully allocated.'
+                                              : `Balance: ${formatCurrency(splitDelta)} — adjust the amounts until the balance is $0.00.`}
+                                          </div>
+                                          <div className="flex flex-wrap gap-2">
+                                            <button
+                                              type="button"
+                                              className="rounded bg-[#111111] px-3 py-1.5 text-sm text-white disabled:opacity-50"
+                                              disabled={!splitIsBalanced || busy !== null}
+                                              onClick={() => void handleSaveSplit(row)}
+                                            >
+                                              Save split
+                                            </button>
+                                            {row.split_status === 'draft' && (
+                                              <button
+                                                type="button"
+                                                className="rounded border border-[#d4d4d4] bg-white px-3 py-1.5 text-sm disabled:opacity-50"
+                                                disabled={busy !== null}
+                                                onClick={() => void handleApproveSplit(row)}
+                                              >
+                                                Approve split
+                                              </button>
+                                            )}
+                                          </div>
+                                        </div>
+                                      )}
+                                    </div>
+                                  ) : isAssignableRow ? (
                                     <>
-                                      <select
-                                        value={selectedPoolKey}
-                                        onChange={(event) => setRowPoolSelections((prev) => ({
-                                          ...prev,
-                                          [row.line_key]: event.target.value,
-                                        }))}
-                                        className="min-w-[8rem] flex-1 rounded border border-[#d4d4d4] px-2 py-1 text-sm"
-                                        title="Choose allocation pool"
-                                      >
-                                        <option value="">Select pool</option>
-                                        {row.valid_pool_options.map((option) => (
-                                          <option key={`${row.line_key}-${option.pool_key}`} value={option.pool_key}>
-                                            {option.pool_name}
-                                          </option>
-                                        ))}
-                                      </select>
-                                      <button
-                                        type="button"
-                                        className="rounded border border-[#d4d4d4] px-3 py-1 text-sm hover:bg-[#f5f5f5] disabled:opacity-60"
-                                        disabled={busy !== null || !selectedPoolKey}
-                                        onClick={() => void handleAssign(row)}
-                                        title="Map this line into the selected allocation pool"
-                                      >
-                                        Assign
-                                      </button>
+                                      {row.valid_pool_options.length === 0 ? (
+                                        <span className="text-xs text-amber-800">
+                                          No assessment categories are available for this setup. Complete the setup
+                                          and mapping step before assigning this cost.
+                                        </span>
+                                      ) : (
+                                        <>
+                                          <label className="flex min-w-[14rem] flex-1 items-center gap-2 text-xs text-[#525252]">
+                                            Assign this full cost to
+                                            <select
+                                              value={selectedPoolKey}
+                                              onChange={(event) => setRowPoolSelections((prev) => ({
+                                                ...prev,
+                                                [row.line_key]: event.target.value,
+                                              }))}
+                                              className="min-w-[8rem] flex-1 rounded border border-[#d4d4d4] px-2 py-1 text-sm"
+                                              title="Choose an assessment category"
+                                            >
+                                              <option value="">Choose an assessment category</option>
+                                              {row.valid_pool_options.map((option) => (
+                                                <option key={`${row.line_key}-${option.pool_key}`} value={option.pool_key}>
+                                                  {option.pool_name}
+                                                </option>
+                                              ))}
+                                            </select>
+                                          </label>
+                                          <button
+                                            type="button"
+                                            className="rounded border border-[#d4d4d4] px-3 py-1 text-sm hover:bg-[#f5f5f5] disabled:opacity-60"
+                                            disabled={busy !== null || !selectedPoolKey}
+                                            onClick={() => void handleAssign(row)}
+                                            title="Assign the full cost to the selected assessment category"
+                                          >
+                                            Save assignment
+                                          </button>
+                                        </>
+                                      )}
                                     </>
                                   ) : (
                                     <span className="text-xs text-[#737373]">
                                       {isReserveDetailRole(row)
-                                        ? 'Clear to include for pool assignment'
-                                        : 'Not schedule-basis'}
+                                        ? 'Clear to include for assessment-category assignment'
+                                        : 'Outside regular assessment basis'}
                                     </span>
                                   )}
                                   {!hideExclude && (
@@ -636,15 +898,17 @@ export function AssessmentMappingReviewScreen() {
                                       Reserve detail
                                     </button>
                                   )}
-                                  <button
-                                    type="button"
-                                    className={dispositionButtonClass(effective === 'pending_split')}
-                                    onClick={() => void handleDisposition(row, 'pending_split')}
-                                    disabled={busy !== null}
-                                    title="Hold line; blocks final render until resolved"
-                                  >
-                                    Needs split
-                                  </button>
+                                  {row.allocation_mode !== 'split_required' && (
+                                    <button
+                                      type="button"
+                                      className={dispositionButtonClass(effective === 'pending_split')}
+                                      onClick={() => void handleDisposition(row, 'pending_split')}
+                                      disabled={busy !== null}
+                                      title="Hold line; blocks final render until resolved"
+                                    >
+                                      Split this line
+                                    </button>
+                                  )}
                                   <button
                                     type="button"
                                     className={dispositionButtonClass(
@@ -658,7 +922,9 @@ export function AssessmentMappingReviewScreen() {
                                   </button>
                                 </div>
                                 {row.current_pool_key && (
-                                  <div className="mt-2 text-xs text-[#737373]">Current pool: {row.current_pool_key}</div>
+                                  <div className="mt-2 text-xs text-[#737373]">
+                                    Current assessment category: {assessmentCategoryName(state.assessment_categories, row.current_pool_key)}
+                                  </div>
                                 )}
                               </td>
                             </tr>
@@ -709,7 +975,7 @@ export function AssessmentMappingReviewScreen() {
                 <table className="min-w-full divide-y divide-[#e5e5e5] text-sm">
                   <thead className="text-left text-xs uppercase text-[#737373]">
                     <tr>
-                      <th className="py-2 pr-4">Pool</th>
+                      <th className="py-2 pr-4">Assessment category</th>
                       <th className="py-2 pr-4">Label</th>
                       <th className="py-2 pr-4">Match</th>
                       <th className="py-2 pr-4">State</th>
@@ -719,7 +985,9 @@ export function AssessmentMappingReviewScreen() {
                   <tbody className="divide-y divide-[#eeeeee]">
                     {state.rules.map((rule) => (
                       <tr key={rule.id}>
-                        <td className="py-3 pr-4 font-medium text-[#111111]">{rule.pool_key}</td>
+                        <td className="py-3 pr-4 font-medium text-[#111111]">
+                          {assessmentCategoryName(state.assessment_categories, rule.pool_key)}
+                        </td>
                         <td className="py-3 pr-4 text-[#525252]">
                           <div>{rule.match_label || rule.normalized_label || 'Residual/default'}</div>
                           {(rule.source_parent_category || rule.source_evidence_text) && (
@@ -790,7 +1058,7 @@ export function AssessmentMappingReviewScreen() {
                     </div>
                   ))}
                   <div className="grid gap-2 border-t border-[#eeeeee] pt-3 sm:grid-cols-4">
-                    <input value={aliasDraft.pool_key} onChange={(event) => setAliasDraft({ ...aliasDraft, pool_key: event.target.value })} placeholder="Pool key" aria-label="Alias pool key" className="rounded border border-[#d4d4d4] px-2 py-1 text-sm" />
+                    <input value={aliasDraft.pool_key} onChange={(event) => setAliasDraft({ ...aliasDraft, pool_key: event.target.value })} placeholder="Assessment category key" aria-label="Alias assessment category key" className="rounded border border-[#d4d4d4] px-2 py-1 text-sm" />
                     <input value={aliasDraft.dre_label} onChange={(event) => setAliasDraft({ ...aliasDraft, dre_label: event.target.value })} placeholder="DRE label" aria-label="Alias DRE label" className="rounded border border-[#d4d4d4] px-2 py-1 text-sm" />
                     <input value={aliasDraft.budget_label} onChange={(event) => setAliasDraft({ ...aliasDraft, budget_label: event.target.value })} placeholder="Budget label" aria-label="Alias budget label" className="rounded border border-[#d4d4d4] px-2 py-1 text-sm" />
                     <button type="button" className="rounded-lg bg-[#111111] px-3 py-1.5 text-sm font-medium text-white" onClick={() => void runAction('alias-create', () => createMappingAlias(hoaId, aliasDraft))}>
@@ -808,7 +1076,9 @@ export function AssessmentMappingReviewScreen() {
                   ) : state.exemption_decisions.map((decision) => (
                     <div key={decision.pool_key} className="rounded border border-[#eeeeee] p-3 text-sm">
                       <div className="flex items-center justify-between gap-3">
-                        <span className="font-medium text-[#111111]">{decision.pool_key}</span>
+                        <span className="font-medium text-[#111111]">
+                          {assessmentCategoryName(state.assessment_categories, decision.pool_key)}
+                        </span>
                         <StatusBadge value={decision.exemption_state} />
                       </div>
                       <input
