@@ -41,15 +41,17 @@ def db(tmp_path: Path) -> sqlite3.Connection:
     conn.execute("INSERT INTO properties (name, units) VALUES ('Test', 10)")
     pid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     conn.execute(
-        "INSERT INTO dre_documents (property_id, file_id, file_name, status) "
-        "VALUES (?, 'dre/1/x.pdf', 'x.pdf', 'active')",
+        "INSERT INTO dre_documents "
+        "(property_id, file_id, file_name, status, document_type) "
+        "VALUES (?, 'dre/1/x.pdf', 'x.pdf', 'active', 'ccr')",
         (pid,),
     )
     doc_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     conn.execute(
         "INSERT INTO dre_extraction_runs "
-        "(dre_document_id, property_id, model_name, prompt_version, prompt_sha256, status) "
-        "VALUES (?, ?, 'gemini-flash-latest', '1.0.0', 'abc123', 'succeeded')",
+        "(dre_document_id, property_id, model_name, prompt_version, prompt_sha256, "
+        "status, document_type) "
+        "VALUES (?, ?, 'gemini-flash-latest', '1.0.0', 'abc123', 'succeeded', 'ccr')",
         (doc_id, pid),
     )
     conn.commit()
@@ -318,9 +320,14 @@ class TestApproveExtractionRunAppliesEdits:
         self, db: sqlite3.Connection
     ) -> None:
         pid, rid = _ids(db)
+        payload = _payload_with_one_pool()
+        payload["unit_structure"]["unit_count"] = 1
+        payload["unit_structure"]["units"] = [
+            {"unit_number": "101", "category": "residential"}
+        ]
         db.execute(
             "UPDATE dre_extraction_runs SET parsed_json = ? WHERE id = ?",
-            (json.dumps(_payload_with_one_pool()), rid),
+            (json.dumps(payload), rid),
         )
         db.commit()
 
@@ -329,6 +336,13 @@ class TestApproveExtractionRunAppliesEdits:
             field_path="allocation_pools[0].recipient_scope",
             old_value="all_units",
             new_value="residential_only",
+            connection=db,
+        )
+        record_review_edit(
+            dre_extraction_run_id=rid,
+            field_path="allocation_pools[0].selected_unit_numbers",
+            old_value=[],
+            new_value=["101"],
             connection=db,
         )
 
@@ -345,7 +359,7 @@ class TestApproveExtractionRunAppliesEdits:
             "WHERE assessment_setup_id = ? AND pool_key = 'operating'",
             (resp.promoted_setup_id,),
         ).fetchone()
-        assert row[0] == "residential_only"
+        assert row[0] == "custom_unit_list"
 
     def test_denominator_label_edit_changes_promoted_pool(
         self, db: sqlite3.Connection

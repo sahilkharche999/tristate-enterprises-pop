@@ -8,6 +8,7 @@ is the expected executable resolution of that external rule.
 
 from __future__ import annotations
 
+import copy
 from decimal import Decimal
 
 
@@ -174,6 +175,7 @@ def missouri_extraction_payload() -> dict:
                 "allocation_context": "cost_center",
                 "billing_treatment": "recurring",
                 "recipient_scope": "parking_users",
+                "selected_unit_numbers": ["201"],
                 "denominator_label": "parking square footage",
                 "denominator_value": None,
                 "denominator_source": "unknown",
@@ -211,6 +213,66 @@ def missouri_extraction_payload() -> dict:
         "human_review_questions": [],
         "recommended_saved_setup": None,
     }
+
+
+def missouri_run_18_extraction_payload() -> dict:
+    """Run-18 policy shape with context-specific recurring categories."""
+    payload = copy.deepcopy(missouri_extraction_payload())
+    payload["assessment_setup"]["declared_contexts"].insert(
+        1, "reserve_contribution"
+    )
+    pools = payload["allocation_pools"]
+    for pool in pools:
+        treatment = pool["billing_treatment"]
+        pool["billing_cadence"] = (
+            "one_time" if treatment == "separate_one_time" else "recurring"
+        )
+        pool["amount_availability"] = (
+            "external_schedule"
+            if treatment == "operator_amount_pending"
+            else "known"
+        )
+
+    residual = next(pool for pool in pools if pool["pool_key"] == "equal_base")
+    residual["residual_after_pool_keys"] = [
+        "variable_dre_operating",
+        "variable_dre_reserves",
+        "parking_cost_center",
+    ]
+
+    operating = next(
+        pool for pool in pools if pool["pool_key"] == "variable_dre_exceptions"
+    )
+    operating["pool_key"] = "variable_dre_operating"
+    operating["pool_name"] = "DRE-Prorated Operating Exceptions"
+    operating["billing_treatment"] = "recurring"
+    operating["billing_cadence"] = "recurring"
+    operating["amount_availability"] = "external_schedule"
+    operating["included_budget_lines"] = ["insurance", "gas", "water"]
+
+    reserve = copy.deepcopy(operating)
+    reserve["pool_key"] = "variable_dre_reserves"
+    reserve["pool_name"] = "DRE-Prorated Reserve Contributions"
+    reserve["allocation_context"] = "reserve_contribution"
+    reserve["included_budget_lines"] = [
+        "roof reserve",
+        "painting reserve",
+        "water heater reserve",
+    ]
+    pools.insert(2, reserve)
+
+    parking = next(
+        pool for pool in pools if pool["pool_key"] == "parking_cost_center"
+    )
+    parking["amount_availability"] = "external_schedule"
+
+    structural = next(
+        pool for pool in pools if pool["pool_key"] == "structural_repair_sa"
+    )
+    structural["billing_treatment"] = "operator_amount_pending"
+    structural["billing_cadence"] = "one_time"
+    structural["amount_availability"] = "operator_pending"
+    return payload
 
 
 def missouri_sqft_monthly_for_unit(unit_number: str) -> Decimal:

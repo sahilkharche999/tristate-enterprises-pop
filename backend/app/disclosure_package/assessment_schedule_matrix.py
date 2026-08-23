@@ -1904,6 +1904,77 @@ def _per_unit_factor_value_lookup_from_payload(
     return lookup, converted_pool_keys
 
 
+def _pool_custom_recipient_ids_from_payload(
+    *,
+    payload: dict[str, Any],
+    unit_id_by_number: dict[str, int],
+) -> dict[str, list[int]]:
+    """Resolve reviewed participant unit numbers to promoted engine IDs."""
+    result: dict[str, list[int]] = {}
+    for pool in payload.get("allocation_pools") or []:
+        scope = str(pool.get("recipient_scope") or "")
+        if scope in {"", "all_units"}:
+            continue
+        pool_key = str(pool.get("pool_key") or "")
+        participants = [
+            str(value).strip()
+            for value in (
+                pool.get("selected_unit_numbers")
+                or pool.get("participant_unit_numbers")
+                or []
+            )
+            if str(value).strip()
+        ]
+        if not participants and scope in {
+            "residential_only",
+            "commercial_only",
+            "parking_users",
+        }:
+            for unit in (payload.get("unit_structure") or {}).get("units") or []:
+                unit_number = str(unit.get("unit_number") or "").strip()
+                category = str(
+                    unit.get("category")
+                    or unit.get("residential_commercial_flag")
+                    or ""
+                ).strip().lower()
+                parking = str(
+                    unit.get("parking_flag")
+                    or unit.get("parking_spaces")
+                    or ""
+                ).strip().lower()
+                if scope == "residential_only" and category.startswith("res"):
+                    participants.append(unit_number)
+                elif scope == "commercial_only" and category.startswith("com"):
+                    participants.append(unit_number)
+                elif scope == "parking_users" and parking not in {
+                    "",
+                    "0",
+                    "false",
+                    "no",
+                    "none",
+                }:
+                    participants.append(unit_number)
+            participants = [value for value in participants if value]
+        if not pool_key or not participants:
+            raise ValueError(
+                "A selected-home category has no reviewed participating homes."
+            )
+        missing = [
+            unit_number
+            for unit_number in participants
+            if unit_number not in unit_id_by_number
+        ]
+        if missing:
+            raise ValueError(
+                "Selected-home category references homes that are not in the "
+                f"promoted setup: {', '.join(missing)}"
+            )
+        result[pool_key] = [
+            unit_id_by_number[unit_number] for unit_number in participants
+        ]
+    return result
+
+
 def _pool_totals_annual_for_mappings(
     *,
     budget_lines: list[BudgetLineInput],
@@ -2511,6 +2582,7 @@ def _apply_approved_allocation_resolutions(
     setup_id: int,
     pools: list[PoolDefinition],
     recipients: list[RecipientReference],
+    pool_custom_recipients: dict[str, list[int]],
 ) -> tuple[
     list[PoolDefinition],
     dict[str, dict[tuple[str, int], Decimal]],
@@ -2550,6 +2622,23 @@ def _apply_approved_allocation_resolutions(
             updated_pools.append(pool)
             continue
         snapshot = resolution.factor_snapshot
+        if pool.recipient_scope == "custom_unit_list":
+            custom_ids = set(pool_custom_recipients.get(pool.pool_key, []))
+            scoped_recipients = [
+                recipient
+                for recipient in recipients
+                if recipient.ref_type == "unit" and recipient.ref_id in custom_ids
+            ]
+            if not scoped_recipients:
+                raise EngineSetupError(
+                    f"Selected-home assessment category '{pool.pool_key}' "
+                    "has no approved recipient identifiers"
+                )
+        else:
+            scoped_recipients = resolve_recipients(
+                RecipientSet(recipients=recipients),
+                pool.recipient_scope,
+            )
         updated_pools.append(
             pool.model_copy(
                 update={
@@ -2570,7 +2659,7 @@ def _apply_approved_allocation_resolutions(
         if resolution.resolved_method == "specified_value":
             missing = [
                 recipient.label
-                for recipient in recipients
+                for recipient in scoped_recipients
                 if recipient.ref_type != "unit"
                 or (
                     recipient.label not in snapshot.recipients
@@ -2582,7 +2671,7 @@ def _apply_approved_allocation_resolutions(
                     f"Approved specified values for assessment category '{pool.pool_key}' "
                     f"are missing recipient(s): {', '.join(missing)}"
                 )
-            for recipient in recipients:
+            for recipient in scoped_recipients:
                 raw_value = snapshot.recipients.get(
                     recipient.label,
                     snapshot.recipients.get(str(recipient.ref_id)),
@@ -2601,13 +2690,16 @@ def _apply_approved_allocation_resolutions(
             )
         weights: dict[tuple[str, int], Decimal] = {}
         missing: list[str] = []
-        scoped_recipients = resolve_recipients(
-            RecipientSet(recipients=recipients),
-            pool.recipient_scope,
-        )
+        scoped_keys = {
+            (recipient.ref_type, recipient.ref_id)
+            for recipient in scoped_recipients
+        }
         for snapshot_key, value in snapshot.recipients.items():
             recipient = recipient_by_key.get(str(snapshot_key))
-            if recipient is not None:
+            if (
+                recipient is not None
+                and (recipient.ref_type, recipient.ref_id) in scoped_keys
+            ):
                 weights[(recipient.ref_type, recipient.ref_id)] = _money(value)
         for recipient in scoped_recipients:
             if (
@@ -3215,6 +3307,24 @@ def build_matrix_from_approved_assessment_setup(
         for recipient in recipients
         if _get(recipient, "ref_type") == "unit"
     }
+    try:
+        pool_custom_recipients = _pool_custom_recipient_ids_from_payload(
+            payload=payload,
+            unit_id_by_number=unit_id_by_number,
+        )
+    except ValueError as exc:
+        return _fallback_matrix_for_db_issue(
+            hoa_name=hoa_name,
+            fiscal_year=fiscal_year,
+            reason=f"Assessment matrix needs operator review before rendering: {exc}",
+            approved_at=approved_at,
+        )
+    pools = [
+        pool.model_copy(update={"recipient_scope": "custom_unit_list"})
+        if pool.pool_key in pool_custom_recipients
+        else pool
+        for pool in pools
+    ]
     pool_totals_annual = _pool_totals_annual_for_mappings(
         budget_lines=budget_lines,
         mappings=mappings,
@@ -3232,6 +3342,7 @@ def build_matrix_from_approved_assessment_setup(
                 setup_id=setup_id,
                 pools=pools,
                 recipients=recipients,
+                pool_custom_recipients=pool_custom_recipients,
             )
         )
     except (EngineSetupError, ValueError) as exc:
@@ -3298,6 +3409,7 @@ def build_matrix_from_approved_assessment_setup(
                 approved_assessment_revenue_annual=approved_assessment_revenue_annual,
                 specified_value_lookup=specified_lookup,
                 pool_recipient_weights=approved_pool_weights,
+                pool_custom_recipients=pool_custom_recipients,
             )
         )
     except (NeedsHumanReview, EngineSetupError, ValueError) as exc:

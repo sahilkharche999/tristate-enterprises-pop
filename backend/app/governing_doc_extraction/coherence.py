@@ -19,8 +19,8 @@ from app.dre_extraction.schemas import (
 )
 
 _PROPORTIONAL_METHODS = frozenset({"ownership_percentage", "square_footage"})
-_SPECIAL_BILLING_TREATMENTS = frozenset(
-    {"separate_one_time", "operator_amount_pending"}
+_RECURRING_CONTEXTS = frozenset(
+    {"regular_operating", "cost_center", "reserve_contribution"}
 )
 
 
@@ -111,16 +111,24 @@ def assess_allocation_coherence(
                 f"allocation pool '{pool.pool_key}' has no source page citation"
             )
         if context == "special_assessment":
-            if pool.billing_treatment not in _SPECIAL_BILLING_TREATMENTS:
+            if pool.billing_cadence != "one_time":
                 reasons.append(
                     f"special-assessment pool '{pool.pool_key}' must use "
-                    "separate_one_time or operator_amount_pending billing"
+                    "one_time billing cadence"
                 )
             if pool.pool_kind != "separately_billed_special_assessment":
                 reasons.append(
                     f"special-assessment pool '{pool.pool_key}' is missing the "
                     "derived separately-billed engine treatment"
                 )
+        elif (
+            context in _RECURRING_CONTEXTS
+            and pool.billing_cadence != "recurring"
+        ):
+            reasons.append(
+                f"{context.replace('_', '-')} pool '{pool.pool_key}' must use "
+                "recurring billing cadence"
+            )
         elif context == "cost_center" and not (
             pool.recipient_scope or ""
         ).strip():
@@ -136,12 +144,14 @@ def assess_allocation_coherence(
     for residual in pools:
         if residual.budget_line_derivation != "residual_default":
             continue
+        if residual.billing_cadence != "recurring":
+            continue
         claimed = set(residual.residual_after_pool_keys or [])
         missing = sorted(
             pool.pool_key
             for pool in pools
             if pool.pool_key != residual.pool_key
-            and pool.allocation_context != "regular_operating"
+            and pool.billing_cadence == residual.billing_cadence
             and pool.pool_key not in claimed
         )
         if missing:

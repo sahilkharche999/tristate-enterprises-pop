@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from decimal import Decimal
 
 import pytest
@@ -15,11 +16,15 @@ from app.dre_extraction.schemas import (
     UnitRow,
     UnitStructure,
 )
+from app.dre_extraction.promotion import parse_extraction_payload
 from app.governing_doc_extraction.coherence import (
     IncoherentCcrExtraction,
     apply_coherence_to_extraction,
     assess_allocation_coherence,
     assert_ccr_allocation_coherent,
+)
+from tests.support.missouri_allocation_fixture import (
+    missouri_run_18_extraction_payload,
 )
 
 
@@ -58,6 +63,8 @@ def _pool(
     *,
     context: str = "regular_operating",
     billing: str = "recurring",
+    cadence: str = "recurring",
+    amount_availability: str = "known",
     recipient_scope: str = "",
 ) -> AllocationPoolBlock:
     return AllocationPoolBlock(
@@ -66,6 +73,8 @@ def _pool(
         allocation_method=method,  # type: ignore[arg-type]
         allocation_context=context,  # type: ignore[arg-type]
         billing_treatment=billing,  # type: ignore[arg-type]
+        billing_cadence=cadence,  # type: ignore[arg-type]
+        amount_availability=amount_availability,  # type: ignore[arg-type]
         recipient_scope=recipient_scope,
         confidence=0.9,
         source_pages=[1],
@@ -83,6 +92,25 @@ def _unit(num: str, pct: str = "10") -> UnitRow:
 
 
 class TestAssessAllocationCoherence:
+    def test_missouri_run_18_context_categories_are_coherent(self) -> None:
+        extraction = parse_extraction_payload(
+            json.dumps(missouri_run_18_extraction_payload())
+        )
+
+        assert extraction is not None
+        pools = {pool.pool_key: pool for pool in extraction.allocation_pools}
+        assert pools["variable_dre_operating"].allocation_method == "custom_factor"
+        assert pools["variable_dre_reserves"].allocation_method == "custom_factor"
+        assert (
+            pools["variable_dre_operating"].allocation_context
+            == "regular_operating"
+        )
+        assert (
+            pools["variable_dre_reserves"].allocation_context
+            == "reserve_contribution"
+        )
+        assert not assess_allocation_coherence(extraction).is_incoherent
+
     def test_missouri_collapse_incoherent(self) -> None:
         ext = _extraction(
             setup_type="individual_unit",
@@ -159,7 +187,7 @@ class TestAssessAllocationCoherence:
         finding = assess_allocation_coherence(ext)
 
         assert finding.is_incoherent
-        assert any("separate_one_time" in reason for reason in finding.reasons)
+        assert any("one_time" in reason for reason in finding.reasons)
 
     def test_cost_center_requires_explicit_recipient_scope(self) -> None:
         ext = _extraction(
@@ -208,6 +236,7 @@ class TestAssessAllocationCoherence:
             "structural_repair",
             context="special_assessment",
             billing="separate_one_time",
+            cadence="one_time",
         ).model_copy(update={"pool_kind": "separately_billed_special_assessment", "source_pages": []})
         ext = _extraction(
             setup_type="multi_pool_combination",
@@ -219,6 +248,116 @@ class TestAssessAllocationCoherence:
 
         assert finding.is_incoherent
         assert any("source page" in reason for reason in finding.reasons)
+
+    def test_run_18_residual_only_requires_same_recurring_billing_stream(self) -> None:
+        residual = _pool("equal", "equal_base").model_copy(
+            update={
+                "budget_line_derivation": "residual_default",
+                "residual_after_pool_keys": [
+                    "operating_exception",
+                    "reserve_contribution",
+                    "parking_cost_center",
+                ],
+            }
+        )
+        ext = _extraction(
+            setup_type="multi_pool_combination",
+            pools=[
+                residual,
+                _pool(
+                    "custom_factor",
+                    "operating_exception",
+                    amount_availability="external_schedule",
+                ),
+                _pool(
+                    "custom_factor",
+                    "reserve_contribution",
+                    context="reserve_contribution",
+                    amount_availability="external_schedule",
+                ),
+                _pool(
+                    "custom_factor",
+                    "parking_cost_center",
+                    context="cost_center",
+                    recipient_scope="parking_users",
+                    amount_availability="external_schedule",
+                ),
+                _pool(
+                    "custom_factor",
+                    "structural_repair",
+                    context="special_assessment",
+                    billing="separate_one_time",
+                    cadence="one_time",
+                    amount_availability="operator_pending",
+                ).model_copy(
+                    update={"pool_kind": "separately_billed_special_assessment"}
+                ),
+            ],
+            declared_contexts=[
+                "regular_operating",
+                "reserve_contribution",
+                "cost_center",
+                "special_assessment",
+            ],
+        )
+
+        finding = assess_allocation_coherence(ext)
+
+        assert not any("structural_repair" in reason for reason in finding.reasons)
+        assert not finding.is_incoherent
+
+    @pytest.mark.parametrize(
+        "missing_key",
+        ["operating_exception", "reserve_contribution", "parking_cost_center"],
+    )
+    def test_run_18_residual_blocks_missing_recurring_exclusions(
+        self,
+        missing_key: str,
+    ) -> None:
+        required = {
+            "operating_exception",
+            "reserve_contribution",
+            "parking_cost_center",
+        }
+        residual = _pool("equal", "equal_base").model_copy(
+            update={
+                "budget_line_derivation": "residual_default",
+                "residual_after_pool_keys": sorted(required - {missing_key}),
+            }
+        )
+        ext = _extraction(
+            setup_type="multi_pool_combination",
+            pools=[
+                residual,
+                _pool("custom_factor", "operating_exception"),
+                _pool(
+                    "custom_factor",
+                    "reserve_contribution",
+                    context="reserve_contribution",
+                ),
+                _pool(
+                    "custom_factor",
+                    "parking_cost_center",
+                    context="cost_center",
+                    recipient_scope="parking_users",
+                ),
+                _pool(
+                    "custom_factor",
+                    "structural_repair",
+                    context="special_assessment",
+                    billing="separate_one_time",
+                    cadence="one_time",
+                ).model_copy(
+                    update={"pool_kind": "separately_billed_special_assessment"}
+                ),
+            ],
+        )
+
+        finding = assess_allocation_coherence(ext)
+
+        assert finding.is_incoherent
+        assert any(missing_key in reason for reason in finding.reasons)
+        assert not any("structural_repair" in reason for reason in finding.reasons)
 
     def test_proportional_zero_units_coherent_for_this_gate(self) -> None:
         ext = _extraction(

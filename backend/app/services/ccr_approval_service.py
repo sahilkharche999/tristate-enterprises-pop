@@ -17,25 +17,35 @@ row, carry-forward mappings, update run status).
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
+from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-from typing import Any, Optional
+from typing import Annotated, Any, Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.dre_extraction.promotion import (
+    AmbiguousOwnershipPercentForm,
+    EditedEntityFailedToPromote,
     MissingUnitFactors,
+    InvalidStructuralOperation,
+    StaleStructuralOperation,
     apply_review_edits_to_extraction,
     check_missing_unit_factors,
     derive_ccr_pool_treatments,
     entity_keys_touched_by_edits,
+    normalize_extraction_for_promotion,
     parse_extraction_payload,
     populate_setup_children,
+    validate_edited_entities_for_promotion,
+    validate_ownership_percent_form,
+    validate_specified_value_pools,
 )
-from app.dre_extraction.schemas import DRESetupExtraction, UnitRow
+from app.dre_extraction.schemas import DRESetupExtraction, UnitPoolFactor, UnitRow
 from app.governing_doc_extraction.coherence import (
     IncoherentCcrExtraction,
-    assert_ccr_allocation_coherent,
+    assess_allocation_coherence,
 )
 from app.services.dre_approval_service import (
     DREApprovalResponse,
@@ -61,6 +71,556 @@ class CCRUnitFactor(BaseModel):
     unit_number: str
     square_feet: Optional[Decimal] = None
     ownership_percent: Optional[Decimal] = None
+    fixed_amounts: dict[str, Annotated[Decimal, Field(gt=0)]] = Field(
+        default_factory=dict
+    )
+    custom_factors: dict[str, Annotated[Decimal, Field(gt=0)]] = Field(
+        default_factory=dict
+    )
+
+
+class IncompleteOperatorUnitRoster(ValueError):
+    """Operator rows cannot safely replace an incomplete extracted roster."""
+
+
+def _validate_replacement_roster(
+    extraction: DRESetupExtraction,
+    unit_numbers: list[str],
+) -> None:
+    expected = extraction.unit_structure.unit_count
+    if expected is None or expected <= 0:
+        return
+
+    normalized = [str(value).strip() for value in unit_numbers]
+    unique = set(normalized)
+    if (
+        any(not value for value in normalized)
+        or len(unique) != len(normalized)
+        or len(normalized) != expected
+    ):
+        raise IncompleteOperatorUnitRoster(
+            f"Enter all {expected} distinct homes before saving this roster."
+        )
+
+
+class CCRPromotionIssue(BaseModel):
+    code: str
+    severity: Literal["warning", "error"]
+    category_key: Optional[str] = None
+    source_pages: list[int] = Field(default_factory=list)
+    explanation: str
+    recommended_operation: Optional[dict[str, Any]] = None
+    approval_blocked: bool
+
+
+class CCRPromotionPreview(BaseModel):
+    extraction_run_id: int
+    review_version: int
+    resolved_extraction: Optional[DRESetupExtraction]
+    issues: list[CCRPromotionIssue] = Field(default_factory=list)
+    approval_blocked: bool
+
+
+class PromotionInputsChanged(RuntimeError):
+    """Review edits or operator factors changed after resolution."""
+
+    def __init__(self, extraction_run_id: int) -> None:
+        self.extraction_run_id = extraction_run_id
+        super().__init__(
+            "CC&R corrections changed while approval was starting. "
+            "Refresh the preview and approve the latest version."
+        )
+
+
+@dataclass(frozen=True)
+class ResolvedCCRPromotion:
+    preview: CCRPromotionPreview
+    edited_entity_keys: frozenset[str]
+    ownership_ambiguity: Optional[AmbiguousOwnershipPercentForm] = None
+    landing_failures: tuple[str, ...] = ()
+    review_row_count: int = 0
+    review_max_id: int = 0
+    operator_factors_raw: Optional[str] = None
+
+
+def _pool_for_key(
+    extraction: Optional[DRESetupExtraction], category_key: Optional[str]
+) -> Optional[Any]:
+    if extraction is None or category_key is None:
+        return None
+    return next(
+        (pool for pool in extraction.allocation_pools if pool.pool_key == category_key),
+        None,
+    )
+
+
+def _coherence_issue(
+    reason: str, extraction: DRESetupExtraction
+) -> CCRPromotionIssue:
+    quoted_keys = re.findall(r"\b(?:pool|category)\s+'([^']+)'", reason)
+    category_key = quoted_keys[0] if quoted_keys else None
+    pool = _pool_for_key(extraction, category_key)
+    if "must use" in reason and "billing cadence" in reason:
+        code = "CCR_BILLING_COMBINATION_UNSUPPORTED"
+        explanation = (
+            f"Category '{category_key}' has a billing schedule that does not "
+            "match its charge type. Regular dues, cost centers, and reserve "
+            "contributions recur; separately billed special assessments are one time."
+        )
+        recommended = {
+            "operation": "update",
+            "category_key": category_key,
+            "changes": {},
+        }
+    elif "has no source page citation" in reason:
+        code = "CCR_POOL_SOURCE_MISSING"
+        explanation = (
+            f"Choose the CC&R page or pages that support category "
+            f"'{category_key}' before approval."
+        )
+        recommended = {
+            "operation": "update",
+            "category_key": category_key,
+            "changes": {"source_pages": []},
+        }
+    elif "declared allocation context" in reason:
+        code = "CCR_DECLARED_CATEGORY_MISSING"
+        explanation = (
+            "The document declares an assessment category that has not yet "
+            "been represented by a reviewed allocation pool."
+        )
+        recommended = {"operation": "add"}
+    elif "does not exclude exception pools" in reason:
+        code = "CCR_RESIDUAL_EXCLUSIONS_INCOMPLETE"
+        explanation = (
+            f"Category '{category_key}' must list every recurring exception "
+            "category before approval."
+        )
+        recommended = {
+            "operation": "update",
+            "category_key": category_key,
+            "changes": {"residual_after_pool_keys": []},
+        }
+    else:
+        code = "CCR_ALLOCATION_STRUCTURE_INCOHERENT"
+        explanation = (
+            "The corrected categories still do not form a complete, internally "
+            "consistent allocation policy."
+        )
+        recommended = (
+            {"operation": "update", "category_key": category_key, "changes": {}}
+            if category_key
+            else None
+        )
+    return CCRPromotionIssue(
+        code=code,
+        severity="error",
+        category_key=category_key,
+        source_pages=list(pool.source_pages) if pool is not None else [],
+        explanation=explanation,
+        recommended_operation=recommended,
+        approval_blocked=True,
+    )
+
+
+def resolve_ccr_promotion(
+    *,
+    property_id: int,
+    extraction_run_id: int,
+    setup_type: SetupTypeLiteral,
+    connection: sqlite3.Connection,
+) -> ResolvedCCRPromotion:
+    """Resolve the immutable CC&R snapshot through the promotion gates.
+
+    This function performs reads only. Approval, re-promotion, and preview all
+    consume this exact result before any setup rows are written.
+    """
+    row = connection.execute(
+        "SELECT parsed_json, operator_unit_factors_json "
+        "FROM dre_extraction_runs "
+        "WHERE id = ? AND property_id = ? "
+        "AND COALESCE(document_type, 'dre') = 'ccr'",
+        (extraction_run_id, property_id),
+    ).fetchone()
+    if row is None:
+        raise ExtractionRunNotFound(
+            f"extraction_run_id={extraction_run_id} not found for property_id={property_id}"
+        )
+
+    edits = list_review_edits(
+        dre_extraction_run_id=extraction_run_id, connection=connection
+    )
+    review_row_count = len(edits)
+    review_max_id = max((edit.edit_id for edit in edits), default=0)
+    review_version = sum(
+        edit.field_path == "allocation_pools.$operation" for edit in edits
+    )
+    extraction = parse_extraction_payload(row[0])
+    operator_factors_raw = row[1]
+    issues: list[CCRPromotionIssue] = []
+    edited_entity_keys: frozenset[str] = frozenset()
+    ownership_ambiguity: Optional[AmbiguousOwnershipPercentForm] = None
+    landing_failures: tuple[str, ...] = ()
+
+    if extraction is None:
+        issues.append(
+            CCRPromotionIssue(
+                code="CCR_EXTRACTION_INVALID",
+                severity="error",
+                explanation=(
+                    "The saved CC&R extraction could not be read. Re-run extraction "
+                    "before attempting approval."
+                ),
+                approval_blocked=True,
+            )
+        )
+    else:
+        try:
+            extraction = apply_review_edits_to_extraction(extraction, edits)
+            edited_entity_keys = entity_keys_touched_by_edits(
+                extraction, edits
+            )
+        except StaleStructuralOperation:
+            issues.append(
+                CCRPromotionIssue(
+                    code="CCR_OPERATION_VERSION_STALE",
+                    severity="error",
+                    explanation=(
+                        "A saved category correction was based on an older version. "
+                        "Refresh the review and apply that correction again."
+                    ),
+                    approval_blocked=True,
+                )
+            )
+        except InvalidStructuralOperation as exc:
+            category_key = exc.category_keys[0] if exc.category_keys else None
+            issues.append(
+                CCRPromotionIssue(
+                    code="CCR_OPERATION_INVALID",
+                    severity="error",
+                    category_key=category_key,
+                    explanation=(
+                        "A saved category correction can no longer be applied safely. "
+                        "Refresh the review and enter the correction again."
+                    ),
+                    approval_blocked=True,
+                )
+            )
+        except Exception as exc:
+            from app.dre_extraction.promotion import UnresolvableReviewEdit
+
+            if not isinstance(exc, UnresolvableReviewEdit):
+                raise
+            issues.append(
+                CCRPromotionIssue(
+                    code="CCR_REVIEW_EDIT_UNRESOLVABLE",
+                    severity="error",
+                    explanation=(
+                        "A saved field correction no longer matches this extraction. "
+                        "Refresh the review and enter the correction again."
+                    ),
+                    approval_blocked=True,
+                )
+            )
+
+    if extraction is not None and not issues:
+        operator_factors = parse_operator_unit_factors(operator_factors_raw)
+        try:
+            extraction = merge_operator_factors(extraction, operator_factors)
+            edited_entity_keys = edited_entity_keys.union(
+                f"unit:{str(unit_number).strip()}"
+                for unit_number in operator_factors
+            )
+        except IncompleteOperatorUnitRoster as exc:
+            issues.append(
+                CCRPromotionIssue(
+                    code="CCR_OPERATOR_ROSTER_INCOMPLETE",
+                    severity="error",
+                    explanation=(
+                        f"The saved home-value list is incomplete. {exc} "
+                        "The existing values were kept; replace the full list to continue."
+                    ),
+                    approval_blocked=True,
+                )
+            )
+        extraction = derive_ccr_pool_treatments(extraction)
+        extraction = normalize_extraction_for_promotion(extraction)
+
+        landing_failures = tuple(
+            validate_edited_entities_for_promotion(
+                extraction,
+                setup_type=setup_type,
+                edited_entity_keys=edited_entity_keys,
+            )
+        )
+        for entity_ref in landing_failures:
+            entity_type, entity_key = entity_ref.split(":", 1)
+            source_pages: list[int] = []
+            if entity_type == "pool":
+                pool = _pool_for_key(extraction, entity_key)
+                source_pages = list(pool.source_pages) if pool is not None else []
+            elif entity_type == "group":
+                group = next(
+                    (
+                        group
+                        for index, group in enumerate(extraction.unit_structure.groups)
+                        if (group.group_id or group.label or str(index)) == entity_key
+                    ),
+                    None,
+                )
+                source_pages = (
+                    [group.source_page]
+                    if group is not None and group.source_page is not None
+                    else []
+                )
+            else:
+                unit = next(
+                    (
+                        unit
+                        for unit in extraction.unit_structure.units
+                        if unit.unit_number == entity_key
+                    ),
+                    None,
+                )
+                source_pages = (
+                    [unit.source_page]
+                    if unit is not None and unit.source_page is not None
+                    else []
+                )
+            issues.append(
+                CCRPromotionIssue(
+                    code="CCR_EDITED_ENTITY_UNPROMOTABLE",
+                    severity="error",
+                    category_key=entity_key,
+                    source_pages=source_pages,
+                    explanation=(
+                        f"The corrected {entity_type} '{entity_key}' still contains "
+                        "a value that cannot be promoted. Correct that category "
+                        "before approval."
+                    ),
+                    recommended_operation=(
+                        {
+                            "operation": "update",
+                            "category_key": entity_key,
+                            "changes": {},
+                        }
+                        if entity_type == "pool"
+                        else None
+                    ),
+                    approval_blocked=True,
+                )
+            )
+
+        finding = assess_allocation_coherence(extraction)
+        issues.extend(_coherence_issue(reason, extraction) for reason in finding.reasons)
+
+        if setup_type != "per_unit":
+            for pool in extraction.allocation_pools:
+                if (
+                    pool.recipient_scope == "all_units"
+                    and pool.allocation_method
+                    not in {
+                        "square_footage",
+                        "ownership_percentage",
+                        "custom_factor",
+                        "specified_value",
+                    }
+                ):
+                    continue
+                issues.append(
+                    CCRPromotionIssue(
+                        code="CCR_SETUP_TYPE_INCOMPATIBLE",
+                        severity="error",
+                        category_key=pool.pool_key,
+                        source_pages=list(pool.source_pages),
+                        explanation=(
+                            f"Category '{pool.pool_key}' assigns values to each home "
+                            "or to selected homes. Choose the per-home setup before approval."
+                        ),
+                        approval_blocked=True,
+                    )
+                )
+
+        try:
+            validate_ownership_percent_form(extraction)
+        except AmbiguousOwnershipPercentForm as exc:
+            ownership_ambiguity = exc
+            for pool in extraction.allocation_pools:
+                if pool.allocation_method != "ownership_percentage":
+                    continue
+                issues.append(
+                    CCRPromotionIssue(
+                        code="CCR_OWNERSHIP_PERCENT_AMBIGUOUS",
+                        severity="error",
+                        category_key=pool.pool_key,
+                        source_pages=list(pool.source_pages),
+                        explanation=(
+                            f"Category '{pool.pool_key}' uses ownership percentages, "
+                            "but the saved values do not clearly indicate whether they "
+                            "are fractions or percentage points. Choose the printed "
+                            "format before approval."
+                        ),
+                        recommended_operation={
+                            "operation": "set_ownership_percent_form",
+                            "allowed_values": ["fraction", "points"],
+                        },
+                        approval_blocked=True,
+                    )
+                )
+
+        if setup_type == "per_unit":
+            for category_key in check_missing_unit_factors(extraction):
+                pool = _pool_for_key(extraction, category_key)
+                issues.append(
+                    CCRPromotionIssue(
+                        code="CCR_UNIT_FACTORS_MISSING",
+                        severity="error",
+                        category_key=category_key,
+                        source_pages=list(pool.source_pages) if pool is not None else [],
+                        explanation=(
+                            f"Category '{category_key}' uses a proportional method, "
+                            "but at least one participating home is missing a "
+                            "positive allocation factor."
+                        ),
+                        recommended_operation=None,
+                        approval_blocked=True,
+                    )
+                )
+            for category_key, validation in validate_specified_value_pools(
+                extraction
+            ).items():
+                if validation.valid:
+                    continue
+                pool = _pool_for_key(extraction, category_key)
+                missing = validation.failure_kind == "missing"
+                issues.append(
+                    CCRPromotionIssue(
+                        code=(
+                            "CCR_SPECIFIED_VALUES_MISSING"
+                            if missing
+                            else "CCR_SPECIFIED_VALUES_INVALID"
+                        ),
+                        severity="error",
+                        category_key=category_key,
+                        source_pages=list(pool.source_pages) if pool is not None else [],
+                        explanation=(
+                            (
+                                f"Category '{category_key}' needs a positive dollar "
+                                "amount for every participating home before approval."
+                            )
+                            if missing
+                            else (
+                                f"Category '{category_key}' has per-home amounts that "
+                                f"do not reconcile to its documented total: "
+                                f"{validation.reason}."
+                            )
+                        ),
+                        approval_blocked=True,
+                    )
+                )
+
+    preview = CCRPromotionPreview(
+        extraction_run_id=extraction_run_id,
+        review_version=review_version,
+        resolved_extraction=extraction,
+        issues=issues,
+        approval_blocked=any(issue.approval_blocked for issue in issues),
+    )
+    return ResolvedCCRPromotion(
+        preview=preview,
+        edited_entity_keys=edited_entity_keys,
+        ownership_ambiguity=ownership_ambiguity,
+        landing_failures=landing_failures,
+        review_row_count=review_row_count,
+        review_max_id=review_max_id,
+        operator_factors_raw=operator_factors_raw,
+    )
+
+
+def _pin_ccr_promotion_inputs(
+    *,
+    property_id: int,
+    extraction_run_id: int,
+    resolved: ResolvedCCRPromotion,
+    connection: sqlite3.Connection,
+) -> None:
+    """Acquire SQLite's write lock iff the resolved review/factor inputs match."""
+    cursor = connection.execute(
+        """
+        UPDATE dre_extraction_runs
+           SET id = id
+         WHERE id = ?
+           AND property_id = ?
+           AND COALESCE(document_type, 'dre') = 'ccr'
+           AND operator_unit_factors_json IS ?
+           AND (
+                SELECT COUNT(*)
+                  FROM dre_review_edits
+                 WHERE dre_extraction_run_id = ?
+           ) = ?
+           AND COALESCE((
+                SELECT MAX(id)
+                  FROM dre_review_edits
+                 WHERE dre_extraction_run_id = ?
+           ), 0) = ?
+        """,
+        (
+            extraction_run_id,
+            property_id,
+            resolved.operator_factors_raw,
+            extraction_run_id,
+            resolved.review_row_count,
+            extraction_run_id,
+            resolved.review_max_id,
+        ),
+    )
+    if cursor.rowcount != 1:
+        raise PromotionInputsChanged(extraction_run_id)
+
+
+def _raise_preview_blockers(resolved: ResolvedCCRPromotion) -> None:
+    preview = resolved.preview
+    if not preview.approval_blocked:
+        return
+    issue_dicts = [issue.model_dump(mode="json") for issue in preview.issues]
+    codes = {issue.code for issue in preview.issues}
+    if "CCR_UNIT_FACTORS_MISSING" in codes:
+        exc: Exception = MissingUnitFactors(
+            [
+                issue.category_key
+                for issue in preview.issues
+                if issue.code == "CCR_UNIT_FACTORS_MISSING"
+                and issue.category_key is not None
+            ]
+        )
+    elif resolved.ownership_ambiguity is not None:
+        exc = resolved.ownership_ambiguity
+    elif resolved.landing_failures:
+        exc = EditedEntityFailedToPromote(list(resolved.landing_failures))
+    elif "CCR_EXTRACTION_INVALID" in codes or any(
+        code.startswith("CCR_") and "OPERATION" not in code and "REVIEW_EDIT" not in code
+        for code in codes
+    ):
+        exc = IncoherentCcrExtraction(
+            [issue.explanation for issue in preview.issues]
+        )
+    elif "CCR_OPERATION_VERSION_STALE" in codes:
+        exc = StaleStructuralOperation(base_version=-1, current_version=preview.review_version)
+    elif "CCR_OPERATION_INVALID" in codes:
+        exc = InvalidStructuralOperation(
+            "Stored structural operation is invalid.",
+            [
+                issue.category_key
+                for issue in preview.issues
+                if issue.category_key is not None
+            ],
+        )
+    else:
+        from app.dre_extraction.promotion import UnresolvableReviewEdit
+
+        exc = UnresolvableReviewEdit([])
+    setattr(exc, "promotion_issues", issue_dicts)
+    raise exc
 
 
 def save_operator_unit_factors(
@@ -76,7 +636,9 @@ def save_operator_unit_factors(
     Returns the number of factor entries saved.
     """
     row = connection.execute(
-        "SELECT id FROM dre_extraction_runs WHERE id = ? AND property_id = ?",
+        "SELECT id, operator_unit_factors_json, parsed_json "
+        "FROM dre_extraction_runs "
+        "WHERE id = ? AND property_id = ?",
         (extraction_run_id, property_id),
     ).fetchone()
     if row is None:
@@ -84,14 +646,53 @@ def save_operator_unit_factors(
             f"extraction_run_id={extraction_run_id} not found for property_id={property_id}"
         )
 
+    extraction = parse_extraction_payload(row[2])
+    if extraction is not None:
+        _validate_replacement_roster(
+            extraction,
+            [factor.unit_number for factor in factors],
+        )
+
+    existing_factors = {
+        str(unit_number).strip(): entry
+        for unit_number, entry in parse_operator_unit_factors(row[1]).items()
+        if isinstance(entry, dict)
+    }
     factors_dict: dict[str, dict] = {}
     for f in factors:
-        entry: dict[str, Any] = {}
+        unit_number = f.unit_number.strip()
+        entry: dict[str, Any] = dict(existing_factors.get(unit_number, {}))
         if f.square_feet is not None:
             entry["square_feet"] = str(f.square_feet)
         if f.ownership_percent is not None:
             entry["ownership_percent"] = str(f.ownership_percent)
-        factors_dict[f.unit_number] = entry
+        if f.fixed_amounts:
+            fixed_amounts = (
+                dict(entry.get("fixed_amounts", {}))
+                if isinstance(entry.get("fixed_amounts"), dict)
+                else {}
+            )
+            fixed_amounts.update(
+                {
+                    pool_key: str(amount)
+                    for pool_key, amount in f.fixed_amounts.items()
+                }
+            )
+            entry["fixed_amounts"] = fixed_amounts
+        if f.custom_factors:
+            custom_factors = (
+                dict(entry.get("custom_factors", {}))
+                if isinstance(entry.get("custom_factors"), dict)
+                else {}
+            )
+            custom_factors.update(
+                {
+                    pool_key: str(value)
+                    for pool_key, value in f.custom_factors.items()
+                }
+            )
+            entry["custom_factors"] = custom_factors
+        factors_dict[unit_number] = entry
 
     connection.execute(
         "UPDATE dre_extraction_runs SET operator_unit_factors_json = ? WHERE id = ?",
@@ -110,10 +711,19 @@ def get_operator_unit_factors(
         "SELECT operator_unit_factors_json FROM dre_extraction_runs WHERE id = ?",
         (extraction_run_id,),
     ).fetchone()
-    if row is None or not row[0]:
+    if row is None:
+        return {}
+    return parse_operator_unit_factors(row[0])
+
+
+def parse_operator_unit_factors(
+    operator_factors_raw: Optional[str],
+) -> dict[str, dict]:
+    """Parse one captured factor snapshot without performing another read."""
+    if not operator_factors_raw:
         return {}
     try:
-        result = json.loads(row[0])
+        result = json.loads(operator_factors_raw)
         return result if isinstance(result, dict) else {}
     except (json.JSONDecodeError, TypeError):
         return {}
@@ -132,6 +742,8 @@ def merge_operator_factors(
     if not operator_factors:
         return extraction
 
+    _validate_replacement_roster(extraction, list(operator_factors))
+
     # Normalize BOTH sides of the key match (M6): keys on the existing units
     # and the operator-factor keys are stripped identically, so "101 " and
     # "101" resolve to the same unit instead of appending a phantom.
@@ -148,6 +760,8 @@ def merge_operator_factors(
 
         sq_ft_raw = factor_entry.get("square_feet")
         own_pct_raw = factor_entry.get("ownership_percent")
+        fixed_amounts_raw = factor_entry.get("fixed_amounts")
+        custom_factors_raw = factor_entry.get("custom_factors")
 
         def _dec(v: Any) -> Optional[Decimal]:
             if v is None:
@@ -159,6 +773,53 @@ def merge_operator_factors(
 
         sq_ft = _dec(sq_ft_raw)
         own_pct = _dec(own_pct_raw)
+        fixed_amounts = (
+            {
+                str(pool_key): amount
+                for pool_key, raw_amount in fixed_amounts_raw.items()
+                if (amount := _dec(raw_amount)) is not None
+            }
+            if isinstance(fixed_amounts_raw, dict)
+            else {}
+        )
+        custom_factors = (
+            {
+                str(pool_key): value
+                for pool_key, raw_value in custom_factors_raw.items()
+                if (value := _dec(raw_value)) is not None and value > 0
+            }
+            if isinstance(custom_factors_raw, dict)
+            else {}
+        )
+        existing_pool_factors = list(existing.pool_factors) if existing is not None else []
+        replaced_keys = set(fixed_amounts) | set(custom_factors)
+        pool_factors = [
+            factor
+            for factor in existing_pool_factors
+            if not (
+                factor.pool_key in replaced_keys
+            )
+        ]
+        pool_factors.extend(
+            UnitPoolFactor(
+                pool_key=pool_key,
+                factor_value=amount,
+                factor_label="Operator-entered annual amount",
+                factor_type="dollar_amount",
+                source_page=None,
+            )
+            for pool_key, amount in fixed_amounts.items()
+        )
+        pool_factors.extend(
+            UnitPoolFactor(
+                pool_key=pool_key,
+                factor_value=value,
+                factor_label="Operator-entered custom factor",
+                factor_type="raw_factor",
+                source_page=None,
+            )
+            for pool_key, value in custom_factors.items()
+        )
 
         if existing is not None:
             merged_units.append(
@@ -168,6 +829,7 @@ def merge_operator_factors(
                         "ownership_percent": (
                             own_pct if own_pct is not None else existing.ownership_percent
                         ),
+                        "pool_factors": pool_factors,
                     }
                 )
             )
@@ -182,19 +844,28 @@ def merge_operator_factors(
                     parking_flag="",
                     source_page=None,
                     confidence=0.0,
-                    pool_factors=[],
+                    pool_factors=pool_factors,
                 )
             )
 
     # Also include any existing units NOT covered by operator factors.
     # Compare against the normalized operator keys so a whitespace-only
     # difference doesn't re-add a unit that was already merged above (M6).
-    for unit_num, unit in existing_by_num.items():
-        if unit_num not in normalized_operator_keys:
-            merged_units.append(unit)
+    known_count = extraction.unit_structure.unit_count
+    if known_count is None or known_count <= 0:
+        for unit_num, unit in existing_by_num.items():
+            if unit_num not in normalized_operator_keys:
+                merged_units.append(unit)
 
     unit_structure = extraction.unit_structure.model_copy(
-        update={"units": merged_units, "unit_count": len(merged_units)}
+        update={
+            "units": merged_units,
+            "unit_count": (
+                known_count
+                if known_count is not None and known_count > 0
+                else len(merged_units)
+            ),
+        }
     )
     return extraction.model_copy(update={"unit_structure": unit_structure})
 
@@ -246,39 +917,23 @@ def approve_ccr_extraction_run(
             f"extraction_run_id={extraction_run_id} is review_status='rejected'."
         )
 
-    # Parse the extraction, apply queued Review Workbench edits, then merge
-    # operator-entered per-unit factors on top (review edits patch first,
-    # CC&R factors merge second — same layering as this pipeline already
-    # uses for missing-data injection).
-    extraction: Optional[DRESetupExtraction] = parse_extraction_payload(parsed_json_text)
-    if extraction is None:
-        raise IncoherentCcrExtraction(
-            ["parsed CC&R extraction is missing or failed domain validation"]
-        )
-    edited_entity_keys: frozenset[str] = frozenset()
-    edits = list_review_edits(
-        dre_extraction_run_id=extraction_run_id, connection=connection,
+    resolved = resolve_ccr_promotion(
+        property_id=property_id,
+        extraction_run_id=extraction_run_id,
+        setup_type=setup_type,
+        connection=connection,
     )
-    extraction = apply_review_edits_to_extraction(extraction, edits)
-    edited_entity_keys = entity_keys_touched_by_edits(
-        extraction, [edit.field_path for edit in edits]
+    _raise_preview_blockers(resolved)
+    _pin_ccr_promotion_inputs(
+        property_id=property_id,
+        extraction_run_id=extraction_run_id,
+        resolved=resolved,
+        connection=connection,
     )
-
-    operator_factors = get_operator_unit_factors(
-        extraction_run_id=extraction_run_id, connection=connection
-    )
-    if operator_factors:
-        extraction = merge_operator_factors(extraction, operator_factors)
-    extraction = derive_ccr_pool_treatments(extraction)
-
-    # Block collapsed factor-table / multi-method policy after edits.
-    assert_ccr_allocation_coherent(extraction)
-
-    # Block promotion if any proportional pool has no unit data (3.3).
-    if setup_type == "per_unit":
-        missing = check_missing_unit_factors(extraction)
-        if missing:
-            raise MissingUnitFactors(missing)
+    extraction = resolved.preview.resolved_extraction
+    if extraction is None:  # narrowed by _raise_preview_blockers
+        raise RuntimeError("resolved CC&R extraction unexpectedly missing")
+    edited_entity_keys = resolved.edited_entity_keys
 
     # Supersede any prior approved setup.
     prior_setup = connection.execute(
@@ -410,23 +1065,23 @@ def reopen_and_repromote_ccr_run(
     reviewed_by: Optional[str],
     connection: sqlite3.Connection,
 ) -> ReopenRepromoteResponse:
-    """CC&R-aware ``reopen_and_repromote``: layers operator per-unit
-    factors on top of review edits, same as ``approve_ccr_extraction_run``,
-    and re-enforces the missing-unit-factors guard on re-promotion.
-    """
-
-    def _apply_ccr_factors(extraction: DRESetupExtraction) -> DRESetupExtraction:
-        # Merge CC&R operator factors, then re-enforce allocation coherence
-        # so re-promote cannot bypass the same guard as first-time approve.
-        # Missing-unit-factors still runs in reopen_and_repromote after this.
-        operator_factors = get_operator_unit_factors(
-            extraction_run_id=extraction_run_id, connection=connection
-        )
-        if operator_factors:
-            extraction = merge_operator_factors(extraction, operator_factors)
-        extraction = derive_ccr_pool_treatments(extraction)
-        assert_ccr_allocation_coherent(extraction)
-        return extraction
+    """Re-promote the exact same resolved candidate returned by preview."""
+    resolved = resolve_ccr_promotion(
+        property_id=property_id,
+        extraction_run_id=extraction_run_id,
+        setup_type=setup_type,
+        connection=connection,
+    )
+    _raise_preview_blockers(resolved)
+    _pin_ccr_promotion_inputs(
+        property_id=property_id,
+        extraction_run_id=extraction_run_id,
+        resolved=resolved,
+        connection=connection,
+    )
+    extraction = resolved.preview.resolved_extraction
+    if extraction is None:
+        raise RuntimeError("resolved CC&R extraction unexpectedly missing")
 
     return reopen_and_repromote(
         property_id=property_id,
@@ -434,17 +1089,24 @@ def reopen_and_repromote_ccr_run(
         setup_type=setup_type,
         reviewed_by=reviewed_by,
         connection=connection,
-        extra_extraction_transform=_apply_ccr_factors,
+        resolved_extraction=extraction,
+        resolved_edited_entity_keys=resolved.edited_entity_keys,
     )
 
 
 __all__ = [
     "CCRUnitFactor",
+    "IncompleteOperatorUnitRoster",
     "MissingUnitFactors",
     "IncoherentCcrExtraction",
     "save_operator_unit_factors",
     "get_operator_unit_factors",
+    "parse_operator_unit_factors",
     "merge_operator_factors",
+    "CCRPromotionIssue",
+    "CCRPromotionPreview",
+    "PromotionInputsChanged",
+    "resolve_ccr_promotion",
     "approve_ccr_extraction_run",
     "reopen_and_repromote_ccr_run",
 ]

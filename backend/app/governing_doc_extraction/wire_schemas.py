@@ -141,6 +141,14 @@ CCRBillingTreatment = Literal[
     "operator_amount_pending",
 ]
 
+CCRBillingCadence = Literal["recurring", "one_time"]
+
+CCRAmountAvailability = Literal[
+    "known",
+    "external_schedule",
+    "operator_pending",
+]
+
 
 class WireCCRAssessmentSetupBlock(BaseModel):
     """Structural pattern of the allocation policy."""
@@ -301,9 +309,24 @@ class WireCCRAllocationPool(BaseModel):
     )
     billing_treatment: CCRBillingTreatment = Field(
         description=(
-            "How this pool is billed: recurring for ongoing assessments, separate_one_time "
-            "for a one-time/special levy, or operator_amount_pending when the document "
-            "defers the amount to a budget, schedule, or later operator input."
+            "Legacy compatibility classification. Set consistently with billing_cadence "
+            "and amount_availability: recurring for recurring+known/external_schedule, "
+            "separate_one_time for one_time+known/external_schedule, or "
+            "operator_amount_pending whenever amount_availability=operator_pending."
+        )
+    )
+    billing_cadence: CCRBillingCadence = Field(
+        description=(
+            "Billing frequency only: recurring for an ongoing budget/assessment stream; "
+            "one_time for a separately levied special assessment. Amount availability "
+            "does not change cadence."
+        )
+    )
+    amount_availability: CCRAmountAvailability = Field(
+        description=(
+            "Whether the pool amount is known from the extracted material, supplied by "
+            "an external budget/schedule, or still requires operator entry. Use known, "
+            "external_schedule, or operator_pending independently of billing cadence."
         )
     )
     recipient_scope: Optional[str] = Field(
@@ -328,9 +351,11 @@ class WireCCRAllocationPool(BaseModel):
     )
     expense_categories: Optional[list[str]] = Field(
         description=(
-            "Expense categories or purposes the document explicitly names for this pool, "
-            "verbatim from the text. Empty list for a residual/base pool that covers "
-            "everything not claimed by exception pools."
+            "Context-specific expense categories or purposes explicitly named for this "
+            "pool, verbatim from the text. Never combine categories from different "
+            "allocation_context values merely because they share allocation_basis; "
+            "for example, DRE-prorated operating expenses and named reserve contributions "
+            "must be separate pools/categories. Empty only for a residual/base pool."
         )
     )
     is_residual_base: Optional[bool] = Field(
@@ -414,6 +439,8 @@ __all__ = [
     "WireCCRDocumentMetadata",
     "CCRAllocationContext",
     "CCRBillingTreatment",
+    "CCRBillingCadence",
+    "CCRAmountAvailability",
     "WireCCRAssessmentSetupBlock",
     "WireCCRUnitFactor",
     "WireCCRUnitStructure",

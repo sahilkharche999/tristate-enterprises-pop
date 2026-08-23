@@ -69,15 +69,24 @@ def _denominator_source(ccr_source: str) -> str:
 
 def _pool_kind(
     allocation_context: str,
-    billing_treatment: str,
+    billing_cadence: str,
 ) -> str:
     """Derive the legacy engine marker from typed CCR semantics."""
-    if allocation_context == "special_assessment" and billing_treatment in {
-        "separate_one_time",
-        "operator_amount_pending",
-    }:
+    if allocation_context == "special_assessment" and billing_cadence == "one_time":
         return "separately_billed_special_assessment"
     return ""
+
+
+def _legacy_billing_treatment(
+    billing_cadence: str,
+    amount_availability: str,
+) -> str:
+    """Compile independent wire semantics into the legacy domain field."""
+    if amount_availability == "operator_pending":
+        return "operator_amount_pending"
+    if billing_cadence == "one_time":
+        return "separate_one_time"
+    return "recurring"
 
 
 def _doc_meta(wire: ws.WireCCRDocumentMetadata) -> DocumentMetadata:
@@ -142,7 +151,12 @@ def _pool(wire: ws.WireCCRAllocationPool) -> AllocationPoolBlock:
         monthly_amount=None,
         allocation_method=wire.allocation_basis,
         allocation_context=wire.allocation_context,
-        billing_treatment=wire.billing_treatment,
+        billing_treatment=_legacy_billing_treatment(
+            wire.billing_cadence,
+            wire.amount_availability,
+        ),
+        billing_cadence=wire.billing_cadence,
+        amount_availability=wire.amount_availability,
         recipient_scope=_text(wire.recipient_scope),
         denominator_label=_text(wire.denominator_label),
         denominator_value=None,
@@ -156,7 +170,7 @@ def _pool(wire: ws.WireCCRAllocationPool) -> AllocationPoolBlock:
         confidence=_confidence(wire.confidence),
         pool_kind=_pool_kind(
             wire.allocation_context,
-            wire.billing_treatment,
+            wire.billing_cadence,
         ),
     )
 

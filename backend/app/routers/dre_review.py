@@ -35,6 +35,13 @@ from ..services.dre_review_service import (
     list_field_sources,
     list_review_edits,
     record_review_edit,
+    record_structural_operation,
+    StructuralOperationReasonRequired,
+)
+from ..dre_extraction.promotion import (
+    InvalidStructuralOperation,
+    STRUCTURAL_OPERATION_FIELD_PATH,
+    StaleStructuralOperation,
 )
 
 
@@ -198,6 +205,41 @@ def post_record_edit(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     actor = current_user.get("email") or current_user.get("name") or "unknown"
+    if payload.field_path == STRUCTURAL_OPERATION_FIELD_PATH:
+        try:
+            return record_structural_operation(
+                dre_extraction_run_id=run_id,
+                operation=payload.new_value,
+                reason=payload.reason,
+                edited_by=str(actor),
+                connection=raw_conn,
+            )
+        except StructuralOperationReasonRequired as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "STRUCTURAL_REASON_REQUIRED",
+                    "message": str(exc),
+                },
+            ) from exc
+        except StaleStructuralOperation as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "STALE_OPERATION_VERSION",
+                    "message": str(exc),
+                    "base_version": exc.base_version,
+                    "current_version": exc.current_version,
+                },
+            ) from exc
+        except (InvalidStructuralOperation, TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "INVALID_STRUCTURAL_OPERATION",
+                    "message": "The category correction is not a valid typed operation.",
+                },
+            ) from exc
     return record_review_edit(
         dre_extraction_run_id=run_id,
         field_path=payload.field_path,

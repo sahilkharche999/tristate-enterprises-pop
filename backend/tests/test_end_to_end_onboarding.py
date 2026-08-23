@@ -173,6 +173,7 @@ _PER_UNIT_DRE = {
             {"unit_number": "101", "square_feet": "850",
              "category": "residential", "parking_flag": "1 space"},
             {"unit_number": "201", "square_feet": "1200",
+             "ownership_percent": "100",
              "category": "commercial", "parking_flag": ""},
             {"unit_number": "PH", "square_feet": "2500",
              "category": "residential", "parking_flag": "2 spaces"},
@@ -253,22 +254,22 @@ class TestPatternCPerUnit:
         assert resp.snapshot_counts["groups"] == 0
         assert resp.snapshot_counts["units"] == 3
 
-        # Parking pool collapsed via adapter: method=equal, scope=parking_users
+        # Named subsets promote as exact reviewed custom recipient lists.
         parking = db.execute(
             "SELECT allocation_method, recipient_scope "
             "FROM allocation_pools "
             "WHERE assessment_setup_id = ? AND pool_key = 'parking'",
             (resp.promoted_setup_id,),
         ).fetchone()
-        assert parking == ("equal", "parking_users")
+        assert parking == ("equal", "custom_unit_list")
 
-        # Commercial pool has scope=commercial_only
+        # Commercial pool is also persisted as its exact participant list.
         commercial = db.execute(
             "SELECT recipient_scope FROM allocation_pools "
             "WHERE assessment_setup_id = ? AND pool_key = 'commercial_share'",
             (resp.promoted_setup_id,),
         ).fetchone()
-        assert commercial[0] == "commercial_only"
+        assert commercial[0] == "custom_unit_list"
 
         # Parking spaces inferred from "1 space" / "2 spaces" flags
         parking_spaces = db.execute(

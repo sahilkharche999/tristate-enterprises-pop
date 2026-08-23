@@ -241,7 +241,7 @@ def approve_extraction_run(
         )
         extraction = apply_review_edits_to_extraction(extraction, edits)
         edited_entity_keys = entity_keys_touched_by_edits(
-            extraction, [edit.field_path for edit in edits]
+            extraction, edits
         )
 
     # Same missing-unit-factors guard CC&R promotion already enforces: a
@@ -550,6 +550,8 @@ def reopen_and_repromote(
     extra_extraction_transform: Optional[
         Callable[[DRESetupExtraction], DRESetupExtraction]
     ] = None,
+    resolved_extraction: Optional[DRESetupExtraction] = None,
+    resolved_edited_entity_keys: Optional[frozenset[str]] = None,
 ) -> ReopenRepromoteResponse:
     """Correct an already-promoted run without a new extraction/upload.
 
@@ -603,22 +605,26 @@ def reopen_and_repromote(
             "use the approve endpoint for a first-time promotion."
         )
 
-    extraction: Optional[DRESetupExtraction] = parse_extraction_payload(parsed_json_text)
-    if extraction is None:
-        raise ExtractionRunNotApprovable(
-            f"extraction_run_id={extraction_run_id} has no valid parsed_json to re-promote."
+    if resolved_extraction is None:
+        extraction: Optional[DRESetupExtraction] = parse_extraction_payload(parsed_json_text)
+        if extraction is None:
+            raise ExtractionRunNotApprovable(
+                f"extraction_run_id={extraction_run_id} has no valid parsed_json to re-promote."
+            )
+
+        edits = list_review_edits(
+            dre_extraction_run_id=extraction_run_id, connection=connection,
+        )
+        extraction = apply_review_edits_to_extraction(extraction, edits)
+        edited_entity_keys = entity_keys_touched_by_edits(
+            extraction, edits
         )
 
-    edits = list_review_edits(
-        dre_extraction_run_id=extraction_run_id, connection=connection,
-    )
-    extraction = apply_review_edits_to_extraction(extraction, edits)
-    edited_entity_keys = entity_keys_touched_by_edits(
-        extraction, [edit.field_path for edit in edits]
-    )
-
-    if extra_extraction_transform is not None:
-        extraction = extra_extraction_transform(extraction)
+        if extra_extraction_transform is not None:
+            extraction = extra_extraction_transform(extraction)
+    else:
+        extraction = resolved_extraction
+        edited_entity_keys = resolved_edited_entity_keys or frozenset()
 
     # Re-run the same missing-unit-factors guard a first-time promotion
     # enforces — edits (or a setup_type change) since the original

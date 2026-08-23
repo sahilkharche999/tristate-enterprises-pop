@@ -19,25 +19,31 @@ New CC&R-specific endpoints:
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Optional
+from typing import Annotated, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.ai_implementation.db import get_session
 from app.auth.dependencies import get_current_user
 from app.dre_extraction.promotion import (
     EditedEntityFailedToPromote,
+    InvalidStructuralOperation,
+    StaleStructuralOperation,
     UnresolvableReviewEdit,
 )
 from app.services.ccr_approval_service import (
+    CCRPromotionPreview,
     CCRUnitFactor,
+    IncompleteOperatorUnitRoster,
     IncoherentCcrExtraction,
     MissingUnitFactors,
+    PromotionInputsChanged,
     approve_ccr_extraction_run,
     get_operator_unit_factors,
     reopen_and_repromote_ccr_run,
+    resolve_ccr_promotion,
     save_operator_unit_factors,
 )
 from app.dre_extraction.promotion import AmbiguousOwnershipPercentForm
@@ -210,6 +216,12 @@ class UnitFactorEntry(BaseModel):
     unit_number: str
     square_feet: Optional[Decimal] = None
     ownership_percent: Optional[Decimal] = None
+    fixed_amounts: dict[str, Annotated[Decimal, Field(gt=0)]] = Field(
+        default_factory=dict
+    )
+    custom_factors: dict[str, Annotated[Decimal, Field(gt=0)]] = Field(
+        default_factory=dict
+    )
 
 
 class SaveFactorsRequest(BaseModel):
@@ -247,6 +259,8 @@ def save_unit_factors(
                     unit_number=f.unit_number,
                     square_feet=f.square_feet,
                     ownership_percent=f.ownership_percent,
+                    fixed_amounts=f.fixed_amounts,
+                    custom_factors=f.custom_factors,
                 )
                 for f in payload.factors
             ],
@@ -255,6 +269,8 @@ def save_unit_factors(
         raw_conn.commit()
     except ExtractionRunNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except IncompleteOperatorUnitRoster as exc:
+        raise HTTPException(status_code=422, detail={"message": str(exc)}) from exc
     return SaveFactorsResponse(extraction_run_id=run_id, factors_saved=count)
 
 
@@ -281,6 +297,34 @@ def get_unit_factors(
 
 class CCRApprovalRequest(BaseModel):
     setup_type: SetupTypeLiteral
+
+
+def _promotion_issues(exc: Exception) -> list[dict]:
+    return list(getattr(exc, "promotion_issues", []))
+
+
+@router.get(
+    "/hoa/{hoa_id}/ccr/extraction-runs/{run_id}/promotion-preview",
+    response_model=CCRPromotionPreview,
+)
+def preview_ccr_promotion(
+    hoa_id: int,
+    run_id: int,
+    setup_type: SetupTypeLiteral,
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user),
+) -> CCRPromotionPreview:
+    """Resolve review corrections and promotion checks without writing."""
+    _ = current_user
+    try:
+        return resolve_ccr_promotion(
+            property_id=hoa_id,
+            extraction_run_id=run_id,
+            setup_type=setup_type,
+            connection=session.connection().connection,
+        ).preview
+    except ExtractionRunNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.post(
@@ -312,6 +356,14 @@ def approve_ccr_run(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ExtractionRunAlreadyPromoted as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except PromotionInputsChanged as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "PROMOTION_INPUTS_CHANGED",
+                "message": str(exc),
+            },
+        ) from exc
     except ExtractionRunNotApprovable as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except MissingUnitFactors as exc:
@@ -320,6 +372,7 @@ def approve_ccr_run(
             detail={
                 "message": str(exc),
                 "missing_pool_keys": exc.missing_pool_keys,
+                "issues": _promotion_issues(exc),
             },
         ) from exc
     except IncoherentCcrExtraction as exc:
@@ -328,6 +381,7 @@ def approve_ccr_run(
             detail={
                 "message": str(exc),
                 "coherence_reasons": exc.reasons,
+                "issues": _promotion_issues(exc),
             },
         ) from exc
     except AmbiguousOwnershipPercentForm as exc:
@@ -338,6 +392,7 @@ def approve_ccr_run(
                 "column_label": exc.column_label,
                 "column_total": str(exc.total),
                 "sample_values": [str(v) for v in exc.sample_values],
+                "issues": _promotion_issues(exc),
             },
         ) from exc
     except UnresolvableReviewEdit as exc:
@@ -346,12 +401,22 @@ def approve_ccr_run(
             detail={
                 "message": str(exc),
                 "unresolvable_field_paths": exc.unresolvable_field_paths,
+                "issues": _promotion_issues(exc),
             },
+        ) from exc
+    except (StaleStructuralOperation, InvalidStructuralOperation) as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"message": str(exc), "issues": _promotion_issues(exc)},
         ) from exc
     except EditedEntityFailedToPromote as exc:
         raise HTTPException(
             status_code=422,
-            detail={"message": str(exc), "failed_entities": exc.entity_refs},
+            detail={
+                "message": str(exc),
+                "failed_entities": exc.entity_refs,
+                "issues": _promotion_issues(exc),
+            },
         ) from exc
 
 
@@ -424,12 +489,21 @@ def repromote_ccr_run(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ExtractionRunNotApprovable as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except PromotionInputsChanged as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "PROMOTION_INPUTS_CHANGED",
+                "message": str(exc),
+            },
+        ) from exc
     except MissingUnitFactors as exc:
         raise HTTPException(
             status_code=422,
             detail={
                 "message": str(exc),
                 "missing_pool_keys": exc.missing_pool_keys,
+                "issues": _promotion_issues(exc),
             },
         ) from exc
     except IncoherentCcrExtraction as exc:
@@ -438,6 +512,7 @@ def repromote_ccr_run(
             detail={
                 "message": str(exc),
                 "coherence_reasons": exc.reasons,
+                "issues": _promotion_issues(exc),
             },
         ) from exc
     except AmbiguousOwnershipPercentForm as exc:
@@ -448,6 +523,7 @@ def repromote_ccr_run(
                 "column_label": exc.column_label,
                 "column_total": str(exc.total),
                 "sample_values": [str(v) for v in exc.sample_values],
+                "issues": _promotion_issues(exc),
             },
         ) from exc
     except UnresolvableReviewEdit as exc:
@@ -456,10 +532,20 @@ def repromote_ccr_run(
             detail={
                 "message": str(exc),
                 "unresolvable_field_paths": exc.unresolvable_field_paths,
+                "issues": _promotion_issues(exc),
             },
+        ) from exc
+    except (StaleStructuralOperation, InvalidStructuralOperation) as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"message": str(exc), "issues": _promotion_issues(exc)},
         ) from exc
     except EditedEntityFailedToPromote as exc:
         raise HTTPException(
             status_code=422,
-            detail={"message": str(exc), "failed_entities": exc.entity_refs},
+            detail={
+                "message": str(exc),
+                "failed_entities": exc.entity_refs,
+                "issues": _promotion_issues(exc),
+            },
         ) from exc

@@ -24,9 +24,20 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any, Iterable, Literal, Optional
 
 from pydantic import BaseModel
+
+from app.dre_extraction.promotion import (
+    STRUCTURAL_OPERATION_FIELD_PATH,
+    InvalidStructuralOperation,
+    PoolStructuralOperation,
+    StaleStructuralOperation,
+    apply_review_edits_to_extraction,
+    parse_extraction_payload,
+    parse_pool_structural_operation,
+)
 
 
 HIGH_RISK_FIELDS = frozenset(
@@ -67,6 +78,10 @@ class ExtractedFieldSourceResponse(BaseModel):
     page_number: int
     bounding_box_json: Optional[str]
     confidence: Optional[float]
+
+
+class StructuralOperationReasonRequired(ValueError):
+    """A structural correction must carry an operator audit reason."""
 
 
 def _stringify_value(value: Any) -> Optional[str]:
@@ -136,6 +151,112 @@ def record_review_edit(
         edited_by=row[6],
         edited_at=row[7],
     )
+
+
+def record_structural_operation(
+    *,
+    dre_extraction_run_id: int,
+    operation: PoolStructuralOperation | dict[str, Any],
+    reason: Optional[str] = None,
+    edited_by: Optional[str] = None,
+    connection: sqlite3.Connection,
+) -> DREReviewEditResponse:
+    """Validate and atomically append a pool operation.
+
+    A caller-owned transaction is preserved. Otherwise ``BEGIN IMMEDIATE``
+    serializes base-version validation, full-log replay, and insertion.
+    """
+    if reason is None or not reason.strip():
+        raise StructuralOperationReasonRequired(
+            "Explain why this category correction is needed."
+        )
+    owns_transaction = not connection.in_transaction
+    savepoint = "dre_structural_operation"
+    if owns_transaction:
+        connection.execute("BEGIN IMMEDIATE")
+    else:
+        connection.execute(f"SAVEPOINT {savepoint}")
+    try:
+        typed = parse_pool_structural_operation(operation)
+        run_row = connection.execute(
+            "SELECT parsed_json FROM dre_extraction_runs WHERE id = ?",
+            (dre_extraction_run_id,),
+        ).fetchone()
+        extraction = (
+            parse_extraction_payload(run_row[0])
+            if run_row is not None
+            else None
+        )
+        if extraction is None:
+            raise InvalidStructuralOperation(
+                "The immutable extraction cannot be replayed.", []
+            )
+
+        edits = list_review_edits(
+            dre_extraction_run_id=dre_extraction_run_id,
+            connection=connection,
+        )
+        candidate_value = json.dumps(
+            typed.model_dump(mode="json"),
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        candidate = SimpleNamespace(
+            field_path=STRUCTURAL_OPERATION_FIELD_PATH,
+            new_value=candidate_value,
+        )
+        apply_review_edits_to_extraction(extraction, [*edits, candidate])
+
+        current_version = sum(
+            edit.field_path == STRUCTURAL_OPERATION_FIELD_PATH for edit in edits
+        )
+        cur = connection.execute(
+            """
+            INSERT INTO dre_review_edits (
+                dre_extraction_run_id, field_path, old_value, new_value,
+                reason, edited_by
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                dre_extraction_run_id,
+                STRUCTURAL_OPERATION_FIELD_PATH,
+                _stringify_value({"version": current_version}),
+                candidate_value,
+                reason,
+                edited_by,
+            ),
+        )
+        edit_id = cur.lastrowid
+        if edit_id is None:
+            raise RuntimeError(
+                "sqlite did not return a lastrowid for dre_review_edits"
+            )
+        row = connection.execute(
+            "SELECT id, dre_extraction_run_id, field_path, old_value, new_value, "
+            "reason, edited_by, edited_at FROM dre_review_edits WHERE id = ?",
+            (edit_id,),
+        ).fetchone()
+        if owns_transaction:
+            connection.commit()
+        else:
+            connection.execute(f"RELEASE SAVEPOINT {savepoint}")
+        return DREReviewEditResponse(
+            edit_id=row[0],
+            dre_extraction_run_id=row[1],
+            field_path=row[2],
+            old_value=row[3],
+            new_value=row[4],
+            reason=row[5],
+            edited_by=row[6],
+            edited_at=row[7],
+        )
+    except Exception:
+        if owns_transaction:
+            connection.rollback()
+        else:
+            connection.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+            connection.execute(f"RELEASE SAVEPOINT {savepoint}")
+        raise
 
 
 def list_review_edits(
@@ -353,4 +474,7 @@ __all__ = [
     "record_entity_sources_from_extraction",
     "record_field_source",
     "record_review_edit",
+    "record_structural_operation",
+    "StructuralOperationReasonRequired",
+    "StaleStructuralOperation",
 ]

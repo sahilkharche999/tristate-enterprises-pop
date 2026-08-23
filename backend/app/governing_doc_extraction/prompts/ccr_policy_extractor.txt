@@ -91,14 +91,20 @@ economic allocation context stated by the document:
      treatment.
 Record these values in assessment_setup.declared_contexts. For every declared context,
 emit one cited rule as an allocation_pool with the matching allocation_context, source_pages,
-and billing_treatment. If the document states a context but the rule, beneficiaries,
+billing_cadence, and amount_availability. Context boundaries are economic boundaries:
+when the same legal allocation method or external custom-factor schedule covers different
+contexts, emit separate context-specific pools and categories. For example, DRE-prorated
+operating expenses and specifically named reserve contributions are separate pools even
+when both use custom_factor. Never merge operating, reserve, cost-center, or special-
+assessment categories merely because their allocation_basis matches.
+If the document states a context but the rule, beneficiaries,
 amount, or denominator cannot be resolved, still declare the context and emit a
 high-severity human_review_question explaining the missing evidence; never silently
-drop the context. A special-assessment pool must use
-billing_treatment=separate_one_time (or operator_amount_pending when the one-time
-amount is deferred to an external budget) and must remain separate from recurring
-assessment pools. A cost-center pool must identify its recipient_scope; use a review
-question instead of all_units when the beneficiaries are not established.
+drop the context. A special-assessment pool must use billing_cadence=one_time and must
+remain separate from recurring assessment pools. Its amount_availability is independently
+known, external_schedule, or operator_pending. A cost-center pool must identify its
+recipient_scope; use a review question instead of all_units when beneficiaries are not
+established.
 
 ════════════════════════════════════════════════════════
 STEP 3 — BUILD THE STRUCTURED OUTPUT
@@ -151,10 +157,21 @@ allocation_pools
   • allocation_context: the context for this pool
     ("regular_operating", "reserve_contribution", "special_assessment", "cost_center").
   • billing_treatment: how this pool is billed ("recurring", "separate_one_time",
-    "operator_amount_pending").
+    "operator_amount_pending"). This legacy compatibility field must agree with the two
+    independent fields below.
+  • billing_cadence: frequency only ("recurring" or "one_time"). A deferred amount does
+    not make a recurring category one-time, and a deferred special-assessment amount
+    remains one_time.
+  • amount_availability: amount source state only ("known", "external_schedule", or
+    "operator_pending"), independent of cadence.
   • is_residual_base: true for the residual/default pool that covers all costs not in exception pools; false for exception / cost-center pools.
-  • expense_categories: SEMANTIC categories the document names for this pool when explicit (e.g., "insurance", "painting and roof reserves"). Empty for pure residual bases. Do NOT invent categories beyond the document.
-  • residual_after_pool_keys: for residual base pools, list the pool_keys of exception pools that carve out of the residual.
+  • expense_categories: CONTEXT-SPECIFIC semantic categories the document names for this
+    pool when explicit. Separate operating expenses from reserve contributions even if
+    both use the same custom_factor schedule. Empty for pure residual bases. Do NOT invent
+    categories beyond the document.
+  • residual_after_pool_keys: for a recurring residual base, list recurring exception,
+    reserve, and cost-center pool_keys in the same regular billing stream that carve out
+    of that residual. Do NOT list separately billed one_time special-assessment pools.
   • recipient_scope: who participates ("all_units", "residential_only", "commercial_only", etc.).
   • denominator_label / denominator_source: if the document states the denominator, record it; otherwise use a human_review_question.
   • source_pages: every page on which this pool's rule appears.

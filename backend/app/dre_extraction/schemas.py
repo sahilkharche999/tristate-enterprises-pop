@@ -14,9 +14,9 @@ mapping (``setup_type='fixed_equal'`` → ``'fixed'`` etc.) happens in
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Any, Literal, Optional, Union
+from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 _PROMPT_VOCAB_CONFIG = ConfigDict(extra="ignore", str_strip_whitespace=True)
@@ -70,6 +70,14 @@ PromptBillingTreatment = Literal[
     "recurring",
     "separate_one_time",
     "operator_amount_pending",
+]
+
+PromptBillingCadence = Literal["recurring", "one_time"]
+
+PromptAmountAvailability = Literal[
+    "known",
+    "external_schedule",
+    "operator_pending",
 ]
 
 PromptBudgetLineDerivation = Literal[
@@ -198,6 +206,10 @@ class AllocationPoolBlock(BaseModel):
     monthly_amount: Optional[Decimal] = None
     allocation_method: PromptAllocationMethod
     recipient_scope: str = ""
+    selected_unit_numbers: list[str] = Field(default_factory=list)
+    # Legacy task-4 name retained for persisted review operations. The
+    # pre-validator keeps both representations synchronized.
+    participant_unit_numbers: list[str] = Field(default_factory=list)
     denominator_label: str = ""
     denominator_value: Optional[Decimal] = None
     denominator_source: Literal["dre_shown", "calculated", "unknown"] = "unknown"
@@ -210,6 +222,8 @@ class AllocationPoolBlock(BaseModel):
     confidence: float = 0.0
     allocation_context: PromptAllocationContext = "regular_operating"
     billing_treatment: PromptBillingTreatment = "recurring"
+    billing_cadence: PromptBillingCadence = "recurring"
+    amount_availability: PromptAmountAvailability = "known"
     # Operator-set metadata, not extracted from the source document (no DRE
     # states whether a pool's cost is "variable" — this is an accounting
     # classification the operator applies in the Review Workbench). Lives
@@ -226,6 +240,51 @@ class AllocationPoolBlock(BaseModel):
     # 'separately_billed_special_assessment'. (v2 may set it from extraction by
     # meaning — a one-time/limited levy distinct from ongoing assessments.)
     pool_kind: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _derive_independent_billing_semantics(cls, value: Any) -> Any:
+        """Backfill new billing dimensions for persisted legacy extractions."""
+        if not isinstance(value, dict):
+            return value
+        data = dict(value)
+        selected_present = "selected_unit_numbers" in data
+        legacy_present = "participant_unit_numbers" in data
+        selected = list(data.get("selected_unit_numbers") or [])
+        legacy = list(data.get("participant_unit_numbers") or [])
+        if selected_present and legacy_present and selected != legacy:
+            raise ValueError(
+                "selected_unit_numbers and participant_unit_numbers must match"
+            )
+        canonical = selected if selected_present else legacy
+        data["selected_unit_numbers"] = canonical
+        data["participant_unit_numbers"] = canonical
+        treatment = data.get("billing_treatment")
+        context = data.get("allocation_context")
+        if "billing_cadence" not in data:
+            data["billing_cadence"] = (
+                "one_time"
+                if treatment == "separate_one_time"
+                or (
+                    treatment == "operator_amount_pending"
+                    and context == "special_assessment"
+                )
+                else "recurring"
+            )
+        if "amount_availability" not in data:
+            data["amount_availability"] = (
+                "operator_pending"
+                if treatment == "operator_amount_pending"
+                else "known"
+            )
+        if "billing_treatment" not in data:
+            if data["amount_availability"] == "operator_pending":
+                data["billing_treatment"] = "operator_amount_pending"
+            elif data["billing_cadence"] == "one_time":
+                data["billing_treatment"] = "separate_one_time"
+            else:
+                data["billing_treatment"] = "recurring"
+        return data
 
 
 class FormulaBlock(BaseModel):

@@ -9,15 +9,16 @@
 //   GET    /hoa/{id}/ccr/extraction-runs/{run_id}/factors       → current factors
 //   POST   /hoa/{id}/ccr/extraction-runs/{run_id}/approve       → promote to AssessmentSetup
 
-import { BASE_URL } from './config';
-import { authHeaders, handleResponse } from './http';
+import { BASE_URL } from './config.ts';
+import { authHeaders, handleResponse } from './http.ts';
 import type {
   DREApprovalResponse,
   DREDemotionResponse,
   DREDocument,
   DREExtractionRunListItem,
+  DREReviewEdit,
   ReopenRepromoteResponse,
-} from './dre';
+} from './dre.ts';
 
 // Re-export DRE types reused by the CC&R panel.
 export type {
@@ -32,11 +33,156 @@ export interface CCRUnitFactorEntry {
   unit_number: string;
   square_feet?: number | null;
   ownership_percent?: number | null;
+  fixed_amounts?: Record<string, number>;
+  custom_factors?: Record<string, number>;
 }
 
 export interface SaveFactorsResponse {
   extraction_run_id: number;
   factors_saved: number;
+}
+
+export type CCRSetupType = 'fixed' | 'grouped' | 'per_unit';
+
+export type CCRPoolCorrectionOperation =
+  | {
+      operation: 'add';
+      base_version: number;
+      category_key: string;
+      pool: Record<string, unknown>;
+    }
+  | {
+      operation: 'update';
+      base_version: number;
+      category_key: string;
+      changes: Record<string, unknown>;
+    }
+  | {
+      operation: 'split';
+      base_version: number;
+      category_key: string;
+      pools: Array<Record<string, unknown>>;
+    }
+  | {
+      operation: 'merge';
+      base_version: number;
+      category_keys: string[];
+      pool: Record<string, unknown>;
+    }
+  | {
+      operation: 'remove';
+      base_version: number;
+      category_key: string;
+    };
+
+export type CCRRecommendedOperation =
+  | Omit<Extract<CCRPoolCorrectionOperation, { operation: 'add' }>, 'base_version'>
+  | Omit<Extract<CCRPoolCorrectionOperation, { operation: 'update' }>, 'base_version'>
+  | {
+      operation: 'set_ownership_percent_form';
+      allowed_values: Array<'fraction' | 'points'>;
+    }
+  | Record<string, unknown>;
+
+export interface CCRPromotionIssue {
+  code: string;
+  severity: 'warning' | 'error';
+  category_key: string | null;
+  source_pages: number[];
+  explanation: string;
+  recommended_operation: CCRRecommendedOperation | null;
+  approval_blocked: boolean;
+}
+
+export interface CCRPromotionPreview {
+  extraction_run_id: number;
+  review_version: number;
+  resolved_extraction: Record<string, unknown> | null;
+  issues: CCRPromotionIssue[];
+  approval_blocked: boolean;
+}
+
+export interface CCRScalarCorrection {
+  field_path: string;
+  old_value?: unknown;
+  new_value: unknown;
+  reason?: string;
+}
+
+const DEFAULT_CCR_CORRECTION_ERROR =
+  'We could not save that correction. Refresh the review and try again.';
+
+export function parseFriendlyCCRApiError(
+  error: unknown,
+  fallback = DEFAULT_CCR_CORRECTION_ERROR,
+): string {
+  const raw =
+    error && typeof error === 'object' && 'message' in error
+      ? String((error as { message?: unknown }).message || '')
+      : '';
+  if (/stale|changed while|older version/i.test(raw)) {
+    return 'This review changed while you were working. Refresh it and try that choice again.';
+  }
+  if (/network|failed to fetch|offline/i.test(raw)) {
+    return 'We could not reach the server. Check your connection and try again.';
+  }
+  // Backend details can contain implementation names, validation paths, and
+  // machine values. The guided review deliberately exposes only actionable,
+  // stable language instead of attempting to partially sanitize those details.
+  return fallback;
+}
+
+export async function getCCRPromotionPreview(
+  hoaId: number,
+  runId: number,
+  setupType: CCRSetupType,
+): Promise<CCRPromotionPreview> {
+  const query = new URLSearchParams({ setup_type: setupType });
+  const res = await fetch(
+    `${BASE_URL}/hoa/${hoaId}/ccr/extraction-runs/${runId}/promotion-preview?${query}`,
+    { headers: authHeaders() },
+  );
+  return handleResponse(res);
+}
+
+export async function saveCCRCorrectionOperation(
+  hoaId: number,
+  runId: number,
+  operation: CCRPoolCorrectionOperation,
+  reason = 'Guided CC&R correction',
+): Promise<DREReviewEdit> {
+  const res = await fetch(
+    `${BASE_URL}/hoa/${hoaId}/dre/extraction-runs/${runId}/edits`,
+    {
+      method: 'POST',
+      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        field_path: 'allocation_pools.$operation',
+        new_value: operation,
+        reason,
+      }),
+    },
+  );
+  return handleResponse(res);
+}
+
+export async function saveCCRScalarCorrection(
+  hoaId: number,
+  runId: number,
+  correction: CCRScalarCorrection,
+): Promise<DREReviewEdit> {
+  const res = await fetch(
+    `${BASE_URL}/hoa/${hoaId}/dre/extraction-runs/${runId}/edits`,
+    {
+      method: 'POST',
+      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ...correction,
+        reason: correction.reason || 'Guided CC&R correction',
+      }),
+    },
+  );
+  return handleResponse(res);
 }
 
 export async function uploadCCR(

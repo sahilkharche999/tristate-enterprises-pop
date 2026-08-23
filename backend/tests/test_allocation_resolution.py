@@ -136,7 +136,7 @@ def test_missouri_promotion_keeps_custom_factor_unresolved(db: sqlite3.Connectio
         (setup_id,),
     ).fetchone()
     assert parking[0] == "square_footage"
-    assert parking[1] == "parking_users"
+    assert parking[1] == "custom_unit_list"
     assert structural[0] == "square_footage"
     assert structural[1] == "separately_billed_special_assessment"
     assert db.execute(

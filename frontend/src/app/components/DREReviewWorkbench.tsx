@@ -34,6 +34,7 @@ import {
 } from '../api/dre';
 import { approveCCRRun, reopenAndRepromoteCCRRun } from '../api/ccr';
 import { formatCurrency } from '../lib/budget';
+import { CCRCorrectionWorkflow } from './CCRCorrectionWorkflow';
 import { cn } from './ui/utils';
 import { DrePdfCompareView } from './DrePdfCompareView';
 
@@ -1047,7 +1048,7 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
         .map((k) => ({ key: k, value: recommendedSetup[k] }))
     : [];
 
-  const mainContent = (
+  const dreMainContent = (
     <section className="space-y-6 p-4">
       {/* ── Header ────────────────────────────────────────────────── */}
       <header className="flex flex-wrap items-start justify-between gap-4">
@@ -2074,6 +2075,21 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
         </section>
       )}
     </section>
+  );
+
+  const mainContent = isCCR ? (
+    <CCRCorrectionWorkflow
+      hoaId={hoaId}
+      runId={runId}
+      detail={detail}
+      setupType={chosenSetupType}
+      onSetupTypeChange={setChosenSetupType}
+      onCompare={() => setIsCompareOpen(true)}
+      jumpToPage={jumpToPage}
+      onRunChanged={refresh}
+    />
+  ) : (
+    dreMainContent
   );
 
   return (

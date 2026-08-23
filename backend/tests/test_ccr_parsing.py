@@ -62,12 +62,14 @@ def _wire_extraction() -> WireCCRPolicyExtraction:
                 allocation_basis="equal",
                 allocation_context="regular_operating",
                 billing_treatment="recurring",
+                billing_cadence="recurring",
+                amount_availability="external_schedule",
                 recipient_scope="all_units",
                 denominator_label="all units",
                 denominator_source="calculated",
                 expense_categories=[],
                 is_residual_base=True,
-                residual_after_pool_keys=["structural_repair"],
+                residual_after_pool_keys=[],
                 source_pages=[1],
                 confidence=0.95,
             ),
@@ -77,6 +79,8 @@ def _wire_extraction() -> WireCCRPolicyExtraction:
                 allocation_basis="square_footage",
                 allocation_context="special_assessment",
                 billing_treatment="separate_one_time",
+                billing_cadence="one_time",
+                amount_availability="external_schedule",
                 recipient_scope="all_units",
                 denominator_label="total square footage",
                 denominator_source="exhibit_reference",
@@ -167,6 +171,27 @@ def test_promotion_rederives_special_treatment_after_review_edits() -> None:
     )
 
 
+def test_promotion_canonicalizes_stale_legacy_treatment_after_billing_edit() -> None:
+    extraction = to_domain(_wire_extraction())
+    edited_pool = extraction.allocation_pools[1].model_copy(
+        update={
+            "amount_availability": "operator_pending",
+        }
+    )
+    assert edited_pool.billing_treatment == "separate_one_time"
+    edited = extraction.model_copy(
+        update={"allocation_pools": [extraction.allocation_pools[0], edited_pool]}
+    )
+
+    promoted = derive_ccr_pool_treatments(edited)
+
+    pool = promoted.allocation_pools[1]
+    assert pool.billing_treatment == "operator_amount_pending"
+    assert pool.billing_cadence == "one_time"
+    assert pool.amount_availability == "operator_pending"
+    assert pool.pool_kind == "separately_billed_special_assessment"
+
+
 def test_promotion_clears_stale_special_treatment_after_review_edit() -> None:
     extraction = to_domain(_wire_extraction())
     edited_pool = extraction.allocation_pools[1].model_copy(
@@ -182,3 +207,24 @@ def test_promotion_clears_stale_special_treatment_after_review_edit() -> None:
     promoted = derive_ccr_pool_treatments(edited)
 
     assert promoted.allocation_pools[1].pool_kind == ""
+
+
+def test_legacy_parsed_json_derives_independent_billing_semantics() -> None:
+    payload = to_domain(_wire_extraction()).model_dump(mode="json")
+    structural = payload["allocation_pools"][1]
+    structural.pop("billing_cadence", None)
+    structural.pop("amount_availability", None)
+    structural["billing_treatment"] = "operator_amount_pending"
+
+    parsed = parse_extraction_response(
+        json.dumps(payload),
+    ).extraction
+
+    assert parsed is not None
+    pool = parsed.allocation_pools[1]
+    assert pool.billing_cadence == "one_time"
+    assert pool.amount_availability == "operator_pending"
+    assert (
+        derive_ccr_pool_treatments(parsed).allocation_pools[1].pool_kind
+        == "separately_billed_special_assessment"
+    )

@@ -45,15 +45,17 @@ def db(tmp_path: Path) -> sqlite3.Connection:
     conn.execute("INSERT INTO properties (name, units) VALUES ('Test', 10)")
     pid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     conn.execute(
-        "INSERT INTO dre_documents (property_id, file_id, file_name, status) "
-        "VALUES (?, 'dre/1/x.pdf', 'x.pdf', 'active')",
+        "INSERT INTO dre_documents "
+        "(property_id, file_id, file_name, status, document_type) "
+        "VALUES (?, 'dre/1/x.pdf', 'x.pdf', 'active', 'ccr')",
         (pid,),
     )
     doc_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     conn.execute(
         "INSERT INTO dre_extraction_runs "
-        "(dre_document_id, property_id, model_name, prompt_version, prompt_sha256, status) "
-        "VALUES (?, ?, 'gemini-flash-latest', '1.0.0', 'abc123', 'succeeded')",
+        "(dre_document_id, property_id, model_name, prompt_version, prompt_sha256, "
+        "status, document_type) "
+        "VALUES (?, ?, 'gemini-flash-latest', '1.0.0', 'abc123', 'succeeded', 'ccr')",
         (doc_id, pid),
     )
     conn.commit()

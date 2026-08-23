@@ -40,7 +40,9 @@ def _resolved_extraction():
     resolved_cost_center = cost_center.model_copy(
         update={
             "allocation_method": "equal",
-            "recipient_scope": "units_with_facility_access",
+            "recipient_scope": "custom_unit_list",
+            "selected_unit_numbers": ["A"],
+            "participant_unit_numbers": ["A"],
         }
     )
     return extraction.model_copy(
@@ -63,6 +65,19 @@ def test_generic_fixture_declares_and_covers_each_context() -> None:
         pool.allocation_context for pool in extraction.allocation_pools
     } == set(GENERIC_CCR_CONTEXTS)
     assert len(extraction.unit_structure.units) == 3
+    pools = {pool.pool_key: pool for pool in extraction.allocation_pools}
+    assert pools["equal_base"].allocation_method == "equal"
+    assert pools["external_schedule_exception"].allocation_method == "custom_factor"
+    assert pools["reserve_contribution"].allocation_method == "custom_factor"
+    assert pools["reserve_contribution"].billing_cadence == "recurring"
+    assert pools["parking_cost_center"].allocation_context == "cost_center"
+    assert pools["parking_cost_center"].billing_cadence == "recurring"
+    assert pools["structural_repair"].billing_cadence == "one_time"
+    assert pools["equal_base"].residual_after_pool_keys == [
+        "external_schedule_exception",
+        "reserve_contribution",
+        "parking_cost_center",
+    ]
 
     finding = assess_allocation_coherence(extraction)
 

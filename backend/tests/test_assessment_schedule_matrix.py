@@ -33,6 +33,7 @@ from app.assessment_engine.schemas import (
 from app.disclosure_package.assessment_schedule_matrix import (
     EvidenceRef,
     FooterRow,
+    _apply_approved_allocation_resolutions,
     build_matrix_from_approved_assessment_setup,
     build_universal_assessment_matrix,
     validate_assessment_matrix_finalization,
@@ -87,6 +88,86 @@ def _text_from_matrix_pdf(matrix) -> str:
         return "\n".join(page.get_text() for page in doc)
     finally:
         doc.close()
+
+
+def test_approved_resolution_renders_only_selected_home_recipients() -> None:
+    connection = sqlite3.connect(":memory:")
+    connection.execute(
+        """
+        CREATE TABLE allocation_resolutions (
+            id INTEGER PRIMARY KEY,
+            property_id INTEGER,
+            assessment_setup_id INTEGER,
+            pool_key TEXT,
+            version_int INTEGER,
+            status TEXT,
+            declared_method TEXT,
+            resolved_method TEXT,
+            factor_snapshot_json TEXT
+        )
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO allocation_resolutions
+        (id, property_id, assessment_setup_id, pool_key, version_int, status,
+         declared_method, resolved_method, factor_snapshot_json)
+        VALUES (1, 1, 7, 'subset', 1, 'approved',
+                'ownership_percentage', 'ownership_percentage', ?)
+        """,
+        (json.dumps({"recipients": {"A": "1", "B": "999"}}),),
+    )
+    recipients = [
+        RecipientReference(ref_type="unit", ref_id=11, label="A"),
+        RecipientReference(ref_type="unit", ref_id=12, label="B"),
+    ]
+    pools = [
+        PoolDefinition(
+            pool_id=1,
+            pool_key="subset",
+            pool_name="Selected homes",
+            allocation_method="ownership_percentage",
+            recipient_scope="custom_unit_list",
+        )
+    ]
+
+    (
+        resolved_pools,
+        weights,
+        specified,
+        _,
+        _,
+    ) = _apply_approved_allocation_resolutions(
+        connection=connection,
+        setup_id=7,
+        pools=pools,
+        recipients=recipients,
+        pool_custom_recipients={"subset": [11]},
+    )
+    result = run(
+        CalcInput(
+            setup_type="per_unit",
+            pools=resolved_pools,
+            recipient_set=RecipientSet(recipients=recipients),
+            budget_lines=[_budget("selected dues", "1200")],
+            mappings=[_mapping("selected dues", "subset")],
+            approved_assessment_revenue_annual=Decimal("1200"),
+            specified_value_lookup=specified,
+            pool_recipient_weights=weights,
+            pool_custom_recipients={"subset": [11]},
+        )
+    )
+    matrix = build_universal_assessment_matrix(
+        result,
+        setup_type="per_unit",
+        hoa_name="Selected HOA",
+        fiscal_year=2026,
+        pool_definitions=resolved_pools,
+    )
+
+    assert weights == {"subset": {("unit", 11): Decimal("1.00")}}
+    assert [row.recipient_label for row in matrix.rows] == ["A"]
+    assert matrix.rows[0].annual_total == Decimal("1200.00")
 
 
 def _empty_result() -> CalcResultSet:
@@ -921,6 +1002,7 @@ def test_db_builder_800_high_multi_factor_units_do_not_require_global_ownership_
                             "pool_name": "Residential Prorated",
                             "allocation_method": "ownership_percentage",
                             "recipient_scope": "residential_only",
+                            "selected_unit_numbers": ["101", "102"],
                             "denominator_value": "1",
                             "annual_amount": "69544",
                             "monthly_amount": "5795.32",
@@ -931,6 +1013,7 @@ def test_db_builder_800_high_multi_factor_units_do_not_require_global_ownership_
                             "pool_name": "Residential Equal",
                             "allocation_method": "equal",
                             "recipient_scope": "residential_only",
+                            "selected_unit_numbers": ["101", "102"],
                             "denominator_value": "60",
                             "annual_amount": "104019.48",
                             "monthly_amount": "8668.29",
@@ -941,6 +1024,7 @@ def test_db_builder_800_high_multi_factor_units_do_not_require_global_ownership_
                             "pool_name": "Parking Garage",
                             "allocation_method": "equal",
                             "recipient_scope": "parking_users",
+                            "selected_unit_numbers": ["101"],
                             "denominator_value": "64",
                             "annual_amount": "30861",
                             "monthly_amount": "2571.74",
@@ -1301,6 +1385,7 @@ def _build_800_high_connection(
                             "pool_name": "Residential Prorated",
                             "allocation_method": "ownership_percentage",
                             "recipient_scope": "residential_only",
+                            "selected_unit_numbers": ["101", "102"],
                             "denominator_value": "1",
                             "annual_amount": "69544",
                             "monthly_amount": "5795.32",
@@ -1311,6 +1396,7 @@ def _build_800_high_connection(
                             "pool_name": "Residential Equal",
                             "allocation_method": "equal",
                             "recipient_scope": "residential_only",
+                            "selected_unit_numbers": ["101", "102"],
                             "denominator_value": "60",
                             "annual_amount": "104019.48",
                             "monthly_amount": "8668.29",
@@ -1321,6 +1407,7 @@ def _build_800_high_connection(
                             "pool_name": "Parking Garage",
                             "allocation_method": "equal",
                             "recipient_scope": "parking_users",
+                            "selected_unit_numbers": ["101"],
                             "denominator_value": "64",
                             "annual_amount": "30861",
                             "monthly_amount": "2571.74",

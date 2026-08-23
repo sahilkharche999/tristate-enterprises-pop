@@ -38,7 +38,9 @@ import logging
 import re
 import sqlite3
 from decimal import Decimal, InvalidOperation
-from typing import Any, Iterable, Optional, Union, get_args, get_origin
+from typing import Any, Iterable, Literal, Optional, Union, get_args, get_origin
+
+from pydantic import BaseModel, Field, TypeAdapter
 
 from ..assessment_engine.percent_form import (
     AmbiguousPercentColumn,
@@ -79,6 +81,87 @@ class UnresolvableReviewEdit(RuntimeError):
         )
 
 
+STRUCTURAL_OPERATION_FIELD_PATH = "allocation_pools.$operation"
+
+
+class StaleStructuralOperation(RuntimeError):
+    """A pool operation was authored against an older operation version."""
+
+    def __init__(self, *, base_version: int, current_version: int) -> None:
+        self.base_version = base_version
+        self.current_version = current_version
+        super().__init__(
+            f"Structural operation base version {base_version} is stale; "
+            f"current version is {current_version}."
+        )
+
+
+class InvalidStructuralOperation(RuntimeError):
+    """A typed pool operation cannot be safely replayed."""
+
+    def __init__(self, message: str, category_keys: list[str]) -> None:
+        self.category_keys = category_keys
+        super().__init__(message)
+
+
+class _PoolOperationBase(BaseModel):
+    base_version: int = Field(ge=0)
+
+
+class AddPoolOperation(_PoolOperationBase):
+    operation: Literal["add"]
+    category_key: str
+    pool: AllocationPoolBlock
+
+
+class SplitPoolOperation(_PoolOperationBase):
+    operation: Literal["split"]
+    category_key: str
+    pools: list[AllocationPoolBlock] = Field(min_length=2)
+
+
+class MergePoolOperation(_PoolOperationBase):
+    operation: Literal["merge"]
+    category_keys: list[str] = Field(min_length=2)
+    pool: AllocationPoolBlock
+
+
+class RemovePoolOperation(_PoolOperationBase):
+    operation: Literal["remove"]
+    category_key: str
+
+
+class UpdatePoolOperation(_PoolOperationBase):
+    operation: Literal["update"]
+    category_key: str
+    changes: dict[str, Any]
+
+
+PoolStructuralOperation = Union[
+    AddPoolOperation,
+    SplitPoolOperation,
+    MergePoolOperation,
+    RemovePoolOperation,
+    UpdatePoolOperation,
+]
+_POOL_OPERATION_ADAPTER = TypeAdapter(
+    Union[
+        AddPoolOperation,
+        SplitPoolOperation,
+        MergePoolOperation,
+        RemovePoolOperation,
+        UpdatePoolOperation,
+    ]
+)
+
+
+def parse_pool_structural_operation(value: Any) -> PoolStructuralOperation:
+    """Validate a JSON/dict pool operation into its typed representation."""
+    if isinstance(value, str):
+        value = json.loads(value)
+    return _POOL_OPERATION_ADAPTER.validate_python(value)
+
+
 _PROPORTIONAL_ALLOCATION_METHODS = frozenset(
     {"square_footage", "ownership_percentage", "custom_factor"}
 )
@@ -108,16 +191,111 @@ class MissingUnitFactors(RuntimeError):
 
 
 def check_missing_unit_factors(extraction: DRESetupExtraction) -> list[str]:
-    """Return ``pool_key``s of proportional-allocation pools that have no
-    per-unit unit data at all (i.e. ``unit_structure.units`` is empty).
-    """
-    has_units = bool(extraction.unit_structure.units)
+    """Return proportional pools missing a positive factor for a participant."""
+    def _is_positive_numeric(value: Any) -> bool:
+        try:
+            numeric = Decimal(str(value))
+        except (InvalidOperation, TypeError, ValueError):
+            return False
+        return numeric.is_finite() and numeric > 0
+
+    units = list(extraction.unit_structure.units)
+    units_by_number = {
+        str(unit.unit_number).strip(): unit
+        for unit in units
+        if str(unit.unit_number).strip()
+    }
     missing: list[str] = []
     for pool in extraction.allocation_pools:
-        if pool.allocation_method in _PROPORTIONAL_ALLOCATION_METHODS:
-            if not has_units:
-                missing.append(pool.pool_key)
+        if pool.allocation_method not in _PROPORTIONAL_ALLOCATION_METHODS:
+            continue
+        participant_numbers = (
+            list(units_by_number)
+            if pool.recipient_scope == "all_units"
+            else [
+                str(value).strip()
+                for value in pool.selected_unit_numbers
+                if str(value).strip()
+            ]
+        )
+        if pool.recipient_scope != "all_units" and not participant_numbers:
+            try:
+                participant_numbers = _resolved_selected_unit_numbers(pool, units)
+            except InvalidStructuralOperation:
+                participant_numbers = []
+        if not participant_numbers:
+            missing.append(pool.pool_key)
+            continue
+
+        def _has_positive_factor(unit_number: str) -> bool:
+            unit = units_by_number.get(unit_number)
+            if unit is None:
+                return False
+            if pool.allocation_method == "square_footage":
+                return unit.square_feet is not None and unit.square_feet > 0
+            if pool.allocation_method == "ownership_percentage":
+                return (
+                    unit.ownership_percent is not None
+                    and unit.ownership_percent > 0
+                )
+            return any(
+                factor.pool_key == pool.pool_key
+                and _is_positive_numeric(factor.factor_value)
+                for factor in unit.pool_factors
+            )
+
+        if any(
+            not _has_positive_factor(unit_number)
+            for unit_number in participant_numbers
+        ):
+            missing.append(pool.pool_key)
     return missing
+
+
+def validate_specified_value_pools(
+    extraction: DRESetupExtraction,
+) -> dict[str, "SpecifiedValueFactorValidation"]:
+    """Validate every specified-value pool with the promotion validator."""
+    units = list(extraction.unit_structure.units)
+    units_by_number = {
+        str(unit.unit_number).strip(): unit
+        for unit in units
+        if str(unit.unit_number).strip()
+    }
+    validations: dict[str, SpecifiedValueFactorValidation] = {}
+    for pool in extraction.allocation_pools:
+        if pool.allocation_method != "specified_value":
+            continue
+        participant_numbers = (
+            list(units_by_number)
+            if pool.recipient_scope == "all_units"
+            else [
+                str(value).strip()
+                for value in pool.selected_unit_numbers
+                if str(value).strip()
+            ]
+        )
+        if pool.recipient_scope != "all_units" and not participant_numbers:
+            try:
+                participant_numbers = _resolved_selected_unit_numbers(pool, units)
+            except InvalidStructuralOperation:
+                participant_numbers = []
+        validations[pool.pool_key] = validate_specified_value_factors(
+            factors=_dollar_factors_for_pool(units, pool.pool_key),
+            participant_numbers=participant_numbers,
+            annual_amount=pool.annual_amount,
+            monthly_amount=pool.monthly_amount,
+        )
+    return validations
+
+
+def check_missing_specified_values(extraction: DRESetupExtraction) -> list[str]:
+    """Return specified-value pools missing positive participant amounts."""
+    return [
+        pool_key
+        for pool_key, validation in validate_specified_value_pools(extraction).items()
+        if not validation.valid and validation.failure_kind == "missing"
+    ]
 
 
 class AmbiguousOwnershipPercentForm(RuntimeError):
@@ -245,7 +423,197 @@ def _coerce_edit_value(annotation: Any, raw_new_value: Optional[str]) -> Any:
         return int(raw_new_value)
     if target_type is float:
         return float(raw_new_value)
+    if get_origin(target_type) is list:
+        parsed = json.loads(raw_new_value)
+        return TypeAdapter(target_type).validate_python(parsed)
     return raw_new_value
+
+
+def _pool_index_by_key(
+    pools: list[AllocationPoolBlock], category_key: str
+) -> int:
+    matches = [index for index, pool in enumerate(pools) if pool.pool_key == category_key]
+    if len(matches) != 1:
+        raise InvalidStructuralOperation(
+            f"Category key {category_key!r} must identify exactly one pool.",
+            [category_key],
+        )
+    return matches[0]
+
+
+def _validate_new_pool_keys(
+    pools: list[AllocationPoolBlock],
+    *,
+    replacing_keys: set[str],
+    new_pools: list[AllocationPoolBlock],
+) -> None:
+    new_keys = [pool.pool_key for pool in new_pools]
+    if any(not key.strip() for key in new_keys) or len(new_keys) != len(set(new_keys)):
+        raise InvalidStructuralOperation(
+            "Added or replacement pools require unique, non-empty category keys.",
+            new_keys,
+        )
+    existing = {
+        pool.pool_key for pool in pools if pool.pool_key not in replacing_keys
+    }
+    collisions = sorted(existing.intersection(new_keys))
+    if collisions:
+        raise InvalidStructuralOperation(
+            "Added or replacement category keys already exist.",
+            collisions,
+        )
+
+
+def _validate_structural_pool(pool: AllocationPoolBlock) -> None:
+    if pool.recipient_scope not in _VALID_RECIPIENT_SCOPES:
+        raise InvalidStructuralOperation(
+            "Category recipient scope is unsupported.",
+            [pool.pool_key],
+        )
+    if pool.recipient_scope != "all_units":
+        participants = [
+            str(value).strip() for value in pool.selected_unit_numbers
+        ]
+        if (
+            not participants
+            or any(not value for value in participants)
+            or len(set(participants)) != len(participants)
+        ):
+            raise InvalidStructuralOperation(
+                "Selected-home categories require distinct participating homes.",
+                [pool.pool_key],
+            )
+    if pool.amount_availability == "known" and (
+        pool.annual_amount is None or pool.annual_amount <= 0
+    ):
+        raise InvalidStructuralOperation(
+            "Known category amounts must be positive annual values.",
+            [pool.pool_key],
+        )
+
+
+def _maintain_residual_pool_relationships(
+    pools: list[AllocationPoolBlock],
+) -> list[AllocationPoolBlock]:
+    """Keep category dependencies valid after any structural operation.
+
+    Residual categories are canonicalized to every peer with the same billing
+    cadence. Other categories retain only references that still exist and never
+    reference themselves. This makes add/split/merge/remove safe without asking
+    an operator to edit the internal dependency graph.
+    """
+    existing_keys = {pool.pool_key for pool in pools}
+    maintained: list[AllocationPoolBlock] = []
+    for pool in pools:
+        if pool.budget_line_derivation == "residual_default":
+            relationships = [
+                peer.pool_key
+                for peer in pools
+                if peer.pool_key != pool.pool_key
+                and peer.billing_cadence == pool.billing_cadence
+            ]
+        else:
+            relationships = [
+                key
+                for key in pool.residual_after_pool_keys
+                if key in existing_keys and key != pool.pool_key
+            ]
+        maintained.append(
+            pool.model_copy(update={"residual_after_pool_keys": relationships})
+        )
+    return maintained
+
+
+def _apply_pool_structural_operation(
+    pools: list[AllocationPoolBlock],
+    operation: PoolStructuralOperation,
+) -> list[AllocationPoolBlock]:
+    result = list(pools)
+    if isinstance(operation, AddPoolOperation):
+        if operation.pool.pool_key != operation.category_key:
+            raise InvalidStructuralOperation(
+                "Add operation category_key must match pool.pool_key.",
+                [operation.category_key, operation.pool.pool_key],
+            )
+        _validate_new_pool_keys(
+            result, replacing_keys=set(), new_pools=[operation.pool]
+        )
+        _validate_structural_pool(operation.pool)
+        result.append(operation.pool)
+        return _maintain_residual_pool_relationships(result)
+
+    if isinstance(operation, RemovePoolOperation):
+        result.pop(_pool_index_by_key(result, operation.category_key))
+        return _maintain_residual_pool_relationships(result)
+
+    if isinstance(operation, UpdatePoolOperation):
+        index = _pool_index_by_key(result, operation.category_key)
+        if "pool_key" in operation.changes:
+            raise InvalidStructuralOperation(
+                "Update cannot rename a stable category key.",
+                [operation.category_key],
+            )
+        unknown = set(operation.changes) - set(AllocationPoolBlock.model_fields)
+        if unknown:
+            raise InvalidStructuralOperation(
+                "Update contains unsupported pool fields.",
+                [operation.category_key],
+            )
+        updated_payload = result[index].model_dump(mode="python")
+        updated_payload.update(operation.changes)
+        if (
+            "selected_unit_numbers" in operation.changes
+            and "participant_unit_numbers" not in operation.changes
+        ):
+            updated_payload["participant_unit_numbers"] = operation.changes[
+                "selected_unit_numbers"
+            ]
+        elif (
+            "participant_unit_numbers" in operation.changes
+            and "selected_unit_numbers" not in operation.changes
+        ):
+            updated_payload["selected_unit_numbers"] = operation.changes[
+                "participant_unit_numbers"
+            ]
+        result[index] = AllocationPoolBlock.model_validate(updated_payload)
+        _validate_structural_pool(result[index])
+        return _maintain_residual_pool_relationships(result)
+
+    if isinstance(operation, SplitPoolOperation):
+        index = _pool_index_by_key(result, operation.category_key)
+        _validate_new_pool_keys(
+            result,
+            replacing_keys={operation.category_key},
+            new_pools=operation.pools,
+        )
+        for pool in operation.pools:
+            _validate_structural_pool(pool)
+        result[index : index + 1] = operation.pools
+        return _maintain_residual_pool_relationships(result)
+
+    indexes = [
+        _pool_index_by_key(result, category_key)
+        for category_key in operation.category_keys
+    ]
+    if len(indexes) != len(set(indexes)):
+        raise InvalidStructuralOperation(
+            "Merge category keys must be unique.",
+            operation.category_keys,
+        )
+    _validate_new_pool_keys(
+        result,
+        replacing_keys=set(operation.category_keys),
+        new_pools=[operation.pool],
+    )
+    _validate_structural_pool(operation.pool)
+    insert_at = min(indexes)
+    result = [
+        pool
+        for index, pool in enumerate(result)
+        if index not in set(indexes)
+    ]
+    result.insert(insert_at, operation.pool)
+    return _maintain_residual_pool_relationships(result)
 
 
 def _entity_ref_for_segments(
@@ -298,16 +666,40 @@ def apply_review_edits_to_extraction(
     can't be resolved against the extraction tree or coerced to its
     field's declared type — never silently dropped or misapplied.
     """
-    latest_by_path: dict[str, Any] = {}
-    for edit in edits:
-        latest_by_path[edit.field_path] = edit
-    if not latest_by_path:
+    ordered_edits = list(edits)
+    latest_scalar_index: dict[str, int] = {
+        edit.field_path: index
+        for index, edit in enumerate(ordered_edits)
+        if edit.field_path != STRUCTURAL_OPERATION_FIELD_PATH
+    }
+    if not ordered_edits:
         return extraction
 
     working = extraction.model_copy(deep=True)
     unresolvable: list[str] = []
+    structural_version = 0
 
-    for field_path, edit in latest_by_path.items():
+    for index, edit in enumerate(ordered_edits):
+        field_path = edit.field_path
+        if field_path == STRUCTURAL_OPERATION_FIELD_PATH:
+            try:
+                operation = parse_pool_structural_operation(edit.new_value)
+            except (json.JSONDecodeError, TypeError, ValueError) as exc:
+                raise InvalidStructuralOperation(
+                    "Stored structural operation is invalid.", []
+                ) from exc
+            if operation.base_version != structural_version:
+                raise StaleStructuralOperation(
+                    base_version=operation.base_version,
+                    current_version=structural_version,
+                )
+            working.allocation_pools = _apply_pool_structural_operation(
+                list(working.allocation_pools), operation
+            )
+            structural_version += 1
+            continue
+        if latest_scalar_index[field_path] != index:
+            continue
         segments = _parse_field_path(field_path)
         if segments is None:
             unresolvable.append(field_path)
@@ -320,6 +712,11 @@ def apply_review_edits_to_extraction(
             annotation = model_fields[attr_name].annotation
             coerced = _coerce_edit_value(annotation, edit.new_value)
             setattr(target_obj, attr_name, coerced)
+            if isinstance(target_obj, AllocationPoolBlock):
+                if attr_name == "selected_unit_numbers":
+                    target_obj.participant_unit_numbers = list(coerced)
+                elif attr_name == "participant_unit_numbers":
+                    target_obj.selected_unit_numbers = list(coerced)
         except (
             AttributeError,
             IndexError,
@@ -338,7 +735,7 @@ def apply_review_edits_to_extraction(
 
 
 def entity_keys_touched_by_edits(
-    extraction: DRESetupExtraction, field_paths: Iterable[str]
+    extraction: DRESetupExtraction, edits_or_field_paths: Iterable[Any]
 ) -> frozenset[str]:
     """Return the set of ``"pool:<key>"``/``"group:<key>"``/``"unit:<key>"``
     refs that the given (already-applied) edit ``field_paths`` touched.
@@ -350,7 +747,32 @@ def entity_keys_touched_by_edits(
     ``EditedEntityFailedToPromote``).
     """
     keys: set[str] = set()
-    for field_path in field_paths:
+    for edit_or_path in edits_or_field_paths:
+        field_path = (
+            edit_or_path
+            if isinstance(edit_or_path, str)
+            else edit_or_path.field_path
+        )
+        if field_path == STRUCTURAL_OPERATION_FIELD_PATH:
+            if isinstance(edit_or_path, str):
+                continue
+            try:
+                operation = parse_pool_structural_operation(edit_or_path.new_value)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                continue
+            if isinstance(operation, MergePoolOperation):
+                pool_keys = [*operation.category_keys, operation.pool.pool_key]
+            elif isinstance(operation, SplitPoolOperation):
+                pool_keys = [
+                    operation.category_key,
+                    *(pool.pool_key for pool in operation.pools),
+                ]
+            elif isinstance(operation, AddPoolOperation):
+                pool_keys = [operation.category_key]
+            else:
+                pool_keys = [operation.category_key]
+            keys.update(f"pool:{pool_key}" for pool_key in pool_keys)
+            continue
         segments = _parse_field_path(field_path)
         if segments is None:
             continue
@@ -370,13 +792,17 @@ _VALID_DENOMINATOR_SOURCES = {"dre_value", "calculated", "manual"}
 def _coerce_recipient_scope(raw: str) -> str:
     """Normalize prompt-emitted ``recipient_scope`` to internal enum.
 
-    Defaults to ``all_units`` for empty/unrecognized values — the engine
-    fans out across every unit then, which is the safest default.
+    Unsupported values fail closed. Silently broadening an unknown subset to
+    every home would create owner charges that the reviewed document did not
+    authorize.
     """
     candidate = (raw or "").strip().lower().replace(" ", "_")
     if candidate in _VALID_RECIPIENT_SCOPES:
         return candidate
-    return "all_units"
+    raise InvalidStructuralOperation(
+        "Category recipient scope is unsupported.",
+        [],
+    )
 
 
 def _coerce_denominator_source(raw: str) -> str:
@@ -410,7 +836,14 @@ def _insert_pool(
     written_method = (
         "unresolved" if mapping.promote_as_unresolved else mapping.internal_method
     )
-    scope = mapping.forced_scope or _coerce_recipient_scope(pool.recipient_scope)
+    declared_scope = mapping.forced_scope or _coerce_recipient_scope(
+        pool.recipient_scope
+    )
+    scope = (
+        "custom_unit_list"
+        if declared_scope != "all_units"
+        else "all_units"
+    )
     denom_source = (
         mapping.forced_denominator_source
         or _coerce_denominator_source(pool.denominator_source)
@@ -522,6 +955,83 @@ def _parking_count(raw: str) -> int:
     return int(digits) if digits else 0
 
 
+def _resolved_selected_unit_numbers(
+    pool: AllocationPoolBlock,
+    units: list[UnitRow],
+) -> list[str]:
+    """Return the exact reviewed/derived participant set for one pool."""
+    mapping = map_allocation_method(pool.allocation_method)
+    scope = mapping.forced_scope or _coerce_recipient_scope(pool.recipient_scope)
+    if scope == "all_units":
+        return []
+
+    explicit = [
+        str(value).strip()
+        for value in pool.selected_unit_numbers
+        if str(value).strip()
+    ]
+    if explicit:
+        if len(set(explicit)) != len(explicit):
+            raise InvalidStructuralOperation(
+                "Category participant home identifiers must be distinct.",
+                [pool.pool_key],
+            )
+        known = {str(unit.unit_number).strip() for unit in units}
+        missing = [value for value in explicit if value not in known]
+        if units and missing:
+            raise InvalidStructuralOperation(
+                "Category participant homes are not present in the unit schedule.",
+                [pool.pool_key],
+            )
+        return explicit
+
+    derived: list[str] = []
+    for unit in units:
+        unit_number = str(unit.unit_number).strip()
+        if not unit_number:
+            continue
+        category = _coerce_category(
+            unit.category,
+            unit.residential_commercial_flag,
+        )
+        if scope == "residential_only" and category == "residential":
+            derived.append(unit_number)
+        elif scope == "commercial_only" and category == "commercial":
+            derived.append(unit_number)
+        elif scope == "parking_users" and _parking_count(unit.parking_flag) > 0:
+            derived.append(unit_number)
+
+    if not derived:
+        raise InvalidStructuralOperation(
+            "A non-all payer category has no evidenced or selected homes.",
+            [pool.pool_key],
+        )
+    return derived
+
+
+def _materialize_pool_participants(
+    extraction: DRESetupExtraction,
+) -> DRESetupExtraction:
+    units = list(extraction.unit_structure.units)
+    pools: list[AllocationPoolBlock] = []
+    for pool in extraction.allocation_pools:
+        mapping = map_allocation_method(pool.allocation_method)
+        scope = mapping.forced_scope or _coerce_recipient_scope(
+            pool.recipient_scope
+        )
+        selected = _resolved_selected_unit_numbers(pool, units)
+        pools.append(
+            pool.model_copy(
+                update={
+                    "recipient_scope": scope,
+                    "selected_unit_numbers": selected,
+                    "participant_unit_numbers": selected,
+                }
+            )
+        )
+    return extraction.model_copy(update={"allocation_pools": pools})
+
+
 def _insert_unit(
     *,
     setup_id: int,
@@ -565,15 +1075,80 @@ def _insert_unit(
 # and finalize while any specified_value pool still carries placeholder rows.
 EQUAL_SPLIT_PLACEHOLDER_SOURCE = "equal_split_placeholder"
 
-# Sum-test tolerance for disambiguating extracted per-unit dollar factors
-# (monthly form vs annual form) against the pool's stated totals.
-_DOLLAR_FACTOR_SUM_TOLERANCE = Decimal("0.005")  # 0.5%
+_MONEY_QUANTUM = Decimal("0.01")
 
 
-def _within_tolerance(total: Decimal, target: Optional[Decimal]) -> bool:
-    if target is None or target == 0:
-        return False
-    return abs(total - target) / abs(target) <= _DOLLAR_FACTOR_SUM_TOLERANCE
+class SpecifiedValueFactorValidation(BaseModel):
+    valid: bool
+    form: Optional[Literal["monthly", "annual"]] = None
+    values: dict[str, Decimal] = Field(default_factory=dict)
+    reason: Optional[str] = None
+    failure_kind: Optional[Literal["missing", "invalid_total"]] = None
+
+
+def validate_specified_value_factors(
+    *,
+    factors: dict[str, Decimal],
+    participant_numbers: Iterable[str],
+    annual_amount: Optional[Decimal],
+    monthly_amount: Optional[Decimal],
+) -> SpecifiedValueFactorValidation:
+    """Validate one specified-value schedule using exact currency arithmetic."""
+    participants = [str(value).strip() for value in participant_numbers]
+    if not participants:
+        return SpecifiedValueFactorValidation(
+            valid=False,
+            reason="no participating homes were resolved",
+            failure_kind="missing",
+        )
+    values: dict[str, Decimal] = {}
+    for unit_number in participants:
+        value = factors.get(unit_number)
+        if value is not None and value.is_finite() and value > 0:
+            values[unit_number] = value
+    if len(values) != len(participants):
+        reason = (
+            "extraction carried no per-unit dollar_amount factors"
+            if not values
+            else f"only {len(values)}/{len(participants)} units participating in "
+            "this category carry a positive dollar_amount factor for this pool"
+        )
+        return SpecifiedValueFactorValidation(
+            valid=False,
+            values=values,
+            reason=reason,
+            failure_kind="missing",
+        )
+
+    total = sum(values.values(), start=Decimal("0"))
+
+    def money_equal(left: Decimal, right: Optional[Decimal]) -> bool:
+        return (
+            right is not None
+            and left.quantize(_MONEY_QUANTUM)
+            == right.quantize(_MONEY_QUANTUM)
+        )
+
+    monthly_match = money_equal(total, monthly_amount) or money_equal(
+        total * Decimal(12), annual_amount
+    )
+    annual_match = money_equal(total, annual_amount)
+    if monthly_match != annual_match:
+        return SpecifiedValueFactorValidation(
+            valid=True,
+            form="monthly" if monthly_match else "annual",
+            values=values,
+        )
+    return SpecifiedValueFactorValidation(
+        valid=False,
+        values=values,
+        reason=(
+            f"per-home dollar factors sum to {total:,.2f}, which matches "
+            f"{'both' if monthly_match else 'neither'} pool total "
+            f"(monthly={monthly_amount}, annual={annual_amount})"
+        ),
+        failure_kind="invalid_total",
+    )
 
 
 def _dollar_factors_for_pool(
@@ -611,6 +1186,7 @@ def _insert_specified_value_allocations(
     unit_count: int,
     connection: sqlite3.Connection,
     edited_entity_keys: frozenset[str] = frozenset(),
+    target_unit_numbers: Optional[list[str]] = None,
 ) -> dict[str, Any]:
     """Insert one assessment_unit_pool_allocations row per unit (C7).
 
@@ -634,41 +1210,30 @@ def _insert_specified_value_allocations(
     Returns an audit dict: ``{"mode": "dre_dollar_factors"|"placeholder",
     "form": "monthly"|"annual"|None, "reason": str|None}``.
     """
-    if not unit_id_by_number:
+    target_unit_ids = (
+        {
+            unit_number: unit_id_by_number[unit_number]
+            for unit_number in target_unit_numbers
+            if unit_number in unit_id_by_number
+        }
+        if target_unit_numbers is not None
+        else unit_id_by_number
+    )
+    if not target_unit_ids:
         return {"mode": "skipped", "form": None, "reason": "no units inserted"}
 
-    factors = _dollar_factors_for_pool(units, pool_key)
-    covered = set(factors) >= set(unit_id_by_number)
+    validation = validate_specified_value_factors(
+        factors=_dollar_factors_for_pool(units, pool_key),
+        participant_numbers=target_unit_ids,
+        annual_amount=annual_amount,
+        monthly_amount=monthly_amount,
+    )
+    form = validation.form
+    reason = validation.reason
 
-    form: Optional[str] = None
-    reason: Optional[str] = None
-    if covered:
-        total = sum(factors[n] for n in unit_id_by_number)
-        monthly_match = _within_tolerance(total, monthly_amount) or (
-            _within_tolerance(total * Decimal(12), annual_amount)
-        )
-        annual_match = _within_tolerance(total, annual_amount)
-        if monthly_match and not annual_match:
-            form = "monthly"
-        elif annual_match and not monthly_match:
-            form = "annual"
-        else:
-            reason = (
-                f"per-unit dollar factors sum to {total} which matches "
-                f"{'both' if (monthly_match and annual_match) else 'neither'} "
-                f"pool total (monthly={monthly_amount}, annual={annual_amount})"
-            )
-    elif factors:
-        reason = (
-            f"only {len(factors)}/{len(unit_id_by_number)} units carry a "
-            "dollar_amount factor for this pool"
-        )
-    else:
-        reason = "extraction carried no per-unit dollar_amount factors"
-
-    if form is not None:
-        for unit_number, unit_id in unit_id_by_number.items():
-            value = factors[unit_number]
+    if validation.valid and form is not None:
+        for unit_number, unit_id in target_unit_ids.items():
+            value = validation.values[unit_number]
             monthly = (
                 value if form == "monthly" else value / Decimal(12)
             ).quantize(Decimal("0.01"))
@@ -696,7 +1261,8 @@ def _insert_specified_value_allocations(
     # Placeholder fallback: equal split, explicitly tagged. Blocked by
     # preflight until the operator resolves it — never a guess shipped
     # as document data.
-    if annual_amount is None or unit_count <= 0:
+    target_count = len(target_unit_ids)
+    if annual_amount is None or target_count <= 0:
         return {"mode": "skipped", "form": None, "reason": reason}
     logger.warning(
         "promotion: specified_value pool %r fell back to equal-split "
@@ -705,10 +1271,10 @@ def _insert_specified_value_allocations(
         pool_key,
         reason,
     )
-    monthly = (annual_amount / Decimal(12) / Decimal(unit_count)).quantize(
+    monthly = (annual_amount / Decimal(12) / Decimal(target_count)).quantize(
         Decimal("0.01")
     )
-    for unit_number, unit_id in unit_id_by_number.items():
+    for unit_number, unit_id in target_unit_ids.items():
         connection.execute(
             """
             INSERT INTO assessment_unit_pool_allocations (
@@ -747,9 +1313,14 @@ def parse_extraction_payload(
 
 _PROPORTIONAL_SQFT_METHODS = frozenset({"square_footage"})
 _ISOLATED_POOL_KINDS = frozenset({"separately_billed_special_assessment"})
-_SPECIAL_BILLING_TREATMENTS = frozenset(
-    {"separate_one_time", "operator_amount_pending"}
-)
+
+
+def _canonical_billing_treatment(pool: AllocationPoolBlock) -> str:
+    if pool.amount_availability == "operator_pending":
+        return "operator_amount_pending"
+    if pool.billing_cadence == "one_time":
+        return "separate_one_time"
+    return "recurring"
 
 
 def derive_ccr_pool_treatments(
@@ -757,10 +1328,10 @@ def derive_ccr_pool_treatments(
 ) -> DRESetupExtraction:
     """Re-derive engine treatment from typed CCR pool semantics.
 
-    Review edits can change typed context or billing treatment after Gemini
-    extraction. Recompute the legacy marker at the promotion boundary so a
-    stale or omitted ``pool_kind`` cannot turn a one-time levy into recurring
-    dues.
+    Review edits can change cadence or amount availability after Gemini
+    extraction. Recompute both legacy compatibility fields at the promotion
+    boundary so stale ``billing_treatment`` or ``pool_kind`` values cannot
+    contradict the independent semantics.
     """
     pools: list[AllocationPoolBlock] = []
     changed = False
@@ -769,14 +1340,19 @@ def derive_ccr_pool_treatments(
             "separately_billed_special_assessment"
             if (
                 pool.allocation_context == "special_assessment"
-                and pool.billing_treatment in _SPECIAL_BILLING_TREATMENTS
+                and pool.billing_cadence == "one_time"
             )
             else ""
         )
-        if pool.pool_kind != pool_kind:
+        billing_treatment = _canonical_billing_treatment(pool)
+        if (
+            pool.pool_kind != pool_kind
+            or pool.billing_treatment != billing_treatment
+        ):
             pool = pool.model_copy(
                 update={
                     "pool_kind": pool_kind,
+                    "billing_treatment": billing_treatment,
                 }
             )
             changed = True
@@ -941,6 +1517,95 @@ def _fill_missing_square_footage_denominators(
     return extraction.model_copy(update={"allocation_pools": new_pools})
 
 
+def normalize_extraction_for_promotion(
+    extraction: DRESetupExtraction,
+) -> DRESetupExtraction:
+    """Apply the pure normalization used immediately before promotion writes."""
+    normalized = _normalize_proportional_pool_methods(extraction)
+    return _fill_missing_square_footage_denominators(normalized)
+
+
+def validate_ownership_percent_form(
+    extraction: DRESetupExtraction,
+) -> tuple[Optional[Decimal], Optional[Decimal]]:
+    """Resolve ownership column divisors without mutating or writing.
+
+    The same validation is used by preview and by child population so an
+    ambiguous ownership column is visible before approval starts writing.
+    """
+    has_ownership_pool = any(
+        pool.allocation_method == "ownership_percentage"
+        for pool in extraction.allocation_pools
+    )
+    forced_form = extraction.unit_structure.ownership_percent_form
+
+    def _percent_divisor_for(rows: Iterable[Any], label: str) -> Optional[Decimal]:
+        try:
+            return resolve_percent_divisor(
+                [row.ownership_percent for row in rows],
+                column_label=label,
+                forced_form=forced_form,
+            )
+        except AmbiguousPercentColumn as exc:
+            if has_ownership_pool:
+                raise AmbiguousOwnershipPercentForm(exc) from exc
+            logger.warning(
+                "promotion: %s is ambiguous (%s) but no ownership_percentage "
+                "pool exists; storing verbatim for the read-side resolver",
+                label,
+                exc,
+            )
+            return None
+
+    return (
+        _percent_divisor_for(
+            extraction.unit_structure.groups,
+            "assessment_groups.ownership_percent",
+        ),
+        _percent_divisor_for(
+            extraction.unit_structure.units,
+            "assessment_units.ownership_percent",
+        ),
+    )
+
+
+def validate_edited_entities_for_promotion(
+    extraction: DRESetupExtraction,
+    *,
+    setup_type: str,
+    edited_entity_keys: frozenset[str],
+) -> list[str]:
+    """Return edited entities that promotion would filter instead of insert."""
+    normalized = normalize_extraction_for_promotion(extraction)
+    failed: list[str] = []
+
+    for pool in normalized.allocation_pools:
+        entity_ref = f"pool:{pool.pool_key}"
+        if entity_ref not in edited_entity_keys:
+            continue
+        mapping = map_allocation_method(pool.allocation_method)
+        if mapping.internal_method is None and not mapping.promote_as_unresolved:
+            failed.append(entity_ref)
+
+    if setup_type == "grouped":
+        for index, group in enumerate(normalized.unit_structure.groups):
+            group_key = group.group_id or group.label or str(index)
+            entity_ref = f"group:{group_key}"
+            if (
+                entity_ref in edited_entity_keys
+                and (group.unit_count is None or group.unit_count <= 0)
+            ):
+                failed.append(entity_ref)
+
+    if setup_type == "per_unit":
+        for unit in normalized.unit_structure.units:
+            entity_ref = f"unit:{unit.unit_number}"
+            if entity_ref in edited_entity_keys and not unit.unit_number:
+                failed.append(entity_ref)
+
+    return failed
+
+
 def populate_setup_children(
     *,
     setup_id: int,
@@ -960,13 +1625,19 @@ def populate_setup_children(
 
     Returns a count summary for the audit trail.
     """
-    extraction = _normalize_proportional_pool_methods(extraction)
-    extraction = _fill_missing_square_footage_denominators(extraction)
+    extraction = normalize_extraction_for_promotion(extraction)
+    extraction = _materialize_pool_participants(extraction)
+    failed_edited_entities = validate_edited_entities_for_promotion(
+        extraction,
+        setup_type=setup_type,
+        edited_entity_keys=edited_entity_keys,
+    )
+    if failed_edited_entities:
+        raise EditedEntityFailedToPromote(failed_edited_entities)
 
     counts = {
         "pools": 0, "groups": 0, "units": 0, "unit_pool_allocations": 0,
     }
-    failed_edited_entities: list[str] = []
 
     # C8: resolve the ownership-percent column form ONCE, column-level,
     # before any row insert — the stored value is always the normalized
@@ -975,35 +1646,8 @@ def populate_setup_children(
     # An ambiguous column blocks promotion only when a pool actually
     # allocates by ownership percentage; display-only columns store
     # verbatim and the render-side resolver guards them.
-    has_ownership_pool = any(
-        pool.allocation_method == "ownership_percentage"
-        for pool in extraction.allocation_pools
-    )
-    forced_form = extraction.unit_structure.ownership_percent_form
-
-    def _percent_divisor_for(rows, label: str) -> Optional[Decimal]:
-        try:
-            return resolve_percent_divisor(
-                [row.ownership_percent for row in rows],
-                column_label=label,
-                forced_form=forced_form,
-            )
-        except AmbiguousPercentColumn as exc:
-            if has_ownership_pool:
-                raise AmbiguousOwnershipPercentForm(exc) from exc
-            logger.warning(
-                "promotion: %s is ambiguous (%s) but no ownership_percentage "
-                "pool exists; storing verbatim for the read-side resolver",
-                label,
-                exc,
-            )
-            return None
-
-    group_percent_divisor = _percent_divisor_for(
-        extraction.unit_structure.groups, "assessment_groups.ownership_percent"
-    )
-    unit_percent_divisor = _percent_divisor_for(
-        extraction.unit_structure.units, "assessment_units.ownership_percent"
+    group_percent_divisor, unit_percent_divisor = validate_ownership_percent_form(
+        extraction
     )
 
     pool_id_by_key: dict[str, int] = {}
@@ -1043,20 +1687,15 @@ def populate_setup_children(
                     "skipping resolution seed for %s",
                     pool.pool_key,
                 )
-        elif f"pool:{pool.pool_key}" in edited_entity_keys:
-            failed_edited_entities.append(f"pool:{pool.pool_key}")
 
     if setup_type == "grouped":
         for idx, group in enumerate(extraction.unit_structure.groups):
-            group_key = group.group_id or group.label or str(idx)
             if _insert_group(
                 setup_id=setup_id, group=group,
                 display_order=idx, connection=connection,
                 percent_divisor=group_percent_divisor,
             ) is not None:
                 counts["groups"] += 1
-            elif f"group:{group_key}" in edited_entity_keys:
-                failed_edited_entities.append(f"group:{group_key}")
         _refresh_proportional_resolution_snapshots(
             setup_id=setup_id,
             extraction=extraction,
@@ -1073,9 +1712,12 @@ def populate_setup_children(
             if unit_id is not None:
                 unit_id_by_number[unit.unit_number] = unit_id
                 counts["units"] += 1
-            elif f"unit:{unit.unit_number}" in edited_entity_keys:
-                failed_edited_entities.append(f"unit:{unit.unit_number}")
 
+        _promote_custom_factor_resolutions(
+            setup_id=setup_id,
+            extraction=extraction,
+            connection=connection,
+        )
         _refresh_proportional_resolution_snapshots(
             setup_id=setup_id,
             extraction=extraction,
@@ -1103,9 +1745,18 @@ def populate_setup_children(
                 unit_count=len(unit_id_by_number),
                 connection=connection,
                 edited_entity_keys=edited_entity_keys,
+                target_unit_numbers=(
+                    pool.selected_unit_numbers
+                    if pool.recipient_scope != "all_units"
+                    else None
+                ),
             )
             if outcome["mode"] != "skipped":
-                counts["unit_pool_allocations"] += before
+                counts["unit_pool_allocations"] += (
+                    len(pool.selected_unit_numbers)
+                    if pool.recipient_scope != "all_units"
+                    else before
+                )
             if outcome["mode"] == "placeholder":
                 counts.setdefault("specified_value_placeholders", []).append(
                     {"pool_key": pool.pool_key, "reason": outcome["reason"]}
@@ -1115,9 +1766,6 @@ def populate_setup_children(
                 pool_key=pool.pool_key,
                 connection=connection,
             )
-
-    if failed_edited_entities:
-        raise EditedEntityFailedToPromote(failed_edited_entities)
 
     try:
         unresolved_row = connection.execute(
@@ -1145,6 +1793,71 @@ def populate_setup_children(
         )
 
     return counts
+
+
+def _promote_custom_factor_resolutions(
+    *,
+    setup_id: int,
+    extraction: DRESetupExtraction,
+    connection: sqlite3.Connection,
+) -> None:
+    """Turn complete per-category custom factors into executable resolutions."""
+    units_by_number = {
+        str(unit.unit_number): unit for unit in extraction.unit_structure.units
+    }
+    for pool in extraction.allocation_pools:
+        if pool.allocation_method != "custom_factor":
+            continue
+        participant_numbers = (
+            list(units_by_number)
+            if pool.recipient_scope == "all_units"
+            else list(pool.selected_unit_numbers)
+        )
+        factors: dict[str, Decimal] = {}
+        for unit_number in participant_numbers:
+            unit = units_by_number.get(str(unit_number))
+            if unit is None:
+                break
+            matches = [
+                Decimal(str(factor.factor_value))
+                for factor in unit.pool_factors
+                if factor.pool_key == pool.pool_key
+                and factor.factor_value is not None
+                and Decimal(str(factor.factor_value)) > 0
+            ]
+            if len(matches) != 1:
+                break
+            factors[str(unit_number)] = matches[0]
+        if len(factors) != len(participant_numbers) or not factors:
+            continue
+
+        total = sum(factors.values(), start=Decimal("0"))
+        snapshot = {
+            "method": "ownership_percentage",
+            "denominator_value": str(total),
+            "denominator_source": "manual",
+            "recipients": {
+                unit_number: str(value)
+                for unit_number, value in factors.items()
+            },
+        }
+        connection.execute(
+            "UPDATE allocation_pools "
+            "SET allocation_method = 'ownership_percentage', "
+            "denominator_value = ?, denominator_source = 'manual' "
+            "WHERE assessment_setup_id = ? AND pool_key = ?",
+            (str(total), setup_id, pool.pool_key),
+        )
+        connection.execute(
+            "UPDATE allocation_resolutions "
+            "SET status = 'approved', resolved_method = 'ownership_percentage', "
+            "denominator_value = ?, denominator_source = 'manual', "
+            "factor_snapshot_json = ?, source = 'operator', "
+            "approved_at = datetime('now') "
+            "WHERE assessment_setup_id = ? AND pool_key = ? "
+            "AND status IN ('unresolved', 'draft')",
+            (str(total), json.dumps(snapshot), setup_id, pool.pool_key),
+        )
 
 
 def _refresh_proportional_resolution_snapshots(

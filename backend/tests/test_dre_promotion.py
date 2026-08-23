@@ -155,6 +155,10 @@ class TestPopulatePools:
                 "source_pages": [5],
                 "confidence": 0.7,
             }],
+            units=[
+                {"unit_number": "P-1", "parking_flag": "1 space"},
+                {"unit_number": "P-2", "parking_flag": ""},
+            ],
         )
         ext = parse_extraction_payload(json.dumps(payload))
         populate_setup_children(
@@ -166,7 +170,7 @@ class TestPopulatePools:
             "FROM allocation_pools WHERE assessment_setup_id = ?",
             (setup_id,),
         ).fetchone()
-        assert row == ("equal", "parking_users")
+        assert row == ("equal", "custom_unit_list")
 
     def test_unknown_method_skipped(self, db):
         pid, setup_id = _seed_property_and_setup(db)
@@ -567,8 +571,8 @@ class TestSpecifiedValueAllocations:
                 "source_pages": [],
             }],
             units=[
-                {"unit_number": "101"},
-                {"unit_number": "201"},
+                {"unit_number": "101", "category": "residential"},
+                {"unit_number": "201", "category": "residential"},
             ],
         )
         ext = parse_extraction_payload(json.dumps(payload))
