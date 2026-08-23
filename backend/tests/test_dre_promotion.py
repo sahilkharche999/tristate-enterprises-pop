@@ -365,9 +365,8 @@ class TestProportionalPoolNormalization:
         assert method == "square_footage"
 
     def test_fills_missing_sqft_denominator_from_complete_unit_table(self, db):
-        # 131 Missouri case: custom_factor → square_footage at adapt, but CCR
-        # extraction left denominator_value null while every unit has sqft.
-        # Promote must freeze the sum so the engine can allocate.
+        # Explicit square_footage with a missing denominator and complete
+        # unit sqft: promote freezes the sum so the engine can allocate.
         pid, setup_id = _seed_property_and_setup(db)
         payload = _make_extraction_payload(
             pools=[{

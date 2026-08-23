@@ -46,6 +46,7 @@ from ..assessment_engine.percent_form import (
     resolve_percent_divisor,
 )
 from .adapter import map_allocation_method
+from ..allocation_resolution.service import seed_resolution_from_promotion
 from .schemas import (
     AllocationPoolBlock,
     DRESetupExtraction,
@@ -399,36 +400,42 @@ def _insert_pool(
 ) -> Optional[int]:
     """Insert one allocation_pools row. Returns pool_id, or None on bad data."""
     mapping = map_allocation_method(pool.allocation_method)
-    if mapping.internal_method is None:
+    if mapping.internal_method is None and not mapping.promote_as_unresolved:
         logger.warning(
             "promotion: skipping pool %r — allocation method %r could not be mapped",
             pool.pool_key, pool.allocation_method,
         )
         return None
 
+    written_method = (
+        "unresolved" if mapping.promote_as_unresolved else mapping.internal_method
+    )
     scope = mapping.forced_scope or _coerce_recipient_scope(pool.recipient_scope)
     denom_source = (
         mapping.forced_denominator_source
         or _coerce_denominator_source(pool.denominator_source)
     )
+    if mapping.promote_as_unresolved:
+        denom_source = _coerce_denominator_source(pool.denominator_source)
 
     cur = connection.execute(
         """
         INSERT INTO allocation_pools (
             assessment_setup_id, pool_key, pool_name, denominator_label,
-            allocation_method, recipient_scope,
+            declared_allocation_method, allocation_method, recipient_scope,
             denominator_source, denominator_value,
             variable_flag, display_order, include_in_pdf,
             budget_line_derivation,
             residual_after_pool_keys_json,
             residual_exclusions_json,
             pool_kind
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
         """,
         (
             setup_id, pool.pool_key, pool.pool_name or pool.pool_key,
             pool.denominator_label or None,
-            mapping.internal_method, scope,
+            pool.allocation_method,
+            written_method, scope,
             denom_source,
             str(pool.denominator_value) if pool.denominator_value is not None else None,
             1 if pool.variable_flag else 0,
@@ -738,7 +745,15 @@ def parse_extraction_payload(
         return None
 
 
-_PROPORTIONAL_SQFT_METHODS = frozenset({"square_footage", "custom_factor"})
+_PROPORTIONAL_SQFT_METHODS = frozenset({"square_footage"})
+_ISOLATED_POOL_KINDS = frozenset({"separately_billed_special_assessment"})
+
+
+def _is_isolated_structural_pool(pool: AllocationPoolBlock) -> bool:
+    """Special-assessment / parking / cost-center pools keep their own basis."""
+    if (pool.pool_kind or "") in _ISOLATED_POOL_KINDS:
+        return True
+    return _is_parking_or_cost_center_pool(pool)
 
 
 def _is_parking_or_cost_center_pool(pool: AllocationPoolBlock) -> bool:
@@ -821,7 +836,7 @@ def _normalize_proportional_pool_methods(
     changed = False
     for pool in extraction.allocation_pools:
         if pool.allocation_method in _PROPORTIONAL_SQFT_METHODS:
-            if _is_parking_or_cost_center_pool(pool):
+            if _is_isolated_structural_pool(pool):
                 new_pools.append(pool)
                 continue
             logger.info(
@@ -865,7 +880,7 @@ def _fill_missing_square_footage_denominators(
         if pool.allocation_method not in _PROPORTIONAL_SQFT_METHODS:
             new_pools.append(pool)
             continue
-        if _is_parking_or_cost_center_pool(pool):
+        if _is_isolated_structural_pool(pool):
             new_pools.append(pool)
             continue
         logger.info(
@@ -955,6 +970,11 @@ def populate_setup_children(
     )
 
     pool_id_by_key: dict[str, int] = {}
+    property_id_row = connection.execute(
+        "SELECT property_id FROM assessment_setups WHERE id = ?",
+        (setup_id,),
+    ).fetchone()
+    property_id = int(property_id_row[0]) if property_id_row else 0
     for idx, pool in enumerate(extraction.allocation_pools):
         pool_id = _insert_pool(
             setup_id=setup_id, pool=pool, display_order=idx, connection=connection,
@@ -962,6 +982,30 @@ def populate_setup_children(
         if pool_id is not None:
             pool_id_by_key[pool.pool_key] = pool_id
             counts["pools"] += 1
+            mapping = map_allocation_method(pool.allocation_method)
+            try:
+                seed_resolution_from_promotion(
+                    connection,
+                    property_id=property_id,
+                    assessment_setup_id=setup_id,
+                    pool_key=pool.pool_key,
+                    declared_method=pool.allocation_method,
+                    resolved_method=mapping.internal_method,
+                    unresolved=bool(mapping.promote_as_unresolved),
+                    denominator_label=pool.denominator_label or "",
+                    included_categories=list(pool.included_budget_lines or []),
+                    excluded_categories=list(pool.excluded_budget_lines or []),
+                    source_pages=list(pool.source_pages or []),
+                    source_text=pool.denominator_label or "",
+                    denominator_value=pool.denominator_value,
+                    denominator_source=_coerce_denominator_source(pool.denominator_source),
+                )
+            except sqlite3.OperationalError:
+                logger.warning(
+                    "promotion: allocation_resolutions table missing; "
+                    "skipping resolution seed for %s",
+                    pool.pool_key,
+                )
         elif f"pool:{pool.pool_key}" in edited_entity_keys:
             failed_edited_entities.append(f"pool:{pool.pool_key}")
 

@@ -425,6 +425,8 @@ CREATE TABLE IF NOT EXISTS assessment_setups (
     approved_at              TEXT,
     status                   TEXT NOT NULL DEFAULT 'draft'
                              CHECK (status IN ('draft','approved','superseded')),
+    allocation_readiness_status TEXT NOT NULL DEFAULT 'ok'
+                             CHECK (allocation_readiness_status IN ('ok','needs_review')),
     version_int              INTEGER NOT NULL DEFAULT 0,
     created_at               TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at               TEXT NOT NULL DEFAULT (datetime('now'))
@@ -443,8 +445,9 @@ CREATE TABLE IF NOT EXISTS allocation_pools (
     pool_key             TEXT NOT NULL,
     pool_name            TEXT NOT NULL,
     denominator_label    TEXT,
+    declared_allocation_method TEXT,
     allocation_method    TEXT NOT NULL CHECK (allocation_method IN (
-                             'equal','square_footage','ownership_percentage','specified_value'
+                             'equal','square_footage','ownership_percentage','specified_value','unresolved'
                          )),
     recipient_scope      TEXT NOT NULL CHECK (recipient_scope IN (
                              'all_units','residential_only','commercial_only',
@@ -601,6 +604,87 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_budget_line_pool_mappings_disambig
 
 CREATE INDEX IF NOT EXISTS idx_budget_line_pool_mappings_setup
     ON budget_line_pool_mappings(assessment_setup_id, active);
+
+CREATE TABLE IF NOT EXISTS allocation_resolutions (
+    id                          INTEGER PRIMARY KEY AUTOINCREMENT,
+    property_id                 INTEGER NOT NULL
+                                REFERENCES properties(id) ON DELETE CASCADE,
+    assessment_setup_id         INTEGER NOT NULL
+                                REFERENCES assessment_setups(id) ON DELETE CASCADE,
+    pool_key                    TEXT NOT NULL,
+    version_int                 INTEGER NOT NULL DEFAULT 1,
+    status                      TEXT NOT NULL DEFAULT 'unresolved'
+                                CHECK (status IN ('unresolved','draft','approved','superseded')),
+    declared_method             TEXT NOT NULL,
+    declared_denominator_label  TEXT,
+    referenced_schedule_type    TEXT,
+    referenced_schedule_name    TEXT,
+    included_categories_json    TEXT NOT NULL DEFAULT '[]',
+    excluded_categories_json    TEXT NOT NULL DEFAULT '[]',
+    source_pages_json           TEXT NOT NULL DEFAULT '[]',
+    source_evidence_text        TEXT,
+    resolved_method             TEXT,
+    denominator_value           NUMERIC,
+    denominator_source          TEXT,
+    factor_snapshot_json        TEXT NOT NULL DEFAULT '{}',
+    evidence_document_id        INTEGER,
+    prior_schedule_package_id   INTEGER,
+    reason                      TEXT,
+    created_by                  TEXT,
+    created_at                  TEXT NOT NULL DEFAULT (datetime('now')),
+    approved_by                 TEXT,
+    approved_at                 TEXT,
+    source                      TEXT NOT NULL DEFAULT 'promotion'
+                                CHECK (source IN ('promotion','operator','migration')),
+    UNIQUE (assessment_setup_id, pool_key, version_int)
+);
+
+CREATE INDEX IF NOT EXISTS idx_allocation_resolutions_setup
+    ON allocation_resolutions(assessment_setup_id, pool_key, status);
+
+CREATE TABLE IF NOT EXISTS budget_line_allocation_slices (
+    id                              INTEGER PRIMARY KEY AUTOINCREMENT,
+    property_id                     INTEGER NOT NULL
+                                    REFERENCES properties(id) ON DELETE CASCADE,
+    assessment_setup_id             INTEGER NOT NULL
+                                    REFERENCES assessment_setups(id) ON DELETE CASCADE,
+    source_line_normalized_label    TEXT NOT NULL,
+    source_line_account_code        TEXT,
+    source_annual_amount            NUMERIC NOT NULL,
+    slice_annual_amount             NUMERIC NOT NULL,
+    slice_percent                   NUMERIC,
+    pool_key                        TEXT NOT NULL,
+    semantic_category               TEXT NOT NULL DEFAULT '',
+    status                          TEXT NOT NULL DEFAULT 'draft'
+                                    CHECK (status IN ('draft','approved','superseded')),
+    evidence_text                   TEXT,
+    reason                          TEXT,
+    created_by                      TEXT,
+    created_at                      TEXT NOT NULL DEFAULT (datetime('now')),
+    approved_by                     TEXT,
+    approved_at                     TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_budget_line_allocation_slices_setup
+    ON budget_line_allocation_slices(assessment_setup_id, source_line_normalized_label, status);
+
+CREATE TABLE IF NOT EXISTS allocation_category_decisions (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    property_id             INTEGER NOT NULL
+                            REFERENCES properties(id) ON DELETE CASCADE,
+    assessment_setup_id     INTEGER NOT NULL
+                            REFERENCES assessment_setups(id) ON DELETE CASCADE,
+    pool_key                TEXT NOT NULL,
+    category                TEXT NOT NULL,
+    decision                TEXT NOT NULL
+                            CHECK (decision IN ('mapped','zero','not_applicable')),
+    mapped_amount           NUMERIC,
+    evidence_text           TEXT,
+    reason                  TEXT,
+    created_by              TEXT,
+    created_at              TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (assessment_setup_id, pool_key, category)
+);
 
 CREATE TABLE IF NOT EXISTS assessment_mapping_aliases (
     id                       INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -109,10 +109,10 @@ class TestAllocationMethodAdapter:
         assert r.internal_method == "equal"
         assert r.forced_scope == "parking_users"
 
-    def test_custom_factor_becomes_square_footage_manual_denominator(self) -> None:
+    def test_custom_factor_stays_unresolved(self) -> None:
         r = map_allocation_method("custom_factor")
-        assert r.internal_method == "square_footage"
-        assert r.forced_denominator_source == "manual"
+        assert r.internal_method is None
+        assert r.promote_as_unresolved
         assert r.needs_review
 
     def test_unknown_leaves_draft(self) -> None:

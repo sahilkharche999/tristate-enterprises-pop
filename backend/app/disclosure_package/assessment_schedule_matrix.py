@@ -2522,6 +2522,7 @@ def build_matrix_from_approved_assessment_setup(
             pool_kind=row[8],
         )
         for row in pool_rows
+        if str(row[3] or "") != "unresolved"
     ]
     if not pools:
         return _fallback_matrix_for_db_issue(

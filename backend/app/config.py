@@ -60,6 +60,8 @@ class Settings(BaseSettings):
     DOCUMENT_VLM_PAGE_SELECTION_THRESHOLD: int = 10
     DOCUMENT_VLM_PAGE_SELECTION_MAX_PAGES: int = 80
     CBR_THRESHOLD: float = 0.95
+    # off | new_governing_docs | all_final_packages
+    ALLOCATION_RESOLUTION_ENFORCEMENT: str = "new_governing_docs"
 
     class Config:
         env_file = ".env"

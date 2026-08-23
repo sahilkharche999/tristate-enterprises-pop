@@ -34,10 +34,12 @@ class AllocationMethodMapping:
     internal method plus a scope/denominator hint:
 
     - ``parking_space`` → ``equal`` over ``parking_users`` scope
-    - ``custom_factor`` → ``square_footage`` with manual denominator
+    - ``custom_factor`` → unresolved (never square_footage)
     - ``category`` → ``ownership_percentage`` (category share encoded as pct)
 
     ``needs_review=True`` means the operator must confirm before live.
+    ``promote_as_unresolved=True`` writes ``allocation_method='unresolved'``
+    and an allocation-resolution record instead of guessing an engine method.
     """
 
     internal_method: Optional[AllocationMethod]
@@ -45,6 +47,7 @@ class AllocationMethodMapping:
     forced_denominator_source: Optional[str] = None
     needs_review: bool = False
     review_note: Optional[str] = None
+    promote_as_unresolved: bool = False
 
 
 _ALLOCATION_METHOD_TABLE: dict[str, AllocationMethodMapping] = {
@@ -67,12 +70,13 @@ _ALLOCATION_METHOD_TABLE: dict[str, AllocationMethodMapping] = {
         review_note="Prompt emitted 'parking_space' → equal allocation over parking_users scope.",
     ),
     "custom_factor": AllocationMethodMapping(
-        internal_method="square_footage",
-        forced_denominator_source="manual",
+        internal_method=None,
         needs_review=True,
+        promote_as_unresolved=True,
         review_note=(
-            "Prompt emitted 'custom_factor' → square_footage with "
-            "denominator_source='manual'; operator must verify denominator."
+            "Prompt emitted 'custom_factor': an external or DRE-referenced "
+            "schedule. Do not infer square_footage or ownership_percentage "
+            "from available unit data; operator must resolve the rule."
         ),
     ),
     "unknown": AllocationMethodMapping(

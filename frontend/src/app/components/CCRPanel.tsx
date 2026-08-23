@@ -21,6 +21,7 @@ import {
 import { getExtractionRun } from '../api/dre';
 import { FileDropzone } from './fileDropzone';
 import { DREReviewWorkbench } from './DREReviewWorkbench';
+import { AllocationResolutionPanel } from './AllocationResolutionPanel';
 
 type Props = {
   hoaId: number;
@@ -664,6 +665,8 @@ export function CCRPanel({ hoaId }: Props) {
           {uploading ? 'Uploading…' : 'Upload'}
         </button>
       </form>
+
+      <AllocationResolutionPanel hoaId={hoaId} />
     </section>
   );
 }

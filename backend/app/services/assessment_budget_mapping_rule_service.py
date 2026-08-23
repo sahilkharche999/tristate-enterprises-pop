@@ -1173,14 +1173,23 @@ def _rank_line_review_candidates(
         reasons: list[str] = []
         score = 0.0
 
+        from app.allocation_resolution.semantic_mapping import classify_label_match
+
+        match_kind = classify_label_match(
+            match_label or rule_normalized,
+            str(line.get("label") or line.get("normalized_label") or ""),
+        )
         if account_code and rule_account_code and str(account_code) == rule_account_code:
             score = 1.0
             reasons.append("exact account code")
         else:
             if normalized and rule_normalized:
-                if normalized == rule_normalized:
+                if normalized == rule_normalized or match_kind == "exact":
                     score = max(score, 0.95)
                     reasons.append("exact normalized label")
+                elif match_kind == "combined":
+                    score = max(score, 0.45)
+                    reasons.append("combined_line_requires_split")
                 else:
                     overlap = _token_overlap_score(
                         line_tokens,
@@ -1189,7 +1198,9 @@ def _rank_line_review_candidates(
                     if overlap > 0:
                         score = max(score, 0.5 + overlap * 0.35)
                         reasons.append("semantic label overlap")
-                    if rule_normalized in normalized or normalized in rule_normalized:
+                    if match_kind != "combined" and (
+                        rule_normalized in normalized or normalized in rule_normalized
+                    ):
                         score = max(score, 0.8)
                         reasons.append("label contains DRE term")
 
@@ -1200,7 +1211,11 @@ def _rank_line_review_candidates(
                 score = min(1.0, score + 0.1)
                 reasons.append("parent category aligns")
 
-        review_required = bool(rule[14]) or assessment_type == "unknown_needs_review"
+        review_required = (
+            bool(rule[14])
+            or assessment_type == "unknown_needs_review"
+            or match_kind == "combined"
+        )
         threshold = 0.3 if review_required else 0.55
         if score < threshold:
             continue

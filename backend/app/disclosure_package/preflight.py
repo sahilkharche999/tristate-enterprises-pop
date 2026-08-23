@@ -704,6 +704,60 @@ def check_special_assessments(
     return out
 
 
+def check_allocation_resolution_readiness(
+    *,
+    property_id: int,
+    connection,
+) -> list[PreflightError]:
+    """Block final generation when governing-document allocation is unresolved."""
+    try:
+        from app.allocation_resolution.readiness import (
+            evaluate_readiness,
+            readiness_blocks_final,
+        )
+        row = connection.execute(
+            "SELECT default_assessment_setup_id FROM properties WHERE id = ?",
+            (property_id,),
+        ).fetchone()
+        setup_id = int(row[0]) if row and row[0] is not None else None
+        if setup_id is None:
+            return []
+        residual = {
+            str(r[0])
+            for r in connection.execute(
+                "SELECT pool_key FROM allocation_pools "
+                "WHERE assessment_setup_id = ? AND budget_line_derivation = 'residual_default'",
+                (setup_id,),
+            ).fetchall()
+        }
+        report = evaluate_readiness(
+            connection,
+            property_id=property_id,
+            assessment_setup_id=setup_id,
+            residual_pool_keys=residual,
+        )
+        if not readiness_blocks_final(report):
+            return []
+        out: list[PreflightError] = []
+        for issue in report.issues:
+            if issue.severity != "blocking":
+                continue
+            out.append(
+                PreflightError(
+                    field_path=f"allocation_resolution.{issue.target or issue.code}",
+                    message=issue.message,
+                    severity="blocking",
+                    code=issue.code,
+                    suggested_fix=issue.fix_label,
+                    fix_path=issue.fix_path,
+                    fix_label=issue.fix_label,
+                )
+            )
+        return out
+    except Exception:
+        return []
+
+
 def check_specified_value_placeholders(
     *,
     property_id: int,

@@ -29,6 +29,7 @@ from .routers.dre_approval import router as dre_approval_router
 from .routers.dre_review import router as dre_review_router
 from .routers.ccr import router as ccr_router
 from .routers.assessment_mapping_review import router as assessment_mapping_review_router
+from .routers.allocation_resolution import router as allocation_resolution_router
 from .routers.hoa_settings import router as hoa_settings_router
 from .routers.manual_setup import router as manual_setup_router
 
@@ -122,6 +123,7 @@ def create_app() -> FastAPI:
     # endpoints above.
     app.include_router(manual_setup_router)
     app.include_router(assessment_mapping_review_router)
+    app.include_router(allocation_resolution_router)
     # Per-HOA appendix manifest router (Phase 5.4 of
     # dre-driven-assessment-engine). Auth is applied per-route via
     # Depends(get_current_user) on every endpoint.

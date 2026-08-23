@@ -42,6 +42,15 @@ CRITICAL — FACTORS ≠ METHOD:
    division/apportionment PROSE (e.g. "divided equally except …"). Never collapse a
    multi-method policy into a single proportional pool solely because an exhibit lists %.
 
+CRITICAL — custom_factor IS NOT square_footage:
+   If the document says exception costs follow a DRE operating budget, a proration
+   schedule, an exhibit that is not itself "per square foot" or "per recorded
+   ownership percentage", or any other external factor table, emit
+   allocation_method=custom_factor (and record the referenced schedule name in
+   denominator_label). Do NOT emit square_footage merely because unit square
+   footage is also printed in an exhibit. Presence of sqft or % data is evidence
+   the operator may later choose — not proof of the referenced schedule.
+
 A. DEFAULT BASIS — the rule that applies to ALL cost categories unless an exception overrides it.
    Examples of what a default basis might look like (by MEANING, not wording):
    - Every owner pays an equal share regardless of unit size → basis: "equal"

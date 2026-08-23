@@ -827,7 +827,22 @@ def _attach_fix_links(errors: list[PreflightError], hoa_id: int) -> list[Preflig
         fix_path: Optional[str] = err.fix_path
         fix_label = err.fix_label or "Fix"
         if not fix_path:
-            if "assessment_mapping" in path or code.startswith("assessment_mapping"):
+            if (
+                "allocation_resolution" in path
+                or code in {
+                    "allocation_resolution_required",
+                    "combined_line_requires_split",
+                    "required_category_unmapped",
+                    "referenced_schedule_missing",
+                    "approval_required",
+                    "invalid_factor_set",
+                    "slice_reconciliation_failed",
+                    "pool_reconciliation_failed",
+                }
+            ):
+                fix_path = f"/hoa/{hoa_id}/assessment-mapping-review"
+                fix_label = "Resolve allocation issues"
+            elif "assessment_mapping" in path or code.startswith("assessment_mapping"):
                 fix_path = f"/hoa/{hoa_id}/assessment-mapping-review"
                 fix_label = "Open mapping review"
             elif path.startswith("assessment_setup") or "dre" in path.lower():
@@ -1098,6 +1113,12 @@ def run_preflight_detailed(
     from .preflight import check_specified_value_placeholders
 
     errors = errors + check_specified_value_placeholders(
+        property_id=hoa_id,
+        connection=session.connection().connection,
+    )
+    from .preflight import check_allocation_resolution_readiness
+
+    errors = errors + check_allocation_resolution_readiness(
         property_id=hoa_id,
         connection=session.connection().connection,
     )
@@ -1441,6 +1462,19 @@ def assemble_finalize_snapshots(
         compile_context["prior_assessment_matrix"] = prior_matrix.model_dump(
             mode="json",
         )
+    try:
+        from app.allocation_resolution.service import freeze_resolution_snapshot
+
+        setup_row = raw_conn.execute(
+            "SELECT default_assessment_setup_id FROM properties WHERE id = ?",
+            (hoa_id,),
+        ).fetchone()
+        if setup_row and setup_row[0] is not None:
+            compile_context["allocation_resolution"] = freeze_resolution_snapshot(
+                raw_conn, assessment_setup_id=int(setup_row[0])
+            )
+    except Exception:
+        logger.exception("allocation resolution freeze failed for HOA %s", hoa_id)
 
     return {
         "assessment_setup": _serialize_assessment_setup_snapshot(

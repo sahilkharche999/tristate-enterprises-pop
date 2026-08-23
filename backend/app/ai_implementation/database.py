@@ -641,6 +641,7 @@ _ALLOCATION_POOL_COLUMN_DEFINITIONS: dict[str, str] = {
     # AI-generated pool_name. NULL = ordinary pool. The one recognized value is
     # 'separately_billed_special_assessment' (see _pool_is_visible hidden-kinds).
     "pool_kind": "TEXT",
+    "declared_allocation_method": "TEXT",
 }
 
 
@@ -1035,6 +1036,188 @@ def ensure_allocation_pool_columns() -> None:
         raw_conn.close()
 
 
+def ensure_assessment_setup_readiness_column() -> None:
+    """Add allocation_readiness_status on brownfield assessment_setups."""
+    raw_conn = engine.raw_connection()
+    try:
+        cols = {
+            row[1]
+            for row in raw_conn.execute("PRAGMA table_info(assessment_setups)").fetchall()
+        }
+        if cols and "allocation_readiness_status" not in cols:
+            raw_conn.execute(
+                "ALTER TABLE assessment_setups ADD COLUMN "
+                "allocation_readiness_status TEXT NOT NULL DEFAULT 'ok'"
+            )
+            raw_conn.commit()
+    finally:
+        raw_conn.close()
+
+
+def rebuild_allocation_pool_method_check(conn) -> bool:
+    """Widen allocation_pools.allocation_method CHECK to accept ``unresolved``."""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master "
+        "WHERE type='table' AND name='allocation_pools'"
+    ).fetchone()
+    if row is None or "unresolved" in (row[0] or ""):
+        return False
+    logger.info("Rebuilding allocation_pools to allow allocation_method='unresolved'")
+    existing = [r[1] for r in conn.execute("PRAGMA table_info(allocation_pools)")]
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE allocation_pools_new (
+                id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+                assessment_setup_id  INTEGER NOT NULL
+                                     REFERENCES assessment_setups(id) ON DELETE CASCADE,
+                pool_key             TEXT NOT NULL,
+                pool_name            TEXT NOT NULL,
+                denominator_label    TEXT,
+                declared_allocation_method TEXT,
+                allocation_method    TEXT NOT NULL CHECK (allocation_method IN (
+                                         'equal','square_footage','ownership_percentage',
+                                         'specified_value','unresolved'
+                                     )),
+                recipient_scope      TEXT NOT NULL,
+                denominator_source   TEXT NOT NULL DEFAULT 'dre_value',
+                denominator_value    NUMERIC,
+                variable_flag        INTEGER NOT NULL DEFAULT 0,
+                display_order        INTEGER NOT NULL DEFAULT 0,
+                include_in_pdf       INTEGER NOT NULL DEFAULT 1,
+                budget_line_derivation TEXT NOT NULL DEFAULT 'unknown',
+                residual_after_pool_keys_json TEXT NOT NULL DEFAULT '[]',
+                residual_exclusions_json      TEXT NOT NULL DEFAULT '[]',
+                derivation_evidence_json      TEXT,
+                escalation_schedule_json     TEXT DEFAULT '[]',
+                starting_monthly_per_unit    REAL,
+                pool_kind                    TEXT,
+                UNIQUE (assessment_setup_id, pool_key)
+            );
+            """
+        )
+        new_cols = {
+            r[1] for r in conn.execute("PRAGMA table_info(allocation_pools_new)")
+        }
+        copy_cols = [c for c in existing if c in new_cols]
+        quoted = ", ".join(copy_cols)
+        conn.execute(
+            f"INSERT INTO allocation_pools_new ({quoted}) SELECT {quoted} FROM allocation_pools"
+        )
+        conn.execute("DROP TABLE allocation_pools")
+        conn.execute("ALTER TABLE allocation_pools_new RENAME TO allocation_pools")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_allocation_pools_setup "
+            "ON allocation_pools(assessment_setup_id)"
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
+    return True
+
+
+def ensure_allocation_pool_method_check() -> None:
+    raw_conn = engine.raw_connection()
+    try:
+        rebuild_allocation_pool_method_check(raw_conn)
+    finally:
+        raw_conn.close()
+
+
+_ALLOCATION_RESOLUTION_DDL = """
+CREATE TABLE IF NOT EXISTS allocation_resolutions (
+    id                          INTEGER PRIMARY KEY AUTOINCREMENT,
+    property_id                 INTEGER NOT NULL
+                                REFERENCES properties(id) ON DELETE CASCADE,
+    assessment_setup_id         INTEGER NOT NULL
+                                REFERENCES assessment_setups(id) ON DELETE CASCADE,
+    pool_key                    TEXT NOT NULL,
+    version_int                 INTEGER NOT NULL DEFAULT 1,
+    status                      TEXT NOT NULL DEFAULT 'unresolved'
+                                CHECK (status IN ('unresolved','draft','approved','superseded')),
+    declared_method             TEXT NOT NULL,
+    declared_denominator_label  TEXT,
+    referenced_schedule_type    TEXT,
+    referenced_schedule_name    TEXT,
+    included_categories_json    TEXT NOT NULL DEFAULT '[]',
+    excluded_categories_json    TEXT NOT NULL DEFAULT '[]',
+    source_pages_json           TEXT NOT NULL DEFAULT '[]',
+    source_evidence_text        TEXT,
+    resolved_method             TEXT,
+    denominator_value           NUMERIC,
+    denominator_source          TEXT,
+    factor_snapshot_json        TEXT NOT NULL DEFAULT '{}',
+    evidence_document_id        INTEGER,
+    prior_schedule_package_id   INTEGER,
+    reason                      TEXT,
+    created_by                  TEXT,
+    created_at                  TEXT NOT NULL DEFAULT (datetime('now')),
+    approved_by                 TEXT,
+    approved_at                 TEXT,
+    source                      TEXT NOT NULL DEFAULT 'promotion'
+                                CHECK (source IN ('promotion','operator','migration')),
+    UNIQUE (assessment_setup_id, pool_key, version_int)
+);
+CREATE INDEX IF NOT EXISTS idx_allocation_resolutions_setup
+    ON allocation_resolutions(assessment_setup_id, pool_key, status);
+CREATE TABLE IF NOT EXISTS budget_line_allocation_slices (
+    id                              INTEGER PRIMARY KEY AUTOINCREMENT,
+    property_id                     INTEGER NOT NULL
+                                    REFERENCES properties(id) ON DELETE CASCADE,
+    assessment_setup_id             INTEGER NOT NULL
+                                    REFERENCES assessment_setups(id) ON DELETE CASCADE,
+    source_line_normalized_label    TEXT NOT NULL,
+    source_line_account_code        TEXT,
+    source_annual_amount            NUMERIC NOT NULL,
+    slice_annual_amount             NUMERIC NOT NULL,
+    slice_percent                   NUMERIC,
+    pool_key                        TEXT NOT NULL,
+    semantic_category               TEXT NOT NULL DEFAULT '',
+    status                          TEXT NOT NULL DEFAULT 'draft'
+                                    CHECK (status IN ('draft','approved','superseded')),
+    evidence_text                   TEXT,
+    reason                          TEXT,
+    created_by                      TEXT,
+    created_at                      TEXT NOT NULL DEFAULT (datetime('now')),
+    approved_by                     TEXT,
+    approved_at                     TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_budget_line_allocation_slices_setup
+    ON budget_line_allocation_slices(assessment_setup_id, source_line_normalized_label, status);
+CREATE TABLE IF NOT EXISTS allocation_category_decisions (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    property_id             INTEGER NOT NULL
+                            REFERENCES properties(id) ON DELETE CASCADE,
+    assessment_setup_id     INTEGER NOT NULL
+                            REFERENCES assessment_setups(id) ON DELETE CASCADE,
+    pool_key                TEXT NOT NULL,
+    category                TEXT NOT NULL,
+    decision                TEXT NOT NULL
+                            CHECK (decision IN ('mapped','zero','not_applicable')),
+    mapped_amount           NUMERIC,
+    evidence_text           TEXT,
+    reason                  TEXT,
+    created_by              TEXT,
+    created_at              TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (assessment_setup_id, pool_key, category)
+);
+"""
+
+
+def ensure_allocation_resolution_tables() -> None:
+    """Idempotent brownfield tables for allocation resolutions and slices."""
+    raw_conn = engine.raw_connection()
+    try:
+        raw_conn.executescript(_ALLOCATION_RESOLUTION_DDL)
+        raw_conn.commit()
+    finally:
+        raw_conn.close()
+
+
 def rebuild_aupa_source_check(conn) -> bool:
     """Widen the ``source`` CHECK on ``assessment_unit_pool_allocations`` to
     accept ``'equal_split_placeholder'`` (C7). Returns True when a rebuild
@@ -1384,6 +1567,9 @@ def init_db() -> None:
     ensure_appendix_documents_columns()
     ensure_annual_package_columns()
     ensure_allocation_pool_columns()
+    ensure_assessment_setup_readiness_column()
+    ensure_allocation_pool_method_check()
+    ensure_allocation_resolution_tables()
     ensure_assessment_budget_mapping_rule_columns()
     ensure_budget_line_pool_mapping_columns()
     ensure_budget_line_merges_columns()

@@ -111,7 +111,9 @@ class WireCCRAssessmentSetupBlock(BaseModel):
             "'ownership_percentage': share equals the recorded ownership interest. "
             "'square_footage': share is proportional to unit square footage. "
             "'specified_value': each unit has its own flat amount. "
-            "'custom_factor': basis is a DRE-defined factor not covered above. "
+            "'custom_factor': basis is a DRE-defined or externally referenced "
+            "schedule (for example a DRE operating-budget proration table). "
+            "Do NOT emit square_footage just because unit sqft also exists. "
             "'unknown': cannot determine from the document."
         )
     )
