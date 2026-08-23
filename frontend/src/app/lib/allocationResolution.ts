@@ -14,12 +14,16 @@ export function issueAnchor(target: string): string {
   return `allocation-${target.replace(/[^a-zA-Z0-9:_-]/g, '-')}`;
 }
 
-export const MISSOURI_CORRECTION = {
-  sourceLine: 'Electricity & Gas',
-  sourceAnnual: 16800,
-  slices: [
-    { pool_key: 'variable_dre_exceptions', semantic_category: 'gas', slice_annual_amount: '5600' },
-    { pool_key: 'equal_base', semantic_category: 'electricity', slice_annual_amount: '11200' },
-  ],
-  levyUnit201: 1057.2,
-};
+export function combinedLineHint(
+  issues: Array<{ code: string; details?: Record<string, unknown> }>,
+): { lineLabel: string; category: string; poolKey: string } | null {
+  const issue = issues.find((item) => item.code === 'combined_line_requires_split');
+  if (!issue?.details) return null;
+  const lineLabel = String(issue.details.line_label || '').trim();
+  if (!lineLabel) return null;
+  return {
+    lineLabel,
+    category: String(issue.details.category || '').trim(),
+    poolKey: String(issue.details.pool_key || '').trim(),
+  };
+}

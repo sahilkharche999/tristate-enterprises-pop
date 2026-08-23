@@ -2,33 +2,46 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
-  MISSOURI_CORRECTION,
+  combinedLineHint,
   issueAnchor,
   slicesBalance,
 } from '../src/app/lib/allocationResolution.ts';
 
-test('Missouri electricity/gas split preserves the source total', () => {
+test('balanced slices preserve the source total', () => {
   assert.equal(
-    slicesBalance(MISSOURI_CORRECTION.sourceAnnual, MISSOURI_CORRECTION.slices),
+    slicesBalance(1000, [
+      { pool_key: 'exception', semantic_category: 'named-category', slice_annual_amount: '400' },
+      { pool_key: 'residual', semantic_category: 'remainder', slice_annual_amount: '600' },
+    ]),
     0,
   );
 });
 
 test('over-allocation and under-allocation fail the splitter', () => {
-  assert.ok(slicesBalance(16800, [
-    { pool_key: 'variable_dre_exceptions', semantic_category: 'gas', slice_annual_amount: '5600' },
+  assert.ok(slicesBalance(1000, [
+    { pool_key: 'exception', semantic_category: 'named-category', slice_annual_amount: '400' },
   ]) > 0);
-  assert.ok(slicesBalance(16800, [
-    { pool_key: 'variable_dre_exceptions', semantic_category: 'gas', slice_annual_amount: '9000' },
-    { pool_key: 'equal_base', semantic_category: 'electricity', slice_annual_amount: '11200' },
+  assert.ok(slicesBalance(1000, [
+    { pool_key: 'exception', semantic_category: 'named-category', slice_annual_amount: '700' },
+    { pool_key: 'residual', semantic_category: 'remainder', slice_annual_amount: '600' },
   ]) < 0);
 });
 
 test('readiness issue anchors are deep-linkable', () => {
-  assert.equal(issueAnchor('pool:variable_dre_exceptions'), 'allocation-pool:variable_dre_exceptions');
-  assert.match(issueAnchor('line:electricity gas'), /allocation-line/);
+  assert.equal(issueAnchor('pool:exception_costs'), 'allocation-pool:exception_costs');
+  assert.match(issueAnchor('line:utilities'), /allocation-line/);
 });
 
-test('Missouri levy unit 201 stays the correction target', () => {
-  assert.equal(MISSOURI_CORRECTION.levyUnit201, 1057.2);
+test('combined-line hint reads readiness details and ignores unrelated issues', () => {
+  assert.equal(combinedLineHint([]), null);
+  assert.deepEqual(
+    combinedLineHint([
+      { code: 'allocation_resolution_required', details: {} },
+      {
+        code: 'combined_line_requires_split',
+        details: { line_label: 'Water & Sewer', category: 'water', pool_key: 'exceptions' },
+      },
+    ]),
+    { lineLabel: 'Water & Sewer', category: 'water', poolKey: 'exceptions' },
+  );
 });
