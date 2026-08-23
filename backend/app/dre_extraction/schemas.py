@@ -59,6 +59,19 @@ PromptAllocationMethod = Literal[
     "unknown",
 ]
 
+PromptAllocationContext = Literal[
+    "regular_operating",
+    "reserve_contribution",
+    "special_assessment",
+    "cost_center",
+]
+
+PromptBillingTreatment = Literal[
+    "recurring",
+    "separate_one_time",
+    "operator_amount_pending",
+]
+
 PromptBudgetLineDerivation = Literal[
     "explicit_lines",
     "residual_default",
@@ -119,6 +132,7 @@ class AssessmentSetupBlock(BaseModel):
     requires_dre_for_future_years: bool = True
     confidence: float = 0.0
     source_pages: list[int] = Field(default_factory=list)
+    declared_contexts: list[PromptAllocationContext] = Field(default_factory=list)
 
 
 class GroupRow(BaseModel):
@@ -194,6 +208,8 @@ class AllocationPoolBlock(BaseModel):
     residual_exclusions: list[str] = Field(default_factory=list)
     source_pages: list[int] = Field(default_factory=list)
     confidence: float = 0.0
+    allocation_context: PromptAllocationContext = "regular_operating"
+    billing_treatment: PromptBillingTreatment = "recurring"
     # Operator-set metadata, not extracted from the source document (no DRE
     # states whether a pool's cost is "variable" — this is an accounting
     # classification the operator applies in the Review Workbench). Lives

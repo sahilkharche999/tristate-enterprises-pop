@@ -23,6 +23,7 @@ from app.dre_extraction.promotion import (
     populate_setup_children,
 )
 from app.services.ccr_approval_service import approve_ccr_extraction_run
+from app.governing_doc_extraction.coherence import IncoherentCcrExtraction
 from app.services.dre_approval_service import approve_extraction_run
 from app.services.dre_review_service import record_review_edit
 
@@ -114,6 +115,25 @@ def _payload_with_one_pool(
 
 
 class TestApplyReviewEditsToExtraction:
+    def test_ccr_approval_blocks_missing_extraction(
+        self, db: sqlite3.Connection
+    ) -> None:
+        pid, rid = _ids(db)
+        db.execute(
+            "UPDATE dre_extraction_runs SET parsed_json = NULL WHERE id = ?",
+            (rid,),
+        )
+        db.commit()
+
+        with pytest.raises(IncoherentCcrExtraction):
+            approve_ccr_extraction_run(
+                property_id=pid,
+                extraction_run_id=rid,
+                setup_type="fixed",
+                reviewed_by="ops@example.com",
+                connection=db,
+            )
+
     def test_single_edit_applied(self) -> None:
         extraction = parse_extraction_payload(json.dumps(_payload_with_one_pool()))
         assert extraction is not None
@@ -175,6 +195,31 @@ class TestApplyReviewEditsToExtraction:
 
         patched = apply_review_edits_to_extraction(extraction, [_Edit()])
         assert patched.allocation_pools[0].annual_amount == Decimal("150000.50")
+
+    def test_ccr_approval_blocks_declared_context_without_pool(
+        self, db: sqlite3.Connection
+    ) -> None:
+        pid, rid = _ids(db)
+        payload = _payload_with_one_pool()
+        payload["assessment_setup"]["setup_type"] = "multi_pool_combination"
+        payload["assessment_setup"]["declared_contexts"] = [
+            "regular_operating",
+            "special_assessment",
+        ]
+        db.execute(
+            "UPDATE dre_extraction_runs SET parsed_json = ? WHERE id = ?",
+            (json.dumps(payload), rid),
+        )
+        db.commit()
+
+        with pytest.raises(IncoherentCcrExtraction):
+            approve_ccr_extraction_run(
+                property_id=pid,
+                extraction_run_id=rid,
+                setup_type="fixed",
+                reviewed_by="ops@example.com",
+                connection=db,
+            )
 
 
 class TestEditedEntityLandingFailure:
@@ -408,6 +453,41 @@ class TestApproveExtractionRunAppliesEdits:
 
 
 class TestCCRLayeringOrder:
+    def test_ccr_approval_derives_special_pool_kind_from_typed_fields(
+        self, db: sqlite3.Connection
+    ) -> None:
+        pid, rid = _ids(db)
+        payload = _payload_with_one_pool()
+        payload["assessment_setup"]["setup_type"] = "unknown_needs_review"
+        payload["assessment_setup"]["declared_contexts"] = ["special_assessment"]
+        payload["allocation_pools"][0].update(
+            {
+                "allocation_method": "equal",
+                "allocation_context": "special_assessment",
+                "billing_treatment": "separate_one_time",
+            }
+        )
+        db.execute(
+            "UPDATE dre_extraction_runs SET parsed_json = ? WHERE id = ?",
+            (json.dumps(payload), rid),
+        )
+        db.commit()
+
+        response = approve_ccr_extraction_run(
+            property_id=pid,
+            extraction_run_id=rid,
+            setup_type="fixed",
+            reviewed_by="ops@example.com",
+            connection=db,
+        )
+
+        pool_kind = db.execute(
+            "SELECT pool_kind FROM allocation_pools "
+            "WHERE assessment_setup_id = ? AND pool_key = 'operating'",
+            (response.promoted_setup_id,),
+        ).fetchone()[0]
+        assert pool_kind == "separately_billed_special_assessment"
+
     def test_review_edit_then_operator_factor_merge(
         self, db: sqlite3.Connection
     ) -> None:

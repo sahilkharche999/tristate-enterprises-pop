@@ -27,6 +27,7 @@ from app.dre_extraction.promotion import (
     MissingUnitFactors,
     apply_review_edits_to_extraction,
     check_missing_unit_factors,
+    derive_ccr_pool_treatments,
     entity_keys_touched_by_edits,
     parse_extraction_payload,
     populate_setup_children,
@@ -250,27 +251,31 @@ def approve_ccr_extraction_run(
     # CC&R factors merge second — same layering as this pipeline already
     # uses for missing-data injection).
     extraction: Optional[DRESetupExtraction] = parse_extraction_payload(parsed_json_text)
+    if extraction is None:
+        raise IncoherentCcrExtraction(
+            ["parsed CC&R extraction is missing or failed domain validation"]
+        )
     edited_entity_keys: frozenset[str] = frozenset()
-    if extraction is not None:
-        edits = list_review_edits(
-            dre_extraction_run_id=extraction_run_id, connection=connection,
-        )
-        extraction = apply_review_edits_to_extraction(extraction, edits)
-        edited_entity_keys = entity_keys_touched_by_edits(
-            extraction, [edit.field_path for edit in edits]
-        )
+    edits = list_review_edits(
+        dre_extraction_run_id=extraction_run_id, connection=connection,
+    )
+    extraction = apply_review_edits_to_extraction(extraction, edits)
+    edited_entity_keys = entity_keys_touched_by_edits(
+        extraction, [edit.field_path for edit in edits]
+    )
 
     operator_factors = get_operator_unit_factors(
         extraction_run_id=extraction_run_id, connection=connection
     )
-    if extraction is not None and operator_factors:
+    if operator_factors:
         extraction = merge_operator_factors(extraction, operator_factors)
+    extraction = derive_ccr_pool_treatments(extraction)
 
     # Block collapsed factor-table / multi-method policy after edits.
     assert_ccr_allocation_coherent(extraction)
 
     # Block promotion if any proportional pool has no unit data (3.3).
-    if extraction is not None and setup_type == "per_unit":
+    if setup_type == "per_unit":
         missing = check_missing_unit_factors(extraction)
         if missing:
             raise MissingUnitFactors(missing)
@@ -419,6 +424,7 @@ def reopen_and_repromote_ccr_run(
         )
         if operator_factors:
             extraction = merge_operator_factors(extraction, operator_factors)
+        extraction = derive_ccr_pool_treatments(extraction)
         assert_ccr_allocation_coherent(extraction)
         return extraction
 

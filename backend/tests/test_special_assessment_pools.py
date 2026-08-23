@@ -16,6 +16,13 @@ from app.assessment_engine.schemas import (
     RecipientReference,
     RecipientSet,
 )
+from app.dre_extraction.promotion import derive_ccr_pool_treatments
+from app.dre_extraction.schemas import (
+    AllocationPoolBlock,
+    AssessmentSetupBlock,
+    DocumentMetadata,
+    DRESetupExtraction,
+)
 
 
 def _two_units():
@@ -118,3 +125,65 @@ def test_regular_only_run_has_no_special_allocations():
         approved_assessment_revenue_annual=Decimal("12000"),
     ))
     assert res.special_assessment_allocations == []
+
+
+def test_typed_ccr_context_drives_one_time_engine_treatment():
+    extraction = DRESetupExtraction(
+        document_metadata=DocumentMetadata(association_name="Generic"),
+        assessment_setup=AssessmentSetupBlock(setup_type="multi_pool_combination"),
+        allocation_pools=[
+            AllocationPoolBlock(
+                pool_key="repair_levy",
+                pool_name="Repair Levy",
+                allocation_method="square_footage",
+                allocation_context="special_assessment",
+                billing_treatment="separate_one_time",
+                recipient_scope="all_units",
+                denominator_value=Decimal("1000"),
+                source_pages=[3],
+            )
+        ],
+    )
+    pool = derive_ccr_pool_treatments(extraction).allocation_pools[0]
+    line = BudgetLineInput(
+        line_id=1,
+        normalized_label="__repair_levy",
+        section="special_assessment",
+        category="operating",
+        fund_type="operating",
+        account_code=None,
+        amount=Decimal("10000"),
+    )
+    mapping = BudgetLineMappingInput(
+        budget_line_normalized_label="__repair_levy",
+        section="special_assessment",
+        category="operating",
+        fund_type="operating",
+        account_code=None,
+        pool_key=pool.pool_key,
+        active=True,
+    )
+
+    result = run(
+        CalcInput(
+            setup_type="per_unit",
+            pools=[
+                PoolDefinition(
+                    pool_id=1,
+                    pool_key=pool.pool_key,
+                    pool_name=pool.pool_name,
+                    allocation_method=pool.allocation_method,
+                    recipient_scope=pool.recipient_scope,
+                    denominator_value=pool.denominator_value,
+                    pool_kind=pool.pool_kind,
+                )
+            ],
+            recipient_set=RecipientSet(recipients=_two_units()),
+            budget_lines=[line],
+            mappings=[mapping],
+            approved_assessment_revenue_annual=Decimal("0"),
+        )
+    )
+
+    assert result.recipient_totals == []
+    assert result.special_assessment_allocations[0].total == Decimal("10000")

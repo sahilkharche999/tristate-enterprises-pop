@@ -77,6 +77,11 @@ def test_missouri_fixture_has_external_rule_and_levy_totals() -> None:
     assert exception["allocation_method"] == "custom_factor"
     assert "DRE" in exception["denominator_label"]
     assert len(payload["unit_structure"]["units"]) == 9
+    assert payload["assessment_setup"]["declared_contexts"] == [
+        "regular_operating",
+        "cost_center",
+        "special_assessment",
+    ]
     assert any(line["label"] == "Electricity & Gas" for line in [
         {"label": "Electricity & Gas"}
     ])
@@ -121,7 +126,7 @@ def test_missouri_promotion_keeps_custom_factor_unresolved(db: sqlite3.Connectio
     assert exception.declared_method == "custom_factor"
     assert exception.resolved_method is None
     parking = db.execute(
-        "SELECT allocation_method FROM allocation_pools "
+        "SELECT allocation_method, recipient_scope FROM allocation_pools "
         "WHERE pool_key = 'parking_cost_center' AND assessment_setup_id = ?",
         (setup_id,),
     ).fetchone()
@@ -131,8 +136,13 @@ def test_missouri_promotion_keeps_custom_factor_unresolved(db: sqlite3.Connectio
         (setup_id,),
     ).fetchone()
     assert parking[0] == "square_footage"
+    assert parking[1] == "parking_users"
     assert structural[0] == "square_footage"
     assert structural[1] == "separately_billed_special_assessment"
+    assert db.execute(
+        "SELECT COUNT(*) FROM assessment_units WHERE assessment_setup_id = ?",
+        (setup_id,),
+    ).fetchone()[0] == 9
     del pid
 
 

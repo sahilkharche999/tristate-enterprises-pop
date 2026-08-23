@@ -747,6 +747,43 @@ def parse_extraction_payload(
 
 _PROPORTIONAL_SQFT_METHODS = frozenset({"square_footage"})
 _ISOLATED_POOL_KINDS = frozenset({"separately_billed_special_assessment"})
+_SPECIAL_BILLING_TREATMENTS = frozenset(
+    {"separate_one_time", "operator_amount_pending"}
+)
+
+
+def derive_ccr_pool_treatments(
+    extraction: DRESetupExtraction,
+) -> DRESetupExtraction:
+    """Re-derive engine treatment from typed CCR pool semantics.
+
+    Review edits can change typed context or billing treatment after Gemini
+    extraction. Recompute the legacy marker at the promotion boundary so a
+    stale or omitted ``pool_kind`` cannot turn a one-time levy into recurring
+    dues.
+    """
+    pools: list[AllocationPoolBlock] = []
+    changed = False
+    for pool in extraction.allocation_pools:
+        pool_kind = (
+            "separately_billed_special_assessment"
+            if (
+                pool.allocation_context == "special_assessment"
+                and pool.billing_treatment in _SPECIAL_BILLING_TREATMENTS
+            )
+            else ""
+        )
+        if pool.pool_kind != pool_kind:
+            pool = pool.model_copy(
+                update={
+                    "pool_kind": pool_kind,
+                }
+            )
+            changed = True
+        pools.append(pool)
+    if not changed:
+        return extraction
+    return extraction.model_copy(update={"allocation_pools": pools})
 
 
 def _is_isolated_structural_pool(pool: AllocationPoolBlock) -> bool:
@@ -1338,6 +1375,7 @@ __all__ = [
     "UnresolvableReviewEdit",
     "apply_review_edits_to_extraction",
     "check_missing_unit_factors",
+    "derive_ccr_pool_treatments",
     "entity_keys_touched_by_edits",
     "parse_extraction_payload",
     "populate_setup_children",

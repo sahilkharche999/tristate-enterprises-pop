@@ -134,6 +134,14 @@ def run_ccr_extraction(
     )
     record.relevant_page_numbers = expanded
 
+    if not expanded:
+        record.validation_warnings.append(
+            "No assessment-relevant CC&R pages were admitted; "
+            "extraction is blocked pending page-classification review."
+        )
+        record.status = "extraction_partial"
+        return record
+
     # 3–4. Full extraction call + parse with single repair retry.
     raw, wire_parsed, audit = extract_policy_callback(expanded)
     if audit is None:
@@ -146,19 +154,13 @@ def run_ccr_extraction(
     except (TypeError, ValueError):
         record.output_tokens_used = 0
 
-    # Convert wire to domain before passing to the shared parse path.
-    domain_wire_parsed: Optional[DRESetupExtraction] = None
-    if wire_parsed is not None:
-        try:
-            domain_wire_parsed = to_domain(wire_parsed)
-        except Exception:
-            domain_wire_parsed = None
-
     try:
         parse_result = parse_extraction_response(
             raw,
             repair_callback=repair_callback,
-            wire_parsed=domain_wire_parsed,
+            wire_parsed=wire_parsed,
+            wire_schema=WireCCRPolicyExtraction,
+            wire_to_domain_fn=to_domain,
         )
     except ExtractionParseError as exc:
         record.parsed_json = exc.parse_result.parsed_json

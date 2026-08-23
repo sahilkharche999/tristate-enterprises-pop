@@ -28,11 +28,10 @@ import json
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from . import wire_to_domain
 from .schemas import DRESetupExtraction
-from .wire_schemas import WireDRESetupExtraction
 
 
 LOW_CONFIDENCE_THRESHOLD: float = 0.7
@@ -73,16 +72,24 @@ def parse_extraction_response(
     raw_text: str,
     *,
     repair_callback: Optional[Callable[[str, list[str]], str]] = None,
-    wire_parsed: Optional[WireDRESetupExtraction] = None,
+    wire_parsed: Optional[Any] = None,
+    wire_schema: Optional[type[BaseModel]] = None,
+    wire_to_domain_fn: Optional[Callable[[Any], DRESetupExtraction]] = None,
 ) -> ParseResult:
     """Parse a Gemini response into a ``DRESetupExtraction``.
 
     When ``wire_parsed`` is supplied (the structured-output happy
     path), the function takes a fast path: the typed wire instance is
-    converted to the domain shape via ``wire_to_domain.to_domain``
-    and no JSON re-parse + Pydantic re-validation happens. This is
-    the byte-for-byte equivalent of the SDK's ``response.parsed``
-    value, so the result is guaranteed to match ``raw_text``.
+    converted to the domain shape via the supplied adapter (or the DRE
+    adapter by default) and no JSON re-parse + Pydantic re-validation
+    happens. This is the byte-for-byte equivalent of the SDK's
+    ``response.parsed`` value, so the result is guaranteed to match
+    ``raw_text``.
+
+    CCR callers may supply ``wire_schema`` and ``wire_to_domain_fn``.
+    Their fallback and repair responses are then validated against the
+    CCR wire schema instead of being permissively parsed as DRE domain
+    JSON.
 
     When ``wire_parsed`` is ``None`` (legacy callers, or the rare
     case where the SDK fails to parse a structured response), the
@@ -92,8 +99,9 @@ def parse_extraction_response(
 
     Raises ``ExtractionParseError`` if both attempts fail.
     """
+    adapter = wire_to_domain_fn or wire_to_domain.to_domain
     if wire_parsed is not None:
-        domain = wire_to_domain.to_domain(wire_parsed)
+        domain = adapter(wire_parsed)
         return ParseResult(
             extraction=domain,
             raw_text=raw_text,
@@ -102,7 +110,12 @@ def parse_extraction_response(
             repair_attempts=0,
         )
 
-    result = _attempt_parse(raw_text, repair_attempts=0)
+    result = _attempt_parse(
+        raw_text,
+        repair_attempts=0,
+        wire_schema=wire_schema,
+        wire_to_domain_fn=wire_to_domain_fn,
+    )
     if result.succeeded:
         return result
 
@@ -110,14 +123,25 @@ def parse_extraction_response(
         raise ExtractionParseError(result)
 
     repaired_text = repair_callback(raw_text, result.schema_validation_errors)
-    result = _attempt_parse(repaired_text, repair_attempts=1)
+    result = _attempt_parse(
+        repaired_text,
+        repair_attempts=1,
+        wire_schema=wire_schema,
+        wire_to_domain_fn=wire_to_domain_fn,
+    )
     if result.succeeded:
         return result
 
     raise ExtractionParseError(result)
 
 
-def _attempt_parse(raw_text: str, *, repair_attempts: int) -> ParseResult:
+def _attempt_parse(
+    raw_text: str,
+    *,
+    repair_attempts: int,
+    wire_schema: Optional[type[BaseModel]] = None,
+    wire_to_domain_fn: Optional[Callable[[Any], DRESetupExtraction]] = None,
+) -> ParseResult:
     errors: list[str] = []
     parsed: Optional[dict] = None
     extraction: Optional[DRESetupExtraction] = None
@@ -135,10 +159,23 @@ def _attempt_parse(raw_text: str, *, repair_attempts: int) -> ParseResult:
         )
 
     try:
-        extraction = DRESetupExtraction.model_validate(parsed)
-    except ValidationError as exc:
-        for e in exc.errors():
-            errors.append(f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}")
+        if wire_schema is None:
+            extraction = DRESetupExtraction.model_validate(parsed)
+        else:
+            if wire_to_domain_fn is None:
+                raise TypeError(
+                    "wire_to_domain_fn is required when wire_schema is supplied"
+                )
+            wire = wire_schema.model_validate(parsed)
+            extraction = wire_to_domain_fn(wire)
+    except (TypeError, ValueError, ValidationError) as exc:
+        if isinstance(exc, ValidationError):
+            errors.extend(
+                f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}"
+                for e in exc.errors()
+            )
+        else:
+            errors.append(f"{type(exc).__name__}: {exc}")
 
     return ParseResult(
         extraction=extraction,

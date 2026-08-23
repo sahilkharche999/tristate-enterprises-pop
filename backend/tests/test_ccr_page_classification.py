@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from app.dre_extraction.schemas import PageInventoryEntry
 from app.governing_doc_extraction.gemini_callbacks import _classify_instruction
+from app.governing_doc_extraction.gemini_callbacks import build_repair_callback
 from app.governing_doc_extraction.page_classification import (
     CCR_NEIGHBOR_SEED_PAGE_TYPES,
     CCR_PAGE_TYPE_LABELS,
     expand_relevant_pages_with_neighbors,
 )
 from app.governing_doc_extraction.pipeline import run_ccr_extraction
+from app.governing_doc_extraction.prompts import CCR_POLICY_EXTRACTOR_PROMPT
+from app.governing_doc_extraction.wire_schemas import WireCCRPolicyExtraction
 
 
 def _entry(page: int, page_type: str) -> PageInventoryEntry:
@@ -90,7 +93,52 @@ class TestClassifyInstruction:
         assert "continues" in text.lower() or "continuation" in text.lower() or "same Article" in text
 
 
+def test_ccr_prompt_requires_context_complete_allocation_rules() -> None:
+    assert "allocation_context" in CCR_POLICY_EXTRACTOR_PROMPT
+    assert "special_assessment" in CCR_POLICY_EXTRACTOR_PROMPT
+    assert "one cited rule" in CCR_POLICY_EXTRACTOR_PROMPT
+
+
+def test_ccr_repair_uses_ccr_response_schema() -> None:
+    class FakeModels:
+        def __init__(self) -> None:
+            self.configs = []
+
+        def generate_content(self, **kwargs):
+            self.configs.append(kwargs["config"])
+            return type("Response", (), {"text": "{}"})()
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.models = FakeModels()
+
+    client = FakeClient()
+    repair = build_repair_callback(client, model="test-model")
+
+    repair("{}", ["missing field"])
+
+    assert client.models.configs[0].response_schema is WireCCRPolicyExtraction
+
+
 class TestCcrPipelinePageExpansion:
+    def test_no_relevant_pages_blocks_generic_extraction(self) -> None:
+        def classify(batch):
+            return [_entry(page, "blank/irrelevant") for page in batch.page_numbers]
+
+        def extract(_relevant):
+            raise AssertionError("extraction must not run without admitted pages")
+
+        record = run_ccr_extraction(
+            page_count=2,
+            classify_pages_callback=classify,
+            extract_policy_callback=extract,
+            model_name="test-model",
+        )
+
+        assert record.status == "extraction_partial"
+        assert record.relevant_page_numbers == []
+        assert any("relevant" in warning.lower() for warning in record.validation_warnings)
+
     def test_mislabeled_neighbor_reaches_extract(self) -> None:
         """p.16 mislabeled as enforcement still enters extract via ±1 expand."""
 

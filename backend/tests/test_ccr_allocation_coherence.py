@@ -28,6 +28,7 @@ def _extraction(
     setup_type: str,
     pools: list[AllocationPoolBlock],
     units: list[UnitRow] | None = None,
+    declared_contexts: list[str] | None = None,
 ) -> DRESetupExtraction:
     return DRESetupExtraction(
         document_metadata=DocumentMetadata(
@@ -41,6 +42,7 @@ def _extraction(
             summary="test",
             confidence=0.9,
             source_pages=[1],
+            declared_contexts=declared_contexts or [],
         ),
         unit_structure=UnitStructure(
             unit_count=len(units or []),
@@ -50,11 +52,21 @@ def _extraction(
     )
 
 
-def _pool(method: str, key: str = "pool_a") -> AllocationPoolBlock:
+def _pool(
+    method: str,
+    key: str = "pool_a",
+    *,
+    context: str = "regular_operating",
+    billing: str = "recurring",
+    recipient_scope: str = "",
+) -> AllocationPoolBlock:
     return AllocationPoolBlock(
         pool_key=key,
         pool_name=key,
         allocation_method=method,  # type: ignore[arg-type]
+        allocation_context=context,  # type: ignore[arg-type]
+        billing_treatment=billing,  # type: ignore[arg-type]
+        recipient_scope=recipient_scope,
         confidence=0.9,
         source_pages=[1],
     )
@@ -116,6 +128,97 @@ class TestAssessAllocationCoherence:
         )
         finding = assess_allocation_coherence(ext)
         assert finding.is_incoherent
+
+    def test_declared_special_context_requires_a_special_pool(self) -> None:
+        ext = _extraction(
+            setup_type="multi_pool_combination",
+            pools=[_pool("equal", "equal_base")],
+            declared_contexts=["regular_operating", "special_assessment"],
+        )
+
+        finding = assess_allocation_coherence(ext)
+
+        assert finding.is_incoherent
+        assert any("special_assessment" in reason for reason in finding.reasons)
+
+    def test_special_pool_requires_separate_one_time_billing(self) -> None:
+        ext = _extraction(
+            setup_type="multi_pool_combination",
+            pools=[
+                _pool("equal", "equal_base"),
+                _pool(
+                    "square_footage",
+                    "structural_repair",
+                    context="special_assessment",
+                    billing="recurring",
+                ),
+            ],
+            declared_contexts=["regular_operating", "special_assessment"],
+        )
+
+        finding = assess_allocation_coherence(ext)
+
+        assert finding.is_incoherent
+        assert any("separate_one_time" in reason for reason in finding.reasons)
+
+    def test_cost_center_requires_explicit_recipient_scope(self) -> None:
+        ext = _extraction(
+            setup_type="multi_pool_combination",
+            pools=[
+                _pool("equal", "equal_base"),
+                _pool(
+                    "specified_value",
+                    "parking_cost_center",
+                    context="cost_center",
+                    billing="operator_amount_pending",
+                ),
+            ],
+            declared_contexts=["regular_operating", "cost_center"],
+        )
+
+        finding = assess_allocation_coherence(ext)
+
+        assert finding.is_incoherent
+        assert any("recipient scope" in reason for reason in finding.reasons)
+
+    def test_cost_center_with_unknown_basis_is_unresolved(self) -> None:
+        ext = _extraction(
+            setup_type="multi_pool_combination",
+            pools=[
+                _pool("equal", "equal_base"),
+                _pool(
+                    "unknown",
+                    "parking_cost_center",
+                    context="cost_center",
+                    billing="operator_amount_pending",
+                    recipient_scope="units_with_appurtenant_parking",
+                ),
+            ],
+            declared_contexts=["regular_operating", "cost_center"],
+        )
+
+        finding = assess_allocation_coherence(ext)
+
+        assert finding.is_incoherent
+        assert any("allocation basis" in reason for reason in finding.reasons)
+
+    def test_declared_context_rule_requires_source_pages(self) -> None:
+        pool = _pool(
+            "square_footage",
+            "structural_repair",
+            context="special_assessment",
+            billing="separate_one_time",
+        ).model_copy(update={"pool_kind": "separately_billed_special_assessment", "source_pages": []})
+        ext = _extraction(
+            setup_type="multi_pool_combination",
+            pools=[_pool("equal", "equal_base"), pool],
+            declared_contexts=["regular_operating", "special_assessment"],
+        )
+
+        finding = assess_allocation_coherence(ext)
+
+        assert finding.is_incoherent
+        assert any("source page" in reason for reason in finding.reasons)
 
     def test_proportional_zero_units_coherent_for_this_gate(self) -> None:
         ext = _extraction(

@@ -16,11 +16,10 @@ from typing import Any, Callable, Optional
 
 from app.config import settings
 from app.dre_extraction.schemas import PageInventoryEntry
-from app.dre_extraction.wire_schemas import WirePageInventoryBatch
 
 from .page_classification import CCR_PAGE_TYPE_LABELS
 from .prompts import CCR_POLICY_EXTRACTOR_PROMPT
-from .wire_schemas import WireCCRPolicyExtraction
+from .wire_schemas import WireCCRPageInventoryBatch, WireCCRPolicyExtraction
 
 
 def default_model_name() -> str:
@@ -84,10 +83,10 @@ def build_classify_callback(
             config=types.GenerateContentConfig(
                 temperature=0.0,
                 response_mime_type="application/json",
-                response_schema=WirePageInventoryBatch,
+                response_schema=WireCCRPageInventoryBatch,
             ),
         )
-        parsed: Optional[WirePageInventoryBatch] = response.parsed
+        parsed: Optional[WireCCRPageInventoryBatch] = response.parsed
         if parsed is None:
             return []
         out: list[PageInventoryEntry] = []
@@ -210,6 +209,7 @@ def build_repair_callback(
             config=types.GenerateContentConfig(
                 temperature=0.0,
                 response_mime_type="application/json",
+                response_schema=WireCCRPolicyExtraction,
             ),
         )
         return response.text or ""

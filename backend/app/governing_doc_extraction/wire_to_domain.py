@@ -67,6 +67,19 @@ def _denominator_source(ccr_source: str) -> str:
     return mapping.get(ccr_source, "unknown")
 
 
+def _pool_kind(
+    allocation_context: str,
+    billing_treatment: str,
+) -> str:
+    """Derive the legacy engine marker from typed CCR semantics."""
+    if allocation_context == "special_assessment" and billing_treatment in {
+        "separate_one_time",
+        "operator_amount_pending",
+    }:
+        return "separately_billed_special_assessment"
+    return ""
+
+
 def _doc_meta(wire: ws.WireCCRDocumentMetadata) -> DocumentMetadata:
     return DocumentMetadata(
         association_name=_text(wire.association_name),
@@ -81,7 +94,7 @@ def _doc_meta(wire: ws.WireCCRDocumentMetadata) -> DocumentMetadata:
     )
 
 
-def _page_entry(wire: ws.WirePageInventoryEntry) -> PageInventoryEntry:
+def _page_entry(wire: ws.WireCCRPageInventoryEntry) -> PageInventoryEntry:
     return PageInventoryEntry(
         page_number=wire.page_number,
         page_type=wire.page_type,
@@ -103,6 +116,7 @@ def _setup(wire: ws.WireCCRAssessmentSetupBlock) -> AssessmentSetupBlock:
         requires_dre_for_future_years=requires_dre,
         confidence=_confidence(wire.confidence),
         source_pages=_list(wire.source_pages),
+        declared_contexts=_list(wire.declared_contexts),
     )
 
 
@@ -127,6 +141,8 @@ def _pool(wire: ws.WireCCRAllocationPool) -> AllocationPoolBlock:
         annual_amount=None,
         monthly_amount=None,
         allocation_method=wire.allocation_basis,
+        allocation_context=wire.allocation_context,
+        billing_treatment=wire.billing_treatment,
         recipient_scope=_text(wire.recipient_scope),
         denominator_label=_text(wire.denominator_label),
         denominator_value=None,
@@ -138,6 +154,10 @@ def _pool(wire: ws.WireCCRAllocationPool) -> AllocationPoolBlock:
         residual_exclusions=[],
         source_pages=_list(wire.source_pages),
         confidence=_confidence(wire.confidence),
+        pool_kind=_pool_kind(
+            wire.allocation_context,
+            wire.billing_treatment,
+        ),
     )
 
 

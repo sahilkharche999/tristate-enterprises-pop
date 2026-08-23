@@ -19,6 +19,9 @@ from app.dre_extraction.schemas import (
 )
 
 _PROPORTIONAL_METHODS = frozenset({"ownership_percentage", "square_footage"})
+_SPECIAL_BILLING_TREATMENTS = frozenset(
+    {"separate_one_time", "operator_amount_pending"}
+)
 
 
 @dataclass(frozen=True)
@@ -83,6 +86,68 @@ def assess_allocation_coherence(
                 f"{method} pool and unit factor rows but no per-unit dollar "
                 "schedule — likely a multi-method or residual/exception policy "
                 "collapsed onto the exhibit factor table"
+            )
+
+    declared_contexts = {
+        context.strip()
+        for context in extraction.assessment_setup.declared_contexts
+        if context and context.strip()
+    }
+    pool_contexts = {
+        pool.allocation_context
+        for pool in pools
+        if pool.allocation_context
+    }
+    for context in sorted(declared_contexts - pool_contexts):
+        reasons.append(
+            f"declared allocation context '{context}' has no corresponding "
+            "allocation pool or unresolved-rule review item"
+        )
+
+    for pool in pools:
+        context = (pool.allocation_context or "").strip()
+        if not pool.source_pages:
+            reasons.append(
+                f"allocation pool '{pool.pool_key}' has no source page citation"
+            )
+        if context == "special_assessment":
+            if pool.billing_treatment not in _SPECIAL_BILLING_TREATMENTS:
+                reasons.append(
+                    f"special-assessment pool '{pool.pool_key}' must use "
+                    "separate_one_time or operator_amount_pending billing"
+                )
+            if pool.pool_kind != "separately_billed_special_assessment":
+                reasons.append(
+                    f"special-assessment pool '{pool.pool_key}' is missing the "
+                    "derived separately-billed engine treatment"
+                )
+        elif context == "cost_center" and not (
+            pool.recipient_scope or ""
+        ).strip():
+            reasons.append(
+                f"cost-center pool '{pool.pool_key}' has no explicit recipient scope"
+            )
+        if context == "cost_center" and pool.allocation_method == "unknown":
+            reasons.append(
+                f"cost-center pool '{pool.pool_key}' has an unresolved "
+                "allocation basis"
+            )
+
+    for residual in pools:
+        if residual.budget_line_derivation != "residual_default":
+            continue
+        claimed = set(residual.residual_after_pool_keys or [])
+        missing = sorted(
+            pool.pool_key
+            for pool in pools
+            if pool.pool_key != residual.pool_key
+            and pool.allocation_context != "regular_operating"
+            and pool.pool_key not in claimed
+        )
+        if missing:
+            reasons.append(
+                f"residual pool '{residual.pool_key}' does not exclude "
+                f"exception pools: {', '.join(missing)}"
             )
 
     return CoherenceFinding(reasons=tuple(reasons))

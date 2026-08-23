@@ -5,9 +5,9 @@ Same design contract as ``dre_extraction.wire_schemas``:
   2. No Field(default=...) or ConfigDict(extra="forbid") — both rejected by SDK.
   3. No @field_validator — normalization lives in wire_to_domain.
 
-The top-level schema is WireCCRPolicyExtraction.  The Step-1 page
-classification reuses WirePageInventoryEntry and WirePageInventoryBatch
-from the DRE wire schema (same shape, different label set).
+The top-level schema is WireCCRPolicyExtraction.  Step-1 page
+classification has its own label-constrained schema because the legal
+document labels differ from the DRE budget labels.
 
 WIRE_SCHEMA_SHA256 records the byte-stable hash of the JSON Schema
 representation so audit can detect schema drift independently of prompt drift.
@@ -23,7 +23,7 @@ from typing import Literal, Optional
 from pydantic import BaseModel, Field
 
 
-# Re-export the Step-1 shapes from DRE wire schemas — identical structure.
+# Shared validation shapes used by the governing-document extraction.
 from app.dre_extraction.wire_schemas import (
     WirePageInventoryEntry,
     WirePageInventoryBatch,
@@ -33,6 +33,53 @@ from app.dre_extraction.wire_schemas import (
 
 
 # ── CC&R-specific top-level shapes ────────────────────────────────────────
+
+
+CCRPageType = Literal[
+    "assessment/allocation provisions",
+    "special assessment provisions",
+    "definitions",
+    "exhibit/percentage-interest table",
+    "use restrictions",
+    "maintenance responsibilities",
+    "condominium plan/floor plan",
+    "governance/voting",
+    "insurance provisions",
+    "enforcement/dispute resolution",
+    "signature/notary",
+    "table of contents/index",
+    "recitals/preamble",
+    "blank/irrelevant",
+]
+
+
+class WireCCRPageInventoryEntry(BaseModel):
+    """One constrained legal-document page classification."""
+
+    page_number: int
+    page_type: CCRPageType = Field(
+        description=(
+            "Primary content label. Use 'assessment/allocation provisions' for "
+            "assessment levy, apportionment, division, or cost-center rules; "
+            "'special assessment provisions' for special-assessment rules; "
+            "'definitions' for defined terms; and "
+            "'exhibit/percentage-interest table' for unit percentage or "
+            "square-footage tables. Use the other labels for non-assessment "
+            "pages."
+        )
+    )
+    confidence: Optional[float] = Field(
+        description="0.0–1.0 confidence in the classification."
+    )
+    notes: Optional[str] = Field(
+        description="Short observation about the page's primary content."
+    )
+
+
+class WireCCRPageInventoryBatch(BaseModel):
+    """Top-level Step-1 CC&R page-classification response shape."""
+
+    page_inventory: list[WireCCRPageInventoryEntry]
 
 
 class WireCCRDocumentMetadata(BaseModel):
@@ -79,6 +126,19 @@ CCRAllocationBasis = Literal[
     "specified_value",
     "custom_factor",
     "unknown",
+]
+
+CCRAllocationContext = Literal[
+    "regular_operating",
+    "reserve_contribution",
+    "special_assessment",
+    "cost_center",
+]
+
+CCRBillingTreatment = Literal[
+    "recurring",
+    "separate_one_time",
+    "operator_amount_pending",
 ]
 
 
@@ -132,6 +192,18 @@ class WireCCRAssessmentSetupBlock(BaseModel):
     )
     source_pages: Optional[list[int]] = Field(
         description="Pages that establish the allocation structure. MUST contain at least one."
+    )
+    declared_contexts: list[CCRAllocationContext] = Field(
+        description=(
+            "Every economic allocation context explicitly present in the document. "
+            "Include regular_operating when regular assessments are addressed; include "
+            "reserve_contribution only when reserves have a distinct rule or funding "
+            "treatment; include special_assessment when any special-assessment rule or "
+            "exception is stated; include cost_center when a limited-benefit facility or "
+            "service has its own assessment treatment. A declared context MUST have a "
+            "corresponding allocation_pool, or a high-severity human_review_question "
+            "explaining why the rule cannot be resolved."
+        )
     )
 
 
@@ -219,6 +291,21 @@ class WireCCRAllocationPool(BaseModel):
     allocation_basis: CCRAllocationBasis = Field(
         description="The basis used to divide costs in this pool among participating units."
     )
+    allocation_context: CCRAllocationContext = Field(
+        description=(
+            "The economic context governed by this pool: regular_operating for ongoing "
+            "common expenses, reserve_contribution for a distinct reserve rule, "
+            "special_assessment for a separately levied one-time assessment, or "
+            "cost_center for a limited-benefit facility/service."
+        )
+    )
+    billing_treatment: CCRBillingTreatment = Field(
+        description=(
+            "How this pool is billed: recurring for ongoing assessments, separate_one_time "
+            "for a one-time/special levy, or operator_amount_pending when the document "
+            "defers the amount to a budget, schedule, or later operator input."
+        )
+    )
     recipient_scope: Optional[str] = Field(
         description=(
             "Who pays this pool: 'all_units', 'residential_only', 'commercial_only', "
@@ -302,7 +389,7 @@ class WireCCRPolicyExtraction(BaseModel):
     """
 
     document_metadata: WireCCRDocumentMetadata
-    page_inventory: list[WirePageInventoryEntry]
+    page_inventory: list[WireCCRPageInventoryEntry]
     assessment_setup: WireCCRAssessmentSetupBlock
     unit_structure: WireCCRUnitStructure
     allocation_pools: list[WireCCRAllocationPool]
@@ -321,7 +408,12 @@ CCR_WIRE_SCHEMA_SHA256: str = hashlib.sha256(
 __all__ = [
     "WirePageInventoryEntry",
     "WirePageInventoryBatch",
+    "CCRPageType",
+    "WireCCRPageInventoryEntry",
+    "WireCCRPageInventoryBatch",
     "WireCCRDocumentMetadata",
+    "CCRAllocationContext",
+    "CCRBillingTreatment",
     "WireCCRAssessmentSetupBlock",
     "WireCCRUnitFactor",
     "WireCCRUnitStructure",

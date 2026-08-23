@@ -46,7 +46,7 @@ CRITICAL — custom_factor IS NOT square_footage:
    If the document says exception costs follow a DRE operating budget, a proration
    schedule, an exhibit that is not itself "per square foot" or "per recorded
    ownership percentage", or any other external factor table, emit
-   allocation_method=custom_factor (and record the referenced schedule name in
+   allocation_basis=custom_factor (and record the referenced schedule name in
    denominator_label). Do NOT emit square_footage merely because unit square
    footage is also printed in an exhibit. Presence of sqft or % data is evidence
    the operator may later choose — not proof of the referenced schedule.
@@ -80,6 +80,26 @@ F. PER-UNIT FACTOR TABLE — decide whether the per-unit allocation data is PRES
 
 G. COST CENTERS — if the document defines a cost center (facility or service that benefits only some units and is financed by assessments on those units, e.g. parking), emit a separate allocation_pool for it OR a high-severity human_review_question if beneficiaries cannot be determined. Do not silently omit cost centers.
 
+H. CONTEXT COMPLETENESS — before producing the final JSON, enumerate every distinct
+economic allocation context stated by the document:
+   - regular_operating: ongoing common expenses and the default assessment basis.
+   - reserve_contribution: only when reserves have a distinct funding or allocation rule;
+     reserves that follow regular assessments stay within that regular rule.
+   - special_assessment: any one-time levy or special-assessment exception with its own
+     allocation basis, including a different basis for a particular repair purpose.
+   - cost_center: a limited-benefit facility or service with a separate assessment
+     treatment.
+Record these values in assessment_setup.declared_contexts. For every declared context,
+emit one cited rule as an allocation_pool with the matching allocation_context, source_pages,
+and billing_treatment. If the document states a context but the rule, beneficiaries,
+amount, or denominator cannot be resolved, still declare the context and emit a
+high-severity human_review_question explaining the missing evidence; never silently
+drop the context. A special-assessment pool must use
+billing_treatment=separate_one_time (or operator_amount_pending when the one-time
+amount is deferred to an external budget) and must remain separate from recurring
+assessment pools. A cost-center pool must identify its recipient_scope; use a review
+question instead of all_units when the beneficiaries are not established.
+
 ════════════════════════════════════════════════════════
 STEP 3 — BUILD THE STRUCTURED OUTPUT
 ════════════════════════════════════════════════════════
@@ -103,6 +123,10 @@ assessment_setup
     Use "unknown_needs_review" only as a last resort.
   • default_basis: the default allocation basis (equal / ownership_percentage / square_footage / specified_value / custom_factor / unknown).
   • requires_dre_for_future_years: true if the document defers specific amounts or proration schedules to the DRE, board resolution, or an external budget; false only when amounts are fully self-contained in the document.
+  • declared_contexts: every distinct context stated by the document
+    (regular_operating / reserve_contribution / special_assessment / cost_center).
+    Each declared context must have a matching allocation_pool or a high-severity
+    review question explaining why its rule cannot be resolved.
   • source_pages: cite the section(s) that establish the structure.
 
 unit_structure
@@ -124,6 +148,10 @@ allocation_pools
   • pool_key: stable snake_case key derived from the pool's PURPOSE (e.g., "equal_base", "sqft_proportional_exceptions", "parking_cost_center"). Do NOT include HOA names or section numbers in pool_key values.
   • pool_name: short operator-readable name.
   • allocation_basis: the method for this pool ("equal", "square_footage", "ownership_percentage", "specified_value", "custom_factor").
+  • allocation_context: the context for this pool
+    ("regular_operating", "reserve_contribution", "special_assessment", "cost_center").
+  • billing_treatment: how this pool is billed ("recurring", "separate_one_time",
+    "operator_amount_pending").
   • is_residual_base: true for the residual/default pool that covers all costs not in exception pools; false for exception / cost-center pools.
   • expense_categories: SEMANTIC categories the document names for this pool when explicit (e.g., "insurance", "painting and roof reserves"). Empty for pure residual bases. Do NOT invent categories beyond the document.
   • residual_after_pool_keys: for residual base pools, list the pool_keys of exception pools that carve out of the residual.
