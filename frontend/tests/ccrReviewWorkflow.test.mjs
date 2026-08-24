@@ -9,8 +9,15 @@ import {
   buildAdvancedCategoryPool,
   buildCCRCorrectionAction,
   buildCCRFactorPayload,
+  buildCCRExtractedDetail,
   buildCCRReadySummary,
   buildIssueCard,
+  displayCategoryName,
+  friendlyAllocationMethod,
+  friendlyAmountDisplay,
+  friendlyPageType,
+  friendlyWhoPays,
+  mergeExtractionForDetail,
   ccrIssueIdentity,
   correctionActionLabel,
   executeCCRCorrection,
@@ -491,6 +498,122 @@ test('issue identities survive reorder and removal', () => {
   );
 });
 
+test('Bob-facing labels hide pool names, $0 amounts, and raw page types', () => {
+  assert.equal(displayCategoryName('Parking Cost Center Pool'), 'Parking Cost Center');
+  assert.equal(displayCategoryName('Equal Base Operating Assessment Pool'), 'Equal Base Operating Assessment');
+  assert.equal(friendlyAllocationMethod('custom_factor'), 'Divided using an external schedule');
+  assert.equal(friendlyWhoPays('owners with appurtenant parking spaces'), 'Homes with parking');
+  assert.equal(
+    friendlyAmountDisplay(null, 'external_schedule'),
+    'Uses the DRE / budget schedule',
+  );
+  assert.equal(friendlyAmountDisplay(0, 'known'), 'Amount is not in this document');
+  assert.equal(
+    friendlyPageType('assessment/allocation provisions'),
+    'Assessment and allocation rules',
+  );
+});
+
+test('extracted detail view model keeps run-19 categories and homes without $0 or Pool', () => {
+  const merged = mergeExtractionForDetail(
+    {
+      assessment_setup: {
+        summary: 'Regular assessments are divided equally except DRE-prorated items.',
+        requires_dre_for_future_years: true,
+        source_pages: [16],
+      },
+      allocation_pools: [
+        {
+          pool_name: 'Equal Base Operating Assessment Pool',
+          allocation_method: 'equal',
+          recipient_scope: 'all_units',
+          annual_amount: null,
+          amount_availability: 'external_schedule',
+          included_budget_lines: [],
+          source_pages: [16],
+        },
+        {
+          pool_name: 'DRE Prorated Operating Expenses',
+          allocation_method: 'custom_factor',
+          recipient_scope: 'all_units',
+          included_budget_lines: ['insurance', 'gas', 'water'],
+          amount_availability: 'external_schedule',
+          source_pages: [16],
+        },
+        {
+          pool_name: 'DRE Prorated Reserves',
+          allocation_method: 'custom_factor',
+          recipient_scope: 'all_units',
+          included_budget_lines: ['roof', 'paint', 'water heaters'],
+          amount_availability: 'external_schedule',
+          source_pages: [16],
+        },
+        {
+          pool_name: 'Special Assessment - Structural Common Area',
+          allocation_method: 'square_footage',
+          allocation_context: 'special_assessment',
+          billing_cadence: 'one_time',
+          amount_availability: 'operator_pending',
+          included_budget_lines: ['structural Common Area'],
+          source_pages: [16],
+        },
+        {
+          pool_name: 'Parking Cost Center Pool',
+          allocation_method: 'specified_value',
+          recipient_scope: 'parking_users',
+          amount_availability: 'external_schedule',
+          included_budget_lines: ['parking space expenses'],
+          source_pages: [16, 17],
+        },
+      ],
+      unit_structure: {
+        unit_count: 9,
+        units: [
+          { unit_number: '201', square_feet: '2202.0', ownership_percent: '14.5' },
+          { unit_number: '202', square_feet: '1308.0', ownership_percent: '8.6' },
+        ],
+      },
+    },
+    {
+      document_metadata: {
+        association_name: '131 Missouri Street Homeowners Association',
+        document_title: 'Declaration of Restrictions',
+        document_date: '2017-11-27',
+        total_units: 9,
+        source_pages: [16, 17],
+      },
+      page_inventory: [
+        {
+          page_number: 16,
+          page_type: 'assessment/allocation provisions',
+          notes: 'division of assessments',
+        },
+      ],
+      human_review_questions: [
+        {
+          question: 'Please provide the DRE-reviewed operating budget proration schedule.',
+          reason: 'The CC&R defers those numbers to the DRE budget.',
+          source_pages: [16],
+        },
+      ],
+    },
+  );
+
+  const detail = buildCCRExtractedDetail(merged);
+  assert.equal(detail.hoa.associationName, '131 Missouri Street Homeowners Association');
+  assert.equal(detail.categories.length, 5);
+  assert.equal(detail.homes.length, 2);
+  assert.equal(detail.categories[0].name, 'Equal Base Operating Assessment');
+  assert.equal(detail.categories[4].name, 'Parking Cost Center');
+  assert.equal(detail.categories[0].amount, 'Uses the DRE / budget schedule');
+  assert.equal(detail.categories[3].cadence, 'One-time');
+  assert.equal(detail.categories[4].whoPays, 'Homes with parking');
+  assert.equal(detail.pages[0].pageType, 'Assessment and allocation rules');
+  assert.match(JSON.stringify(detail), /insurance, gas, water/);
+  assert.doesNotMatch(JSON.stringify(detail), /\$0|pool_key|multi_pool|coherence/i);
+  assert.doesNotMatch(detail.categories.map((row) => row.name).join(' '), /\bPool\b/);
+});
+
 test('approval stays disabled for blockers and becomes ready with a plain summary', () => {
   assert.equal(isCCRApprovalDisabled({ approval_blocked: true, issues: [{}] }, false), true);
   assert.equal(isCCRApprovalDisabled({ approval_blocked: false, issues: [] }, false), false);
@@ -590,11 +713,18 @@ test('workbench delegates CC&R runs to the guided workflow and keeps PDF jumps',
     join(here, '../src/app/components/CCRCorrectionWorkflow.tsx'),
     'utf8',
   );
+  const extracted = readFileSync(
+    join(here, '../src/app/components/CCRExtractedDetail.tsx'),
+    'utf8',
+  );
 
   assert.match(workbench, /isCCR[\s\S]*CCRCorrectionWorkflow/);
   assert.match(guided, /What needs attention/);
+  assert.match(guided, /CCRExtractedDetail/);
+  assert.match(extracted, /What this document already says/);
   assert.match(guided, /Ready to approve/);
   assert.match(guided, /jumpToPage/);
   assert.match(guided, /preview\.resolved_extraction/);
   assert.match(guided, /CCRAdvancedCorrections/);
+  assert.doesNotMatch(guided, /Reviewed charges/);
 });

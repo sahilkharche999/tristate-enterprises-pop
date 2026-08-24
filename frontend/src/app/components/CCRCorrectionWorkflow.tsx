@@ -18,6 +18,7 @@ import {
   buildAdvancedFactorPayload,
   buildCCRCorrectionAction,
   buildCCRFactorPayload,
+  buildCCRExtractedDetail,
   buildCCRReadySummary,
   buildIssueCard,
   ccrIssueIdentity,
@@ -26,10 +27,12 @@ import {
   friendlyCCRError,
   isCCRApprovalDisabled,
   isUsableCCRRecommendation,
+  mergeExtractionForDetail,
   type CCRCorrectionResult,
   type CCRFactorDraft,
 } from '../lib/ccrReviewWorkflow';
 import { CCRAdvancedCorrections } from './CCRAdvancedCorrections';
+import { CCRExtractedDetail } from './CCRExtractedDetail';
 import { cn } from './ui/utils';
 
 type Props = {
@@ -526,6 +529,12 @@ export function CCRCorrectionWorkflow({
   );
   const ready = buildCCRReadySummary(preview.resolved_extraction);
   const categories = resolvedCategories(preview);
+  const extractedDetail = buildCCRExtractedDetail(
+    mergeExtractionForDetail(
+      preview.resolved_extraction,
+      detail.parsed_json,
+    ),
+  );
 
   return (
     <section className="space-y-6 p-4">
@@ -580,7 +589,8 @@ export function CCRCorrectionWorkflow({
                 What needs attention
               </h2>
               <p className="mt-1 text-sm text-slate-600">
-                {preview.issues.length} decision{preview.issues.length === 1 ? '' : 's'} before approval
+                {preview.issues.length} decision{preview.issues.length === 1 ? '' : 's'} before approval.
+                These values are not printed as a complete table in the CC&R, such as a DRE schedule or parking assignments.
               </p>
             </div>
           </div>
@@ -905,26 +915,9 @@ export function CCRCorrectionWorkflow({
         </section>
       )}
 
-      {categories.length > 0 && (
-        <section className="rounded-xl border border-slate-200 bg-white p-4">
-          <h2 className="font-semibold text-slate-900">Reviewed charges</h2>
-          <ul className="mt-2 divide-y divide-slate-100 text-sm">
-            {categories.map((category, index) => (
-              <li key={index} className="flex flex-wrap items-center justify-between gap-2 py-2">
-                <span>{String(category.pool_name || 'Documented charge')}</span>
-                <span className="text-slate-600">
-                  {Number(category.annual_amount || 0).toLocaleString('en-US', {
-                    style: 'currency',
-                    currency: 'USD',
-                    maximumFractionDigits: 0,
-                  })}{' '}
-                  per year
-                </span>
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
+      {extractedDetail ? (
+        <CCRExtractedDetail detail={extractedDetail} jumpToPage={jumpToPage} />
+      ) : null}
 
       <CCRAdvancedCorrections
         categories={categories}

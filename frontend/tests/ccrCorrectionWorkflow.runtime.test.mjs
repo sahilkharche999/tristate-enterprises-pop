@@ -2134,3 +2134,167 @@ test('legacy partial roster blocker asks for a full replacement', async () => {
   assert.match(document.body.textContent, /existing values were kept/i);
   assert.equal(findButton('Approve owner charges').disabled, true);
 });
+
+test('run-19 shaped preview shows extracted detail under guided cards without $0 or Pool', async () => {
+  const homes = [
+    ['201', '2202.0', '14.5'],
+    ['202', '1308.0', '8.6'],
+    ['203', '1526.0', '10.1'],
+    ['204', '2599.0', '17.2'],
+    ['301', '1465.0', '9.7'],
+    ['302', '1462.0', '9.7'],
+    ['401', '1560.0', '10.3'],
+    ['402', '1457.0', '9.6'],
+    ['403', '1557.0', '10.3'],
+  ];
+  const preview = {
+    extraction_run_id: 19,
+    review_version: 0,
+    resolved_extraction: {
+      assessment_setup: {
+        summary:
+          'Regular assessments are divided equally among all owners, except for insurance, gas, water, and reserves.',
+        requires_dre_for_future_years: true,
+        source_pages: [16, 17],
+      },
+      allocation_pools: [
+        {
+          pool_key: 'equal_base',
+          pool_name: 'Equal Base Operating Assessment Pool',
+          allocation_method: 'equal',
+          recipient_scope: 'all_units',
+          annual_amount: null,
+          amount_availability: 'external_schedule',
+          included_budget_lines: [],
+          source_pages: [16],
+        },
+        {
+          pool_key: 'dre_prorated_operating_expenses',
+          pool_name: 'DRE Prorated Operating Expenses',
+          allocation_method: 'custom_factor',
+          recipient_scope: 'all_units',
+          amount_availability: 'external_schedule',
+          included_budget_lines: ['insurance', 'gas', 'water'],
+          source_pages: [16],
+        },
+        {
+          pool_key: 'dre_prorated_reserve_expenses',
+          pool_name: 'DRE Prorated Reserves',
+          allocation_method: 'custom_factor',
+          recipient_scope: 'all_units',
+          amount_availability: 'external_schedule',
+          included_budget_lines: ['reserves for the roof', 'paint', 'water heaters'],
+          source_pages: [16],
+        },
+        {
+          pool_key: 'special_assessment_structural_sqft',
+          pool_name: 'Special Assessment - Structural Common Area',
+          allocation_method: 'square_footage',
+          allocation_context: 'special_assessment',
+          billing_cadence: 'one_time',
+          amount_availability: 'operator_pending',
+          included_budget_lines: ['structural Common Area'],
+          source_pages: [16],
+        },
+        {
+          pool_key: 'parking_cost_center',
+          pool_name: 'Parking Cost Center Pool',
+          allocation_method: 'specified_value',
+          recipient_scope: 'parking_users',
+          amount_availability: 'external_schedule',
+          included_budget_lines: ['parking space expenses'],
+          source_pages: [16, 17],
+        },
+      ],
+      unit_structure: {
+        unit_count: 9,
+        units: homes.map(([unit_number, square_feet, ownership_percent]) => ({
+          unit_number,
+          square_feet,
+          ownership_percent,
+        })),
+      },
+    },
+    issues: [
+      {
+        code: 'CCR_UNIT_FACTORS_MISSING',
+        severity: 'error',
+        category_key: 'dre_prorated_operating_expenses',
+        source_pages: [16],
+        explanation: 'Missing DRE factors',
+        recommended_operation: null,
+        approval_blocked: true,
+      },
+    ],
+    approval_blocked: true,
+  };
+  globalThis.fetch = async (url, options = {}) => {
+    requests.push({ url: String(url), options });
+    return new Response(JSON.stringify(preview), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+
+  await renderWorkflow({
+    detail: {
+      ...detail(),
+      parsed_json: {
+        document_metadata: {
+          association_name: '131 Missouri Street Homeowners Association',
+          document_title: 'Declaration of Restrictions',
+          document_date: '2017-11-27',
+          total_units: 9,
+          source_pages: [16, 17],
+        },
+        page_inventory: [
+          {
+            page_number: 16,
+            page_type: 'assessment/allocation provisions',
+            notes: 'division of assessments',
+          },
+        ],
+        human_review_questions: [
+          {
+            question: 'Please provide the DRE-reviewed operating budget proration schedule.',
+            reason: 'Those numbers live in the DRE budget.',
+            source_pages: [16],
+          },
+        ],
+      },
+    },
+  });
+
+  await waitForText('What needs attention');
+  const body = document.body.textContent;
+  const attentionAt = body.indexOf('What needs attention');
+  const extractedAt = body.indexOf('What this document already says');
+  const advancedAt = body.indexOf('Advanced corrections');
+  assert.ok(attentionAt >= 0 && extractedAt > attentionAt && advancedAt > extractedAt);
+
+  assert.match(body, /131 Missouri Street Homeowners Association/);
+  assert.match(body, /Regular assessments are divided equally/);
+  assert.match(body, /Needs the yearly budget \/ DRE schedule/);
+  assert.match(body, /Equal Base Operating Assessment/);
+  assert.match(body, /DRE Prorated Operating Expenses/);
+  assert.match(body, /DRE Prorated Reserves/);
+  assert.match(body, /Special Assessment - Structural Common Area/);
+  assert.match(body, /Parking Cost Center/);
+  assert.match(body, /Divided equally/);
+  assert.match(body, /Homes with parking/);
+  assert.match(body, /Amount is not in this document|Uses the DRE \/ budget schedule/);
+  assert.match(body, /Assessment and allocation rules/);
+  assert.match(body, /Home 201|201/);
+  assert.match(body, /403/);
+  assert.doesNotMatch(body, /\$0 per year/);
+  assert.doesNotMatch(body, /Reviewed charges/);
+  assert.doesNotMatch(body, /multi_pool_combination|pool_key|coherence|residual/);
+  assert.equal(findButton('Approve owner charges').disabled, true);
+
+  const extractedHeading = [...document.querySelectorAll('h4')].map(
+    (node) => node.textContent,
+  );
+  assert.ok(extractedHeading.includes('Equal Base Operating Assessment'));
+  assert.ok(extractedHeading.includes('Parking Cost Center'));
+  assert.ok(!extractedHeading.some((name) => /\bPool\b/.test(name)));
+});

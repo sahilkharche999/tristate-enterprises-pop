@@ -383,13 +383,309 @@ function categoryForIssue(
   );
 }
 
+export function displayCategoryName(name: unknown): string {
+  const stripped = String(name || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\s+pools?\s*$/i, '')
+    .trim();
+  return stripped || 'Documented charge';
+}
+
 function categoryName(
   issue: CCRPromotionIssue,
   extraction: Extraction | null,
 ): string {
   const match = categoryForIssue(issue, extraction);
-  if (match?.pool_name) return String(match.pool_name);
+  if (match?.pool_name) return displayCategoryName(match.pool_name);
   return 'This charge';
+}
+
+export function friendlyAllocationMethod(method: unknown): string {
+  switch (String(method || '')) {
+    case 'equal':
+      return 'Divided equally';
+    case 'square_footage':
+      return 'Divided by square footage';
+    case 'ownership_percentage':
+      return 'Divided by ownership percentage';
+    case 'specified_value':
+      return 'A fixed amount for each home';
+    case 'custom_factor':
+      return 'Divided using an external schedule';
+    default:
+      return 'Division method still needs review';
+  }
+}
+
+export function friendlyWhoPays(scope: unknown, selected?: unknown): string {
+  const value = String(scope || 'all_units');
+  if (value === 'all_units') return 'All homes';
+  if (value === 'residential_only') return 'Residential homes only';
+  if (value === 'commercial_only') return 'Commercial homes only';
+  if (value === 'parking_users' || /parking/i.test(value)) {
+    return 'Homes with parking';
+  }
+  if (value === 'custom_unit_list') {
+    const homes = Array.isArray(selected)
+      ? selected.map((item) => String(item || '').trim()).filter(Boolean)
+      : [];
+    return homes.length > 0 ? `Selected homes: ${homes.join(', ')}` : 'Selected homes';
+  }
+  return 'The homes named in the document';
+}
+
+export function friendlyBillingTreatment(
+  category: AllocationCategory,
+): string {
+  const separate =
+    category.pool_kind === 'separately_billed_special_assessment' ||
+    category.allocation_context === 'special_assessment' ||
+    category.billing_treatment === 'separate_one_time' ||
+    category.billing_cadence === 'one_time';
+  return separate ? 'Billed separately' : 'With regular dues';
+}
+
+export function friendlyCadence(category: AllocationCategory): string {
+  return category.billing_cadence === 'one_time' ||
+    category.allocation_context === 'special_assessment'
+    ? 'One-time'
+    : 'Recurring';
+}
+
+export function friendlyAmountSource(availability: unknown): string {
+  switch (String(availability || '')) {
+    case 'known':
+      return 'Amount is known';
+    case 'external_schedule':
+      return 'Uses the DRE / budget schedule';
+    case 'operator_pending':
+      return 'Amount still needs to be entered';
+    default:
+      return 'Amount is not in this document';
+  }
+}
+
+export function friendlyAmountDisplay(
+  annualAmount: unknown,
+  availability: unknown,
+): string {
+  if (annualAmount != null && String(annualAmount).trim() !== '') {
+    const numeric = Number(annualAmount);
+    if (Number.isFinite(numeric) && numeric > 0) {
+      return `${numeric.toLocaleString('en-US', {
+        style: 'currency',
+        currency: 'USD',
+        maximumFractionDigits: 0,
+      })} per year`;
+    }
+  }
+  if (String(availability || '') === 'external_schedule') {
+    return 'Uses the DRE / budget schedule';
+  }
+  if (String(availability || '') === 'operator_pending') {
+    return 'Amount still needs to be entered';
+  }
+  return 'Amount is not in this document';
+}
+
+export function friendlyPageType(pageType: unknown): string {
+  switch (String(pageType || '')) {
+    case 'assessment/allocation provisions':
+      return 'Assessment and allocation rules';
+    case 'special assessment provisions':
+      return 'Special assessment rules';
+    case 'exhibit/percentage-interest table':
+      return 'Home share table';
+    case 'definitions':
+      return 'Definitions';
+    case 'use restrictions':
+      return 'Use restrictions';
+    case 'maintenance responsibilities':
+      return 'Maintenance responsibilities';
+    case 'condominium plan/floor plan':
+      return 'Floor plan';
+    case 'governance/voting':
+      return 'Governance';
+    case 'insurance provisions':
+      return 'Insurance';
+    case 'enforcement/dispute resolution':
+      return 'Enforcement';
+    case 'signature/notary':
+      return 'Signature page';
+    case 'table of contents/index':
+      return 'Table of contents';
+    case 'recitals/preamble':
+      return 'Introduction';
+    case 'blank/irrelevant':
+      return 'Not used for charges';
+    default: {
+      const raw = String(pageType || '').trim();
+      return raw
+        ? raw.replace(/[_/]+/g, ' ').replace(/\s+/g, ' ')
+        : 'Document page';
+    }
+  }
+}
+
+function hasList(value: unknown): boolean {
+  return Array.isArray(value) && value.length > 0;
+}
+
+function numberPages(value: unknown): number[] {
+  return Array.isArray(value)
+    ? value
+        .map((page) => Number(page))
+        .filter((page) => Number.isInteger(page) && page > 0)
+    : [];
+}
+
+function coversText(row: AllocationCategory): string {
+  const lines = row.included_budget_lines || row.expense_categories;
+  if (Array.isArray(lines) && lines.length > 0) {
+    return lines.map(String).map((line) => line.trim()).filter(Boolean).join(', ');
+  }
+  return 'Expenses not listed separately in another charge';
+}
+
+export function mergeExtractionForDetail(
+  resolved: Record<string, unknown> | null | undefined,
+  parsed: Record<string, unknown> | null | undefined,
+): Record<string, unknown> | null {
+  if (!resolved && !parsed) return null;
+  const merged = { ...(parsed || {}), ...(resolved || {}) };
+  if (resolved && parsed) {
+    if (!hasList(resolved.page_inventory) && hasList(parsed.page_inventory)) {
+      merged.page_inventory = parsed.page_inventory;
+    }
+    if (!resolved.document_metadata && parsed.document_metadata) {
+      merged.document_metadata = parsed.document_metadata;
+    }
+    if (
+      !hasList(resolved.human_review_questions) &&
+      hasList(parsed.human_review_questions)
+    ) {
+      merged.human_review_questions = parsed.human_review_questions;
+    }
+  }
+  return merged;
+}
+
+export type CCRExtractedDetailView = {
+  hoa: {
+    associationName: string;
+    documentTitle: string;
+    documentDate: string;
+    unitCount: string;
+    sourcePages: number[];
+    purpose: string;
+  };
+  division: {
+    summary: string;
+    needsExternalBudget: boolean;
+    purpose: string;
+  };
+  categories: Array<{
+    name: string;
+    covers: string;
+    whoPays: string;
+    howDivided: string;
+    billedWith: string;
+    cadence: string;
+    amount: string;
+    amountSource: string;
+    sourcePages: number[];
+  }>;
+  homes: Array<{
+    unitNumber: string;
+    squareFeet: string;
+    ownershipPercent: string;
+  }>;
+  pages: Array<{ pageNumber: number; pageType: string; notes: string }>;
+  questions: Array<{
+    question: string;
+    reason: string;
+    sourcePages: number[];
+  }>;
+};
+
+export function buildCCRExtractedDetail(
+  extraction: Record<string, unknown> | null,
+): CCRExtractedDetailView | null {
+  if (!extraction) return null;
+  const meta = (extraction.document_metadata || {}) as Record<string, unknown>;
+  const setup = (extraction.assessment_setup || {}) as Record<string, unknown>;
+  const unitStructure = (extraction.unit_structure || {}) as Record<
+    string,
+    unknown
+  >;
+  const units = Array.isArray(unitStructure.units) ? unitStructure.units : [];
+  const pages = Array.isArray(extraction.page_inventory)
+    ? extraction.page_inventory
+    : [];
+  const questions = Array.isArray(extraction.human_review_questions)
+    ? extraction.human_review_questions
+    : [];
+
+  return {
+    hoa: {
+      associationName: String(meta.association_name || '').trim(),
+      documentTitle: String(meta.document_title || '').trim(),
+      documentDate: String(meta.document_date || '').trim(),
+      unitCount: String(
+        meta.total_units ?? unitStructure.unit_count ?? (units.length || ''),
+      ),
+      sourcePages: numberPages(meta.source_pages ?? setup.source_pages),
+      purpose: 'Confirms we opened the right governing document.',
+    },
+    division: {
+      summary: String(setup.summary || '').trim(),
+      needsExternalBudget: Boolean(setup.requires_dre_for_future_years),
+      purpose: 'Explains how the document divides owner charges.',
+    },
+    categories: categories(extraction).map((row) => ({
+      name: displayCategoryName(row.pool_name),
+      covers: coversText(row),
+      whoPays: friendlyWhoPays(row.recipient_scope, row.selected_unit_numbers),
+      howDivided: friendlyAllocationMethod(
+        row.allocation_method || row.allocation_basis,
+      ),
+      billedWith: friendlyBillingTreatment(row),
+      cadence: friendlyCadence(row),
+      amount: friendlyAmountDisplay(row.annual_amount, row.amount_availability),
+      amountSource: friendlyAmountSource(row.amount_availability),
+      sourcePages: numberPages(row.source_pages),
+    })),
+    homes: units.map((unit) => {
+      const row = unit as Record<string, unknown>;
+      return {
+        unitNumber: String(row.unit_number || '').trim(),
+        squareFeet: row.square_feet == null ? '' : String(row.square_feet),
+        ownershipPercent:
+          row.ownership_percent == null ? '' : String(row.ownership_percent),
+      };
+    }),
+    pages: pages
+      .map((entry) => {
+        const row = entry as Record<string, unknown>;
+        return {
+          pageNumber: Number(row.page_number) || 0,
+          pageType: friendlyPageType(row.page_type),
+          notes: String(row.notes || '').trim(),
+        };
+      })
+      .filter((row) => row.pageNumber > 0),
+    questions: questions
+      .map((entry) => {
+        const row = entry as Record<string, unknown>;
+        return {
+          question: String(row.question || '').trim(),
+          reason: String(row.reason || '').trim(),
+          sourcePages: numberPages(row.source_pages),
+        };
+      })
+      .filter((row) => row.question),
+  };
 }
 
 const ISSUE_COPY: Record<
@@ -627,8 +923,11 @@ export async function executeCCRCorrection(
 }
 
 function money(value: unknown): string {
+  if (value == null || String(value).trim() === '') {
+    return 'an amount confirmed during budgeting';
+  }
   const numeric = Number(value);
-  return Number.isFinite(numeric)
+  return Number.isFinite(numeric) && numeric > 0
     ? numeric.toLocaleString('en-US', {
         style: 'currency',
         currency: 'USD',
@@ -647,7 +946,7 @@ export function buildCCRReadySummary(extraction: Extraction | null) {
   const charged = joinNatural(
     rows.map(
       (row) =>
-        `${String(row.pool_name || 'Documented charge')} (${money(row.annual_amount)})`,
+        `${displayCategoryName(row.pool_name)} (${money(row.annual_amount)})`,
     ),
   );
   const scopes = new Set(rows.map((row) => String(row.recipient_scope || '')));
