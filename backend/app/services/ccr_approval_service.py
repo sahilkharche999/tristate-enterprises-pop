@@ -31,6 +31,7 @@ from app.dre_extraction.promotion import (
     MissingUnitFactors,
     InvalidStructuralOperation,
     StaleStructuralOperation,
+    apply_documented_specified_value_participants,
     apply_review_edits_to_extraction,
     check_missing_unit_factors,
     derive_ccr_pool_treatments,
@@ -345,6 +346,7 @@ def resolve_ccr_promotion(
             )
         extraction = derive_ccr_pool_treatments(extraction)
         extraction = normalize_extraction_for_promotion(extraction)
+        extraction = apply_documented_specified_value_participants(extraction)
 
         landing_failures = tuple(
             validate_edited_entities_for_promotion(

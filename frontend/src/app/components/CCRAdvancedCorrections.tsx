@@ -550,7 +550,8 @@ export function CCRAdvancedCorrections({
           fixedCategories
             .filter(
               (category) =>
-                category.draft.recipientScope !== 'all_units',
+                category.draft.recipientScope !== 'all_units' &&
+                category.draft.participantUnitNumbers.length > 0,
             )
             .map((category) => [
               category.key,
@@ -562,7 +563,8 @@ export function CCRAdvancedCorrections({
           customCategories
             .filter(
               (category) =>
-                category.draft.recipientScope !== 'all_units',
+                category.draft.recipientScope !== 'all_units' &&
+                category.draft.participantUnitNumbers.length > 0,
             )
             .map((category) => [
               category.key,

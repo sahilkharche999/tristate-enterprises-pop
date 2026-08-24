@@ -211,6 +211,41 @@ test('fixed factors accept a documented zero annual amount', () => {
   );
 });
 
+test('empty participant list still saves documented zero amounts', () => {
+  assert.deepEqual(
+    buildAdvancedFactorPayload(
+      [
+        {
+          unit_number: '201',
+          square_feet: '',
+          ownership_percent: '',
+          fixed_amounts: { parking: '0' },
+        },
+        {
+          unit_number: '202',
+          square_feet: '',
+          ownership_percent: '',
+          fixed_amounts: { parking: '0' },
+        },
+      ],
+      2,
+      {
+        squareFeet: false,
+        ownershipPercent: false,
+        fixedCategoryKeys: ['parking'],
+        fixedRecipientUnitNumbers: { parking: [] },
+      },
+    ),
+    {
+      values: [
+        { unit_number: '201', fixed_amounts: { parking: 0 } },
+        { unit_number: '202', fixed_amounts: { parking: 0 } },
+      ],
+      error: null,
+    },
+  );
+});
+
 test('fixed factors require amounts only from selected participating homes', () => {
   assert.deepEqual(
     buildAdvancedFactorPayload(

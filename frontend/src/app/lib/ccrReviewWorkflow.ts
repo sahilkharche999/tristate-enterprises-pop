@@ -136,6 +136,12 @@ export type CCRAdvancedFactorRequirements = {
   customRecipientUnitNumbers?: Record<string, string[]>;
 };
 
+function restrictsRecipientSet(
+  eligibleUnits: string[] | undefined,
+): eligibleUnits is string[] {
+  return Array.isArray(eligibleUnits) && eligibleUnits.length > 0;
+}
+
 export function buildAdvancedFactorPayload(
   drafts: CCRFactorDraft[],
   expectedUnitCount: number | null,
@@ -181,7 +187,7 @@ export function buildAdvancedFactorPayload(
           ? requirements.squareFeetUnitNumbers
           : requirements.ownershipPercentUnitNumbers;
       if (
-        eligibleUnits &&
+        restrictsRecipientSet(eligibleUnits) &&
         !eligibleUnits.includes(row.unit_number.trim())
       ) {
         continue;
@@ -201,7 +207,7 @@ export function buildAdvancedFactorPayload(
         const eligibleUnits =
           requirements.fixedRecipientUnitNumbers?.[categoryKey];
         if (
-          eligibleUnits &&
+          restrictsRecipientSet(eligibleUnits) &&
           !eligibleUnits.includes(row.unit_number.trim())
         ) {
           continue;
@@ -226,7 +232,7 @@ export function buildAdvancedFactorPayload(
         const eligibleUnits =
           requirements.customRecipientUnitNumbers?.[categoryKey];
         if (
-          eligibleUnits &&
+          restrictsRecipientSet(eligibleUnits) &&
           !eligibleUnits.includes(row.unit_number.trim())
         ) {
           continue;

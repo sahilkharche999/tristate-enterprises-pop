@@ -339,7 +339,8 @@ export function CCRCorrectionWorkflow({
             fixedRecipientUnitNumbers:
               allocationMethod === 'specified_value' &&
               categoryKey &&
-              participantUnitNumbers
+              participantUnitNumbers &&
+              participantUnitNumbers.length > 0
                 ? { [categoryKey]: participantUnitNumbers }
                 : undefined,
             customCategoryKeys:
@@ -349,7 +350,8 @@ export function CCRCorrectionWorkflow({
             customRecipientUnitNumbers:
               allocationMethod === 'custom_factor' &&
               categoryKey &&
-              participantUnitNumbers
+              participantUnitNumbers &&
+              participantUnitNumbers.length > 0
                 ? { [categoryKey]: participantUnitNumbers }
                 : undefined,
           })

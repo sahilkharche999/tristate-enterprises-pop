@@ -257,29 +257,11 @@ def validate_specified_value_pools(
 ) -> dict[str, "SpecifiedValueFactorValidation"]:
     """Validate every specified-value pool with the promotion validator."""
     units = list(extraction.unit_structure.units)
-    units_by_number = {
-        str(unit.unit_number).strip(): unit
-        for unit in units
-        if str(unit.unit_number).strip()
-    }
     validations: dict[str, SpecifiedValueFactorValidation] = {}
     for pool in extraction.allocation_pools:
         if pool.allocation_method != "specified_value":
             continue
-        participant_numbers = (
-            list(units_by_number)
-            if pool.recipient_scope == "all_units"
-            else [
-                str(value).strip()
-                for value in pool.selected_unit_numbers
-                if str(value).strip()
-            ]
-        )
-        if pool.recipient_scope != "all_units" and not participant_numbers:
-            try:
-                participant_numbers = _resolved_selected_unit_numbers(pool, units)
-            except InvalidStructuralOperation:
-                participant_numbers = []
+        participant_numbers = _specified_value_participant_numbers(pool, units)
         validations[pool.pool_key] = validate_specified_value_factors(
             factors=_dollar_factors_for_pool(units, pool.pool_key),
             participant_numbers=participant_numbers,
@@ -1187,6 +1169,91 @@ def _dollar_factors_for_pool(
         if len(matches) == 1:
             out[unit.unit_number] = matches[0]
     return out
+
+
+def _specified_value_participant_numbers(
+    pool: AllocationPoolBlock,
+    units: list[UnitRow],
+) -> list[str]:
+    """Resolve who must have a documented dollar amount for one pool.
+
+    Prefer the document's named homes or a valid recipient scope. When the
+    document only described a subset in prose and named nobody, use the
+    homes the operator already documented amounts for — including $0.
+    """
+    units_by_number = {
+        str(unit.unit_number).strip(): unit
+        for unit in units
+        if str(unit.unit_number).strip()
+    }
+    if pool.recipient_scope == "all_units":
+        return list(units_by_number)
+    explicit = [
+        str(value).strip()
+        for value in pool.selected_unit_numbers
+        if str(value).strip()
+    ]
+    if explicit:
+        return explicit
+    try:
+        derived = _resolved_selected_unit_numbers(pool, units)
+    except InvalidStructuralOperation:
+        derived = []
+    if derived:
+        return derived
+    return list(_dollar_factors_for_pool(units, pool.pool_key))
+
+
+def apply_documented_specified_value_participants(
+    extraction: DRESetupExtraction,
+) -> DRESetupExtraction:
+    """Pin specified-value participants from operator-documented amounts.
+
+    Gemini often emits a prose payer description and an empty home list.
+    After the operator enters amounts (including a documented $0 year),
+    those homes become the reviewed participant set so promotion can write
+    them instead of staying blocked.
+    """
+    units = list(extraction.unit_structure.units)
+    pools: list[AllocationPoolBlock] = []
+    changed = False
+    for pool in extraction.allocation_pools:
+        if (
+            pool.allocation_method != "specified_value"
+            or pool.recipient_scope == "all_units"
+        ):
+            pools.append(pool)
+            continue
+        participants = _specified_value_participant_numbers(pool, units)
+        if not participants:
+            pools.append(pool)
+            continue
+        scope = pool.recipient_scope
+        if scope not in _VALID_RECIPIENT_SCOPES:
+            try:
+                scope = _coerce_recipient_scope(scope)
+            except InvalidStructuralOperation:
+                scope = "custom_unit_list"
+        if (
+            pool.recipient_scope == scope
+            and list(pool.selected_unit_numbers) == participants
+            and list(pool.participant_unit_numbers) == participants
+        ):
+            pools.append(pool)
+            continue
+        pools.append(
+            pool.model_copy(
+                update={
+                    "recipient_scope": scope,
+                    "selected_unit_numbers": participants,
+                    "participant_unit_numbers": participants,
+                }
+            )
+        )
+        changed = True
+    if not changed:
+        return extraction
+    return extraction.model_copy(update={"allocation_pools": pools})
 
 
 def _insert_specified_value_allocations(
@@ -2101,6 +2168,7 @@ __all__ = [
     "EditedEntityFailedToPromote",
     "MissingUnitFactors",
     "UnresolvableReviewEdit",
+    "apply_documented_specified_value_participants",
     "apply_review_edits_to_extraction",
     "check_missing_unit_factors",
     "derive_ccr_pool_treatments",
