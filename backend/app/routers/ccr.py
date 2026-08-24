@@ -216,7 +216,7 @@ class UnitFactorEntry(BaseModel):
     unit_number: str
     square_feet: Optional[Decimal] = None
     ownership_percent: Optional[Decimal] = None
-    fixed_amounts: dict[str, Annotated[Decimal, Field(gt=0)]] = Field(
+    fixed_amounts: dict[str, Annotated[Decimal, Field(ge=0)]] = Field(
         default_factory=dict
     )
     custom_factors: dict[str, Annotated[Decimal, Field(gt=0)]] = Field(

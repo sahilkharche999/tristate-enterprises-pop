@@ -1046,6 +1046,31 @@ def test_custom_fixed_amounts_promote_only_selected_homes_without_placeholder(
     assert "specified_value_placeholders" not in counts
 
 
+def test_factor_api_accepts_zero_fixed_home_amount(
+    client,
+    db_session,
+) -> None:
+    payload = _payload(_pool("operating"))
+    payload["unit_structure"].update(
+        {"unit_count": 1, "units": [{"unit_number": "101"}]}
+    )
+    property_id, run_id = _seed_api_run(db_session, payload)
+
+    response = client.post(
+        f"/hoa/{property_id}/ccr/extraction-runs/{run_id}/factors",
+        json={
+            "factors": [
+                {
+                    "unit_number": "101",
+                    "fixed_amounts": {"parking": "0"},
+                }
+            ]
+        },
+    )
+
+    assert response.status_code == 200, response.text
+
+
 def test_factor_api_rejects_nonpositive_fixed_home_amount(
     client,
     db_session,
@@ -1894,6 +1919,46 @@ def test_specified_value_requires_complete_positive_participant_amounts(
     assert "CCR_SPECIFIED_VALUES_MISSING" not in {
         item["code"] for item in clean.json()["issues"]
     }
+
+
+def test_specified_value_allows_documented_zero_annual_amounts(
+    client,
+    db_session,
+) -> None:
+    pool = _pool("parking")
+    pool["allocation_method"] = "specified_value"
+    pool["amount_availability"] = "external_schedule"
+    pool["annual_amount"] = None
+    pool["monthly_amount"] = None
+    payload = _payload(pool)
+    payload["unit_structure"].update(
+        {
+            "unit_count": 2,
+            "units": [{"unit_number": "201"}, {"unit_number": "202"}],
+        }
+    )
+    property_id, run_id = _seed_api_run(db_session, payload)
+    endpoint = f"/hoa/{property_id}/ccr/extraction-runs/{run_id}"
+
+    saved = client.post(
+        f"{endpoint}/factors",
+        json={
+            "factors": [
+                {"unit_number": "201", "fixed_amounts": {"parking": 0}},
+                {"unit_number": "202", "fixed_amounts": {"parking": 0}},
+            ]
+        },
+    )
+    assert saved.status_code == 200, saved.text
+
+    preview = client.get(
+        f"{endpoint}/promotion-preview",
+        params={"setup_type": "per_unit"},
+    )
+    assert preview.status_code == 200, preview.text
+    codes = {item["code"] for item in preview.json()["issues"]}
+    assert "CCR_SPECIFIED_VALUES_MISSING" not in codes
+    assert "CCR_SPECIFIED_VALUES_INVALID" not in codes
 
 
 def test_specified_value_preview_rejects_cent_level_total_mismatch(

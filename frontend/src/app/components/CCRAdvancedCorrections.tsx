@@ -1050,7 +1050,7 @@ export function CCRAdvancedCorrections({
                       type="number"
                       min="0"
                       aria-label={`Fixed annual amount for ${category.draft.name || 'category'}, home ${index + 1}`}
-                      value={row.fixed_amounts?.[category.key] || ''}
+                      value={row.fixed_amounts?.[category.key] ?? ''}
                       onChange={(event) =>
                         setFactorRows((current) =>
                           current.map((item, itemIndex) =>

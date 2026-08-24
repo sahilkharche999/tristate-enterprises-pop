@@ -1104,14 +1104,14 @@ def validate_specified_value_factors(
     values: dict[str, Decimal] = {}
     for unit_number in participants:
         value = factors.get(unit_number)
-        if value is not None and value.is_finite() and value > 0:
+        if value is not None and value.is_finite() and value >= 0:
             values[unit_number] = value
     if len(values) != len(participants):
         reason = (
             "extraction carried no per-unit dollar_amount factors"
             if not values
             else f"only {len(values)}/{len(participants)} units participating in "
-            "this category carry a positive dollar_amount factor for this pool"
+            "this category carry a documented dollar_amount factor for this pool"
         )
         return SpecifiedValueFactorValidation(
             valid=False,
@@ -1121,6 +1121,21 @@ def validate_specified_value_factors(
         )
 
     total = sum(values.values(), start=Decimal("0"))
+    def absent_or_zero(amount: Optional[Decimal]) -> bool:
+        return amount is None or amount == 0
+
+    if annual_amount is None and monthly_amount is None:
+        return SpecifiedValueFactorValidation(
+            valid=True,
+            form="annual",
+            values=values,
+        )
+    if total == 0 and absent_or_zero(annual_amount) and absent_or_zero(monthly_amount):
+        return SpecifiedValueFactorValidation(
+            valid=True,
+            form="annual",
+            values=values,
+        )
 
     def money_equal(left: Decimal, right: Optional[Decimal]) -> bool:
         return (

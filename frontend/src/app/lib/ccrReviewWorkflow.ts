@@ -208,10 +208,10 @@ export function buildAdvancedFactorPayload(
         }
         const raw = row.fixed_amounts?.[categoryKey]?.trim() || '';
         const numeric = Number(raw);
-        if (!raw || !Number.isFinite(numeric) || numeric <= 0) {
+        if (!raw || !Number.isFinite(numeric) || numeric < 0) {
           return {
             values: [],
-            error: 'Enter a positive fixed annual amount for every home.',
+            error: 'Enter a fixed annual amount for every home. Use 0 if there is no charge this year.',
           };
         }
         fixedAmounts[categoryKey] = numeric;
@@ -354,10 +354,10 @@ export function buildCCRFactorPayload(
       const fixedAmounts: Record<string, number> = {};
       for (const [categoryKey, raw] of Object.entries(row.fixed_amounts)) {
         const numeric = Number(raw.trim());
-        if (!raw.trim() || !Number.isFinite(numeric) || numeric <= 0) {
+        if (!raw.trim() || !Number.isFinite(numeric) || numeric < 0) {
           return {
             values: [],
-            error: 'Enter a positive fixed annual amount for every home.',
+            error: 'Enter a fixed annual amount for every home. Use 0 if there is no charge this year.',
           };
         }
         fixedAmounts[categoryKey] = numeric;
@@ -757,7 +757,7 @@ const ISSUE_COPY: Record<
   CCR_SPECIFIED_VALUES_MISSING: {
     whatHappened: 'A fixed annual amount is missing for one or more participating homes.',
     ownerImpact: 'The charge cannot be approved until every participating home has its documented amount.',
-    recommendation: 'Enter a positive fixed annual amount for every participating home.',
+    recommendation: 'Enter a fixed annual amount for every participating home. Use 0 if there is no charge this year.',
   },
   CCR_SPECIFIED_VALUES_INVALID: {
     whatHappened: 'The per-home amounts do not add up to the documented category total.',

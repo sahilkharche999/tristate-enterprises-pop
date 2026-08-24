@@ -71,7 +71,7 @@ class CCRUnitFactor(BaseModel):
     unit_number: str
     square_feet: Optional[Decimal] = None
     ownership_percent: Optional[Decimal] = None
-    fixed_amounts: dict[str, Annotated[Decimal, Field(gt=0)]] = Field(
+    fixed_amounts: dict[str, Annotated[Decimal, Field(ge=0)]] = Field(
         default_factory=dict
     )
     custom_factors: dict[str, Annotated[Decimal, Field(gt=0)]] = Field(
@@ -505,8 +505,9 @@ def resolve_ccr_promotion(
                         source_pages=list(pool.source_pages) if pool is not None else [],
                         explanation=(
                             (
-                                f"Category '{category_key}' needs a positive dollar "
-                                "amount for every participating home before approval."
+                                f"Category '{category_key}' needs a documented dollar "
+                                "amount for every participating home before approval. "
+                                "Enter 0 when there is no charge this year."
                             )
                             if missing
                             else (

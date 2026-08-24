@@ -783,7 +783,7 @@ export function CCRCorrectionWorkflow({
                                     : usesFixedAmount
                                       ? row.fixed_amounts?.[
                                           String(issue.category_key || '')
-                                        ] || ''
+                                        ] ?? ''
                                       : row.square_feet
                               }
                               onChange={(event) =>

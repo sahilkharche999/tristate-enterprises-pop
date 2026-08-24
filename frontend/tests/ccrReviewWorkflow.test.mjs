@@ -158,6 +158,59 @@ test('advanced factors validate mixed proportional and per-home fixed requiremen
   );
 });
 
+test('fixed factors accept a documented zero annual amount', () => {
+  assert.deepEqual(
+    buildAdvancedFactorPayload(
+      [
+        {
+          unit_number: '201',
+          square_feet: '',
+          ownership_percent: '',
+          fixed_amounts: { parking: '0' },
+        },
+        {
+          unit_number: '202',
+          square_feet: '',
+          ownership_percent: '',
+          fixed_amounts: { parking: '0.00' },
+        },
+      ],
+      2,
+      {
+        squareFeet: false,
+        ownershipPercent: false,
+        fixedCategoryKeys: ['parking'],
+      },
+    ),
+    {
+      values: [
+        { unit_number: '201', fixed_amounts: { parking: 0 } },
+        { unit_number: '202', fixed_amounts: { parking: 0 } },
+      ],
+      error: null,
+    },
+  );
+  assert.match(
+    buildAdvancedFactorPayload(
+      [
+        {
+          unit_number: '201',
+          square_feet: '',
+          ownership_percent: '',
+          fixed_amounts: { parking: '' },
+        },
+      ],
+      1,
+      {
+        squareFeet: false,
+        ownershipPercent: false,
+        fixedCategoryKeys: ['parking'],
+      },
+    ).error,
+    /fixed annual amount/i,
+  );
+});
+
 test('fixed factors require amounts only from selected participating homes', () => {
   assert.deepEqual(
     buildAdvancedFactorPayload(
