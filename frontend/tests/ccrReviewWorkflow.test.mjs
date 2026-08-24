@@ -877,6 +877,8 @@ test('workbench delegates CC&R runs to the guided workflow and keeps PDF jumps',
   );
 
   assert.match(workbench, /isCCR[\s\S]*CCRCorrectionWorkflow/);
+  assert.match(workbench, /Field-level review workbench/);
+  assert.match(workbench, /isCCR \? \([\s\S]*dreMainContent/);
   assert.match(guided, /What needs attention/);
   assert.match(guided, /CCRExtractedDetail/);
   assert.match(extracted, /What this document already says/);

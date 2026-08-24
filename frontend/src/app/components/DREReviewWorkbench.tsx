@@ -2078,16 +2078,24 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
   );
 
   const mainContent = isCCR ? (
-    <CCRCorrectionWorkflow
-      hoaId={hoaId}
-      runId={runId}
-      detail={detail}
-      setupType={chosenSetupType}
-      onSetupTypeChange={setChosenSetupType}
-      onCompare={() => setIsCompareOpen(true)}
-      jumpToPage={jumpToPage}
-      onRunChanged={refresh}
-    />
+    <div className="space-y-4">
+      <CCRCorrectionWorkflow
+        hoaId={hoaId}
+        runId={runId}
+        detail={detail}
+        setupType={chosenSetupType}
+        onSetupTypeChange={setChosenSetupType}
+        onCompare={() => setIsCompareOpen(true)}
+        jumpToPage={jumpToPage}
+        onRunChanged={refresh}
+      />
+      <details className="mx-4 mb-4 rounded-xl border border-slate-200 bg-white">
+        <summary className="cursor-pointer px-4 py-3 font-semibold text-slate-900">
+          Field-level review workbench
+        </summary>
+        {dreMainContent}
+      </details>
+    </div>
   ) : (
     dreMainContent
   );

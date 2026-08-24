@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import {
   combinedLineHint,
@@ -30,6 +33,16 @@ test('over-allocation and under-allocation fail the splitter', () => {
 test('readiness issue anchors are deep-linkable', () => {
   assert.equal(issueAnchor('pool:exception_costs'), 'allocation-pool:exception_costs');
   assert.match(issueAnchor('line:utilities'), /allocation-line/);
+});
+
+test('allocation panel defines humanize before rendering resolution rows', () => {
+  const source = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), '../src/app/components/AllocationResolutionPanel.tsx'),
+    'utf8',
+  );
+  assert.match(source, /function humanize\(value: string\)/);
+  assert.match(source, /humanize\(declared\)/);
+  assert.match(source, /humanize\(String\(row\.status\)\)/);
 });
 
 test('combined-line hint reads readiness details and ignores unrelated issues', () => {

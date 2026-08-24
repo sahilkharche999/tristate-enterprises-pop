@@ -16,6 +16,10 @@ type Props = {
   hoaId: number;
 };
 
+function humanize(value: string) {
+  return value.replaceAll('_', ' ').replace(/\bpool\b/gi, 'assessment category');
+}
+
 function assessmentCategoryName(
   categories: AllocationResolutionState['assessment_categories'],
   key: string | null | undefined,
