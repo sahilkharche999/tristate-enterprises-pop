@@ -41,14 +41,15 @@ class IncoherentCcrExtraction(Exception):
     Mapped to HTTP 422 by the CCR router (same family as MissingUnitFactors).
     """
 
-    def __init__(self, reasons: list[str]) -> None:
+    def __init__(self, reasons: list[str], *, collapsed: bool = True) -> None:
         self.reasons = list(reasons)
-        msg = (
+        prefix = (
             "CC&R extraction allocation policy looks incomplete or collapsed; "
             "correct pools/setup_type in review before promoting. "
-            + "; ".join(self.reasons)
+            if collapsed
+            else ""
         )
-        super().__init__(msg)
+        super().__init__(prefix + "; ".join(self.reasons))
 
 
 def assess_allocation_coherence(

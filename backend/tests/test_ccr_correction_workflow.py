@@ -1961,6 +1961,50 @@ def test_specified_value_allows_documented_zero_annual_amounts(
     assert "CCR_SPECIFIED_VALUES_INVALID" not in codes
 
 
+def test_specified_value_external_schedule_without_named_homes_promotes(
+    client,
+    db_session,
+) -> None:
+    pool = _pool("parking_space_cost_center")
+    pool["allocation_method"] = "specified_value"
+    pool["recipient_scope"] = "Units with an appurtenant parking space"
+    pool["selected_unit_numbers"] = []
+    pool["participant_unit_numbers"] = []
+    pool["amount_availability"] = "external_schedule"
+    pool["annual_amount"] = None
+    pool["monthly_amount"] = None
+    payload = _payload(pool)
+    payload["unit_structure"].update(
+        {
+            "unit_count": 2,
+            "units": [{"unit_number": "201"}, {"unit_number": "202"}],
+        }
+    )
+    property_id, run_id = _seed_api_run(db_session, payload)
+    endpoint = f"/hoa/{property_id}/ccr/extraction-runs/{run_id}"
+
+    preview = client.get(
+        f"{endpoint}/promotion-preview",
+        params={"setup_type": "per_unit"},
+    )
+    assert preview.status_code == 200, preview.text
+    codes = {item["code"] for item in preview.json()["issues"]}
+    assert "CCR_SPECIFIED_VALUES_MISSING" not in codes
+    assert preview.json()["approval_blocked"] is False, preview.json()["issues"]
+
+    approved = client.post(
+        f"{endpoint}/approve",
+        json={"setup_type": "per_unit"},
+    )
+    assert approved.status_code == 200, approved.text
+    rows = db_session.connection().connection.execute(
+        "SELECT specified_monthly_amount FROM assessment_unit_pool_allocations "
+        "WHERE assessment_setup_id = ?",
+        (approved.json()["promoted_setup_id"],),
+    ).fetchall()
+    assert rows == []
+
+
 def test_specified_value_zero_amounts_promote_when_scope_has_no_named_homes(
     client,
     db_session,

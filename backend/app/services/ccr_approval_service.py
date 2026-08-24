@@ -604,8 +604,13 @@ def _raise_preview_blockers(resolved: ResolvedCCRPromotion) -> None:
         code.startswith("CCR_") and "OPERATION" not in code and "REVIEW_EDIT" not in code
         for code in codes
     ):
+        specified_only = codes <= {
+            "CCR_SPECIFIED_VALUES_MISSING",
+            "CCR_SPECIFIED_VALUES_INVALID",
+        }
         exc = IncoherentCcrExtraction(
-            [issue.explanation for issue in preview.issues]
+            [issue.explanation for issue in preview.issues],
+            collapsed=not specified_only,
         )
     elif "CCR_OPERATION_VERSION_STALE" in codes:
         exc = StaleStructuralOperation(base_version=-1, current_version=preview.review_version)

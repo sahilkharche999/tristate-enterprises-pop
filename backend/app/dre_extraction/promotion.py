@@ -262,6 +262,18 @@ def validate_specified_value_pools(
         if pool.allocation_method != "specified_value":
             continue
         participant_numbers = _specified_value_participant_numbers(pool, units)
+        if (
+            not participant_numbers
+            and pool.amount_availability in {"external_schedule", "operator_pending"}
+            and pool.annual_amount is None
+            and pool.monthly_amount is None
+        ):
+            validations[pool.pool_key] = SpecifiedValueFactorValidation(
+                valid=True,
+                form="annual",
+                values={},
+            )
+            continue
         validations[pool.pool_key] = validate_specified_value_factors(
             factors=_dollar_factors_for_pool(units, pool.pool_key),
             participant_numbers=participant_numbers,
@@ -984,6 +996,8 @@ def _resolved_selected_unit_numbers(
             derived.append(unit_number)
 
     if not derived:
+        if scope == "custom_unit_list":
+            return []
         raise InvalidStructuralOperation(
             "A non-all payer category has no evidenced or selected homes.",
             [pool.pool_key],
@@ -1207,12 +1221,13 @@ def _specified_value_participant_numbers(
 def apply_documented_specified_value_participants(
     extraction: DRESetupExtraction,
 ) -> DRESetupExtraction:
-    """Pin specified-value participants from operator-documented amounts.
+    """Pin specified-value participants and a writable recipient scope.
 
     Gemini often emits a prose payer description and an empty home list.
-    After the operator enters amounts (including a documented $0 year),
-    those homes become the reviewed participant set so promotion can write
-    them instead of staying blocked.
+    Operator-entered amounts (including a documented $0 year) become the
+    reviewed participant set. A prose scope with no named homes is rewritten
+    to custom_unit_list so promotion can insert the category without inventing
+    payers.
     """
     units = list(extraction.unit_structure.units)
     pools: list[AllocationPoolBlock] = []
@@ -1225,9 +1240,6 @@ def apply_documented_specified_value_participants(
             pools.append(pool)
             continue
         participants = _specified_value_participant_numbers(pool, units)
-        if not participants:
-            pools.append(pool)
-            continue
         scope = pool.recipient_scope
         if scope not in _VALID_RECIPIENT_SCOPES:
             try:
@@ -1236,8 +1248,8 @@ def apply_documented_specified_value_participants(
                 scope = "custom_unit_list"
         if (
             pool.recipient_scope == scope
-            and list(pool.selected_unit_numbers) == participants
-            and list(pool.participant_unit_numbers) == participants
+            and list(pool.selected_unit_numbers) == list(participants)
+            and list(pool.participant_unit_numbers) == list(participants)
         ):
             pools.append(pool)
             continue
