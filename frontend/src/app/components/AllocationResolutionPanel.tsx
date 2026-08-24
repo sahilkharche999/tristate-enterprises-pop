@@ -78,6 +78,9 @@ export function AllocationResolutionPanel({ hoaId }: Props) {
       </section>
     );
   }
+  if (unresolvedPools.length === 0) {
+    return null;
+  }
 
   const monthlyByUnit = ((preview as { preview?: { monthly_by_unit?: Record<string, string> } } | null)
     ?.preview?.monthly_by_unit) || {};
