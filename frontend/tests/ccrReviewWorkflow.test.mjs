@@ -501,8 +501,13 @@ test('issue identities survive reorder and removal', () => {
 test('Bob-facing labels hide pool names, $0 amounts, and raw page types', () => {
   assert.equal(displayCategoryName('Parking Cost Center Pool'), 'Parking Cost Center');
   assert.equal(displayCategoryName('Equal Base Operating Assessment Pool'), 'Equal Base Operating Assessment');
+  assert.equal(displayCategoryName('Swimming Pools'), 'Swimming Pools');
+  assert.equal(displayCategoryName('Community Pools'), 'Community Pools');
   assert.equal(friendlyAllocationMethod('custom_factor'), 'Divided using an external schedule');
   assert.equal(friendlyWhoPays('owners with appurtenant parking spaces'), 'Homes with parking');
+  assert.notEqual(friendlyWhoPays('non-parking residents'), 'Homes with parking');
+  assert.equal(friendlyWhoPays('non-parking residents'), 'The homes named in the document');
+  assert.notEqual(friendlyWhoPays('visitor parking excluded'), 'Homes with parking');
   assert.equal(
     friendlyAmountDisplay(null, 'external_schedule'),
     'Uses the DRE / budget schedule',
@@ -514,7 +519,66 @@ test('Bob-facing labels hide pool names, $0 amounts, and raw page types', () => 
   );
 });
 
+test('mergeExtractionForDetail backfills HOA metadata when resolved document_metadata is empty', () => {
+  const parsedMeta = {
+    association_name: 'Sample Street Homeowners Association',
+    document_title: 'Declaration of Restrictions',
+    document_date: '2017-11-27',
+    total_units: 9,
+    source_pages: [16, 17],
+  };
+
+  const emptyObject = mergeExtractionForDetail(
+    { assessment_setup: { summary: 'Regular assessments' }, document_metadata: {} },
+    { document_metadata: parsedMeta },
+  );
+  assert.equal(
+    buildCCRExtractedDetail(emptyObject).hoa.associationName,
+    parsedMeta.association_name,
+  );
+  assert.equal(
+    buildCCRExtractedDetail(emptyObject).hoa.documentTitle,
+    parsedMeta.document_title,
+  );
+
+  const emptyDefaults = mergeExtractionForDetail(
+    {
+      document_metadata: {
+        association_name: '',
+        document_title: '',
+        document_date: '',
+        source_pages: [],
+      },
+    },
+    { document_metadata: parsedMeta },
+  );
+  assert.equal(
+    buildCCRExtractedDetail(emptyDefaults).hoa.associationName,
+    parsedMeta.association_name,
+  );
+
+  const operatorOverride = mergeExtractionForDetail(
+    { document_metadata: { association_name: 'Operator Corrected HOA' } },
+    { document_metadata: parsedMeta },
+  );
+  assert.equal(
+    buildCCRExtractedDetail(operatorOverride).hoa.associationName,
+    'Operator Corrected HOA',
+  );
+});
+
 test('extracted detail view model keeps run-19 categories and homes without $0 or Pool', () => {
+  const nineHomeRoster = [
+    ['201', '2202.0', '14.5'],
+    ['202', '1308.0', '8.6'],
+    ['203', '1526.0', '10.1'],
+    ['204', '2599.0', '17.2'],
+    ['301', '1465.0', '9.7'],
+    ['302', '1462.0', '9.7'],
+    ['401', '1560.0', '10.3'],
+    ['402', '1457.0', '9.6'],
+    ['403', '1557.0', '10.3'],
+  ];
   const merged = mergeExtractionForDetail(
     {
       assessment_setup: {
@@ -568,10 +632,11 @@ test('extracted detail view model keeps run-19 categories and homes without $0 o
       ],
       unit_structure: {
         unit_count: 9,
-        units: [
-          { unit_number: '201', square_feet: '2202.0', ownership_percent: '14.5' },
-          { unit_number: '202', square_feet: '1308.0', ownership_percent: '8.6' },
-        ],
+        units: nineHomeRoster.map(([unit_number, square_feet, ownership_percent]) => ({
+          unit_number,
+          square_feet,
+          ownership_percent,
+        })),
       },
     },
     {
@@ -602,7 +667,12 @@ test('extracted detail view model keeps run-19 categories and homes without $0 o
   const detail = buildCCRExtractedDetail(merged);
   assert.equal(detail.hoa.associationName, '131 Missouri Street Homeowners Association');
   assert.equal(detail.categories.length, 5);
-  assert.equal(detail.homes.length, 2);
+  assert.equal(detail.homes.length, 9);
+  assert.deepEqual(
+    detail.homes.map((home) => home.unitNumber),
+    nineHomeRoster.map(([unit]) => unit),
+  );
+  assert.equal(detail.hoa.unitCount, '9');
   assert.equal(detail.categories[0].name, 'Equal Base Operating Assessment');
   assert.equal(detail.categories[4].name, 'Parking Cost Center');
   assert.equal(detail.categories[0].amount, 'Uses the DRE / budget schedule');

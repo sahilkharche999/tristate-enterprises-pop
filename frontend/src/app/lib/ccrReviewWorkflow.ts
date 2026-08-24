@@ -387,7 +387,7 @@ export function displayCategoryName(name: unknown): string {
   const stripped = String(name || '')
     .replace(/\s+/g, ' ')
     .trim()
-    .replace(/\s+pools?\s*$/i, '')
+    .replace(/\s+pool\s*$/i, '')
     .trim();
   return stripped || 'Documented charge';
 }
@@ -418,12 +418,17 @@ export function friendlyAllocationMethod(method: unknown): string {
   }
 }
 
+const NEGATED_PARKING =
+  /\b(non[-\s]?parking|without parking|no parking|except parking|excluding parking|parking excluded)\b/i;
+const PARKING_SCOPE =
+  /\b(parking_users|parking[-_\s]?(users|holders?|spaces?|stalls?)|appurtenant parking|with parking)\b/i;
+
 export function friendlyWhoPays(scope: unknown, selected?: unknown): string {
   const value = String(scope || 'all_units');
   if (value === 'all_units') return 'All homes';
   if (value === 'residential_only') return 'Residential homes only';
   if (value === 'commercial_only') return 'Commercial homes only';
-  if (value === 'parking_users' || /parking/i.test(value)) {
+  if (value === 'parking_users' || (PARKING_SCOPE.test(value) && !NEGATED_PARKING.test(value))) {
     return 'Homes with parking';
   }
   if (value === 'custom_unit_list') {
@@ -532,6 +537,37 @@ function hasList(value: unknown): boolean {
   return Array.isArray(value) && value.length > 0;
 }
 
+function hasText(value: unknown): boolean {
+  return String(value ?? '').trim() !== '';
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function coalesceDocumentMetadata(resolved: unknown, parsed: unknown): Record<string, unknown> {
+  const current = asRecord(resolved);
+  const fallback = asRecord(parsed);
+  const pick = (key: string) => {
+    const left = current[key];
+    if (Array.isArray(left)) return hasList(left) ? left : fallback[key];
+    if (typeof left === 'number' && Number.isFinite(left)) return left;
+    if (hasText(left)) return left;
+    return fallback[key];
+  };
+  return {
+    ...fallback,
+    ...current,
+    association_name: pick('association_name'),
+    document_title: pick('document_title'),
+    document_date: pick('document_date'),
+    total_units: pick('total_units'),
+    source_pages: pick('source_pages'),
+  };
+}
+
 function numberPages(value: unknown): number[] {
   return Array.isArray(value)
     ? value
@@ -558,9 +594,10 @@ export function mergeExtractionForDetail(
     if (!hasList(resolved.page_inventory) && hasList(parsed.page_inventory)) {
       merged.page_inventory = parsed.page_inventory;
     }
-    if (!resolved.document_metadata && parsed.document_metadata) {
-      merged.document_metadata = parsed.document_metadata;
-    }
+    merged.document_metadata = coalesceDocumentMetadata(
+      resolved.document_metadata,
+      parsed.document_metadata,
+    );
     if (
       !hasList(resolved.human_review_questions) &&
       hasList(parsed.human_review_questions)

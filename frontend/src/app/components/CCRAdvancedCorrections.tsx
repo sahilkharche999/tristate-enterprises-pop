@@ -7,6 +7,7 @@ import type {
 import {
   buildAdvancedFactorPayload,
   buildAdvancedCategoryPool,
+  displayCategoryName,
   generateCategoryKey,
   type CCRAdvancedCategoryDraft,
   type CCRFactorDraft,
@@ -134,7 +135,7 @@ function categoryDraft(
       ? 'separate'
       : 'regular';
   return {
-    name: String(category.pool_name || ''),
+    name: displayCategoryName(category.pool_name),
     includedExpenses: Array.isArray(category.included_budget_lines)
       ? category.included_budget_lines.join(', ')
       : '',
@@ -811,7 +812,7 @@ export function CCRAdvancedCorrections({
             {categories.map((category) => (
               <div key={String(category.pool_key)} className="flex flex-wrap items-center gap-2">
                 <span className="text-sm font-medium text-slate-800">
-                  {String(category.pool_name || 'Documented charge')}
+                  {displayCategoryName(category.pool_name)}
                 </span>
                 {(category.source_pages as number[] | undefined)?.map((page) => (
                   <button
@@ -860,7 +861,7 @@ export function CCRAdvancedCorrections({
                   key={String(category.pool_key)}
                   value={String(category.pool_key)}
                 >
-                  {String(category.pool_name || 'Documented charge')}
+                  {displayCategoryName(category.pool_name)}
                 </option>
               ))}
             </select>
@@ -928,7 +929,7 @@ export function CCRAdvancedCorrections({
                           )
                         }
                       />
-                      {String(category.pool_name || 'Documented charge')}
+                      {displayCategoryName(category.pool_name)}
                     </label>
                   );
                 })}

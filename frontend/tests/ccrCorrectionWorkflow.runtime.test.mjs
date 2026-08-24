@@ -2151,6 +2151,7 @@ test('run-19 shaped preview shows extracted detail under guided cards without $0
     extraction_run_id: 19,
     review_version: 0,
     resolved_extraction: {
+      document_metadata: {},
       assessment_setup: {
         summary:
           'Regular assessments are divided equally among all owners, except for insurance, gas, water, and reserves.',
@@ -2297,4 +2298,26 @@ test('run-19 shaped preview shows extracted detail under guided cards without $0
   assert.ok(extractedHeading.includes('Equal Base Operating Assessment'));
   assert.ok(extractedHeading.includes('Parking Cost Center'));
   assert.ok(!extractedHeading.some((name) => /\bPool\b/.test(name)));
+
+  const homesHeading = [...document.querySelectorAll('h3')].find(
+    (node) => node.textContent === 'Homes in this document',
+  );
+  const homesTable = homesHeading?.closest('section')?.querySelector('table');
+  const homeRows = [...(homesTable?.querySelectorAll('tbody tr') ?? [])];
+  assert.equal(homeRows.length, 9);
+  assert.deepEqual(
+    homeRows.map((row) => row.querySelector('td')?.textContent),
+    homes.map(([unit]) => unit),
+  );
+
+  const disclosure = [...document.querySelectorAll('details')].find((node) =>
+    node.textContent?.includes('Advanced corrections'),
+  );
+  assert.ok(disclosure);
+  disclosure.open = true;
+  const optionLabels = [
+    ...disclosure.querySelectorAll('select[aria-label="Category to correct"] option'),
+  ].map((node) => node.textContent);
+  assert.ok(optionLabels.includes('Parking Cost Center'));
+  assert.ok(!optionLabels.some((name) => /\bPool\b/.test(name || '')));
 });
