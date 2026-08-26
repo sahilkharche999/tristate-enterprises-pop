@@ -15,6 +15,7 @@ from app.allocation_resolution.readiness import evaluate_readiness, readiness_bl
 from app.allocation_resolution.semantic_mapping import classify_label_match
 from app.allocation_resolution.service import (
     approve_resolution,
+    approve_slices_for_line,
     list_current_resolutions,
     upsert_category_decision,
     upsert_slices_for_line,
@@ -26,7 +27,11 @@ from app.allocation_resolution.schemas import (
     ResolutionEvidence,
 )
 from app.dre_extraction.adapter import map_allocation_method
-from app.dre_extraction.promotion import parse_extraction_payload, populate_setup_children
+from app.dre_extraction.promotion import (
+    parse_extraction_payload,
+    populate_setup_children,
+    repair_custom_factor_ownership_resolutions,
+)
 from tests.support.missouri_allocation_fixture import (
     MISSOURI_LEVY_EQUAL_ANNUAL,
     MISSOURI_LEVY_HOA_ANNUAL,
@@ -106,25 +111,29 @@ def test_adapter_custom_factor_does_not_become_square_footage() -> None:
     assert mapping.promote_as_unresolved is True
 
 
-def test_missouri_promotion_keeps_custom_factor_unresolved(db: sqlite3.Connection) -> None:
+def test_missouri_promotion_resolves_custom_factor_to_ownership_percentage(
+    db: sqlite3.Connection,
+) -> None:
     pid, setup_id = _seed_setup(db)
     ext = parse_extraction_payload(json.dumps(missouri_extraction_payload()))
     populate_setup_children(
         setup_id=setup_id, setup_type="per_unit", extraction=ext, connection=db,
     )
     row = db.execute(
-        "SELECT declared_allocation_method, allocation_method, denominator_value "
+        "SELECT declared_allocation_method, allocation_method "
         "FROM allocation_pools WHERE assessment_setup_id = ? AND pool_key = 'variable_dre_exceptions'",
         (setup_id,),
     ).fetchone()
     assert row[0] == "custom_factor"
-    assert row[1] == "unresolved"
-    assert row[2] is None
+    assert row[1] == "ownership_percentage"
     recs = list_current_resolutions(db, assessment_setup_id=setup_id)
     exception = next(r for r in recs if r.pool_key == "variable_dre_exceptions")
-    assert exception.status == "unresolved"
+    assert exception.status == "approved"
     assert exception.declared_method == "custom_factor"
-    assert exception.resolved_method is None
+    assert exception.resolved_method == "ownership_percentage"
+    assert set(exception.factor_snapshot.recipients) == {
+        unit["unit_number"] for unit in MISSOURI_UNITS
+    }
     parking = db.execute(
         "SELECT allocation_method, recipient_scope FROM allocation_pools "
         "WHERE pool_key = 'parking_cost_center' AND assessment_setup_id = ?",
@@ -143,6 +152,106 @@ def test_missouri_promotion_keeps_custom_factor_unresolved(db: sqlite3.Connectio
         "SELECT COUNT(*) FROM assessment_units WHERE assessment_setup_id = ?",
         (setup_id,),
     ).fetchone()[0] == 9
+    del pid
+
+
+def test_custom_factor_with_percent_and_sqft_uses_ownership_not_sqft(
+    db: sqlite3.Connection,
+) -> None:
+    pid, setup_id = _seed_setup(db)
+    payload = missouri_extraction_payload()
+    ext = parse_extraction_payload(json.dumps(payload))
+    populate_setup_children(
+        setup_id=setup_id, setup_type="per_unit", extraction=ext, connection=db,
+    )
+    method, denom = db.execute(
+        "SELECT allocation_method, denominator_value FROM allocation_pools "
+        "WHERE pool_key = 'variable_dre_exceptions'",
+    ).fetchone()
+    assert method == "ownership_percentage"
+    assert Decimal(str(denom)) != MISSOURI_TOTAL_SQFT
+    del pid
+
+
+def test_custom_factor_without_percent_stays_unresolved_even_with_sqft(
+    db: sqlite3.Connection,
+) -> None:
+    pid, setup_id = _seed_setup(db)
+    payload = missouri_extraction_payload()
+    for unit in payload["unit_structure"]["units"]:
+        unit["ownership_percent"] = None
+    ext = parse_extraction_payload(json.dumps(payload))
+    populate_setup_children(
+        setup_id=setup_id, setup_type="per_unit", extraction=ext, connection=db,
+    )
+    row = db.execute(
+        "SELECT declared_allocation_method, allocation_method "
+        "FROM allocation_pools WHERE pool_key = 'variable_dre_exceptions'",
+    ).fetchone()
+    assert row[0] == "custom_factor"
+    assert row[1] == "unresolved"
+    rec = next(
+        r for r in list_current_resolutions(db, assessment_setup_id=setup_id)
+        if r.pool_key == "variable_dre_exceptions"
+    )
+    assert rec.status == "unresolved"
+    assert rec.resolved_method is None
+    structural = db.execute(
+        "SELECT allocation_method FROM allocation_pools "
+        "WHERE pool_key = 'structural_repair_sa'",
+    ).fetchone()[0]
+    assert structural == "square_footage"
+    del pid
+
+
+def test_repair_rewrites_legacy_custom_factor_sqft_to_ownership(
+    db: sqlite3.Connection,
+) -> None:
+    pid, setup_id = _seed_setup(db)
+    payload = missouri_extraction_payload()
+    for unit in payload["unit_structure"]["units"]:
+        unit["ownership_percent"] = None
+    ext = parse_extraction_payload(json.dumps(payload))
+    populate_setup_children(
+        setup_id=setup_id, setup_type="per_unit", extraction=ext, connection=db,
+    )
+    db.execute(
+        "UPDATE allocation_pools SET allocation_method = 'square_footage' "
+        "WHERE assessment_setup_id = ? AND pool_key = 'variable_dre_exceptions'",
+        (setup_id,),
+    )
+    db.execute(
+        "UPDATE allocation_resolutions SET status = 'approved', "
+        "resolved_method = 'square_footage' "
+        "WHERE assessment_setup_id = ? AND pool_key = 'variable_dre_exceptions'",
+        (setup_id,),
+    )
+    for unit in MISSOURI_UNITS:
+        db.execute(
+            "UPDATE assessment_units SET ownership_percent = ? "
+            "WHERE assessment_setup_id = ? AND unit_number = ?",
+            (unit["ownership_percent"], setup_id, unit["unit_number"]),
+        )
+    repair_custom_factor_ownership_resolutions(
+        setup_id=setup_id,
+        extraction=ext,
+        connection=db,
+    )
+    method = db.execute(
+        "SELECT allocation_method FROM allocation_pools "
+        "WHERE pool_key = 'variable_dre_exceptions'",
+    ).fetchone()[0]
+    rec = next(
+        r for r in list_current_resolutions(db, assessment_setup_id=setup_id)
+        if r.pool_key == "variable_dre_exceptions"
+    )
+    assert method == "ownership_percentage"
+    assert rec.resolved_method == "ownership_percentage"
+    structural = db.execute(
+        "SELECT allocation_method FROM allocation_pools "
+        "WHERE pool_key = 'structural_repair_sa'",
+    ).fetchone()[0]
+    assert structural == "square_footage"
     del pid
 
 
@@ -330,7 +439,7 @@ def test_review_rows_expose_combined_line_split_state(db: sqlite3.Connection) ->
     }
 
 
-def test_slice_service_rejects_invalid_destinations_and_duplicate_destinations(
+def test_slice_service_rejects_invalid_destinations(
     db: sqlite3.Connection,
 ) -> None:
     pid, setup_id = _seed_setup(db)
@@ -359,29 +468,51 @@ def test_slice_service_rejects_invalid_destinations_and_duplicate_destinations(
             valid_pool_keys={"other_pool"},
         )
 
-    with pytest.raises(ValueError, match="unique"):
-        upsert_slices_for_line(
-            db,
-            property_id=pid,
-            assessment_setup_id=setup_id,
-            source_line_normalized_label="combined utilities",
-            source_line_account_code=None,
-            source_annual_amount=Decimal("100"),
-            slices=[
-                {
-                    "pool_key": "other_pool",
-                    "semantic_category": "gas",
-                    "slice_annual_amount": "40",
-                },
-                {
-                    "pool_key": "other_pool",
-                    "semantic_category": "electricity",
-                    "slice_annual_amount": "60",
-                },
-            ],
-            actor="tester",
-            valid_pool_keys={"other_pool"},
-        )
+
+def test_slice_service_allows_same_destination_for_labeled_slices(
+    db: sqlite3.Connection,
+) -> None:
+    """A combined line can send every slice to one assessment category.
+
+    Operators do this when the source description names more than one charge
+    (Electricity & Gas) but last-package math uses one allocation method.
+    """
+    pid, setup_id = _seed_setup(db)
+    created = upsert_slices_for_line(
+        db,
+        property_id=pid,
+        assessment_setup_id=setup_id,
+        source_line_normalized_label="electricity gas",
+        source_line_account_code=None,
+        source_annual_amount=Decimal("16800"),
+        slices=[
+            {
+                "pool_key": "equal_base",
+                "semantic_category": "gas",
+                "slice_annual_amount": "8400",
+            },
+            {
+                "pool_key": "equal_base",
+                "semantic_category": "electricity",
+                "slice_annual_amount": "8400",
+            },
+        ],
+        actor="tester",
+        valid_pool_keys={"equal_base"},
+    )
+    assert [item.pool_key for item in created] == ["equal_base", "equal_base"]
+    assert [item.slice_annual_amount for item in created] == [
+        Decimal("8400"),
+        Decimal("8400"),
+    ]
+    approved = approve_slices_for_line(
+        db,
+        assessment_setup_id=setup_id,
+        source_line_normalized_label="electricity gas",
+        actor="tester",
+        source_annual_amount=Decimal("16800"),
+    )
+    assert {item.status for item in approved} == {"approved"}
 
 
 def test_classifier_explicit_vs_ambiguous_vs_missing_provenance() -> None:
@@ -427,7 +558,10 @@ def test_migration_report_does_not_rewrite_finalized(db: sqlite3.Connection) -> 
 
 def test_readiness_blocks_unresolved_custom_factor(db: sqlite3.Connection) -> None:
     pid, setup_id = _seed_setup(db)
-    ext = parse_extraction_payload(json.dumps(missouri_extraction_payload()))
+    payload = missouri_extraction_payload()
+    for unit in payload["unit_structure"]["units"]:
+        unit["ownership_percent"] = None
+    ext = parse_extraction_payload(json.dumps(payload))
     populate_setup_children(
         setup_id=setup_id, setup_type="per_unit", extraction=ext, connection=db,
     )
@@ -545,7 +679,7 @@ def test_preview_does_not_mutate_setup(db: sqlite3.Connection) -> None:
     after = db.execute(
         "SELECT allocation_method FROM allocation_pools WHERE pool_key = 'variable_dre_exceptions'"
     ).fetchone()[0]
-    assert before == after == "unresolved"
+    assert before == after == "ownership_percentage"
     del pid
 
 
@@ -576,9 +710,10 @@ def test_allocation_resolution_api_preview_and_final_gate(client, db_session):
     listed = client.get(f"/hoa/{hoa.id}/allocation-resolution")
     assert listed.status_code == 200
     body = listed.json()
-    assert body["blocks_final"] is True
     assert any(
-        r["declared_method"] == "custom_factor" and r["status"] == "unresolved"
+        r["declared_method"] == "custom_factor"
+        and r["resolved_method"] == "ownership_percentage"
+        and r["status"] == "approved"
         for r in body["resolutions"]
     )
 
@@ -588,7 +723,7 @@ def test_allocation_resolution_api_preview_and_final_gate(client, db_session):
 
     ready = client.get(f"/hoa/{hoa.id}/allocation-resolution/readiness")
     assert ready.status_code == 200
-    assert ready.json()["blocks_final"] is True
+    assert ready.json()["blocks_final"] is False
 
     draft = client.post(
         f"/hoa/{hoa.id}/allocation-resolution/pools/variable_dre_exceptions/draft",

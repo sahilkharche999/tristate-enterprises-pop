@@ -861,30 +861,15 @@ test('CC&R API clients use preview and correction endpoints with typed bodies', 
   assert.equal(JSON.parse(requests[2].options.body).field_path, 'assessment_setup.summary');
 });
 
-test('workbench delegates CC&R runs to the guided workflow and keeps PDF jumps', () => {
+test('workbench keeps the editable review window for CC&R runs', () => {
   const here = dirname(fileURLToPath(import.meta.url));
   const workbench = readFileSync(
     join(here, '../src/app/components/DREReviewWorkbench.tsx'),
     'utf8',
   );
-  const guided = readFileSync(
-    join(here, '../src/app/components/CCRCorrectionWorkflow.tsx'),
-    'utf8',
-  );
-  const extracted = readFileSync(
-    join(here, '../src/app/components/CCRExtractedDetail.tsx'),
-    'utf8',
-  );
 
-  assert.match(workbench, /isCCR[\s\S]*CCRCorrectionWorkflow/);
-  assert.match(workbench, /Field-level review workbench/);
-  assert.match(workbench, /isCCR \? \([\s\S]*dreMainContent/);
-  assert.match(guided, /What needs attention/);
-  assert.match(guided, /CCRExtractedDetail/);
-  assert.match(extracted, /What this document already says/);
-  assert.match(guided, /Ready to approve/);
-  assert.match(guided, /jumpToPage/);
-  assert.match(guided, /preview\.resolved_extraction/);
-  assert.match(guided, /CCRAdvancedCorrections/);
-  assert.doesNotMatch(guided, /Reviewed charges/);
+  assert.match(workbench, /const mainContent = dreMainContent/);
+  assert.doesNotMatch(workbench, /CCRCorrectionWorkflow/);
+  assert.doesNotMatch(workbench, /Field-level review workbench/);
+  assert.match(workbench, /isCCR && <span[\s\S]*CC&R/);
 });

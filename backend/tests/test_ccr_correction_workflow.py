@@ -2553,7 +2553,6 @@ def test_bob_can_recover_run_18_entirely_through_public_correction_endpoints(
         issue["code"] for issue in initial_preview["issues"]
     } >= {
         "CCR_DECLARED_CATEGORY_MISSING",
-        "CCR_UNIT_FACTORS_MISSING",
     }
 
     def save_operation(operation: dict, reason: str) -> None:
@@ -2598,10 +2597,7 @@ def test_bob_can_recover_run_18_entirely_through_public_correction_endpoints(
         for issue in corrected_without_factors.json()["issues"]
         if issue["code"] == "CCR_UNIT_FACTORS_MISSING"
     }
-    assert missing_factor_categories == {
-        "variable_dre_operating",
-        "variable_dre_reserves",
-    }
+    assert missing_factor_categories == set()
 
     factor_response = client.post(
         f"/hoa/{property_id}/ccr/extraction-runs/{run_id}/factors",

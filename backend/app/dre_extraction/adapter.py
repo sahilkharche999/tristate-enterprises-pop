@@ -75,8 +75,8 @@ _ALLOCATION_METHOD_TABLE: dict[str, AllocationMethodMapping] = {
         promote_as_unresolved=True,
         review_note=(
             "Prompt emitted 'custom_factor': an external or DRE-referenced "
-            "schedule. Do not infer square_footage or ownership_percentage "
-            "from available unit data; operator must resolve the rule."
+            "schedule. Resolve to ownership_percentage when every participant "
+            "has ownership percent; never infer square_footage."
         ),
     ),
     "unknown": AllocationMethodMapping(

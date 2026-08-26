@@ -78,9 +78,6 @@ export function AllocationResolutionPanel({ hoaId }: Props) {
       </section>
     );
   }
-  if (unresolvedPools.length === 0) {
-    return null;
-  }
 
   const monthlyByUnit = ((preview as { preview?: { monthly_by_unit?: Record<string, string> } } | null)
     ?.preview?.monthly_by_unit) || {};
@@ -136,7 +133,9 @@ export function AllocationResolutionPanel({ hoaId }: Props) {
           const poolKey = String(row.pool_key);
           const categoryName = assessmentCategoryName(state.assessment_categories, poolKey);
           const declared = String(row.declared_method);
-          const selected = methodByPool[poolKey] || String(row.resolved_method || '');
+          const selected = methodByPool[poolKey]
+            || String(row.resolved_method || '')
+            || (['custom_factor', 'external_schedule'].includes(declared) ? 'ownership_percentage' : '');
           return (
             <article
               key={poolKey}

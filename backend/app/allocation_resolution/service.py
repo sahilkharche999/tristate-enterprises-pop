@@ -529,8 +529,6 @@ def upsert_slices_for_line(
         raise ValueError("Each slice must have an assessment category destination.")
     if any(not str(item.get("semantic_category") or "").strip() for item in slices):
         raise ValueError("Each slice must name the governing-document category.")
-    if len(set(destinations)) != len(destinations):
-        raise ValueError("Slice destinations must be unique.")
     if valid_pool_keys is not None:
         unknown = sorted(set(destinations) - set(valid_pool_keys))
         if unknown:
@@ -688,7 +686,6 @@ def approve_slices_for_line(
             not item.semantic_category.strip() or not item.pool_key.strip()
             for item in drafts
         )
-        or len({item.pool_key for item in drafts}) != len(drafts)
         or validate_slice_sum(
             expected_source_amount,
             [item.slice_annual_amount for item in drafts],

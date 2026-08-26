@@ -34,7 +34,6 @@ import {
 } from '../api/dre';
 import { approveCCRRun, reopenAndRepromoteCCRRun } from '../api/ccr';
 import { formatCurrency } from '../lib/budget';
-import { CCRCorrectionWorkflow } from './CCRCorrectionWorkflow';
 import { cn } from './ui/utils';
 import { DrePdfCompareView } from './DrePdfCompareView';
 
@@ -2077,28 +2076,7 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
     </section>
   );
 
-  const mainContent = isCCR ? (
-    <div className="space-y-4">
-      <CCRCorrectionWorkflow
-        hoaId={hoaId}
-        runId={runId}
-        detail={detail}
-        setupType={chosenSetupType}
-        onSetupTypeChange={setChosenSetupType}
-        onCompare={() => setIsCompareOpen(true)}
-        jumpToPage={jumpToPage}
-        onRunChanged={refresh}
-      />
-      <details className="mx-4 mb-4 rounded-xl border border-slate-200 bg-white">
-        <summary className="cursor-pointer px-4 py-3 font-semibold text-slate-900">
-          Field-level review workbench
-        </summary>
-        {dreMainContent}
-      </details>
-    </div>
-  ) : (
-    dreMainContent
-  );
+  const mainContent = dreMainContent;
 
   return (
     <PdfJumpContext.Provider value={jumpToPage}>

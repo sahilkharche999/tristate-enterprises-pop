@@ -39,6 +39,7 @@ from app.dre_extraction.promotion import (
     normalize_extraction_for_promotion,
     parse_extraction_payload,
     populate_setup_children,
+    repair_custom_factor_ownership_resolutions,
     validate_edited_entities_for_promotion,
     validate_ownership_percent_form,
     validate_specified_value_pools,
@@ -986,6 +987,11 @@ def approve_ccr_extraction_run(
             extraction=extraction,
             connection=connection,
             edited_entity_keys=edited_entity_keys,
+        )
+        repair_custom_factor_ownership_resolutions(
+            setup_id=new_setup_id,
+            extraction=extraction,
+            connection=connection,
         )
         if prior_setup_id is not None:
             carry_forward_mappings_across_setups(

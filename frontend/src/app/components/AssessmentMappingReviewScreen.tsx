@@ -25,6 +25,7 @@ import {
 import { formatCurrency } from '../lib/budget';
 import { getErrorMessage } from '../lib/errors';
 import { slicesBalance } from '../lib/allocationResolution';
+import { AllocationResolutionPanel } from './AllocationResolutionPanel';
 
 function humanize(value: string) {
   return value.replaceAll('_', ' ').replace(/\bpool\b/gi, 'assessment category');
@@ -482,6 +483,7 @@ export function AssessmentMappingReviewScreen() {
         {error && (
           <div className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</div>
         )}
+        {Number.isFinite(hoaId) ? <AllocationResolutionPanel hoaId={hoaId} /> : null}
 
         {!state ? (
           <div className="rounded-lg border border-[#e5e5e5] bg-white p-6 text-sm text-[#666666]">
@@ -804,6 +806,11 @@ export function AssessmentMappingReviewScreen() {
                                               ? 'Balance: $0.00 — source amount is fully allocated.'
                                               : `Balance: ${formatCurrency(splitDelta)} — adjust the amounts until the balance is $0.00.`}
                                           </div>
+                                          {error && (
+                                            <div className="rounded border border-rose-200 bg-rose-50 px-2 py-1.5 text-xs text-rose-700">
+                                              {error}
+                                            </div>
+                                          )}
                                           <div className="flex flex-wrap gap-2">
                                             <button
                                               type="button"

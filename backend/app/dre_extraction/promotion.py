@@ -48,7 +48,10 @@ from ..assessment_engine.percent_form import (
     resolve_percent_divisor,
 )
 from .adapter import map_allocation_method
-from ..allocation_resolution.service import seed_resolution_from_promotion
+from ..allocation_resolution.service import (
+    infer_referenced_schedule,
+    seed_resolution_from_promotion,
+)
 from .schemas import (
     AllocationPoolBlock,
     DRESetupExtraction,
@@ -238,10 +241,16 @@ def check_missing_unit_factors(extraction: DRESetupExtraction) -> list[str]:
                     unit.ownership_percent is not None
                     and unit.ownership_percent > 0
                 )
-            return any(
+            has_pool_factor = any(
                 factor.pool_key == pool.pool_key
                 and _is_positive_numeric(factor.factor_value)
                 for factor in unit.pool_factors
+            )
+            if has_pool_factor:
+                return True
+            return (
+                unit.ownership_percent is not None
+                and unit.ownership_percent > 0
             )
 
         if any(
@@ -1812,6 +1821,11 @@ def populate_setup_children(
             extraction=extraction,
             connection=connection,
         )
+        repair_custom_factor_ownership_resolutions(
+            setup_id=setup_id,
+            extraction=extraction,
+            connection=connection,
+        )
         _refresh_proportional_resolution_snapshots(
             setup_id=setup_id,
             extraction=extraction,
@@ -1889,68 +1903,255 @@ def populate_setup_children(
     return counts
 
 
+def _is_custom_or_dre_schedule(declared_method: str, denominator_label: str) -> bool:
+    if declared_method in {"custom_factor", "external_schedule"}:
+        return True
+    schedule = infer_referenced_schedule(declared_method, denominator_label)
+    return schedule.schedule_type == "dre_operating_budget"
+
+
+def _pool_factor_weights(
+    *,
+    pool_key: str,
+    participant_numbers: list[str],
+    units_by_number: dict[str, Any],
+) -> Optional[dict[str, Decimal]]:
+    factors: dict[str, Decimal] = {}
+    for unit_number in participant_numbers:
+        unit = units_by_number.get(str(unit_number))
+        if unit is None:
+            return None
+        matches = [
+            Decimal(str(factor.factor_value))
+            for factor in unit.pool_factors
+            if factor.pool_key == pool_key
+            and factor.factor_value is not None
+            and Decimal(str(factor.factor_value)) > 0
+        ]
+        if len(matches) != 1:
+            return None
+        factors[str(unit_number)] = matches[0]
+    if len(factors) != len(participant_numbers) or not factors:
+        return None
+    return factors
+
+
+def _ownership_percent_weights(
+    connection: sqlite3.Connection,
+    *,
+    setup_id: int,
+    participant_numbers: list[str],
+) -> Optional[dict[str, Decimal]]:
+    if not participant_numbers:
+        return None
+    rows = connection.execute(
+        """
+        SELECT unit_number, ownership_percent
+          FROM assessment_units
+         WHERE assessment_setup_id = ?
+        """,
+        (setup_id,),
+    ).fetchall()
+    by_number = {
+        str(row[0]): row[1]
+        for row in rows
+        if row[0] not in (None, "")
+    }
+    factors: dict[str, Decimal] = {}
+    for unit_number in participant_numbers:
+        raw = by_number.get(str(unit_number))
+        if raw in (None, ""):
+            return None
+        try:
+            value = Decimal(str(raw))
+        except (InvalidOperation, TypeError, ValueError):
+            return None
+        if not value.is_finite() or value <= 0:
+            return None
+        factors[str(unit_number)] = value
+    if len(factors) != len(participant_numbers):
+        return None
+    return factors
+
+
+def _apply_ownership_percentage_resolution(
+    connection: sqlite3.Connection,
+    *,
+    setup_id: int,
+    pool_key: str,
+    factors: dict[str, Decimal],
+    source: str,
+) -> None:
+    total = sum(factors.values(), start=Decimal("0"))
+    snapshot = {
+        "method": "ownership_percentage",
+        "denominator_value": str(total),
+        "denominator_source": "manual",
+        "recipients": {
+            unit_number: str(value)
+            for unit_number, value in factors.items()
+        },
+    }
+    connection.execute(
+        "UPDATE allocation_pools "
+        "SET allocation_method = 'ownership_percentage', "
+        "denominator_value = ?, denominator_source = 'manual' "
+        "WHERE assessment_setup_id = ? AND pool_key = ?",
+        (str(total), setup_id, pool_key),
+    )
+    try:
+        connection.execute(
+            "UPDATE allocation_resolutions "
+            "SET status = 'approved', resolved_method = 'ownership_percentage', "
+            "denominator_value = ?, denominator_source = 'manual', "
+            "factor_snapshot_json = ?, source = ?, "
+            "approved_at = datetime('now') "
+            "WHERE assessment_setup_id = ? AND pool_key = ? "
+            "AND ("
+            "    status IN ('unresolved', 'draft') "
+            "    OR (status = 'approved' AND resolved_method = 'square_footage')"
+            ")",
+            (str(total), json.dumps(snapshot), source, setup_id, pool_key),
+        )
+    except sqlite3.OperationalError:
+        logger.warning(
+            "promotion: allocation_resolutions unavailable while resolving %s",
+            pool_key,
+        )
+
+
 def _promote_custom_factor_resolutions(
     *,
     setup_id: int,
     extraction: DRESetupExtraction,
     connection: sqlite3.Connection,
 ) -> None:
-    """Turn complete per-category custom factors into executable resolutions."""
+    """Turn complete custom factors or unit ownership percents into resolutions."""
     units_by_number = {
         str(unit.unit_number): unit for unit in extraction.unit_structure.units
     }
     for pool in extraction.allocation_pools:
-        if pool.allocation_method != "custom_factor":
+        if pool.allocation_method not in {"custom_factor", "external_schedule"}:
             continue
-        participant_numbers = (
-            list(units_by_number)
-            if pool.recipient_scope == "all_units"
-            else list(pool.selected_unit_numbers)
+        if _is_isolated_structural_pool(pool):
+            continue
+        participant_numbers = [
+            str(number)
+            for number in (
+                list(units_by_number)
+                if pool.recipient_scope == "all_units"
+                else list(pool.selected_unit_numbers)
+            )
+            if str(number).strip()
+        ]
+        factors = _pool_factor_weights(
+            pool_key=pool.pool_key,
+            participant_numbers=participant_numbers,
+            units_by_number=units_by_number,
         )
-        factors: dict[str, Decimal] = {}
-        for unit_number in participant_numbers:
-            unit = units_by_number.get(str(unit_number))
-            if unit is None:
-                break
-            matches = [
-                Decimal(str(factor.factor_value))
-                for factor in unit.pool_factors
-                if factor.pool_key == pool.pool_key
-                and factor.factor_value is not None
-                and Decimal(str(factor.factor_value)) > 0
-            ]
-            if len(matches) != 1:
-                break
-            factors[str(unit_number)] = matches[0]
-        if len(factors) != len(participant_numbers) or not factors:
+        source = "operator"
+        if factors is None:
+            factors = _ownership_percent_weights(
+                connection,
+                setup_id=setup_id,
+                participant_numbers=participant_numbers,
+            )
+            source = "promotion"
+        if factors is None:
             continue
+        _apply_ownership_percentage_resolution(
+            connection,
+            setup_id=setup_id,
+            pool_key=pool.pool_key,
+            factors=factors,
+            source=source,
+        )
 
-        total = sum(factors.values(), start=Decimal("0"))
-        snapshot = {
-            "method": "ownership_percentage",
-            "denominator_value": str(total),
-            "denominator_source": "manual",
-            "recipients": {
-                unit_number: str(value)
-                for unit_number, value in factors.items()
-            },
-        }
-        connection.execute(
-            "UPDATE allocation_pools "
-            "SET allocation_method = 'ownership_percentage', "
-            "denominator_value = ?, denominator_source = 'manual' "
-            "WHERE assessment_setup_id = ? AND pool_key = ?",
-            (str(total), setup_id, pool.pool_key),
+
+def repair_custom_factor_ownership_resolutions(
+    *,
+    setup_id: int,
+    extraction: Optional[DRESetupExtraction] = None,
+    connection: sqlite3.Connection,
+) -> None:
+    """Rewrite wrongly-sqft or unresolved DRE-schedule pools to ownership %."""
+    try:
+        rows = connection.execute(
+            """
+            SELECT pool_key,
+                   COALESCE(declared_allocation_method, ''),
+                   allocation_method,
+                   COALESCE(denominator_label, ''),
+                   COALESCE(recipient_scope, 'all_units')
+              FROM allocation_pools
+             WHERE assessment_setup_id = ?
+            """,
+            (setup_id,),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return
+
+    extraction_pools = {
+        pool.pool_key: pool
+        for pool in (extraction.allocation_pools if extraction is not None else [])
+    }
+    unit_numbers = [
+        str(row[0])
+        for row in connection.execute(
+            """
+            SELECT unit_number FROM assessment_units
+             WHERE assessment_setup_id = ?
+             ORDER BY id
+            """,
+            (setup_id,),
+        ).fetchall()
+        if row[0] not in (None, "")
+    ]
+    for pool_key, declared, current, denom, scope in rows:
+        if declared == "square_footage":
+            continue
+        if not _is_custom_or_dre_schedule(str(declared), str(denom)):
+            continue
+        if current not in {"unresolved", "square_footage"}:
+            continue
+        pool = extraction_pools.get(str(pool_key))
+        if pool is not None and _is_isolated_structural_pool(pool):
+            continue
+        if pool is not None and _pool_factor_weights(
+            pool_key=str(pool_key),
+            participant_numbers=(
+                list(unit_numbers)
+                if pool.recipient_scope == "all_units"
+                else [str(number) for number in pool.selected_unit_numbers]
+            ),
+            units_by_number={
+                str(unit.unit_number): unit
+                for unit in extraction.unit_structure.units
+            } if extraction is not None else {},
+        ):
+            continue
+        participants = (
+            list(unit_numbers)
+            if str(scope) == "all_units"
+            else (
+                [str(number) for number in pool.selected_unit_numbers]
+                if pool is not None
+                else []
+            )
         )
-        connection.execute(
-            "UPDATE allocation_resolutions "
-            "SET status = 'approved', resolved_method = 'ownership_percentage', "
-            "denominator_value = ?, denominator_source = 'manual', "
-            "factor_snapshot_json = ?, source = 'operator', "
-            "approved_at = datetime('now') "
-            "WHERE assessment_setup_id = ? AND pool_key = ? "
-            "AND status IN ('unresolved', 'draft')",
-            (str(total), json.dumps(snapshot), setup_id, pool.pool_key),
+        factors = _ownership_percent_weights(
+            connection,
+            setup_id=setup_id,
+            participant_numbers=participants,
+        )
+        if factors is None:
+            continue
+        _apply_ownership_percentage_resolution(
+            connection,
+            setup_id=setup_id,
+            pool_key=str(pool_key),
+            factors=factors,
+            source="promotion",
         )
 
 
@@ -2187,4 +2388,5 @@ __all__ = [
     "entity_keys_touched_by_edits",
     "parse_extraction_payload",
     "populate_setup_children",
+    "repair_custom_factor_ownership_resolutions",
 ]

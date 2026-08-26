@@ -35,12 +35,12 @@ test('readiness issue anchors are deep-linkable', () => {
   assert.match(issueAnchor('line:utilities'), /allocation-line/);
 });
 
-test('assessment mapping review does not mount allocation-resolution cards', () => {
+test('assessment mapping review mounts allocation-resolution cards', () => {
   const source = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), '../src/app/components/AssessmentMappingReviewScreen.tsx'),
     'utf8',
   );
-  assert.doesNotMatch(source, /AllocationResolutionPanel/);
+  assert.match(source, /AllocationResolutionPanel/);
 });
 
 test('allocation panel defines humanize before rendering resolution rows', () => {
@@ -49,7 +49,6 @@ test('allocation panel defines humanize before rendering resolution rows', () =>
     'utf8',
   );
   assert.match(source, /function humanize\(value: string\)/);
-  assert.match(source, /unresolvedPools\.length === 0/);
   assert.match(source, /humanize\(declared\)/);
   assert.match(source, /humanize\(String\(row\.status\)\)/);
 });
