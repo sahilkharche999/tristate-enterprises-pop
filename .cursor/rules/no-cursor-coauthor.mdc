@@ -1,0 +1,22 @@
+---
+description: Never add Cursor as a commit co-author
+alwaysApply: true
+---
+
+# No Cursor co-author on commits
+
+When creating a git commit, do not add Cursor (or any Cursor agent identity) as a co-author.
+
+- Do not add `Co-authored-by: Cursor <cursoragent@cursor.com>`
+- Do not add any other `Co-authored-by` line for Cursor, Cursor Agent, or similar
+- Commit message body is the change description only
+
+```text
+# BAD
+Fix the mapping review crash.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+# GOOD
+Fix the mapping review crash.
+```

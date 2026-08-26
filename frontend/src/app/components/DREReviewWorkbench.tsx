@@ -66,7 +66,7 @@ function describeApiError(exc: unknown): string {
         return `${message || "These edited items couldn't be promoted."} ${parsed.failed_entities.join(', ')}`;
       }
       if (Array.isArray(parsed.missing_pool_keys) && parsed.missing_pool_keys.length > 0) {
-        return `${message || 'Missing per-unit factors.'} Assessment categories: ${parsed.missing_pool_keys.join(', ')}`;
+        return `${message || 'Missing per-unit factors.'} Pool(s): ${parsed.missing_pool_keys.join(', ')}`;
       }
       if (message) return message;
     }
@@ -1047,7 +1047,7 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
         .map((k) => ({ key: k, value: recommendedSetup[k] }))
     : [];
 
-  const dreMainContent = (
+  const mainContent = (
     <section className="space-y-6 p-4">
       {/* ── Header ────────────────────────────────────────────────── */}
       <header className="flex flex-wrap items-start justify-between gap-4">
@@ -1253,21 +1253,21 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
         <KeyValueGrid rows={setupRows} isManual={isManual} />
       </section>
 
-      {/* ── Assessment categories ────────────────────────────────── */}
+      {/* ── Allocation pools ──────────────────────────────────────── */}
       <section className="rounded-md border border-slate-200 bg-white p-4 shadow-sm">
         <h2 className="mb-3 text-sm font-semibold text-slate-900">
-          Assessment categories{' '}
+          Allocation pools{' '}
           <span className="font-normal text-slate-500">({pools.length})</span>
         </h2>
         {pools.length === 0 ? (
-          <p className="text-sm text-slate-500">No assessment categories detected.</p>
+          <p className="text-sm text-slate-500">No pools detected.</p>
         ) : (
           <div className="overflow-x-auto">
             <table className="min-w-full text-sm">
               <thead>
                 <tr className="border-b border-slate-200 text-left text-xs uppercase tracking-wide text-slate-500">
-                  <th className="py-2 pr-2 font-medium">Parent category</th>
-                  <th className="py-2 pr-4 font-medium">Category key</th>
+                  <th className="py-2 pr-2 font-medium">Parent</th>
+                  <th className="py-2 pr-4 font-medium">Key</th>
                   <th className="py-2 pr-4 font-medium">Name</th>
                   <th className="py-2 pr-4 font-medium">Method</th>
                   <th className="py-2 pr-4 font-medium">Scope</th>
@@ -1276,7 +1276,7 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
                   <th className="py-2 pr-4 text-center font-medium">Variable</th>
                   <th
                     className="py-2 pr-4 text-center font-medium"
-                    title="Mark this assessment category as a special assessment: it is billed separately (one-time), allocated by its basis, and shown in Settings → Special Assessments. Never inferred from the category name."
+                    title="Mark this pool a special assessment: it is billed separately (one-time), allocated by its basis, and shown in Settings → Special Assessments. Never inferred from the pool name."
                   >
                     Special?
                   </th>
@@ -1374,7 +1374,7 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
                         <td className="py-2 pr-4 text-center">
                           <input
                             type="checkbox"
-                            aria-label={`variable flag for assessment category ${poolKey}`}
+                            aria-label={`variable flag for pool ${poolKey}`}
                             defaultChecked={Boolean(pool.variable_flag)}
                             disabled={!reviewReady}
                             onChange={(e) =>
@@ -1397,7 +1397,7 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
                         <td className="py-2 pr-4 text-center">
                           <input
                             type="checkbox"
-                            aria-label={`special assessment flag for assessment category ${poolKey}`}
+                            aria-label={`special assessment flag for pool ${poolKey}`}
                             defaultChecked={pool.pool_kind === 'separately_billed_special_assessment'}
                             disabled={!reviewReady}
                             onChange={(e) =>
@@ -1628,7 +1628,7 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
             , which is neither ~1.0 (written as decimals, e.g. 0.0347 = 3.47%) nor
             ~100 (written as points, e.g. 3.47 = 3.47%). The engine will not guess,
             so confirm how to read them. This does not change any assessment math
-            when no assessment category allocates by ownership %.
+            when no pool allocates by ownership %.
           </p>
           {ownershipFormEditCount > 0 ? (
             <p className="mt-2 text-xs font-medium text-amber-900">
@@ -1808,7 +1808,7 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
                             <table className="min-w-full text-xs">
                               <thead>
                                 <tr className="border-b border-slate-200 text-left uppercase tracking-wide text-slate-500">
-                                  <th className="py-1 pr-3 font-medium">Assessment category</th>
+                                  <th className="py-1 pr-3 font-medium">Pool</th>
                                   <th className="py-1 pr-3 font-medium">Label</th>
                                   <th className="py-1 pr-3 text-right font-medium">
                                     Value
@@ -2075,8 +2075,6 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
       )}
     </section>
   );
-
-  const mainContent = dreMainContent;
 
   return (
     <PdfJumpContext.Provider value={jumpToPage}>

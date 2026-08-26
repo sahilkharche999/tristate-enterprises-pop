@@ -868,7 +868,7 @@ test('workbench keeps the editable review window for CC&R runs', () => {
     'utf8',
   );
 
-  assert.match(workbench, /const mainContent = dreMainContent/);
+  assert.match(workbench, /const mainContent = \(/);
   assert.doesNotMatch(workbench, /CCRCorrectionWorkflow/);
   assert.doesNotMatch(workbench, /Field-level review workbench/);
   assert.match(workbench, /isCCR && <span[\s\S]*CC&R/);
