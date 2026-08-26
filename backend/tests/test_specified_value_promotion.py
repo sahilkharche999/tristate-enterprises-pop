@@ -388,3 +388,26 @@ class TestSourceCheckMigration:
         from app.ai_implementation.database import rebuild_aupa_source_check
 
         assert rebuild_aupa_source_check(db) is False
+
+
+def test_documented_zero_monthly_without_named_homes_is_valid() -> None:
+    from app.dre_extraction.promotion import validate_specified_value_pools
+
+    extraction = parse_extraction_payload(
+        _payload(
+            pool={
+                "recipient_scope": "parking_users",
+                "selected_unit_numbers": [],
+                "annual_amount": None,
+                "monthly_amount": "0",
+                "amount_availability": "known",
+            },
+            units=[
+                {"unit_number": "201", "parking_flag": ""},
+                {"unit_number": "202", "parking_flag": ""},
+            ],
+        )
+    )
+    assert extraction is not None
+    validations = validate_specified_value_pools(extraction)
+    assert validations["capital_contribution"].valid is True

@@ -271,12 +271,12 @@ def validate_specified_value_pools(
         if pool.allocation_method != "specified_value":
             continue
         participant_numbers = _specified_value_participant_numbers(pool, units)
-        if (
-            not participant_numbers
-            and pool.amount_availability in {"external_schedule", "operator_pending"}
-            and pool.annual_amount is None
-            and pool.monthly_amount is None
-        ):
+        no_this_year_dollars = (
+            pool.annual_amount is None or pool.annual_amount == 0
+        ) and (
+            pool.monthly_amount is None or pool.monthly_amount == 0
+        )
+        if not participant_numbers and no_this_year_dollars:
             validations[pool.pool_key] = SpecifiedValueFactorValidation(
                 valid=True,
                 form="annual",

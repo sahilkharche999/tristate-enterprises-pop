@@ -1169,6 +1169,45 @@ def test_custom_participants_map_to_engine_recipient_ids() -> None:
     ) == {"parking": [11, 13]}
 
 
+def test_empty_selected_home_category_without_this_year_dollars_does_not_block() -> None:
+    payload = {
+        "allocation_pools": [
+            {
+                "pool_key": "parking_space_cost_center",
+                "recipient_scope": "parking_users",
+                "selected_unit_numbers": [],
+                "annual_amount": None,
+                "monthly_amount": "0",
+            }
+        ]
+    }
+
+    assert assessment_schedule_matrix._pool_custom_recipient_ids_from_payload(
+        payload=payload,
+        unit_id_by_number={"201": 1, "202": 2},
+    ) == {}
+
+
+def test_empty_selected_home_category_with_positive_dollars_still_requires_homes() -> None:
+    payload = {
+        "allocation_pools": [
+            {
+                "pool_key": "parking_space_cost_center",
+                "recipient_scope": "parking_users",
+                "selected_unit_numbers": [],
+                "annual_amount": "1200",
+                "monthly_amount": None,
+            }
+        ]
+    }
+
+    with pytest.raises(ValueError, match="no reviewed participating homes"):
+        assessment_schedule_matrix._pool_custom_recipient_ids_from_payload(
+            payload=payload,
+            unit_id_by_number={"201": 1, "202": 2},
+        )
+
+
 def test_scalar_edit_after_structural_operation_keeps_append_order() -> None:
     extraction = promotion.parse_extraction_payload(
         json.dumps(_payload(_pool("operating")))

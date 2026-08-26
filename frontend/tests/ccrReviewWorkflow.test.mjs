@@ -872,4 +872,6 @@ test('workbench keeps the editable review window for CC&R runs', () => {
   assert.doesNotMatch(workbench, /CCRCorrectionWorkflow/);
   assert.doesNotMatch(workbench, /Field-level review workbench/);
   assert.match(workbench, /isCCR && <span[\s\S]*CC&R/);
+  assert.match(workbench, /allocation_pools\[\$\{i\}\]\.monthly_amount/);
+  assert.match(workbench, /allocation_pools\[\$\{i\}\]\.annual_amount/);
 });

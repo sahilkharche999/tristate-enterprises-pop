@@ -1904,6 +1904,15 @@ def _per_unit_factor_value_lookup_from_payload(
     return lookup, converted_pool_keys
 
 
+def _absent_or_zero_money(value: Any) -> bool:
+    if value in (None, "", "-"):
+        return True
+    try:
+        return Decimal(str(value)) == 0
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+
+
 def _pool_custom_recipient_ids_from_payload(
     *,
     payload: dict[str, Any],
@@ -1956,6 +1965,13 @@ def _pool_custom_recipient_ids_from_payload(
                     participants.append(unit_number)
             participants = [value for value in participants if value]
         if not pool_key or not participants:
+            # Documented $0 / no printed dollars this year: do not invent
+            # payers and do not block generation. Positive dollars still
+            # require a reviewed home list.
+            if _absent_or_zero_money(pool.get("annual_amount")) and _absent_or_zero_money(
+                pool.get("monthly_amount")
+            ):
+                continue
             raise ValueError(
                 "A selected-home category has no reviewed participating homes."
             )

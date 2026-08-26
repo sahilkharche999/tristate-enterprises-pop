@@ -169,6 +169,8 @@ function EditableValue({
           <input
             autoFocus
             type={kind === 'number' ? 'number' : 'text'}
+            min={kind === 'number' ? '0' : undefined}
+            step={kind === 'number' ? '0.01' : undefined}
             className="w-24 rounded border border-slate-300 px-1 py-0.5 text-xs"
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
@@ -1366,10 +1368,20 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
                           />
                         </td>
                         <td className="py-2 pr-4 text-right tabular-nums font-medium text-slate-900">
-                          {pool.annual_amount !== undefined &&
-                          pool.annual_amount !== null
-                            ? formatCurrency(Number(pool.annual_amount))
-                            : '—'}
+                          <EditableValue
+                            value={pool.annual_amount ?? null}
+                            fieldPath={`allocation_pools[${i}].annual_amount`}
+                            onSave={onSaveEdit}
+                            disabled={!reviewReady}
+                            editCount={editCountByPath[`allocation_pools[${i}].annual_amount`]}
+                            kind="number"
+                            display={
+                              pool.annual_amount !== undefined &&
+                              pool.annual_amount !== null
+                                ? formatCurrency(Number(pool.annual_amount))
+                                : undefined
+                            }
+                          />
                         </td>
                         <td className="py-2 pr-4 text-center">
                           <input
@@ -1438,10 +1450,20 @@ export function DREReviewWorkbench({ hoaId, runId }: Props) {
                             <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-2 text-xs">
                               <dt className="text-slate-500">Monthly</dt>
                               <dd className="text-slate-900 tabular-nums">
-                                {pool.monthly_amount !== undefined &&
-                                pool.monthly_amount !== null
-                                  ? formatCurrency(Number(pool.monthly_amount))
-                                  : '—'}
+                                <EditableValue
+                                  value={pool.monthly_amount ?? null}
+                                  fieldPath={`allocation_pools[${i}].monthly_amount`}
+                                  onSave={onSaveEdit}
+                                  disabled={!reviewReady}
+                                  editCount={editCountByPath[`allocation_pools[${i}].monthly_amount`]}
+                                  kind="number"
+                                  display={
+                                    pool.monthly_amount !== undefined &&
+                                    pool.monthly_amount !== null
+                                      ? formatCurrency(Number(pool.monthly_amount))
+                                      : undefined
+                                  }
+                                />
                               </dd>
                               <dt className="text-slate-500">Denominator label</dt>
                               <dd className="text-slate-900">

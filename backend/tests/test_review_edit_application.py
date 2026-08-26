@@ -198,6 +198,16 @@ class TestApplyReviewEditsToExtraction:
         patched = apply_review_edits_to_extraction(extraction, [_Edit()])
         assert patched.allocation_pools[0].annual_amount == Decimal("150000.50")
 
+    def test_decimal_edit_persists_documented_zero_monthly_amount(self) -> None:
+        extraction = parse_extraction_payload(json.dumps(_payload_with_one_pool()))
+
+        class _Edit:
+            field_path = "allocation_pools[0].monthly_amount"
+            new_value = "0"
+
+        patched = apply_review_edits_to_extraction(extraction, [_Edit()])
+        assert patched.allocation_pools[0].monthly_amount == Decimal("0")
+
     def test_ccr_approval_blocks_declared_context_without_pool(
         self, db: sqlite3.Connection
     ) -> None:
