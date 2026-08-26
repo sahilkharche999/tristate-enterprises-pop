@@ -733,9 +733,21 @@ def test_combined_budget_row_uses_mapping_review_split_contract(client, db_sessi
 
     state = client.get(f"/hoa/{hoa_id}/assessment-mapping-review").json()
     row = state["review_rows"][0]
-    assert row["allocation_mode"] == "split_required"
-    assert row["split_status"] == "required"
+    assert row["allocation_mode"] == "whole_line"
+    assert row["split_status"] == "not_applicable"
     assert row["source_annual_amount"] == 900.0
+
+    marked = client.post(
+        f"/hoa/{hoa_id}/assessment-mapping-review/rows/disposition",
+        json={
+            "line_key": row["line_key"],
+            "disposition_state": "pending_split",
+            "note": "Operator chose to split this combined line.",
+        },
+    )
+    assert marked.status_code == 200, marked.text
+    row = client.get(f"/hoa/{hoa_id}/assessment-mapping-review").json()["review_rows"][0]
+    assert row["allocation_mode"] == "split_required"
 
     stale = client.post(
         f"/hoa/{hoa_id}/allocation-resolution/slices",
@@ -775,6 +787,59 @@ def test_combined_budget_row_uses_mapping_review_split_contract(client, db_sessi
     assert approved.status_code == 200, approved.text
     final_row = client.get(f"/hoa/{hoa_id}/assessment-mapping-review").json()["review_rows"][0]
     assert final_row["split_status"] == "approved"
+
+
+def test_combined_budget_row_can_be_assigned_as_whole_line(client, db_session):
+    hoa_id, setup_id = _seed_assignment_review_data(db_session)
+    raw = db_session.connection().connection
+    raw.execute(
+        """
+        UPDATE budget_drafts
+           SET line_items_json = ?
+         WHERE property_id = ? AND status = 'active'
+        """,
+        (
+            json.dumps([
+                {
+                    "label": "Electricity & Gas",
+                    "category": "operating",
+                    "annual_budget": 16800,
+                    "raw": {"section": "operating"},
+                },
+            ]),
+            hoa_id,
+        ),
+    )
+    raw.execute(
+        """
+        INSERT INTO allocation_resolutions (
+            property_id, assessment_setup_id, pool_key, version_int, status,
+            declared_method, included_categories_json
+        ) VALUES (?, ?, 'pool_a', 1, 'unresolved', 'custom_factor', ?)
+        """,
+        (hoa_id, setup_id, json.dumps(["gas"])),
+    )
+    db_session.commit()
+
+    state = client.get(f"/hoa/{hoa_id}/assessment-mapping-review").json()
+    row = state["review_rows"][0]
+    assert row["allocation_mode"] == "whole_line"
+    assert row["split_status"] == "not_applicable"
+
+    assigned = client.post(
+        f"/hoa/{hoa_id}/assessment-mapping-review/rows/assign",
+        json={
+            "line_key": row["line_key"],
+            "pool_key": "pool_a",
+            "note": "Assign the full combined utility line.",
+        },
+    )
+    assert assigned.status_code == 200, assigned.text
+
+    refreshed = client.get(f"/hoa/{hoa_id}/assessment-mapping-review").json()["review_rows"][0]
+    assert refreshed["allocation_mode"] == "whole_line"
+    assert refreshed["current_pool_key"] == "pool_a"
+    assert refreshed["current_status"] == "mapped"
 
 
 def test_approve_line_review_suggestion_creates_alias_and_current_year_mapping(client, db_session):

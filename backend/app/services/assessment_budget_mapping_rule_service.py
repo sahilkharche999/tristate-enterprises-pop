@@ -1402,8 +1402,11 @@ def _rank_line_review_candidates(
                     score = max(score, 0.95)
                     reasons.append("exact normalized label")
                 elif match_kind == "combined":
-                    score = max(score, 0.45)
-                    reasons.append("combined_line_requires_split")
+                    # Category is one named part of the budget description
+                    # (gas ⊂ Electricity & Gas). Assign the whole source
+                    # amount to that pool unless the operator starts a split.
+                    score = max(score, 0.70)
+                    reasons.append("combined_line_whole_assignment")
                 else:
                     overlap = _token_overlap_score(
                         line_tokens,
@@ -1694,14 +1697,15 @@ def build_assessment_mapping_review_rows(
                 str(item.get("status") or "") == "approved"
                 for item in saved_slices
             )
-        allocation_mode = "split_required" if combined_categories else "whole_line"
+        operator_started_split = bool(saved_slices) or disposition_state == "pending_split"
+        allocation_mode = "split_required" if operator_started_split else "whole_line"
         split_status = (
             "approved" if split_approved
             else "draft" if split_balanced
-            else "required" if combined_categories
+            else "required" if operator_started_split
             else "not_applicable"
         )
-        if combined_categories and included_in_regular_basis:
+        if operator_started_split and included_in_regular_basis:
             status = "split_saved" if split_balanced else "split_required"
 
         rows.append(

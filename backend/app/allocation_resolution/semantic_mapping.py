@@ -17,7 +17,9 @@ def classify_label_match(category: str, line_label: str) -> MatchKind:
     """Classify how a declared category relates to a source budget line.
 
     A narrow category such as ``gas`` is a *combined* match against
-    ``Electricity & Gas`` — never an automatic full-line assignment.
+    ``Electricity & Gas``. That is not an automatic assignment — the
+    operator still confirms the whole source amount, and may optionally
+    split it.
     """
     cat = normalize_budget_label(category)
     line = normalize_budget_label(line_label)

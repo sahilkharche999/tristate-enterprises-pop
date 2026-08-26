@@ -14,7 +14,6 @@ from .schemas import (
     ReadinessIssue,
     ReadinessReport,
 )
-from .semantic_mapping import classify_label_match
 from .service import (
     list_category_decisions,
     list_current_resolutions,
@@ -176,54 +175,11 @@ def evaluate_readiness(
     })
 
     # 3. combined / partial lines
-    combined = 0
-    for rec in resolutions:
-        for category in rec.included_categories:
-            for line in budget_lines:
-                label = normalize_budget_label(
-                    str(line.get("label") or line.get("normalized_label") or "")
-                )
-                kind = classify_label_match(category, label)
-                if kind != "combined":
-                    continue
-                source_line_key = line.get("source_line_key")
-                line_slices = [
-                    sl for sl in approved_slices
-                    if (
-                        (
-                            source_line_key is not None
-                            and sl.source_line_key == source_line_key
-                        )
-                        or (
-                            source_line_key is None
-                            and sl.source_line_normalized_label == label
-                            and (
-                                sl.source_line_account_code in (None, "")
-                                or str(sl.source_line_account_code)
-                                == str(line.get("account_code") or "")
-                            )
-                        )
-                    )
-                ]
-                if line_slices:
-                    continue
-                combined += 1
-                issues.append(ReadinessIssue(
-                    code="combined_line_requires_split",
-                    message=(
-                        f"Category {category!r} matches only part of budget line "
-                        f"{line.get('label')!r}. Split the line before assigning it."
-                    ),
-                    target=f"line:{label}",
-                    fix_path=fix_path,
-                    fix_label=fix_label,
-                    details={
-                        "category": category,
-                        "line_label": line.get("label"),
-                        "pool_key": rec.pool_key,
-                    },
-                ))
-    gates.append({"id": "combined_lines", "ok": combined == 0, "count": combined})
+    # A governing-doc category can be a named part of a combined budget
+    # description (gas ⊂ Electricity & Gas). That is not a required dollar
+    # split — the operator assigns the whole source amount. Incomplete
+    # operator-started splits are covered by slice_reconciliation.
+    gates.append({"id": "combined_lines", "ok": True, "count": 0})
 
     # 4. factor reconciliation
     factor_issues = 0

@@ -429,10 +429,13 @@ def test_review_rows_expose_combined_line_split_state(db: sqlite3.Connection) ->
     )
 
     row = rows[0]
-    assert row["allocation_mode"] == "split_required"
-    assert row["split_status"] == "required"
+    # Combined labels stay whole-line assignable. The operator can still
+    # open an optional split; the product does not force one.
+    assert row["allocation_mode"] == "whole_line"
+    assert row["split_status"] == "not_applicable"
     assert row["source_annual_amount"] == 16800.0
     assert row["saved_slices"] == []
+    assert "gas" in row["combined_categories"]
     assert {option["pool_key"] for option in row["valid_pool_options"]} == {
         "variable_costs",
         "equal_costs",
@@ -574,7 +577,7 @@ def test_readiness_blocks_unresolved_custom_factor(db: sqlite3.Connection) -> No
     )
     codes = {i.code for i in report.issues}
     assert "allocation_resolution_required" in codes
-    assert "combined_line_requires_split" in codes
+    assert "combined_line_requires_split" not in codes
     assert readiness_blocks_final(report) is True
     assert report.ready_for_final is False
 
