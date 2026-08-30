@@ -36,6 +36,7 @@ from app.disclosure_package.assessment_schedule_matrix import (
     _apply_approved_allocation_resolutions,
     build_matrix_from_approved_assessment_setup,
     build_universal_assessment_matrix,
+    category_is_idle_this_year,
     validate_assessment_matrix_finalization,
 )
 from app.disclosure_package.package_specs import STANDARD_PACKAGE_SPEC
@@ -223,6 +224,24 @@ def test_empty_selected_home_resolution_with_no_dollars_does_not_block() -> None
     )
     assert [pool.pool_key for pool in resolved_pools] == ["parking_space_cost_center"]
     assert any("no this-year dollars" in note for note in notes)
+
+
+def test_category_is_idle_this_year_when_every_money_source_is_absent_or_zero() -> None:
+    assert category_is_idle_this_year() is True
+    assert category_is_idle_this_year(mapped_annual=Decimal("0")) is True
+    assert category_is_idle_this_year(
+        mapped_annual=None,
+        operator_total="",
+        documented_annual="-",
+        documented_monthly="0",
+    ) is True
+
+
+def test_category_is_not_idle_when_any_money_source_has_dollars() -> None:
+    assert category_is_idle_this_year(mapped_annual=Decimal("31935")) is False
+    assert category_is_idle_this_year(operator_total="120000") is False
+    assert category_is_idle_this_year(documented_annual="1") is False
+    assert category_is_idle_this_year(documented_monthly="0.01") is False
 
 
 def test_empty_selected_home_resolution_with_dollars_still_requires_homes() -> None:
@@ -2092,8 +2111,31 @@ def test_800_high_multi_pool_parent_child_layout_and_child_mapping_guard() -> No
         child_mapping_status="copied_from_parent",
         child_mapping_approved=False,
     )
+    unit = RecipientReference(
+        ref_type="unit",
+        ref_id=1,
+        label="R1",
+        square_feet=Decimal("1000"),
+        ownership_percent=Decimal("0.50"),
+        parking_spaces=1,
+    )
+    child_with_dollars = CalcResultSet(
+        pool_allocations=[
+            PoolAllocationResult(
+                recipient_ref=unit,
+                pool_id=4,
+                pool_key="general_equal",
+                unrounded_component_monthly=Decimal("100"),
+            )
+        ],
+        recipient_totals=[],
+        rounding_delta_annual=Decimal("0"),
+        rounding_delta_monthly=Decimal("0"),
+        rounding_delta_percent=Decimal("0"),
+        pool_sum_annual=Decimal("1200"),
+    )
     blocked = build_universal_assessment_matrix(
-        _empty_result(),
+        child_with_dollars,
         setup_type="per_unit",
         hoa_name="800 High",
         fiscal_year=2026,
@@ -2101,6 +2143,31 @@ def test_800_high_multi_pool_parent_child_layout_and_child_mapping_guard() -> No
         source_pages=[22],
     )
     assert any("child-level" in issue.message for issue in blocked.preflight_issues)
+
+
+def test_idle_child_copied_from_parent_does_not_block() -> None:
+    idle_child = SimpleNamespace(
+        pool_key="parking_component",
+        pool_name="Parking",
+        allocation_method="specified_value",
+        recipient_scope="parking_users",
+        include_in_pdf=True,
+        display_order=1,
+        parent_pool_key="parking_parent",
+        included_budget_lines=None,
+        child_mapping_status="copied_from_parent",
+        child_mapping_approved=False,
+        needs_current_year_dollars=True,
+    )
+    matrix = build_universal_assessment_matrix(
+        _empty_result(),
+        setup_type="per_unit",
+        hoa_name="Any HOA",
+        fiscal_year=2026,
+        pool_definitions=[idle_child],
+        source_pages=[22],
+    )
+    assert all("child-level" not in issue.message for issue in matrix.preflight_issues)
 
 
 def test_cambridge_budget_only_falls_back_to_manual_review() -> None:

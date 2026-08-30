@@ -276,6 +276,41 @@ class TestPlaceholderPreflightGate:
         _promote(db, setup_id, payload)
         assert check_specified_value_placeholders(property_id=pid, connection=db) == []
 
+    def test_idle_zero_dollar_placeholders_do_not_block(self, db):
+        pid, setup_id = _seed(db)
+        payload = _payload(
+            pool={"annual_amount": "0", "monthly_amount": "0"},
+            units=[_unit("101", None), _unit("102", None)],
+        )
+        _promote(db, setup_id, payload)
+        db.execute(
+            "UPDATE assessment_unit_pool_allocations "
+            "SET source = 'equal_split_placeholder', specified_monthly_amount = 0 "
+            "WHERE assessment_setup_id = ?",
+            (setup_id,),
+        )
+        if db.execute(
+            "SELECT COUNT(*) FROM assessment_unit_pool_allocations "
+            "WHERE assessment_setup_id = ?",
+            (setup_id,),
+        ).fetchone()[0] == 0:
+            unit_ids = [
+                row[0]
+                for row in db.execute(
+                    "SELECT id FROM assessment_units WHERE assessment_setup_id = ?",
+                    (setup_id,),
+                ).fetchall()
+            ]
+            for unit_id in unit_ids:
+                db.execute(
+                    "INSERT INTO assessment_unit_pool_allocations "
+                    "(assessment_setup_id, assessment_unit_id, pool_key, "
+                    " specified_monthly_amount, source) "
+                    "VALUES (?, ?, 'capital_contribution', 0, 'equal_split_placeholder')",
+                    (setup_id, unit_id),
+                )
+        assert check_specified_value_placeholders(property_id=pid, connection=db) == []
+
     def test_gate_scopes_to_default_setup_only(self, db):
         pid, setup_id = _seed(db)
         # a superseded setup with placeholders must not block

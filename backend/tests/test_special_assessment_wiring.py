@@ -7,6 +7,7 @@ from decimal import Decimal
 from app.assessment_engine.engine import SPECIAL_ASSESSMENT_POOL_KIND
 from app.assessment_engine.schemas import PoolDefinition
 from app.disclosure_package.assessment_schedule_matrix import (
+    _empty_special_assessment_issues,
     _pool_is_visible,
     _synthetic_special_assessment_lines,
 )
@@ -149,6 +150,33 @@ def test_no_synthetic_line_without_operator_total():
 
 
 # --- column exclusion --------------------------------------------------------
+
+def test_idle_special_assessment_does_not_emit_missing_amount_issue():
+    issues = _empty_special_assessment_issues(
+        pools=[_special_pool_def("structural_common_area_special_assessment")],
+        pool_totals_annual={},
+        operator_totals={},
+    )
+    assert issues == []
+
+
+def test_idle_special_assessment_with_explicit_zero_total_does_not_block():
+    issues = _empty_special_assessment_issues(
+        pools=[_special_pool_def("sa_roof")],
+        pool_totals_annual={"sa_roof": Decimal("0")},
+        operator_totals={"sa_roof": Decimal("0")},
+    )
+    assert issues == []
+
+
+def test_special_assessment_with_operator_total_is_not_treated_as_idle_gap():
+    issues = _empty_special_assessment_issues(
+        pools=[_special_pool_def("sa_roof")],
+        pool_totals_annual={"sa_roof": Decimal("120000")},
+        operator_totals={"sa_roof": Decimal("120000")},
+    )
+    assert issues == []
+
 
 def test_special_pool_hidden_from_regular_columns():
     special = _special_pool_def()

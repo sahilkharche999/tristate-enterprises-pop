@@ -816,7 +816,9 @@ def check_specified_value_placeholders(
         return []
     rows = connection.execute(
         """
-        SELECT pool_key, COUNT(*) AS placeholder_count
+        SELECT pool_key,
+               COUNT(*) AS placeholder_count,
+               COALESCE(SUM(specified_monthly_amount), 0) AS monthly_sum
           FROM assessment_unit_pool_allocations
          WHERE assessment_setup_id = ?
            AND source = 'equal_split_placeholder'
@@ -826,8 +828,12 @@ def check_specified_value_placeholders(
         (setup_id,),
     ).fetchall()
 
+    from .assessment_schedule_matrix import category_is_idle_this_year
+
     out: list[PreflightError] = []
-    for pool_key, placeholder_count in rows:
+    for pool_key, placeholder_count, monthly_sum in rows:
+        if category_is_idle_this_year(documented_monthly=monthly_sum):
+            continue
         out.append(
             PreflightError(
                 field_path=f"assessment_setup.pools.{pool_key}.unit_allocations",

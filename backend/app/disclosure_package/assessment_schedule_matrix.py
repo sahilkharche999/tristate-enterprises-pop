@@ -803,11 +803,18 @@ def _money_routing_issue_messages(result: Any) -> list[str]:
     return messages
 
 
-def _child_pool_mapping_issues(pool_definitions: list[Any]) -> list[PreflightError]:
+def _child_pool_mapping_issues(
+    pool_definitions: list[Any],
+    pool_totals_annual: dict[str, Decimal] | None = None,
+) -> list[PreflightError]:
     issues: list[PreflightError] = []
     for pool in pool_definitions:
         parent_key = _parent_pool_key(pool)
         if not parent_key:
+            continue
+        if pool_totals_annual is not None and category_is_idle_this_year(
+            mapped_annual=pool_totals_annual.get(_pool_key(pool)),
+        ):
             continue
         included_lines = _get(pool, "included_budget_lines", None)
         mapping_status = str(_get(pool, "child_mapping_status", "") or "")
@@ -1007,8 +1014,17 @@ def build_universal_assessment_matrix(
         for pool in visible_pools
     ]
 
+    mapped_annual_all: dict[str, Decimal] = defaultdict(_zero)
+    for row in result.pool_allocations:
+        mapped_annual_all[row.pool_key] += row.unrounded_component_monthly * Decimal("12")
+
     preflight_issues = list(pending_review_issues or [])
-    preflight_issues.extend(_child_pool_mapping_issues(pool_definitions))
+    preflight_issues.extend(
+        _child_pool_mapping_issues(
+            pool_definitions,
+            pool_totals_annual=mapped_annual_all,
+        )
+    )
     if not evidence_refs:
         preflight_issues.append(PreflightError(
             field_path="assessment_schedule.evidence_refs",
@@ -1913,6 +1929,53 @@ def _absent_or_zero_money(value: Any) -> bool:
         return False
 
 
+def category_is_idle_this_year(
+    *,
+    mapped_annual: Any = None,
+    operator_total: Any = None,
+    documented_annual: Any = None,
+    documented_monthly: Any = None,
+) -> bool:
+    """True when a category has no this-year dollars to bill.
+
+    Idle categories are omitted from the package. They must not invent
+    payers or totals, and they must not fail generate. A category with
+    real mapped, operator-entered, or documented dollars is not idle.
+    """
+    return all(
+        _absent_or_zero_money(value)
+        for value in (
+            mapped_annual,
+            operator_total,
+            documented_annual,
+            documented_monthly,
+        )
+    )
+
+
+def _empty_special_assessment_issues(
+    pools: list[Any],
+    pool_totals_annual: dict[str, Decimal] | None = None,
+    operator_totals: dict[str, Decimal] | None = None,
+) -> list[PreflightError]:
+    """Idle specials (no mapped dollars, no operator total) are omitted.
+
+    A $0 special is unused this year — not a missing amount. Non-idle
+    specials already have dollars, so they never emit this gap.
+    """
+    totals = pool_totals_annual or {}
+    operators = operator_totals or {}
+    for pool in pools:
+        if str(_get(pool, "pool_kind", "") or "") != SPECIAL_ASSESSMENT_POOL_KIND:
+            continue
+        if category_is_idle_this_year(
+            mapped_annual=totals.get(_pool_key(pool)),
+            operator_total=operators.get(_pool_key(pool)),
+        ):
+            continue
+    return []
+
+
 def _pool_custom_recipient_ids_from_payload(
     *,
     payload: dict[str, Any],
@@ -1968,8 +2031,9 @@ def _pool_custom_recipient_ids_from_payload(
             # Documented $0 / no printed dollars this year: do not invent
             # payers and do not block generation. Positive dollars still
             # require a reviewed home list.
-            if _absent_or_zero_money(pool.get("annual_amount")) and _absent_or_zero_money(
-                pool.get("monthly_amount")
+            if category_is_idle_this_year(
+                documented_annual=pool.get("annual_amount"),
+                documented_monthly=pool.get("monthly_amount"),
             ):
                 continue
             raise ValueError(
@@ -2647,12 +2711,9 @@ def _apply_approved_allocation_resolutions(
                 if recipient.ref_type == "unit" and recipient.ref_id in custom_ids
             ]
             if not scoped_recipients:
-                this_year = Decimal("0")
-                if pool_totals_annual is not None:
-                    this_year = Decimal(
-                        str(pool_totals_annual.get(pool.pool_key) or 0)
-                    )
-                if pool_totals_annual is not None and this_year == 0:
+                if pool_totals_annual is not None and category_is_idle_this_year(
+                    mapped_annual=pool_totals_annual.get(pool.pool_key),
+                ):
                     pool_custom_recipients[pool.pool_key] = []
                     updated_pools.append(pool)
                     audit_notes.append(
@@ -3474,23 +3535,13 @@ def build_matrix_from_approved_assessment_setup(
             approved_at=approved_at,
         )
 
-    # A special-assessment pool with no amount (no mapped lines and no operator
-    # total) would render an all-zero allocation table. Surface it as a blocking,
-    # ACTIONABLE issue naming the pool and both in-app fixes — never a silent $0.
-    empty_special_pool_issues = [
-        PreflightError(
-            field_path=f"allocation_pools.{pool.pool_key}.total",
-            message=(
-                f"Special assessment pool '{pool.pool_name}' has no amount. Enter a "
-                "total in Settings → Special Assessments, or map a budget line to it "
-                "in Assessment Mapping Review."
-            ),
-            severity="blocking",
-        )
-        for pool in pools
-        if pool.pool_kind == SPECIAL_ASSESSMENT_POOL_KIND
-        and pool_totals_annual.get(pool.pool_key, Decimal("0")) == 0
-    ]
+    # Idle specials (CC&R documents the method; this year's budget has no
+    # levy) are omitted. Do not invent a total and do not fail generate.
+    empty_special_pool_issues = _empty_special_assessment_issues(
+        pools,
+        pool_totals_annual,
+        operator_totals=_special_assessment_operator_totals(connection, property_id),
+    )
 
     # Manual (pool-free) special assessments: allocate an operator-entered total
     # across the HOA's existing units by the chosen basis, and surface them via the
