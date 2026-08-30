@@ -72,8 +72,9 @@ _RESERVE_REVIEW_ROW_ROLES = {
 _REVIEW_ROW_ROLE_REASONS = {
     _REGULAR_REVIEW_ROW_ROLE: "eligible current-year operating budget line",
     _RESERVE_CONTRIBUTION_REVIEW_ROW_ROLE: (
-        "current-year reserve contribution line — assign to the reserve "
-        "contributions pool for the assessment schedule split"
+        "current-year reserve contribution line — named CCR exception "
+        "components go to that exception pool; leftover transfer stays on "
+        "the CCR residual/default pool"
     ),
     "reserve_component_detail": "reserve component detail line",
     "reserve_cashflow_detail": "reserve cashflow detail line",
@@ -82,42 +83,103 @@ _REVIEW_ROW_ROLE_REASONS = {
 }
 
 
-def _is_reserve_pool_option(option: dict[str, object]) -> bool:
-    key = str(option.get("pool_key") or "").lower()
-    name = str(option.get("pool_name") or "").lower()
-    return "reserve" in key or "reserve" in name
+# Shared accounting words — not HOA component names. A CCR exception rule
+# such as "reserves for elevator and paving" must not consume a generic
+# "Reserve Allocation/Transfer" just because both mention "reserve".
+_GENERIC_RESERVE_TRANSFER_TOKENS = frozenset(
+    {
+        "reserve",
+        "reserves",
+        "allocation",
+        "transfer",
+        "contribution",
+        "contributions",
+    }
+)
 
 
 def _pool_options_for_row_role(
     row_role: str,
     valid_pool_options: list[dict[str, object]],
 ) -> list[dict[str, object]]:
-    """Prefer reserve pools for contribution lines; fall back to all pools."""
-    if row_role != _RESERVE_CONTRIBUTION_REVIEW_ROW_ROLE:
-        return list(valid_pool_options)
-    reserve_opts = [opt for opt in valid_pool_options if _is_reserve_pool_option(opt)]
-    return reserve_opts or list(valid_pool_options)
+    """Every current pool is assignable, including the CCR residual/equal pool.
+
+    Contribution/transfer lines used to be filtered to name-contains
+    ``reserve``, which hid Equal and left only an exception pool such as
+    ``DRE Prorated Reserve Exceptions``.
+    """
+    return list(valid_pool_options)
 
 
 def _preferred_reserve_pool_key(
     valid_pool_options: list[dict[str, object]],
 ) -> Optional[str]:
-    """Pick the best reserve pool key for contribution-line suggestions."""
+    """Dedicated reserve-contribution pool only — never an exception pool."""
     if not valid_pool_options:
         return None
     for preferred in (
         "reserve_contributions",
         "reserve_contribution",
         "replacement_fund",
-        "reserves",
     ):
         for opt in valid_pool_options:
             if str(opt.get("pool_key") or "").lower() == preferred:
                 return str(opt["pool_key"])
+    return None
+
+
+def _residual_pool_key(
+    valid_pool_options: list[dict[str, object]],
+) -> Optional[str]:
+    """CCR residual/default pool for this setup — never an HOA name or id."""
     for opt in valid_pool_options:
-        if _is_reserve_pool_option(opt):
+        if str(opt.get("budget_line_derivation") or "") == "residual_default":
+            return str(opt["pool_key"])
+    for opt in valid_pool_options:
+        if str(opt.get("allocation_method") or "").lower() == "equal":
+            return str(opt["pool_key"])
+    for opt in valid_pool_options:
+        key = str(opt.get("pool_key") or "").lower()
+        name = str(opt.get("pool_name") or "").lower()
+        if "equal" in key or "equal" in name:
             return str(opt["pool_key"])
     return None
+
+
+_FUNCTION_WORDS = frozenset({"and", "or", "for", "the", "of", "to", "a", "an"})
+
+
+def _specific_mapping_tokens(label: str) -> frozenset[str]:
+    return (
+        _semantic_label_tokens(label)
+        - _GENERIC_RESERVE_TRANSFER_TOKENS
+        - _FUNCTION_WORDS
+    )
+
+
+def _explicit_rule_requires_missing_specificity(
+    rule_label: str,
+    line_label: str,
+) -> bool:
+    """True when an explicit CCR exception names components the line does not.
+
+    If the rule is only generic reserve/transfer words (``reserves``), keep
+    normal matching so an HOA that excepts all reserves still maps.
+    """
+    rule_specific = _specific_mapping_tokens(rule_label)
+    if not rule_specific:
+        return False
+    return not bool(rule_specific & _semantic_label_tokens(line_label))
+
+
+def _is_generic_reserve_contribution_label(label: str) -> bool:
+    tokens = _semantic_label_tokens(label)
+    if "reserve" not in tokens and "reserves" not in tokens:
+        return False
+    leftover = tokens - _GENERIC_RESERVE_TRANSFER_TOKENS
+    if leftover:
+        return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -1381,6 +1443,12 @@ def _rank_line_review_candidates(
 
         match_label = str(rule[2] or rule[3] or "")
         rule_normalized = str(rule[3] or "")
+        line_label = str(line.get("label") or line.get("normalized_label") or "")
+        if _explicit_rule_requires_missing_specificity(match_label, line_label):
+            # Explicit CCR exceptions name components. A generic combined
+            # transfer must not inherit those exceptions just because both
+            # mention "reserve".
+            continue
         rule_account_code = (
             str(rule[4]) if rule[4] not in (None, "") else None
         )
@@ -1495,9 +1563,20 @@ def build_assessment_mapping_review_rows(
         assessment_setup_id=assessment_setup_id,
         connection=connection,
     )
+    pool_columns = _table_columns(connection, "allocation_pools")
+    derivation_sql = (
+        "budget_line_derivation"
+        if "budget_line_derivation" in pool_columns
+        else "'unknown'"
+    )
+    method_sql = (
+        "allocation_method"
+        if "allocation_method" in pool_columns
+        else "''"
+    )
     pool_rows = connection.execute(
-        """
-        SELECT pool_key, pool_name
+        f"""
+        SELECT pool_key, pool_name, {derivation_sql}, {method_sql}
           FROM allocation_pools
          WHERE assessment_setup_id = ?
          ORDER BY display_order, id
@@ -1530,7 +1609,12 @@ def build_assessment_mapping_review_rows(
         connection=connection,
     )
     valid_pool_options = [
-        {"pool_key": str(row[0]), "pool_name": str(row[1])}
+        {
+            "pool_key": str(row[0]),
+            "pool_name": str(row[1]),
+            "budget_line_derivation": str(row[2] or ""),
+            "allocation_method": str(row[3] or ""),
+        }
         for row in pool_rows
     ]
     valid_pool_keys = {str(row[0]) for row in pool_rows}
@@ -1643,7 +1727,22 @@ def build_assessment_mapping_review_rows(
                 status = "suggested" if candidates else "unresolved"
 
         recommended_pool_key: Optional[str] = None
-        if candidates:
+        residual_key = _residual_pool_key(row_pool_options)
+        line_label = classification.line_label
+        use_residual_default = (
+            included_in_regular_basis
+            and not mapped
+            and residual_key is not None
+            and (
+                _is_generic_reserve_contribution_label(line_label)
+                or not candidates
+            )
+        )
+        if use_residual_default:
+            # CCR residual/default: regular assessments stay on that pool
+            # unless an explicit exception rule matched the line.
+            recommended_pool_key = residual_key
+        elif candidates:
             recommended_pool_key = candidates[0].pool_key
         elif (
             row_role == _RESERVE_CONTRIBUTION_REVIEW_ROW_ROLE
