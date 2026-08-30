@@ -2599,6 +2599,7 @@ def _apply_approved_allocation_resolutions(
     pools: list[PoolDefinition],
     recipients: list[RecipientReference],
     pool_custom_recipients: dict[str, list[int]],
+    pool_totals_annual: Optional[dict[str, Decimal]] = None,
 ) -> tuple[
     list[PoolDefinition],
     dict[str, dict[tuple[str, int], Decimal]],
@@ -2646,6 +2647,19 @@ def _apply_approved_allocation_resolutions(
                 if recipient.ref_type == "unit" and recipient.ref_id in custom_ids
             ]
             if not scoped_recipients:
+                this_year = Decimal("0")
+                if pool_totals_annual is not None:
+                    this_year = Decimal(
+                        str(pool_totals_annual.get(pool.pool_key) or 0)
+                    )
+                if pool_totals_annual is not None and this_year == 0:
+                    pool_custom_recipients[pool.pool_key] = []
+                    updated_pools.append(pool)
+                    audit_notes.append(
+                        f"Selected-home assessment category '{pool.pool_key}' "
+                        "has no reviewed homes and no this-year dollars; skipped."
+                    )
+                    continue
                 raise EngineSetupError(
                     f"Selected-home assessment category '{pool.pool_key}' "
                     "has no approved recipient identifiers"
@@ -3359,6 +3373,7 @@ def build_matrix_from_approved_assessment_setup(
                 pools=pools,
                 recipients=recipients,
                 pool_custom_recipients=pool_custom_recipients,
+                pool_totals_annual=pool_totals_annual,
             )
         )
     except (EngineSetupError, ValueError) as exc:

@@ -170,6 +170,87 @@ def test_approved_resolution_renders_only_selected_home_recipients() -> None:
     assert matrix.rows[0].annual_total == Decimal("1200.00")
 
 
+def _resolution_connection(pool_key: str) -> sqlite3.Connection:
+    connection = sqlite3.connect(":memory:")
+    connection.execute(
+        """
+        CREATE TABLE allocation_resolutions (
+            id INTEGER PRIMARY KEY,
+            property_id INTEGER,
+            assessment_setup_id INTEGER,
+            pool_key TEXT,
+            version_int INTEGER,
+            status TEXT,
+            declared_method TEXT,
+            resolved_method TEXT,
+            factor_snapshot_json TEXT
+        )
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO allocation_resolutions
+        (id, property_id, assessment_setup_id, pool_key, version_int, status,
+         declared_method, resolved_method, factor_snapshot_json)
+        VALUES (1, 1, 7, ?, 1, 'approved',
+                'specified_value', 'specified_value', ?)
+        """,
+        (pool_key, json.dumps({"recipients": {}})),
+    )
+    return connection
+
+
+def test_empty_selected_home_resolution_with_no_dollars_does_not_block() -> None:
+    connection = _resolution_connection("parking_space_cost_center")
+    pools = [
+        PoolDefinition(
+            pool_id=1,
+            pool_key="parking_space_cost_center",
+            pool_name="Parking Cost Center",
+            allocation_method="specified_value",
+            recipient_scope="custom_unit_list",
+        )
+    ]
+    recipients = [RecipientReference(ref_type="unit", ref_id=11, label="201")]
+
+    resolved_pools, _, _, _, notes = _apply_approved_allocation_resolutions(
+        connection=connection,
+        setup_id=7,
+        pools=pools,
+        recipients=recipients,
+        pool_custom_recipients={},
+        pool_totals_annual={"parking_space_cost_center": Decimal("0")},
+    )
+    assert [pool.pool_key for pool in resolved_pools] == ["parking_space_cost_center"]
+    assert any("no this-year dollars" in note for note in notes)
+
+
+def test_empty_selected_home_resolution_with_dollars_still_requires_homes() -> None:
+    from app.assessment_engine.errors import EngineSetupError
+    import pytest
+
+    connection = _resolution_connection("parking_space_cost_center")
+    pools = [
+        PoolDefinition(
+            pool_id=1,
+            pool_key="parking_space_cost_center",
+            pool_name="Parking Cost Center",
+            allocation_method="specified_value",
+            recipient_scope="custom_unit_list",
+        )
+    ]
+
+    with pytest.raises(EngineSetupError, match="no approved recipient identifiers"):
+        _apply_approved_allocation_resolutions(
+            connection=connection,
+            setup_id=7,
+            pools=pools,
+            recipients=[RecipientReference(ref_type="unit", ref_id=11, label="201")],
+            pool_custom_recipients={},
+            pool_totals_annual={"parking_space_cost_center": Decimal("480")},
+        )
+
+
 def _empty_result() -> CalcResultSet:
     return CalcResultSet(
         pool_allocations=[],
