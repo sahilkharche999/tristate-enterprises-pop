@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 QPDF_TIMEOUT_SECONDS = 30
 
 # Mirrors the @page geometry in templates/standard/_shared.css. Only the
-# bottom-right footer box matters here — the overlay page's background is
+# bottom-center footer box matters here — the overlay page's background is
 # transparent everywhere else (verified: WeasyPrint doesn't paint a
 # background unless one is styled), so pypdf's merge_page composites it
 # over the real page's content without hiding anything.
@@ -50,11 +50,13 @@ _PAGE_NUMBER_OVERLAY_CSS = """
 @page {
     size: Letter;
     margin: 1.4in 0.65in 1.1in 0.65in;
-    @bottom-right {
+    @bottom-center {
         content: counter(page) " of " counter(pages);
         font-family: "DejaVu Sans Condensed", Tahoma, "Liberation Sans", sans-serif;
         font-size: 8pt;
         color: #555;
+        vertical-align: bottom;
+        padding-bottom: 0.3in;
     }
 }
 html, body { margin: 0; padding: 0; }

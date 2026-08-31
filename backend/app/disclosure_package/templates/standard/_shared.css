@@ -276,19 +276,28 @@ table th {
     display: flex;
     justify-content: space-between;
     align-items: baseline;
+    width: 100%;
     margin: 3pt 0;
     font-size: 9pt;
 }
 
 .toc-entry {
+    flex: 1 1 auto;
     text-decoration: none;
     color: #000;
 }
 
 .toc-page {
-    flex: 0 0 auto;
+    flex: 0 0 2em;
     margin-left: 12pt;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
     color: #000;
+}
+
+.note-keep {
+    page-break-inside: avoid;
+    break-inside: avoid;
 }
 
 /* Disclosure-summary form rows (§5570) */
@@ -371,6 +380,13 @@ table th {
 
 .letter-signature {
     margin-top: 24pt;
+}
+
+.letter-signature-image {
+    display: block;
+    max-height: 0.7in;
+    width: auto;
+    margin: 0 0 8pt 0;
 }
 
 /* Letter/report line treatments replacing former inline `style=` attributes

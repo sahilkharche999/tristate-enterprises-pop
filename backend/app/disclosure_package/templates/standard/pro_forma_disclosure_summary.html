@@ -150,7 +150,7 @@
         {% if computed.additional_assessments_needed %}
           {% for aa in computed.additional_assessments_needed %}
           <tr>
-            <td>{{ aa.due_date or '—' }}</td>
+            <td>{{ aa.due_date or hoa_settings.get('letter_date') or '—' }}</td>
             <td class="right">${{ '{:,.2f}'.format(aa.amount_per_unit|float) }}{% if aa.frequency %} per {{ aa.frequency }}{% endif %}</td>
           </tr>
           {% endfor %}

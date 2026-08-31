@@ -27,6 +27,7 @@ import {
   resolveDisclosureDefaultsTab,
 } from '../lib/settingsNavigation';
 import { HOALogoUploadControl } from './HOALogoUploadControl';
+import { HOASignatureUploadControl } from './HOASignatureUploadControl';
 import { Button } from './ui/button';
 
 const REQUIRED_MONEY_FIELDS = new Set<string>([
@@ -82,7 +83,7 @@ const TAB_INTROS: Record<DisclosureDefaultsTab, string> = {
 
 /** Stable fingerprint of editable disclosure settings for dirty detection. */
 function disclosureFingerprint(settings: HOADisclosureSettings): string {
-  const { property_id: _p, has_logo: _h, ...writable } = settings;
+  const { property_id: _p, has_logo: _h, has_signature: _s, ...writable } = settings;
   return JSON.stringify(writable);
 }
 
@@ -262,7 +263,7 @@ export const HOADisclosureSettingsForm = forwardRef<
       // property_id and has_logo are derived/read-only fields returned by GET;
       // the backend's _ALLOWED_FIELDS allowlist rejects unknown keys, so both
       // must be stripped before resending the full settings blob on save.
-      const { property_id: _propertyId, has_logo: _hasLogo, ...writable } = settings;
+      const { property_id: _propertyId, has_logo: _hasLogo, has_signature: _hasSig, ...writable } = settings;
       const next = await putHOADisclosureSettings(hoaId, writable);
       setSettings(next);
       baselineRef.current = disclosureFingerprint(next);
@@ -938,6 +939,13 @@ export const HOADisclosureSettingsForm = forwardRef<
             onChanged={(hasLogo) => setSettings({ ...settings, has_logo: hasLogo })}
             onLogoModeChanged={(mode) =>
               setSettings({ ...settings, letterhead_logo_mode: mode })
+            }
+          />
+          <HOASignatureUploadControl
+            hoaId={hoaId}
+            hasSignature={Boolean(settings.has_signature)}
+            onChanged={(hasSignature) =>
+              setSettings({ ...settings, has_signature: hasSignature })
             }
           />
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">

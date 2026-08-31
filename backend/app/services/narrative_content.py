@@ -71,10 +71,9 @@ class NarrativeDocument:
         return CONTENT_ROOT / "standard" / f"{self.doc_id}.html"
 
 
-# Insertion order IS package order — it drives the editor's single continuous
-# scroll. Computed pages that interleave with these are listed separately in
-# COMPUTED_PLACEHOLDERS so the editor can show read-only cards in the right
-# positions without making them editable.
+# Registry of editable documents. Package / editor order comes from the firm
+# section catalog (`section_order.py`); computed pages interleave from
+# COMPUTED_PLACEHOLDERS keyed by template.
 _DOCUMENTS: tuple[NarrativeDocument, ...] = (
     NarrativeDocument(
         doc_id="cover_letter",
@@ -91,7 +90,7 @@ _DOCUMENTS: tuple[NarrativeDocument, ...] = (
         doc_id="budget_toc",
         template="annual_budget_report_toc.html",
         label="Table of contents",
-        required_blocks=frozenset({"appendix_toc_rows"}),
+        required_blocks=frozenset({"appendix_toc_rows", "package_toc_rows"}),
     ),
     NarrativeDocument(
         doc_id="forecasted_title",
@@ -167,16 +166,16 @@ TEMPLATE_TO_DOCUMENT: dict[str, str] = {
 #: report reads in order without needing a live render (design.md D6).
 COMPUTED_PLACEHOLDERS: tuple[dict[str, Any], ...] = (
     {
-        "template": "pro_forma_disclosure_summary.html",
-        "label": "Pro forma disclosure summary (§5570 statutory form)",
-        "after": "budget_toc",
-        "page_count_hint": 4,
-    },
-    {
         "template": "assessment_schedule/universal.html",
         "label": "Assessment schedule",
         "after": "budget_toc",
         "page_count_hint": 2,
+    },
+    {
+        "template": "pro_forma_disclosure_summary.html",
+        "label": "Pro forma disclosure summary (§5570 statutory form)",
+        "after": "budget_toc",
+        "page_count_hint": 4,
     },
     {
         "template": "forecasted_income_statement.html",
@@ -558,6 +557,10 @@ def resolve_for_context(
         matrix=context.get("matrix"),
         static_data=context.get("static_data"),
         appendix_toc_entries=context.get("appendix_toc_entries") or [],
+        toc_page_numbers=context.get("toc_page_numbers") or {},
+        package_templates=context.get("package_templates"),
+        section_order=context.get("section_order"),
+        hidden_sections=context.get("hidden_sections"),
     )
     source = bodies or {}
     return {
@@ -572,33 +575,54 @@ def documents_for_api(
     session: Any, hoa_id: Optional[int] = None
 ) -> list[dict[str, Any]]:
     """Editable documents in package order, with computed placeholders interleaved."""
+    from app.disclosure_package.section_order import (
+        CATALOG_BY_TEMPLATE,
+        load_saved_lists_from_session,
+        resolve_generated_templates,
+    )
+
     firm_rows = _fetch(session, FIRM_SCOPE, None)
     hoa_rows = _fetch(session, HOA_SCOPE, hoa_id) if hoa_id is not None else {}
-    placeholders_after: dict[str, list[dict[str, Any]]] = {}
-    for placeholder in COMPUTED_PLACEHOLDERS:
-        placeholders_after.setdefault(placeholder["after"], []).append(placeholder)
+    saved_order, _hidden = load_saved_lists_from_session(session)
+    # Hidden optionals stay in the editor so wording can still be maintained.
+    templates = resolve_generated_templates(saved_order, hidden=())
+    computed_by_template = {item["template"]: item for item in COMPUTED_PLACEHOLDERS}
 
-    out: list[dict[str, Any]] = []
-    for doc in _DOCUMENTS:
+    def _editable_row(doc: NarrativeDocument) -> dict[str, Any]:
         if doc.doc_id in hoa_rows:
             scope, body = HOA_SCOPE, hoa_rows[doc.doc_id]
         elif doc.doc_id in firm_rows:
             scope, body = FIRM_SCOPE, firm_rows[doc.doc_id]
         else:
             scope, body = "baseline", baseline_html(doc.doc_id)
-        out.append(
-            {
-                "kind": "editable",
-                "id": doc.doc_id,
-                "label": doc.label,
-                "html": body,
-                "effective_scope": scope,
-                "has_firm_override": doc.doc_id in firm_rows,
-                "has_hoa_override": doc.doc_id in hoa_rows,
-                "required_blocks": sorted(doc.required_blocks),
-            }
-        )
-        for placeholder in placeholders_after.get(doc.doc_id, ()):
+        return {
+            "kind": "editable",
+            "id": doc.doc_id,
+            "label": doc.label,
+            "html": body,
+            "effective_scope": scope,
+            "has_firm_override": doc.doc_id in firm_rows,
+            "has_hoa_override": doc.doc_id in hoa_rows,
+            "required_blocks": sorted(doc.required_blocks),
+        }
+
+    out: list[dict[str, Any]] = []
+    seen_editable: set[str] = set()
+    for template in templates:
+        entry = CATALOG_BY_TEMPLATE[template]
+        if entry.bundle:
+            for doc_id in entry.bundle:
+                doc = DOCUMENT_REGISTRY[doc_id]
+                out.append(_editable_row(doc))
+                seen_editable.add(doc.doc_id)
+            continue
+        doc_id = TEMPLATE_TO_DOCUMENT.get(template)
+        if doc_id:
+            out.append(_editable_row(DOCUMENT_REGISTRY[doc_id]))
+            seen_editable.add(doc_id)
+            continue
+        placeholder = computed_by_template.get(template)
+        if placeholder:
             out.append(
                 {
                     "kind": "computed",
@@ -607,4 +631,7 @@ def documents_for_api(
                     "page_count_hint": placeholder["page_count_hint"],
                 }
             )
+    for doc in _DOCUMENTS:
+        if doc.doc_id not in seen_editable:
+            out.append(_editable_row(doc))
     return out

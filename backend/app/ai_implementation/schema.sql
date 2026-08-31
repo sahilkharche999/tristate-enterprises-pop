@@ -350,6 +350,7 @@ CREATE TABLE IF NOT EXISTS hoa_settings (
     version_int                         INTEGER NOT NULL DEFAULT 0,
     logo_filename                       TEXT,
     letterhead_logo_mode                TEXT NOT NULL DEFAULT 'logo_and_text',
+    signature_filename                  TEXT,
     boilerplate_overrides_json          TEXT,
     boilerplate_reference_filename      TEXT,
     updated_at                          TEXT NOT NULL DEFAULT (datetime('now'))

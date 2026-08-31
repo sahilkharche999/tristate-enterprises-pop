@@ -143,6 +143,7 @@ class HOASettings(Base):
     logo_filename = Column(Text)
     # logo_and_text | logo_only
     letterhead_logo_mode = Column(Text, default="logo_and_text")
+    signature_filename = Column(Text)
     # Per-HOA package language overrides (hoa-boilerplate-workbench).
     # JSON object of slot_id → plain text. Missing/empty slots use templates.
     boilerplate_overrides_json = Column(Text)

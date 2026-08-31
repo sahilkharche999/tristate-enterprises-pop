@@ -151,6 +151,7 @@ _HOA_SETTINGS_COLUMN_DEFINITIONS: dict[str, str] = {
     "logo_filename": "TEXT",
     # letterhead: logo_and_text (default) | logo_only (full brand image, no wordmark)
     "letterhead_logo_mode": "TEXT NOT NULL DEFAULT 'logo_and_text'",
+    "signature_filename": "TEXT",
     # Per-HOA package language overrides + workbench reference PDF
     # (hoa-boilerplate-workbench).
     "boilerplate_overrides_json": "TEXT",

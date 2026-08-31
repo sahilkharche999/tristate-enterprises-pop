@@ -610,6 +610,7 @@ def _resolve_preflight_inputs(
         "board_deferrals_json",
         "logo_filename",
         "letterhead_logo_mode",
+        "signature_filename",
     ):
         val = getattr(settings_row, field, None)
         if val not in (None, ""):

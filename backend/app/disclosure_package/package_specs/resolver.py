@@ -18,6 +18,7 @@ import sqlite3
 from typing import Optional
 
 from ..schemas import PackageSpec
+from ..section_order import apply_to_spec, load_saved_lists
 from .standard import STANDARD_PACKAGE_SPEC
 
 
@@ -69,9 +70,11 @@ def resolve(
         if row is None:
             raise UnsupportedHOAError(property_id)
 
-        return STANDARD_PACKAGE_SPEC.model_copy(
+        saved_order, hidden = load_saved_lists(connection)
+        spec = STANDARD_PACKAGE_SPEC.model_copy(
             update={"hoa_id": property_id, "fiscal_year": fiscal_year}
         )
+        return apply_to_spec(spec, saved_order=saved_order, hidden=hidden)
     finally:
         if close_after:
             connection.close()

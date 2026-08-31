@@ -81,6 +81,7 @@ def test_deleted_5300_disclosure_blocks_finalize():
         ("note_7", "significant_assumptions_variance"),
         ("note_8", "outstanding_loan_note"),
         ("budget_toc", "appendix_toc_rows"),
+        ("budget_toc", "package_toc_rows"),
     ],
 )
 def test_every_required_block_is_enforced(doc_id, block):

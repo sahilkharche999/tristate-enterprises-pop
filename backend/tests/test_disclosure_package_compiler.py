@@ -442,7 +442,7 @@ def test_compile_package_reuses_resolved_reserve_funding_across_templates(
 
     expected_monthly_total = Decimal("68701.17")
     expected_monthly_per_unit = Decimal("246.24")
-    for template in ("cover_letter.html", "note_4_5.html", "note_6_funding_plan.html"):
+    for template in ("cover_letter.html", "notes_packed.html"):
         computed = contexts[template]["computed"]
         assert computed["monthly_replacement_contribution_total"] == expected_monthly_total
         assert computed["monthly_replacement_contribution_per_unit_2026"] == expected_monthly_per_unit
@@ -475,7 +475,7 @@ def test_compile_package_assessment_override_updates_resolved_annual_revenue(
     for template in (
         "cover_letter.html",
         "pro_forma_disclosure_summary.html",
-        "note_4_5.html",
+        "notes_packed.html",
         "forecasted_income_statement.html",
     ):
         computed = contexts[template]["computed"]
@@ -564,7 +564,7 @@ def test_compile_package_surfaces_old_mill_style_conflicts_without_hardcoding(
     assert any("Reserve study cash-flow contribution differs" in gap for gap in computed["data_gaps"])
     assert any("Approved monthly assessment revenue differs" in gap for gap in computed["data_gaps"])
 
-    for template in ("cover_letter.html", "pro_forma_disclosure_summary.html", "note_4_5.html"):
+    for template in ("cover_letter.html", "pro_forma_disclosure_summary.html", "notes_packed.html"):
         assert contexts[template]["computed"]["monthly_assessment_per_unit_current"] == Decimal("606.97")
         assert contexts[template]["computed"]["monthly_replacement_contribution_per_unit_2026"] == Decimal("246.24")
 
@@ -1430,10 +1430,19 @@ def test_real_render_toc_and_footer_page_numbers_match_assembled_pdf(
         toc_text = doc[3].get_text()  # page 4 = annual_budget_report_toc.html
 
         def _page_number_after(label: str) -> int:
-            for line in toc_text.splitlines():
-                if label in line:
-                    idx = toc_text.splitlines().index(line)
-                    return int(toc_text.splitlines()[idx + 1].strip())
+            lines = toc_text.splitlines()
+            for idx, line in enumerate(lines):
+                if label not in line:
+                    continue
+                rest = line.split(label, 1)[1].strip()
+                if rest:
+                    token = rest.split()[-1]
+                    if token.isdigit():
+                        return int(token)
+                if idx + 1 < len(lines):
+                    nxt = lines[idx + 1].strip()
+                    if nxt.isdigit():
+                        return int(nxt)
             raise AssertionError(f"TOC entry not found: {label}")
 
         pro_forma_page = _page_number_after("Pro Forma Operating Budget")

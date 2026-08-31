@@ -16,6 +16,7 @@ from ..services import (
     hoa_logo_storage,
     hoa_settings_service,
     narrative_content,
+    signature_storage,
 )
 
 router = APIRouter(prefix="/hoa", tags=["HOA Settings"])
@@ -62,6 +63,9 @@ def _row_to_dict(row) -> Dict[str, Any]:
         "replacement_fund_monthly_assessment_per_unit": row.replacement_fund_monthly_assessment_per_unit,
         "board_deferrals_json": row.board_deferrals_json or "[]",
         "has_logo": hoa_logo_storage.hoa_logo_exists(row.logo_filename),
+        "has_signature": signature_storage.signature_exists(
+            getattr(row, "signature_filename", None)
+        ),
         "letterhead_logo_mode": (
             getattr(row, "letterhead_logo_mode", None) or "logo_and_text"
         ),
@@ -189,6 +193,66 @@ async def get_hoa_logo(
     if not row.logo_filename or not hoa_logo_storage.hoa_logo_exists(row.logo_filename):
         raise HTTPException(status_code=404, detail="No logo configured for this HOA")
     return FileResponse(path=hoa_logo_storage.hoa_logo_path(row.logo_filename))
+
+
+@router.post("/{hoa_id}/settings/signature")
+async def upload_hoa_signature(
+    hoa_id: int,
+    file: UploadFile = File(...),
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user),  # noqa: ARG001
+):
+    if not session.query(Property).filter_by(id=hoa_id).one_or_none():
+        raise HTTPException(status_code=404, detail=f"HOA not found: {hoa_id}")
+    row = hoa_settings_service.get_or_create(session, hoa_id=hoa_id)
+    file_bytes = await file.read()
+    try:
+        relative_path = signature_storage.save_hoa_signature(
+            property_id=hoa_id,
+            file_bytes=file_bytes,
+            original_filename=file.filename or "signature.png",
+        )
+    except signature_storage.UnsupportedSignatureFileType as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if row.signature_filename and row.signature_filename != relative_path:
+        signature_storage.delete_signature(row.signature_filename)
+    row.signature_filename = relative_path
+    session.commit()
+    session.refresh(row)
+    return _row_to_dict(row)
+
+
+@router.delete("/{hoa_id}/settings/signature")
+async def delete_hoa_signature(
+    hoa_id: int,
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user),  # noqa: ARG001
+):
+    if not session.query(Property).filter_by(id=hoa_id).one_or_none():
+        raise HTTPException(status_code=404, detail=f"HOA not found: {hoa_id}")
+    row = hoa_settings_service.get_or_create(session, hoa_id=hoa_id)
+    if row.signature_filename:
+        signature_storage.delete_signature(row.signature_filename)
+        row.signature_filename = None
+        session.commit()
+        session.refresh(row)
+    return _row_to_dict(row)
+
+
+@router.get("/{hoa_id}/settings/signature")
+async def get_hoa_signature(
+    hoa_id: int,
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user),  # noqa: ARG001
+) -> FileResponse:
+    if not session.query(Property).filter_by(id=hoa_id).one_or_none():
+        raise HTTPException(status_code=404, detail=f"HOA not found: {hoa_id}")
+    row = hoa_settings_service.get_or_create(session, hoa_id=hoa_id)
+    if not row.signature_filename or not signature_storage.signature_exists(
+        row.signature_filename
+    ):
+        raise HTTPException(status_code=404, detail="No signature configured for this HOA")
+    return FileResponse(path=signature_storage.signature_path(row.signature_filename))
 
 
 def _require_hoa(session: Session, hoa_id: int) -> None:

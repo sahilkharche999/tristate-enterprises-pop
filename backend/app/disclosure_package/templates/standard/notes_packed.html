@@ -1,0 +1,9 @@
+{% extends "_base.html" %}
+{% block title %}Notes to Financial Statements{% endblock %}
+{% block content %}
+<section class="note-keep no-break">{{ narrative.note_1_3 | safe_html }}</section>
+<section class="note-keep no-break">{{ narrative.note_4_5 | safe_html }}</section>
+<section class="note-keep no-break">{{ narrative.note_6 | safe_html }}</section>
+<section class="note-keep no-break">{{ narrative.note_7 | safe_html }}</section>
+<section class="note-keep no-break">{{ narrative.note_8 | safe_html }}</section>
+{% endblock %}

@@ -40,6 +40,7 @@ import {
   type SettingsEditTab,
   type SettingsSection,
 } from '../lib/settingsNavigation';
+import { CompanyPackageSettingsCard } from './CompanyPackageSettingsCard';
 import { HOADisclosureSettingsForm, type HOADisclosureSettingsFormHandle } from './HOADisclosureSettingsForm';
 import { BoilerplateWorkbench } from './BoilerplateWorkbench';
 // full-screen package language workbench (same shell as DRE PDF compare)
@@ -789,6 +790,9 @@ export function SettingsScreen() {
                 onReadyChange={setDisclosureReady}
                 onDirtyChange={setDisclosureDirty}
               />
+              <div className="mt-8 border-t border-[#e5e5e5] pt-6">
+                <CompanyPackageSettingsCard />
+              </div>
               <div className="mt-8 border-t border-[#e5e5e5] pt-6">
                 <h3 className="text-base font-semibold text-[#1a1a1a]">
                   Disclosure package wording

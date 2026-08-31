@@ -433,6 +433,33 @@ export function BoilerplateWorkbench({
       </div>
 
       <div className="flex min-h-0 flex-1">
+        {documents && (
+          <nav
+            aria-label="Package pages"
+            className="w-56 shrink-0 overflow-y-auto border-r border-[#e5e5e5] bg-[#fafafa] py-2"
+          >
+            {(documents ?? []).filter(isEditable).map((doc) => {
+              const active = doc.id === activeDocId;
+              return (
+                <button
+                  key={doc.id}
+                  type="button"
+                  className={`block w-full truncate px-3 py-1.5 text-left text-xs ${
+                    active
+                      ? 'bg-[#111111] text-white'
+                      : 'text-[#404040] hover:bg-[#f0f0f0]'
+                  }`}
+                  onClick={() => {
+                    setActiveDocId(doc.id);
+                    editorRef.current?.focusDocument(doc.id);
+                  }}
+                >
+                  {doc.label}
+                </button>
+              );
+            })}
+          </nav>
+        )}
         <div className="flex min-h-0 flex-1 flex-col">
           {documents === null ? (
             <p className="p-6 text-sm text-[#666666]">

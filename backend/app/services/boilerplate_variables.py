@@ -25,6 +25,7 @@ time, and ``resolve`` raises rather than emit it if it ever reaches this far.
 """
 from __future__ import annotations
 
+import calendar
 import re
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -46,6 +47,8 @@ TOKEN_CATALOG: dict[str, str] = {
     "hoa_entity_type": "Entity type",
     "incorporation_clause": "“, created in YYYY” (empty if unknown)",
     "fiscal_year": "Fiscal year",
+    "fiscal_year_end_date": "Fiscal year end date",
+    "prior_fiscal_year_end_date": "Prior fiscal year end date",
     "prior_year": "Prior year",
     "final_forecast_year": "Final forecast year (fiscal year + 29)",
     "effective_date": "Budget effective date",
@@ -75,6 +78,7 @@ TOKEN_CATALOG: dict[str, str] = {
     "monthly_assessment_per_unit": "Monthly assessment per unit",
     # reserve money
     "reserve_monthly_contribution": "Monthly reserve contribution (association)",
+    "reserve_annual_contribution": "Annual reserve contribution (association)",
     "reserve_monthly_per_unit": "Monthly reserve contribution (per unit)",
     "reserve_funding_source_label": "Reserve funding source label",
     "cash_reserve_balance": "Estimated cash reserves (end of prior year)",
@@ -98,11 +102,11 @@ TOC_PAGE_TOKENS: dict[str, str] = {
     "page_forecasted_statement_title": "forecasted_statement_title.html",
     "page_compilation_report": "compilation_report.html",
     "page_forecasted_income_statement": "forecasted_income_statement.html",
-    "page_notes_1_to_3": "notes_1_to_3.html",
-    "page_note_4_5": "note_4_5.html",
-    "page_note_6": "note_6_funding_plan.html",
-    "page_note_7": "note_7.html",
-    "page_note_8": "note_8.html",
+    "page_notes_1_to_3": "notes_packed.html",
+    "page_note_4_5": "notes_packed.html",
+    "page_note_6": "notes_packed.html",
+    "page_note_7": "notes_packed.html",
+    "page_note_8": "notes_packed.html",
     "page_reserve_component_schedule_title": "reserve_component_schedule_title.html",
     "page_insurance_disclosure_cover": "insurance_disclosure_cover.html",
     "page_thirty_year_study_title": "thirty_year_study_title.html",
@@ -186,6 +190,16 @@ CHIP_SOURCES: dict[str, ChipSource] = {
     ),
     # ── period: mechanical ──────────────────────────────────────────────────
     "fiscal_year": ChipSource("derived", None, "The package's budget year."),
+    "fiscal_year_end_date": ChipSource(
+        "derived",
+        None,
+        "Last day of this package's fiscal year (from the HOA's fiscal-year-end month).",
+    ),
+    "prior_fiscal_year_end_date": ChipSource(
+        "derived",
+        None,
+        "Last day of the prior fiscal year.",
+    ),
     "prior_year": ChipSource("derived", None, "The budget year minus one."),
     "final_forecast_year": ChipSource(
         "derived", None, "The budget year plus 29 — the end of the 30-year study."
@@ -282,6 +296,12 @@ CHIP_SOURCES: dict[str, ChipSource] = {
         "The association's monthly reserve funding. Which figure drives it is "
         "chosen by the reserve funding source setting.",
     ),
+    "reserve_annual_contribution": ChipSource(
+        "computed",
+        "reserve_funding_source",
+        "The association's annual reserve funding (monthly contribution × 12, "
+        "or the reserved annual figure when the compute already has one).",
+    ),
     "reserve_monthly_per_unit": ChipSource(
         "computed",
         "reserve_funding_source",
@@ -370,6 +390,11 @@ BLOCK_SOURCES: dict[str, ChipSource] = {
         "One table-of-contents row per uploaded appendix. Manage these on the "
         "Appendices tab.",
     ),
+    "package_toc_rows": ChipSource(
+        "derived",
+        None,
+        "Generated-page table-of-contents rows, in the firm section order.",
+    ),
 }
 
 
@@ -431,6 +456,7 @@ BLOCK_CATALOG: dict[str, str] = {
     "reserve_only_assumption": "Reserve-only packet note — list item (Note 7)",
     "significant_assumptions_variance": "Assessment-level assumption (Note 7)",
     "appendix_toc_rows": "Table-of-contents rows for uploaded appendices",
+    "package_toc_rows": "Table-of-contents rows for generated package pages",
 }
 
 # Matches an (empty) value-chip span, tolerant of attribute order and any
@@ -511,6 +537,32 @@ def _percent(value: Any, places: int = 1) -> str:
 
 def _text(value: Any) -> str:
     return "" if value is None else str(value)
+
+
+def _fiscal_year_end_month(hoa: Any) -> int:
+    raw = _attr(hoa, "fiscal_year_end_month")
+    try:
+        month = int(raw)
+    except (TypeError, ValueError):
+        return 12
+    return month if 1 <= month <= 12 else 12
+
+
+def _long_month_end(year: int, month: int) -> str:
+    last = calendar.monthrange(year, month)[1]
+    return f"{calendar.month_name[month]} {last}, {year}"
+
+
+def _annual_reserve_contribution(reserve_funding: Mapping[str, Any], monthly_total: Any) -> Any:
+    annual = reserve_funding.get("annual_contribution") if reserve_funding else None
+    if annual is not None:
+        return annual
+    if monthly_total is None:
+        return None
+    try:
+        return Decimal(str(monthly_total)) * Decimal(12)
+    except (InvalidOperation, ValueError):
+        return None
 
 
 def _attr(obj: Any, name: str, default: Any = None) -> Any:
@@ -631,6 +683,12 @@ def build_var_map(
             f", created in {incorporation_year}" if incorporation_year else ""
         ),
         "fiscal_year": str(fiscal_year),
+        "fiscal_year_end_date": _long_month_end(
+            fiscal_year, _fiscal_year_end_month(hoa)
+        ),
+        "prior_fiscal_year_end_date": _long_month_end(
+            fiscal_year - 1, _fiscal_year_end_month(hoa)
+        ),
         "prior_year": str(fiscal_year - 1),
         "final_forecast_year": str(fiscal_year + 29),
         "effective_date": f"January 1, {fiscal_year}",
@@ -677,6 +735,7 @@ def build_var_map(
         "monthly_assessment_per_unit": f"${_money(monthly_per_unit)}",
         # reserve money
         "reserve_monthly_contribution": f"${_money(reserve_total)}",
+        "reserve_annual_contribution": f"${_money(_annual_reserve_contribution(reserve_funding, reserve_total))}",
         "reserve_monthly_per_unit": f"${_money(reserve_per_unit)}",
         "reserve_funding_source_label": source_label,
         "cash_reserve_balance": "${}".format(
@@ -940,6 +999,46 @@ def _appendix_toc_rows(entries: Optional[Iterable[Mapping[str, Any]]]) -> Markup
     return Markup(rows)
 
 
+def _package_toc_rows(
+    toc_page_numbers: Optional[Mapping[str, Any]] = None,
+    saved_order: Optional[Iterable[str]] = None,
+    hidden: Optional[Iterable[str]] = None,
+    package_templates: Optional[Iterable[str]] = None,
+) -> Markup:
+    from app.disclosure_package.section_order import (
+        CATALOG_BY_TEMPLATE,
+        NOTE_TOC_ROWS,
+        resolve_generated_templates,
+    )
+
+    pages = toc_page_numbers or {}
+    if package_templates is not None:
+        templates = [key for key in package_templates if key in CATALOG_BY_TEMPLATE]
+    else:
+        templates = resolve_generated_templates(list(saved_order or []), hidden)
+    rows: list[str] = []
+    for template in templates:
+        entry = CATALOG_BY_TEMPLATE[template]
+        if entry.bundle:
+            note_page = pages.get(template)
+            page_text = str(note_page) if note_page is not None else "—"
+            for title, _token in NOTE_TOC_ROWS:
+                rows.append(
+                    f'<li><span class="toc-entry">{escape(title)}</span>'
+                    f'<span class="toc-page">{escape(page_text)}</span></li>'
+                )
+            continue
+        if not entry.toc_title:
+            continue
+        page = pages.get(template)
+        page_text = str(page) if page is not None else "—"
+        rows.append(
+            f'<li><span class="toc-entry">{escape(entry.toc_title)}</span>'
+            f'<span class="toc-page">{escape(page_text)}</span></li>'
+        )
+    return Markup("".join(rows))
+
+
 def build_block_map(
     *,
     fiscal_year: int,
@@ -947,6 +1046,10 @@ def build_block_map(
     matrix: Any = None,
     static_data: Any = None,
     appendix_toc_entries: Optional[Iterable[Mapping[str, Any]]] = None,
+    toc_page_numbers: Optional[Mapping[str, Any]] = None,
+    section_order: Optional[Iterable[str]] = None,
+    hidden_sections: Optional[Iterable[str]] = None,
+    package_templates: Optional[Iterable[str]] = None,
 ) -> dict[str, Markup]:
     """Build the {block_name: trusted HTML} map for one compile pass.
 
@@ -969,6 +1072,12 @@ def build_block_map(
             computed, assessments_vary
         ),
         "appendix_toc_rows": _appendix_toc_rows(appendix_toc_entries),
+        "package_toc_rows": _package_toc_rows(
+            toc_page_numbers,
+            section_order,
+            hidden_sections,
+            package_templates,
+        ),
     }
 
 

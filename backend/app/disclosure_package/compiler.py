@@ -171,6 +171,23 @@ def _hoa_logo_data_uri(logo_filename: Optional[str]) -> Optional[str]:
     return f"data:{mime};base64,{encoded}"
 
 
+def _fill_empty_assessment_due_dates(
+    rows: list[Any], settings: Optional[dict[str, Any]]
+) -> list[Any]:
+    """§5570 item 4: empty due dates take the existing Settings letter date."""
+    fallback = str((settings or {}).get("letter_date") or "").strip()
+    filled: list[Any] = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            filled.append(row)
+            continue
+        item = dict(row)
+        if not str(item.get("due_date") or "").strip() and fallback:
+            item["due_date"] = fallback
+        filled.append(item)
+    return filled
+
+
 class CompileError(RuntimeError):
     """Raised when compile_package cannot produce a valid PDF.
 
@@ -925,7 +942,10 @@ def _compute_all(
     # of a single (false) per-unit figure. The numbers come from the pool once;
     # the json entry supplies only metadata (due date, purpose).
     _apply_special_assessment_allocations(special_assessments, assessment_matrix)
-    additional_assessments_needed = _parse_json_list("additional_assessments_needed_json")
+    additional_assessments_needed = _fill_empty_assessment_due_dates(
+        _parse_json_list("additional_assessments_needed_json"),
+        settings,
+    )
     outstanding_loan = _parse_json_object("outstanding_loan_json")
 
     # 30-year reserve funding study inputs (drifting-puzzling-grove rebuild).
@@ -1343,6 +1363,7 @@ def compile_package(
         # Letterhead logo layout (Bob): always present for StrictUndefined.
         "letterhead_logo_mode": "logo_and_text",
         "logo_filename": None,
+        "signature_filename": None,
     }
     if hoa_settings_overrides:
         for key, value in hoa_settings_overrides.items():
@@ -1357,6 +1378,13 @@ def compile_package(
     #     direct file:// reference would be rejected. Embedding as a data
     #     URI avoids ever needing a network/file fetch during render.
     hoa_logo_data_uri = _hoa_logo_data_uri(effective_hoa_settings.get("logo_filename"))
+    from app.services import signature_storage
+
+    signature_image_data_uri = signature_storage.signature_data_uri(
+        signature_storage.resolve_signature_filename(
+            hoa_filename=effective_hoa_settings.get("signature_filename"),
+        )
+    )
 
     # 3. Pre-compute section-grouped expenses/revenues so we can capture
     #    them in the audit input_snapshot (the snapshot is serialized at
@@ -1456,6 +1484,11 @@ def compile_package(
         # and friends as top-level keys, and handing it the wrapper silently
         # resolved every money chip to $0 instead of raising.
         computed_facts = computed["computed"]
+        package_templates = [
+            entry.template
+            for entry in spec.entries
+            if isinstance(entry, GeneratedPage)
+        ]
 
         def _resolve_narrative(
             toc_page_numbers: Optional[dict[str, Any]] = None,
@@ -1486,9 +1519,11 @@ def compile_package(
                 matrix=assessment_matrix,
                 static_data=spec.static_data,
                 appendix_toc_entries=appendix_toc_entries or [],
+                toc_page_numbers=toc_page_numbers or {},
+                package_templates=package_templates,
             )
             try:
-                return {
+                resolved = {
                     doc_id: boilerplate_variables_module.resolve(
                         body, var_map, block_map
                     )
@@ -1503,6 +1538,12 @@ def compile_package(
                         severity="blocking",
                     )],
                 ) from exc
+            cover = resolved.get("cover_letter")
+            if cover:
+                resolved["cover_letter"] = signature_storage.inject_signature_image(
+                    cover, signature_image_data_uri
+                )
+            return resolved
 
         ctx_full: dict[str, Any] = {
             "spec": spec,

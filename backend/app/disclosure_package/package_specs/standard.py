@@ -29,11 +29,11 @@ from __future__ import annotations
 from decimal import Decimal
 
 from ..schemas import (
-    GeneratedPage,
     HOAStaticData,
     PackageSpec,
     StaticAppendix,
 )
+from ..section_order import default_generated_pages
 
 
 _STANDARD_STATIC_DEFAULTS = HOAStaticData(
@@ -63,32 +63,9 @@ _STANDARD_STATIC_DEFAULTS = HOAStaticData(
 )
 
 
-_STANDARD_ENTRIES = [
-    # ─── Generated pages ────────────────────────────────────────────────────
-    GeneratedPage(template="cover_letter.html", page_count_hint=2),
-    GeneratedPage(template="annual_budget_report_cover.html", page_count_hint=1),
-    GeneratedPage(template="annual_budget_report_toc.html", page_count_hint=1),
-    GeneratedPage(template="pro_forma_disclosure_summary.html", page_count_hint=4),
-    GeneratedPage(template="assessment_schedule/universal.html", page_count_hint=2),
-    GeneratedPage(template="forecasted_statement_title.html", page_count_hint=1),
-    GeneratedPage(template="compilation_report.html", page_count_hint=1),
-    GeneratedPage(template="forecasted_income_statement.html", page_count_hint=2),
-    GeneratedPage(template="notes_1_to_3.html", page_count_hint=2),
-    GeneratedPage(template="note_4_5.html", page_count_hint=1),
-    GeneratedPage(template="note_6_funding_plan.html", page_count_hint=1),
-    GeneratedPage(template="note_7.html", page_count_hint=1),
-    GeneratedPage(template="note_8.html", page_count_hint=1),
-    GeneratedPage(template="reserve_component_schedule_title.html", page_count_hint=1),
-    GeneratedPage(template="reserve_component_schedule.html", page_count_hint=5),
-    GeneratedPage(template="insurance_disclosure_cover.html", page_count_hint=1),
-    # 30-year reserve funding study (drifting-puzzling-grove rebuild).
-    GeneratedPage(template="thirty_year_study_title.html", page_count_hint=1),
-    GeneratedPage(template="thirty_year_study_compilation.html", page_count_hint=1),
-    GeneratedPage(template="thirty_year_cash_flow_panel.html", page_count_hint=3),
-    GeneratedPage(template="major_component_schedule.html", page_count_hint=14),
-    # ─── Static appendices (fallback for HOAs that don't use the
-    #     appendix_documents table yet — operators should migrate to
-    #     the per-HOA appendix manifest in the Settings tab). ─────────────────
+_STANDARD_STATIC_APPENDICES = [
+    # Fallback for HOAs that don't use the appendix_documents table yet —
+    # operators should migrate to the per-HOA appendix manifest in Settings.
     StaticAppendix(file="insurance_certificate.pdf", page_count_hint=3),
     StaticAppendix(file="annual_policy_statement_cover.pdf", page_count_hint=1),
     StaticAppendix(file="adr_disclosure.pdf", page_count_hint=6),
@@ -98,6 +75,11 @@ _STANDARD_ENTRIES = [
     StaticAppendix(file="open_forum_resolution.pdf", page_count_hint=3),
     StaticAppendix(file="electronic_consent_form.pdf", page_count_hint=1),
     StaticAppendix(file="signoff.pdf", page_count_hint=1),
+]
+
+_STANDARD_ENTRIES = [
+    *default_generated_pages(),
+    *_STANDARD_STATIC_APPENDICES,
 ]
 
 

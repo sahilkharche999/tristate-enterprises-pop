@@ -343,11 +343,13 @@ def test_appendix_toc_rows():
 
 
 def test_toc_page_chips_resolve_from_page_numbers():
-    var_map = _var_map(toc_page_numbers={"note_7.html": 23})
+    var_map = _var_map(toc_page_numbers={"notes_packed.html": 23})
     assert var_map["page_note_7"] == "23"
+    assert var_map["page_notes_1_to_3"] == "23"
     # Pass 1 renders before page numbers exist; an em-dash placeholder keeps
     # the row's width stable so pass-1 pagination matches pass 2.
-    assert var_map["page_note_8"] == "—"
+    empty = _var_map(toc_page_numbers={})
+    assert empty["page_note_8"] == "—"
 
 
 # ── carriers, resolution, and the trust boundary ────────────────────────────

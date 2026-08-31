@@ -137,6 +137,7 @@ export interface HOADisclosureSettings {
   has_logo: boolean;
   /** logo_and_text (default) | logo_only — full brand image without wordmark */
   letterhead_logo_mode?: 'logo_and_text' | 'logo_only';
+  has_signature?: boolean;
 }
 
 export async function getHOADisclosureSettings(hoaId: number): Promise<HOADisclosureSettings> {
@@ -199,6 +200,32 @@ export async function uploadHOALogo(
 
 export async function deleteHOALogo(hoaId: number): Promise<HOADisclosureSettings> {
   const r = await fetch(`${BASE_URL}/hoa/${hoaId}/settings/logo`, {
+    method: 'DELETE',
+    headers: authHeaders(),
+  });
+  return handleResponse<HOADisclosureSettings>(r);
+}
+
+export function hoaSignatureUrl(hoaId: number): string {
+  return `${BASE_URL}/hoa/${hoaId}/settings/signature`;
+}
+
+export async function uploadHOASignature(
+  hoaId: number,
+  file: File,
+): Promise<HOADisclosureSettings> {
+  const form = new FormData();
+  form.append('file', file);
+  const r = await fetch(`${BASE_URL}/hoa/${hoaId}/settings/signature`, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: form,
+  });
+  return handleResponse<HOADisclosureSettings>(r);
+}
+
+export async function deleteHOASignature(hoaId: number): Promise<HOADisclosureSettings> {
+  const r = await fetch(`${BASE_URL}/hoa/${hoaId}/settings/signature`, {
     method: 'DELETE',
     headers: authHeaders(),
   });

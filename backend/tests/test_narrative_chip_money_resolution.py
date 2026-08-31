@@ -226,7 +226,7 @@ def test_compiler_resolves_narrative_money_to_real_figures(
         hoa_settings_overrides={"reserve_cash_balance_eoy_prior": 250000},
     )
 
-    narrative = contexts["note_4_5.html"]["narrative"]
+    narrative = contexts["notes_packed.html"]["narrative"]
     note_5 = narrative["note_4_5"]
 
     # Note 5 is the reserve disclosure that shipped reading $0 across the

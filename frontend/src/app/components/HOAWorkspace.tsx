@@ -15,6 +15,7 @@ import { Button } from './ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 import { Label } from './ui/label';
 import { getAppSettings, updateAppSettings } from '../api/appSettings';
+import { CompanyPackageSettingsCard } from './CompanyPackageSettingsCard';
 import { createHOA, listHOAs } from '../api/hoa';
 import { useAuth } from '../context/AuthContext';
 import { getErrorMessage } from '../lib/errors';
@@ -72,6 +73,7 @@ export function HOAWorkspace() {
   const [globalReserveInflationError, setGlobalReserveInflationError] = useState<string | null>(null);
   const [isSavingGlobalReserveInflation, setIsSavingGlobalReserveInflation] = useState(false);
   const [isGlobalReserveInflationOpen, setIsGlobalReserveInflationOpen] = useState(false);
+  const [isCompanyPackageOpen, setIsCompanyPackageOpen] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -255,6 +257,13 @@ export function HOAWorkspace() {
               }}
             >
               Reserve {globalReserveInflationRate}%
+            </Button>
+            <Button
+              variant="outline"
+              className="border-[#e5e5e5] text-[#525252] hover:bg-[#f5f5f5] hover:text-[#111111]"
+              onClick={() => setIsCompanyPackageOpen(true)}
+            >
+              Package order
             </Button>
             <Link to="/settings">
               <Button variant="ghost" size="icon" className="hover:bg-[#f5f5f5]">
@@ -559,6 +568,32 @@ export function HOAWorkspace() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {isCompanyPackageOpen ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-6">
+          <div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-2xl border border-[#e5e5e5] bg-white shadow-2xl">
+            <div className="flex items-start justify-between border-b border-[#e5e5e5] px-6 py-4">
+              <div>
+                <h2 className="text-lg font-semibold text-[#111111]">Company package</h2>
+                <p className="mt-1 text-sm text-[#666666]">
+                  Section order and the default cover-letter signature for every HOA.
+                </p>
+              </div>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="hover:bg-[#f5f5f5]"
+                onClick={() => setIsCompanyPackageOpen(false)}
+              >
+                <X className="w-5 h-5 text-[#525252]" />
+              </Button>
+            </div>
+            <div className="p-6">
+              <CompanyPackageSettingsCard />
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {isCreateOpen ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-6">

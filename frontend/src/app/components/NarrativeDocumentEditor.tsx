@@ -78,6 +78,7 @@ export interface NarrativeEditorHandle {
   /** Re-baseline after a successful save, so the same edits aren't re-sent. */
   markSaved: () => void;
   activeDocId: () => string | null;
+  focusDocument: (docId: string) => void;
 }
 
 export const NarrativeDocumentEditor = forwardRef<
@@ -186,8 +187,23 @@ export const NarrativeDocumentEditor = forwardRef<
         onDirtyChange(false);
       },
       activeDocId: () => activeRef.current,
+      focusDocument: (docId: string) => {
+        if (!editor) return;
+        editor.state.doc.forEach((node, pos) => {
+          if (node.type.name !== 'docSection') return;
+          if (node.attrs.docId !== docId) return;
+          editor.commands.setTextSelection(pos + 1);
+          editor.commands.focus();
+        });
+        const el = editor.view.dom.querySelector(
+          `[data-doc-id="${docId.replace(/"/g, '')}"]`,
+        ) as HTMLElement | null;
+        el?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        activeRef.current = docId;
+        onActiveDocChange(docId);
+      },
     }),
-    [changedDocuments, editor, onDirtyChange],
+    [changedDocuments, editor, onActiveDocChange, onDirtyChange],
   );
 
   const handleChipClick = useCallback(
