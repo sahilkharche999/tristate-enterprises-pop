@@ -207,6 +207,59 @@ def test_documents_for_api_follows_saved_firm_order(session):
     assert ids.index("assessment_schedule/universal.html") > ids.index("cover_letter")
 
 
+_LEGACY_TOC = """
+<h1>Annual Budget Report — Table of Contents</h1>
+<ul class="toc">
+  <li><span class="toc-entry">Pro Forma Operating Budget</span>
+      <span data-var="page_pro_forma_disclosure_summary" class="toc-page"></span></li>
+  <li data-block="appendix_toc_rows"></li>
+</ul>
+"""
+
+
+def test_legacy_saved_toc_does_not_block_preflight(session):
+    from sqlalchemy import text as sql_text
+
+    from app.disclosure_package.preflight import check_narrative_documents
+
+    session.execute(
+        sql_text(
+            "INSERT INTO narrative_overrides "
+            "(scope, document_id, body_html) "
+            "VALUES ('firm', 'budget_toc', :body)"
+        ),
+        {"body": _LEGACY_TOC},
+    )
+    session.flush()
+
+    resolved = nc.resolve_all(session, None)
+    assert 'data-block="package_toc_rows"' in resolved["budget_toc"]
+    errors = check_narrative_documents(resolved)
+    assert not any(e.code == "missing_required_block" for e in errors)
+
+
+def test_heal_does_not_rewrite_operator_documents():
+    html = "<p>Dear Homeowner, that's all.</p>"
+    assert nc.heal_document_html("cover_letter", html) == html
+
+
+def test_legacy_saved_toc_is_healed_in_the_editor_payload(session):
+    from sqlalchemy import text as sql_text
+
+    session.execute(
+        sql_text(
+            "INSERT INTO narrative_overrides "
+            "(scope, document_id, body_html) "
+            "VALUES ('firm', 'budget_toc', :body)"
+        ),
+        {"body": _LEGACY_TOC},
+    )
+    session.flush()
+
+    rows = {row["id"]: row for row in nc.documents_for_api(session, None)}
+    assert 'data-block="package_toc_rows"' in rows["budget_toc"]["html"]
+
+
 def test_note_page_chips_all_point_at_packed_template():
     var_map = bv.build_var_map(
         hoa=SimpleNamespace(

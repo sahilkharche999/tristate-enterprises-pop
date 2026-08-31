@@ -289,10 +289,14 @@ export function BoilerplateWorkbench({
     }
   };
 
-  const handleReset = async (docId: string, label: string) => {
+  const handleReset = async (
+    docId: string,
+    label: string,
+    layer: NarrativeScope,
+  ) => {
     if (
       !window.confirm(
-        scope === 'firm'
+        layer === 'firm'
           ? `Reset “${label}” to the original shipped wording for every HOA?`
           : `Reset “${label}” for this HOA?`,
       )
@@ -301,7 +305,7 @@ export function BoilerplateWorkbench({
     }
     setSaving(true);
     try {
-      applyPayload(await resetNarrativeDocument(hoaId, docId, scope));
+      applyPayload(await resetNarrativeDocument(hoaId, docId, layer));
       toast.success('Reset to the wording underneath.');
     } catch (error) {
       toast.error(getErrorMessage(error, 'Failed to reset.'));
@@ -340,9 +344,12 @@ export function BoilerplateWorkbench({
   const activeDoc = (documents ?? [])
     .filter(isEditable)
     .find((d) => d.id === activeDocId);
-  const canResetActive =
-    activeDoc &&
-    (scope === 'firm' ? activeDoc.has_firm_override : activeDoc.has_hoa_override);
+  const resetScope: NarrativeScope | null = activeDoc?.has_hoa_override
+    ? 'hoa'
+    : activeDoc?.has_firm_override
+      ? 'firm'
+      : null;
+  const canResetActive = Boolean(resetScope);
 
   return (
     <div
@@ -385,7 +392,9 @@ export function BoilerplateWorkbench({
                 variant="outline"
                 size="sm"
                 disabled={saving || !canResetActive}
-                onClick={() => void handleReset(activeDoc.id, activeDoc.label)}
+                onClick={() =>
+                  void handleReset(activeDoc.id, activeDoc.label, resetScope ?? scope)
+                }
               >
                 Reset this page
               </Button>

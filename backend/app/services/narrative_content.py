@@ -281,6 +281,22 @@ def _fetch(session: Any, scope: str, scope_id: Optional[int]) -> dict[str, str]:
     return {row[0]: row[1] for row in rows if row[1]}
 
 
+def heal_document_html(doc_id: str, html: Optional[str]) -> str:
+    """Restore system chips that older saved copies predate.
+
+    ``package_toc_rows`` was added after firm/HOA TOC overrides were already
+    stored. Those copies still have the old hardcoded rows and would block
+    every generate. The shipped baseline is the source of truth for that
+    chip; operator wording on other documents is left alone.
+    """
+    body = html or ""
+    if doc_id != "budget_toc":
+        return body
+    if "package_toc_rows" in blocks_present(body):
+        return body
+    return baseline_html(doc_id)
+
+
 def resolve_document(
     session: Any, doc_id: str, hoa_id: Optional[int] = None
 ) -> str:
@@ -289,10 +305,10 @@ def resolve_document(
     if hoa_id is not None:
         hoa_rows = _fetch(session, HOA_SCOPE, hoa_id)
         if doc_id in hoa_rows:
-            return hoa_rows[doc_id]
+            return heal_document_html(doc_id, hoa_rows[doc_id])
     firm_rows = _fetch(session, FIRM_SCOPE, None)
     if doc_id in firm_rows:
-        return firm_rows[doc_id]
+        return heal_document_html(doc_id, firm_rows[doc_id])
     return baseline_html(doc_id)
 
 
@@ -317,9 +333,10 @@ def resolve_all(session: Any, hoa_id: Optional[int] = None) -> dict[str, str]:
     firm_rows = _fetch(session, FIRM_SCOPE, None)
     hoa_rows = _fetch(session, HOA_SCOPE, hoa_id) if hoa_id is not None else {}
     return {
-        doc_id: hoa_rows.get(doc_id)
-        or firm_rows.get(doc_id)
-        or baseline_html(doc_id)
+        doc_id: heal_document_html(
+            doc_id,
+            hoa_rows.get(doc_id) or firm_rows.get(doc_id) or baseline_html(doc_id),
+        )
         for doc_id in DOCUMENT_REGISTRY
     }
 
@@ -450,7 +467,9 @@ def for_render(
     if use_snapshots:
         frozen_map = frozen if isinstance(frozen, dict) else {}
         return {
-            doc_id: str(frozen_map.get(doc_id) or baseline_html(doc_id))
+            doc_id: heal_document_html(
+                doc_id, str(frozen_map.get(doc_id) or baseline_html(doc_id))
+            )
             for doc_id in DOCUMENT_REGISTRY
         }
     return resolve_all(session, hoa_id)
@@ -599,7 +618,7 @@ def documents_for_api(
             "kind": "editable",
             "id": doc.doc_id,
             "label": doc.label,
-            "html": body,
+            "html": heal_document_html(doc.doc_id, body),
             "effective_scope": scope,
             "has_firm_override": doc.doc_id in firm_rows,
             "has_hoa_override": doc.doc_id in hoa_rows,

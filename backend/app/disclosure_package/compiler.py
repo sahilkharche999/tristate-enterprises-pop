@@ -1272,8 +1272,9 @@ def compile_package(
             if value not in (None, "")
             else narrative_content_module.baseline_html(doc_id)
         )
-        narrative_raw[doc_id] = (
-            boilerplate_sanitize_module.sanitize_slot_html(body) or ""
+        narrative_raw[doc_id] = narrative_content_module.heal_document_html(
+            doc_id,
+            boilerplate_sanitize_module.sanitize_slot_html(body) or "",
         )
 
     # 1. Preflight gate (REQ-D11-008) — fail fast with field paths.
