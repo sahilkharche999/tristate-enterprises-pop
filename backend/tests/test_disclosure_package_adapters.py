@@ -192,6 +192,33 @@ def test_from_reserve_study_extraction_skips_rows_without_useful_life():
     assert snap.components[0].line_item == "Valid"
 
 
+def test_from_reserve_study_extraction_ignores_section_headers():
+    from app.disclosure_package.adapters import from_reserve_study_extraction
+
+    doc = SimpleNamespace(
+        study_date="October 25, 2024",
+        rows=[
+            SimpleNamespace(
+                line_item="Building Exteriors",
+                row_type="header",
+                useful_life=None,
+                remaining_life=None,
+                replacement_cost=None,
+            ),
+            SimpleNamespace(
+                line_item="Roof",
+                row_type="item",
+                useful_life=25,
+                remaining_life=10,
+                replacement_cost=50000.0,
+            ),
+        ],
+    )
+    snap = from_reserve_study_extraction(doc)
+    assert [c.line_item for c in snap.components] == ["Roof"]
+    assert snap.skipped_reviewed_rows == []
+
+
 def test_from_reserve_study_extraction_allows_income_statement_only_draft():
     from app.disclosure_package.adapters import from_reserve_study_extraction
 

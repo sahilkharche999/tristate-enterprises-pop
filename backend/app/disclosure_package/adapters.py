@@ -183,6 +183,9 @@ def from_reserve_study_extraction(document: Any) -> ReserveStudySnapshot:
         or _attr_or_key(document, "study_was_uploaded")
     )
     for raw in raw_rows:
+        row_type = str(_attr_or_key(raw, "row_type") or "").strip().lower()
+        if row_type == "header":
+            continue
         line_item = str(_attr_or_key(raw, "line_item") or "(unnamed)")
         excluded = bool(_attr_or_key(raw, "excluded"))
         exclude_reason = _attr_or_key(raw, "exclude_reason")
