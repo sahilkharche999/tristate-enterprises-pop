@@ -168,7 +168,11 @@ export async function getPriorAssessmentSchedule(
 
 export async function confirmPriorAssessmentSchedule(
   hoaId: number,
-  body: { fiscal_year: number; rows: PriorScheduleRow[] },
+  body: {
+    fiscal_year: number;
+    package_fiscal_year?: number;
+    rows: PriorScheduleRow[];
+  },
 ): Promise<{ status: string; prior_fiscal_year: number; row_count: number }> {
   const res = await fetch(`${BASE_URL}/hoa/${hoaId}/prior-assessment-schedule`, {
     method: 'PUT',

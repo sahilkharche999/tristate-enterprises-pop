@@ -107,16 +107,10 @@ async def upload_ccr(
             original_filename=file.filename or "governing_doc.pdf",
             uploaded_by=_actor_email(current_user),
             connection=raw_conn,
+            document_type="ccr",
         )
     except PropertyNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-    # Tag the newly-uploaded document as 'ccr'.
-    raw_conn.execute(
-        "UPDATE dre_documents SET document_type = 'ccr' WHERE id = ?",
-        (result.dre_document_id,),
-    )
-    raw_conn.commit()
     return result
 
 

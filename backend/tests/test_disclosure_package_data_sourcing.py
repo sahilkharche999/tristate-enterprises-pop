@@ -57,10 +57,15 @@ def test_changing_assessment_input_changes_rendered_amount(
     monthly_per_unit_target, units, assessment_total,
 ):
     """Different draft inputs produce different rendered cover-letter amounts."""
-    pytest.importorskip(
-        "weasyprint",
-        reason="WeasyPrint native deps absent; real-render data-sourcing test runs in Docker/CI",
-    )
+    try:
+        pytest.importorskip(
+            "weasyprint",
+            reason="WeasyPrint native deps absent; real-render data-sourcing test runs in Docker/CI",
+        )
+    except OSError:
+        pytest.skip(
+            "WeasyPrint native deps absent; real-render data-sourcing test runs in Docker/CI"
+        )
     appendices = tmp_path / "appendices"
     appendices.mkdir()
 

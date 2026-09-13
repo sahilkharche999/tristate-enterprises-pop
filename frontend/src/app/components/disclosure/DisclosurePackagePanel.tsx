@@ -13,6 +13,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 
+import { listAnnualPackages } from '../../api/annualPackages';
 import {
   getDisclosurePreflight,
   type DisclosurePreflightResult,
@@ -76,18 +77,32 @@ export function DisclosurePackagePanel({
 
   const [preflight, setPreflight] = useState<DisclosurePreflightResult | null>(null);
   const [preflightLoading, setPreflightLoading] = useState(false);
+  const [preflightFailed, setPreflightFailed] = useState(false);
+  const [finalizedPackageId, setFinalizedPackageId] = useState<number | undefined>(undefined);
 
   const fetchPreflight = useCallback(async () => {
     setPreflightLoading(true);
+    setPreflightFailed(false);
     try {
       const result = await getDisclosurePreflight(hoaId, fiscalYear);
       setPreflight(result);
     } catch {
-      // On error, treat as unknown readiness (don't block the operator).
       setPreflight(null);
+      setPreflightFailed(true);
     } finally {
       setPreflightLoading(false);
     }
+  }, [hoaId, fiscalYear]);
+
+  useEffect(() => {
+    void listAnnualPackages(hoaId)
+      .then((packages) => {
+        const finalized = packages
+          .filter((pkg) => pkg.status === 'finalized' && pkg.fiscal_year === fiscalYear)
+          .sort((a, b) => b.package_id - a.package_id)[0];
+        setFinalizedPackageId(finalized?.package_id);
+      })
+      .catch(() => setFinalizedPackageId(undefined));
   }, [hoaId, fiscalYear]);
 
   useEffect(() => {
@@ -96,21 +111,25 @@ export function DisclosurePackagePanel({
 
   const blockingCount = preflight?.blocking.length ?? 0;
   const isGenerateBlocked =
-    !isSupportedHoa || (preflight !== null && blockingCount > 0);
+    !isSupportedHoa ||
+    preflightLoading ||
+    preflightFailed ||
+    preflight === null ||
+    blockingCount > 0;
 
   const handleGenerate = () => {
     if (isGenerateBlocked) return;
-    void generate(hoaId, fiscalYear);
+    void generate(hoaId, fiscalYear, finalizedPackageId);
   };
 
   const handleRetry = () => {
     reset();
-    if (!isGenerateBlocked) void generate(hoaId, fiscalYear);
+    if (!isGenerateBlocked) void generate(hoaId, fiscalYear, finalizedPackageId);
   };
 
   const handleRegenerate = () => {
     reset();
-    if (!isGenerateBlocked) void generate(hoaId, fiscalYear);
+    if (!isGenerateBlocked) void generate(hoaId, fiscalYear, finalizedPackageId);
   };
 
   const supportedBody = `Compile the full annual budget disclosure PDF for ${hoaName}'s ${fiscalYear} fiscal year, including the cover letter, pro forma operating budget, reserve disclosure, 30-year funding plan, and required policy appendices.`;
@@ -124,14 +143,23 @@ export function DisclosurePackagePanel({
     ? loadingRows()
     : preflight !== null
       ? findingsToRows(preflight)
-      : [];
+      : preflightFailed
+        ? [
+            {
+              label: 'Readiness check failed to load. Re-check before generating.',
+              status: 'fail',
+            },
+          ]
+        : [];
 
   const generateButtonLabel =
     state === 'starting'
       ? 'Starting…'
-      : blockingCount > 0
-        ? `Resolve ${blockingCount} item${blockingCount === 1 ? '' : 's'} to generate`
-        : 'Generate Disclosure Package';
+      : preflightFailed
+        ? 'Recheck readiness to generate'
+        : blockingCount > 0
+          ? `Resolve ${blockingCount} item${blockingCount === 1 ? '' : 's'} to generate`
+          : 'Generate Disclosure Package';
 
   return (
     <section className="space-y-6">

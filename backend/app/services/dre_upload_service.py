@@ -57,6 +57,46 @@ def _detect_page_count(file_bytes: bytes) -> Optional[int]:
         return None
 
 
+def mark_approved_setups_stale_for_new_document(
+    connection: sqlite3.Connection,
+    *,
+    property_id: int,
+    document_type: str,
+    new_document_id: int,
+) -> int:
+    """Mark approved setups stale when their source doc is no longer active.
+
+    Only setups whose source document has the same ``document_type``
+    (``dre`` or ``ccr``) are marked. Other governing-document types stay
+    approved until their own source is replaced.
+    """
+    cols = {
+        str(row[1])
+        for row in connection.execute("PRAGMA table_info(assessment_setups)").fetchall()
+    }
+    if "source_document_stale" not in cols:
+        return 0
+    cursor = connection.execute(
+        """
+        UPDATE assessment_setups
+           SET source_document_stale = 1,
+               updated_at = datetime('now')
+         WHERE property_id = ?
+           AND status = 'approved'
+           AND COALESCE(source_document_stale, 0) = 0
+           AND source_dre_document_id IS NOT NULL
+           AND source_dre_document_id != ?
+           AND EXISTS (
+               SELECT 1 FROM dre_documents d
+                WHERE d.id = assessment_setups.source_dre_document_id
+                  AND COALESCE(d.document_type, 'dre') = ?
+           )
+        """,
+        (property_id, new_document_id, document_type),
+    )
+    return int(cursor.rowcount or 0)
+
+
 def upload_dre_document(
     *,
     property_id: int,
@@ -64,6 +104,7 @@ def upload_dre_document(
     original_filename: str,
     uploaded_by: Optional[str],
     connection: sqlite3.Connection,
+    document_type: str = "dre",
 ) -> DREUploadResponse:
     """Save a DRE upload to disk + record it in the DB.
 
@@ -106,6 +147,18 @@ def upload_dre_document(
     connection.execute(
         "UPDATE dre_documents SET file_id = ? WHERE id = ?",
         (file_id, dre_document_id),
+    )
+    normalized_type = "ccr" if str(document_type).strip().lower() == "ccr" else "dre"
+    if normalized_type == "ccr":
+        connection.execute(
+            "UPDATE dre_documents SET document_type = 'ccr' WHERE id = ?",
+            (dre_document_id,),
+        )
+    mark_approved_setups_stale_for_new_document(
+        connection,
+        property_id=property_id,
+        document_type=normalized_type,
+        new_document_id=dre_document_id,
     )
     connection.commit()
 

@@ -88,6 +88,13 @@ def _seed_active_draft_for(db_session, hoa_id: int) -> None:
             "year_new": 2010,
         }
     ]
+    funding_plan_rows = [
+        {
+            "year": OLD_MILL_FY,
+            "annual_contribution": 200,
+            "beginning_balance": 0,
+        }
+    ]
     draft = BudgetDraft(
         property_id=hoa_id,
         source_upload_id=None,
@@ -95,6 +102,7 @@ def _seed_active_draft_for(db_session, hoa_id: int) -> None:
         status=BUDGET_DRAFT_ACTIVE,
         line_items_json=json.dumps(line_items),
         reserve_study_rows_json=json.dumps(reserve_rows),
+        reserve_funding_plan_rows_json=json.dumps(funding_plan_rows),
         reserve_study_status="completed",
         global_note=None,
         statement_month=12,

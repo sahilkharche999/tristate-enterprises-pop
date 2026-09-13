@@ -2140,8 +2140,13 @@ def test_drop_annual_schedule_noise_filters_cross_vendor_year_patterns():
         )
     )
     kept, dropped = _drop_annual_schedule_noise(rows)
-    assert dropped == len(noisy_labels)
-    assert [r.line_item for r in kept] == ["Roof - Built Up; Replacement"]
+    # Lifecycle data is present, so these rows are kept and flagged —
+    # never dropped on label text alone.
+    assert dropped == 0
+    assert [r.line_item for r in kept][-1] == "Roof - Built Up; Replacement"
+    flagged = [r for r in kept if r.line_item != "Roof - Built Up; Replacement"]
+    assert len(flagged) == len(noisy_labels)
+    assert all("suspicious_label" in r.flags for r in flagged)
 
 
 def test_drop_annual_schedule_noise_handles_unknown_vendor_via_lifecycle_check():
@@ -2176,3 +2181,18 @@ def test_drop_annual_schedule_noise_handles_unknown_vendor_via_lifecycle_check()
     kept, dropped = _drop_annual_schedule_noise(rows)
     assert dropped == 2
     assert [r.line_item for r in kept] == ["Some New Vendor Component Name"]
+
+
+def test_parse_funding_plan_rows_from_text_cash_flow_fixture():
+    from app.services.reserve_study_extractor import parse_funding_plan_rows_from_text
+
+    text = (
+        "Year Beginning Contribution Interest Expenditures Ending %\n"
+        "2025 360000.00 31935.00 1200.00 8000.00 385135.00 68\n"
+        "2026 385135.00 32900.00 1300.00 9000.00 410335.00 70\n"
+    )
+    rows = parse_funding_plan_rows_from_text(text)
+    assert [row.year for row in rows] == [2025, 2026]
+    assert rows[0].annual_contribution == 31935.0
+    assert rows[0].beginning_balance == 360000.0
+    assert rows[1].interest_income == 1300.0

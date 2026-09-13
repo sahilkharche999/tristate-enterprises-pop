@@ -65,6 +65,8 @@ class ExtractedReserveStudyRow(BaseModel):
     estimated_liability: Optional[int] = Field(default=None, ge=0)
     source_page: Optional[int] = Field(default=None, ge=1)
     flags: list[str] = Field(default_factory=list)
+    excluded: bool = False
+    exclude_reason: Optional[str] = None
 
     @model_validator(mode="before")
     @classmethod
@@ -112,6 +114,23 @@ class ExtractedReserveStudyPage(BaseModel):
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
 
 
+class ExtractedReserveStudyFundingPlanRow(BaseModel):
+    """One fiscal-year cash-flow / funding-plan row from the reserve study."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    year: int = Field(ge=1900, le=3000)
+    beginning_balance: Optional[float] = None
+    annual_contribution: Optional[float] = None
+    monthly_per_unit: Optional[float] = None
+    interest_income: Optional[float] = None
+    reserve_expenditures: Optional[float] = None
+    ending_balance: Optional[float] = None
+    fully_funded_balance: Optional[float] = None
+    percent_funded: Optional[float] = None
+    source_page: Optional[int] = Field(default=None, ge=1)
+
+
 class ExtractedReserveStudyDocument(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -122,6 +141,7 @@ class ExtractedReserveStudyDocument(BaseModel):
     classifications: list[ReserveStudyPageClassification] = Field(default_factory=list)
     page_spans: list[ReserveStudyPageSpan] = Field(default_factory=list)
     rows: list[ExtractedReserveStudyRow] = Field(default_factory=list)
+    funding_plan_rows: list[ExtractedReserveStudyFundingPlanRow] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     extraction_metadata: dict[str, Any] = Field(default_factory=dict)

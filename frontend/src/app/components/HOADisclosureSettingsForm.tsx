@@ -13,6 +13,7 @@ import {
   type FinancialPacketArchetype,
   type HOADisclosureSettings,
   type OutstandingLoan,
+  type ReserveFundingCandidates,
   type ReserveFundingSource,
   type SpecialAssessmentEntry,
   type SpecialAssessmentPool,
@@ -31,7 +32,6 @@ import { HOASignatureUploadControl } from './HOASignatureUploadControl';
 import { Button } from './ui/button';
 
 const REQUIRED_MONEY_FIELDS = new Set<string>([
-  'reserve_cash_balance_eoy_prior',
   'reserve_funding_source',
 ]);
 
@@ -52,7 +52,6 @@ const LETTERHEAD_SCALAR_KEYS = new Set<string>([
 ]);
 
 const MONEY_SCALAR_KEYS = new Set<string>([
-  'reserve_cash_balance_eoy_prior',
   'fund_balance_boy_operations',
   'monthly_assessment_per_unit_prior',
   'interest_rate_after_tax',
@@ -83,7 +82,13 @@ const TAB_INTROS: Record<DisclosureDefaultsTab, string> = {
 
 /** Stable fingerprint of editable disclosure settings for dirty detection. */
 function disclosureFingerprint(settings: HOADisclosureSettings): string {
-  const { property_id: _p, has_logo: _h, has_signature: _s, ...writable } = settings;
+  const {
+    property_id: _p,
+    has_logo: _h,
+    has_signature: _s,
+    reserve_funding_candidates: _c,
+    ...writable
+  } = settings;
   return JSON.stringify(writable);
 }
 
@@ -151,6 +156,32 @@ function parseDeferrals(raw: string | null | undefined): BoardDeferralEntry[] {
   } catch {
     return [];
   }
+}
+
+function parseCashByYear(raw: string | null | undefined): Record<string, number> {
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    const out: Record<string, number> = {};
+    for (const [year, amount] of Object.entries(parsed as Record<string, unknown>)) {
+      const numeric = Number(amount);
+      if (Number.isFinite(numeric)) out[year] = numeric;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function formatMoney(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return '—';
+  return value.toLocaleString(undefined, {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
 }
 
 function parseLoan(raw: string | null | undefined): OutstandingLoan | null {
@@ -263,9 +294,18 @@ export const HOADisclosureSettingsForm = forwardRef<
       // property_id and has_logo are derived/read-only fields returned by GET;
       // the backend's _ALLOWED_FIELDS allowlist rejects unknown keys, so both
       // must be stripped before resending the full settings blob on save.
-      const { property_id: _propertyId, has_logo: _hasLogo, has_signature: _hasSig, ...writable } = settings;
+      const {
+        property_id: _propertyId,
+        has_logo: _hasLogo,
+        has_signature: _hasSig,
+        reserve_funding_candidates: candidates,
+        ...writable
+      } = settings;
       const next = await putHOADisclosureSettings(hoaId, writable);
-      setSettings(next);
+      setSettings({
+        ...next,
+        reserve_funding_candidates: next.reserve_funding_candidates ?? candidates,
+      });
       baselineRef.current = disclosureFingerprint(next);
       onDirtyChangeRef.current?.(false);
       setSavedAt(new Date().toLocaleTimeString());
@@ -702,12 +742,6 @@ export const HOADisclosureSettingsForm = forwardRef<
             {REQUIRED_MONEY_FIELDS.has(key) ? (
               <span className="ml-1 font-semibold text-[#92400e]">Required for package</span>
             ) : null}
-            {key === 'reserve_cash_balance_eoy_prior' ? (
-              <span className="mt-0.5 block font-normal text-[#92400e]">
-                $0 is allowed but usually means the field was never filled — percent funded
-                will look empty if the HOA holds reserves.
-              </span>
-            ) : null}
           </span>
           {type === 'textarea' ? (
             <textarea
@@ -957,8 +991,7 @@ export const HOADisclosureSettingsForm = forwardRef<
       {activeTab === 'money' ? (
         <div className="space-y-4">
           <p className="text-xs text-[#92400e]">
-            Required for package: reserve funding source and cash balance (confirm if $0 is
-            intentional — preflight warns but does not block $0).
+            Required for package: reserve funding source and dated cash for this package year.
           </p>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             {renderScalarFields(MONEY_SCALAR_KEYS)}
@@ -977,26 +1010,147 @@ export const HOADisclosureSettingsForm = forwardRef<
                 <option value="reserve-only">Reserve-only accountant statement</option>
               </select>
             </label>
-            <label data-setting-field="reserve_funding_source" className="block text-sm">
+            {(() => {
+              const cashYear =
+                packageYear && packageYear > 0 ? packageYear : new Date().getFullYear();
+              const cashByYear = parseCashByYear(settings.reserve_cash_by_fiscal_year_json);
+              const yearCash =
+                cashByYear[String(cashYear)] ?? settings.reserve_cash_balance_eoy_prior ?? 0;
+              const updateYearCash = (amount: number, asOfDate: string | null) => {
+                const nextMap = { ...cashByYear, [String(cashYear)]: amount };
+                setSettings((prev) =>
+                  prev
+                    ? {
+                        ...prev,
+                        reserve_cash_balance_eoy_prior: amount,
+                        reserve_cash_by_fiscal_year_json: JSON.stringify(nextMap),
+                        reserve_cash_as_of_date: asOfDate,
+                      }
+                    : prev,
+                );
+              };
+              return (
+                <div
+                  data-setting-field="reserve_cash_as_of_date"
+                  className="sm:col-span-2 space-y-2 rounded border border-[#e5e5e5] p-3"
+                >
+                  <h4 className="text-sm font-semibold text-[#111]">
+                    Reserve cash for fiscal {cashYear}
+                  </h4>
+                  <p className="text-xs text-[#737373]">
+                    Dated opening cash for this package year. Undated leftover cash blocks generate.
+                  </p>
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                    <label className="block text-sm">
+                      <span className="block text-xs text-[#737373] mb-1">Cash amount ($)</span>
+                      <input
+                        type="number"
+                        step="any"
+                        value={yearCash === 0 ? '' : String(yearCash)}
+                        onChange={(e) =>
+                          updateYearCash(
+                            e.target.value === '' ? 0 : Number(e.target.value),
+                            settings.reserve_cash_as_of_date,
+                          )
+                        }
+                        className="w-full border border-[#d4d4d4] rounded px-2 py-1 text-sm"
+                      />
+                    </label>
+                    <label className="block text-sm">
+                      <span className="block text-xs text-[#737373] mb-1">As-of date</span>
+                      <input
+                        type="date"
+                        value={settings.reserve_cash_as_of_date || ''}
+                        onChange={(e) =>
+                          updateYearCash(yearCash, e.target.value || null)
+                        }
+                        className="w-full border border-[#d4d4d4] rounded px-2 py-1 text-sm"
+                      />
+                    </label>
+                  </div>
+                </div>
+              );
+            })()}
+            <label data-setting-field="reserve_funding_source" className="block text-sm sm:col-span-2">
               <span className="block text-xs text-[#737373] mb-1">
                 Reserve funding source{' '}
                 <span className="font-semibold text-[#92400e]">Required for package</span>
               </span>
               <select
-                value={settings.reserve_funding_source}
+                value={settings.reserve_funding_source || 'auto'}
                 onChange={(e) =>
                   update('reserve_funding_source', e.target.value as ReserveFundingSource)
                 }
                 className="w-full border border-[#d4d4d4] rounded px-2 py-1 text-sm"
               >
-                <option value="reserve_study_provision">
-                  Reserve study annual provision ÷ 12 (default)
-                </option>
+                <option value="auto">Income statement (default)</option>
                 <option value="budget_allocation_line">
                   Budget &ldquo;Reserve - Allocation/Transfer&rdquo; line ÷ 12
                 </option>
+                <option value="reserve_study_provision">
+                  Reserve study annual provision ÷ 12
+                </option>
                 <option value="manual">Manual override (use field above)</option>
               </select>
+              {settings.reserve_funding_source === 'reserve_study_provision' ? (
+                <p className="mt-1 text-xs text-[#92400e]">
+                  Component provision can differ from the income-statement transfer when both exist.
+                  Existing HOAs that already use this mode are left unchanged.
+                </p>
+              ) : null}
+              {settings.reserve_funding_source !== 'auto' &&
+              settings.reserve_funding_source !== 'budget_allocation_line' ? (
+                <label className="mt-2 block text-sm">
+                  <span className="block text-xs text-[#737373] mb-1">
+                    Overwrite reason (required when source is not the income-statement transfer)
+                  </span>
+                  <input
+                    value={settings.reserve_funding_overwrite_reason || ''}
+                    onChange={(e) =>
+                      update('reserve_funding_overwrite_reason', e.target.value || null)
+                    }
+                    className="w-full border border-[#d4d4d4] rounded px-2 py-1 text-sm"
+                    placeholder="Why this amount differs from the budget transfer"
+                  />
+                </label>
+              ) : null}
+              {(() => {
+                const candidates: ReserveFundingCandidates = settings.reserve_funding_candidates ?? {
+                  budget: null,
+                  study: null,
+                  provision: null,
+                };
+                return (
+                  <dl className="mt-2 grid grid-cols-3 gap-2 text-xs text-[#525252]">
+                    <div>
+                      <dt className="text-[#737373]">Budget transfer</dt>
+                      <dd className="font-medium text-[#111]">{formatMoney(candidates.budget)}</dd>
+                    </div>
+                    <div>
+                      <dt className="text-[#737373]">Study calendar</dt>
+                      <dd className="font-medium text-[#111]">{formatMoney(candidates.study)}</dd>
+                    </div>
+                    <div>
+                      <dt className="text-[#737373]">Component provision</dt>
+                      <dd className="font-medium text-[#111]">{formatMoney(candidates.provision)}</dd>
+                    </div>
+                  </dl>
+                );
+              })()}
+            </label>
+            <label className="flex items-start gap-2 text-sm sm:col-span-2">
+              <input
+                type="checkbox"
+                checked={Boolean(settings.use_study_funding_calendar)}
+                onChange={(e) => update('use_study_funding_calendar', e.target.checked)}
+                className="mt-1"
+              />
+              <span>
+                Use extracted study funding calendar for year 1+ of the 30-year plan
+                <span className="block text-xs text-[#737373]">
+                  Year 0 still prints the adopted contribution. Empty calendars block generate.
+                </span>
+              </span>
             </label>
           </div>
         </div>

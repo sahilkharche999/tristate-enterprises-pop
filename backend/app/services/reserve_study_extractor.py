@@ -18,6 +18,7 @@ from ..ai_implementation.pipeline.llm_client import call_llm_vision
 from ..models.financial_document_extraction import DocumentExtractionFailure
 from ..models.reserve_study_extraction import (
     ExtractedReserveStudyDocument,
+    ExtractedReserveStudyFundingPlanRow,
     ExtractedReserveStudyPage,
     ExtractedReserveStudyRow,
     ReserveStudyDiscoveryResult,
@@ -1227,6 +1228,111 @@ async def _discover_from_prepared(
     )
 
 
+_FUNDING_PLAN_SYSTEM_PROMPT = (
+    "You extract a year-by-year reserve funding calendar from cash-flow / "
+    "funding-plan / liability-schedule pages. Do not extract component inventory "
+    "rows. For each calendar year return year, beginning_balance, "
+    "annual_contribution, interest_income, reserve_expenditures, ending_balance, "
+    "and percent_funded when printed. Skip totals and invented years."
+)
+
+_FUNDING_YEAR_LINE_RE = re.compile(
+    r"^(19\d{2}|20\d{2}|21\d{2})\b(.*)$"
+)
+_FUNDING_NUMBER_RE = re.compile(r"-?\d[\d,]*\.?\d*")
+
+
+def parse_funding_plan_rows_from_text(
+    text: str,
+    *,
+    source_page: int = 1,
+) -> list[ExtractedReserveStudyFundingPlanRow]:
+    """Parse year-organized cash-flow rows from a funding-plan page.
+
+    Expected shape (vendor columns vary): year, beginning, contribution,
+    interest, expenditures, ending, optional percent funded.
+    """
+    rows: list[ExtractedReserveStudyFundingPlanRow] = []
+    seen_years: set[int] = set()
+    for raw_line in (text or "").splitlines():
+        match = _FUNDING_YEAR_LINE_RE.match(raw_line.strip())
+        if not match:
+            continue
+        year = int(match.group(1))
+        if year in seen_years:
+            continue
+        numbers = [
+            Decimal(token.replace(",", ""))
+            for token in _FUNDING_NUMBER_RE.findall(match.group(2) or "")
+        ]
+        if len(numbers) < 2:
+            continue
+        percent = None
+        if numbers and Decimal("0") <= numbers[-1] <= Decimal("200") and len(numbers) >= 5:
+            percent = float(numbers[-1])
+        rows.append(
+            ExtractedReserveStudyFundingPlanRow(
+                year=year,
+                beginning_balance=float(numbers[0]) if len(numbers) > 0 else None,
+                annual_contribution=float(numbers[1]) if len(numbers) > 1 else None,
+                interest_income=float(numbers[2]) if len(numbers) > 2 else None,
+                reserve_expenditures=float(numbers[3]) if len(numbers) > 3 else None,
+                ending_balance=float(numbers[4]) if len(numbers) > 4 else None,
+                percent_funded=percent,
+                source_page=source_page,
+            )
+        )
+        seen_years.add(year)
+    return rows
+
+
+def derive_increase_brackets_from_funding_plan(
+    rows: list[ExtractedReserveStudyFundingPlanRow],
+) -> list[dict[str, Any]]:
+    """Year-over-year contribution ratios as Settings increase brackets."""
+    ordered = sorted(
+        (row for row in rows if row.annual_contribution),
+        key=lambda row: row.year,
+    )
+    if len(ordered) < 2:
+        return []
+    brackets: list[dict[str, Any]] = []
+    current_rate: Optional[Decimal] = None
+    start_year: Optional[int] = None
+    prev = ordered[0]
+    for row in ordered[1:]:
+        if not prev.annual_contribution:
+            prev = row
+            continue
+        rate = (
+            Decimal(str(row.annual_contribution)) / Decimal(str(prev.annual_contribution))
+            - Decimal("1")
+        ).quantize(Decimal("0.0001"))
+        if current_rate is None:
+            current_rate = rate
+            start_year = row.year
+        elif rate != current_rate:
+            brackets.append(
+                {
+                    "start_year": start_year,
+                    "end_year": prev.year,
+                    "rate": float(current_rate),
+                }
+            )
+            current_rate = rate
+            start_year = row.year
+        prev = row
+    if current_rate is not None and start_year is not None:
+        brackets.append(
+            {
+                "start_year": start_year,
+                "end_year": ordered[-1].year,
+                "rate": float(current_rate),
+            }
+        )
+    return brackets
+
+
 async def discover_reserve_study_pages(
     path: str,
     *,
@@ -1354,6 +1460,33 @@ async def extract_reserve_study(
         unique_warnings.append(
             f"Merged {duplicates_merged} duplicate reserve-study row(s) detected across extracted pages."
         )
+    funding_page_numbers = sorted(
+        {
+            item.page_number
+            for item in discovery.classifications
+            if item.is_year_provision_or_liability_schedule
+        }
+    )
+    funding_plan_rows: list[ExtractedReserveStudyFundingPlanRow] = []
+    if funding_page_numbers:
+        funding_texts = _extract_reserve_study_page_texts_for_pages(path, funding_page_numbers)
+        for page_number in funding_page_numbers:
+            funding_plan_rows.extend(
+                parse_funding_plan_rows_from_text(
+                    funding_texts.get(page_number, ""),
+                    source_page=page_number,
+                )
+            )
+        by_year: dict[int, ExtractedReserveStudyFundingPlanRow] = {}
+        for row in funding_plan_rows:
+            by_year.setdefault(row.year, row)
+        funding_plan_rows = [by_year[year] for year in sorted(by_year)]
+        if not funding_plan_rows:
+            unique_warnings.append(
+                "Cash-flow / funding-plan pages were found, but no year rows "
+                "could be extracted. Confirm the calendar before generating."
+            )
+
     confidence_inputs = [discovery.confidence, *confidences]
     confidence = sum(confidence_inputs) / len(confidence_inputs) if confidence_inputs else 0.0
 
@@ -1365,6 +1498,7 @@ async def extract_reserve_study(
         classifications=discovery.classifications,
         page_spans=discovery.page_spans,
         rows=rows,
+        funding_plan_rows=funding_plan_rows,
         warnings=unique_warnings,
         confidence=confidence,
         extraction_metadata={
@@ -1373,5 +1507,7 @@ async def extract_reserve_study(
             "ocr_text_pages": ocr_text_pages,
             "ocr_fallback_pages": ocr_fallback_pages,
             "duplicates_merged": duplicates_merged,
+            "funding_plan_extract": "calendar_text_pass",
+            "funding_plan_prompt": "v1-calendar-only",
         },
     )

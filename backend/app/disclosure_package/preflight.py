@@ -43,6 +43,7 @@ from .reconciliation import (
     resolve_reserve_funding_facts,
     resolve_reserve_interest_tax_facts,
 )
+from .scenario import build_package_scenario
 
 
 # Accepted reserve-study-date formats. ISO + US numeric are most common;
@@ -406,15 +407,76 @@ def validate_inputs(
                 "or supply a reserve-study funding-plan row for the package year."
             ),
         ))
+    overwrite_reason = str(overrides.get("reserve_funding_overwrite_reason") or "").strip()
     for warning in reserve_funding_facts.warnings:
         code, suggested_fix = _reserve_funding_issue_details(warning)
+        is_conflict = code == "reserve_funding_conflict"
         errors.append(PreflightError(
             field_path="reserve_funding.source",
             message=warning,
-            severity="warning",
+            severity="blocking" if is_conflict and not overwrite_reason else "warning",
             code=code,
             affected_value=reserve_funding_facts.model_dump(mode="json"),
             suggested_fix=suggested_fix,
+        ))
+
+    package_scenario = build_package_scenario(
+        fiscal_year=spec.fiscal_year,
+        units=hoa_metadata.units,
+        budget_line_items=budget_draft.line_items,
+        reserve_snapshot=reserve_snapshot,
+        settings=overrides,
+    )
+    for reason in package_scenario.blocking_reasons:
+        if "undated" in reason.lower() or "does not match" in reason.lower():
+            errors.append(PreflightError(
+                field_path="hoa_settings.reserve_cash_as_of_date",
+                message=reason,
+                severity="blocking",
+                code="undated_or_mismatched_cash",
+                suggested_fix="Attach an as-of date or a per-fiscal-year cash amount.",
+            ))
+        elif "overwrite reason" in reason.lower():
+            errors.append(PreflightError(
+                field_path="hoa_settings.reserve_funding_overwrite_reason",
+                message=reason,
+                severity="blocking",
+                code="reserve_funding_conflict",
+                suggested_fix="Record why reserve funding differs from the income-statement transfer.",
+            ))
+
+    if (
+        getattr(reserve_snapshot, "study_was_uploaded", False)
+        and not reserve_snapshot.funding_plan_rows
+        and not overrides.get("funding_calendar_confirmed_flat")
+    ):
+        errors.append(PreflightError(
+            field_path="reserve_study_snapshot.funding_plan_rows",
+            message=(
+                "A reserve study was uploaded but no funding-plan calendar was "
+                "extracted or confirmed. Generation of a polished 30-year plan "
+                "is blocked."
+            ),
+            severity="blocking",
+            code="missing_funding_calendar",
+            suggested_fix=(
+                "Re-extract the cash-flow pages, confirm the calendar, or "
+                "explicitly confirm a typed/flat schedule."
+            ),
+        ))
+
+    for skipped in getattr(reserve_snapshot, "skipped_reviewed_rows", []) or []:
+        if getattr(skipped, "excluded", False):
+            continue
+        errors.append(PreflightError(
+            field_path="reserve_study_snapshot.components",
+            message=(
+                f"Reviewed reserve row {skipped.line_item!r} was dropped "
+                f"({skipped.reason}) and is not marked excluded."
+            ),
+            severity="blocking",
+            code="dropped_reviewed_component",
+            suggested_fix="Repair the row in reserve-study review or mark it excluded with a reason.",
         ))
 
     assessment_facts = resolve_assessment_facts(
@@ -703,6 +765,47 @@ def check_special_assessments(
                 )
 
     return out
+
+
+def check_stale_assessment_setup(
+    *,
+    property_id: int,
+    connection,
+) -> list[PreflightError]:
+    """Block generate when an approved setup no longer matches the active doc."""
+    try:
+        cols = {
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(assessment_setups)").fetchall()
+        }
+    except sqlite3.Error:
+        return []
+    if "source_document_stale" not in cols:
+        return []
+    row = connection.execute(
+        """
+        SELECT id FROM assessment_setups
+         WHERE property_id = ?
+           AND status = 'approved'
+           AND COALESCE(source_document_stale, 0) = 1
+         ORDER BY id DESC LIMIT 1
+        """,
+        (property_id,),
+    ).fetchone()
+    if row is None:
+        return []
+    return [
+        PreflightError(
+            field_path="assessment_setup.source_document",
+            message=(
+                "The approved assessment setup is stale because a newer DRE or "
+                "CC&R was uploaded. Re-affirm or re-promote before generating."
+            ),
+            severity="blocking",
+            code="stale_assessment_setup",
+            suggested_fix="Open the DRE/CC&R review workbench and re-promote the new document.",
+        )
+    ]
 
 
 def check_allocation_resolution_readiness(

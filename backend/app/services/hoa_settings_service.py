@@ -1,7 +1,11 @@
 """Per-HOA settings CRUD. Backs the disclosure-package configuration UI."""
 from __future__ import annotations
+
+import json
 from typing import Any, Dict
+
 from sqlalchemy.orm import Session
+
 from ..ai_implementation.db.models import HOASettings
 
 # NOTE on due_date format (task 5.1/5.5): the frontend's date-picker
@@ -34,6 +38,10 @@ _ALLOWED_FIELDS = {
     "income_tax_provision_override",
     "reserve_funding_source",
     "reserve_funding_manual_amount",
+    "reserve_funding_overwrite_reason",
+    "reserve_cash_by_fiscal_year_json",
+    "reserve_cash_as_of_date",
+    "use_study_funding_calendar",
     "special_assessments_json",
     "additional_assessments_needed_json",
     "outstanding_loan_json",
@@ -51,6 +59,32 @@ _ALLOWED_FIELDS = {
     # Letterhead logo layout (Bob: logo-only vs logo + text)
     "letterhead_logo_mode",
 }
+
+
+def _merge_dated_cash_into_year_map(row: HOASettings) -> None:
+    """When cash + as-of date are both set, store the amount under that year."""
+    as_of = getattr(row, "reserve_cash_as_of_date", None)
+    amount = getattr(row, "reserve_cash_balance_eoy_prior", None)
+    if not as_of or amount is None:
+        return
+    digits = "".join(ch if ch.isdigit() else " " for ch in str(as_of)).split()
+    if not digits:
+        return
+    try:
+        year = int(digits[0])
+    except ValueError:
+        return
+    if year < 1900 or year > 3000:
+        return
+    raw = getattr(row, "reserve_cash_by_fiscal_year_json", None)
+    try:
+        mapping = json.loads(raw) if raw else {}
+    except (TypeError, json.JSONDecodeError):
+        mapping = {}
+    if not isinstance(mapping, dict):
+        mapping = {}
+    mapping[str(year)] = amount
+    row.reserve_cash_by_fiscal_year_json = json.dumps(mapping)
 
 
 def get_or_create(session: Session, *, hoa_id: int) -> HOASettings:
@@ -76,6 +110,7 @@ def update(session: Session, *, hoa_id: int, payload: Dict[str, Any]) -> HOASett
                 )
             value = mode
         setattr(row, key, value)
+    _merge_dated_cash_into_year_map(row)
     session.commit()
     session.refresh(row)
     return row

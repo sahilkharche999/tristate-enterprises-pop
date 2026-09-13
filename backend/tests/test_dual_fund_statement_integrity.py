@@ -413,3 +413,46 @@ def test_annual_statement_excludes_transfer_style_other_revenue_from_inflation()
     assert facts.total_expenses_operations == Decimal("273851.00")
     # Ops is not crushed by a $105k transfer
     assert facts.excess_revenues_over_expenses_operations > Decimal("-10000")
+
+
+def test_missouri_line_fund_split_uses_transfer_not_provision() -> None:
+    """Missouri replacement column follows mapped transfer $31,935, not provision."""
+    from app.disclosure_package.reconciliation import PoolLineFundTotals
+    from tests.support.missouri_allocation_fixture import (
+        MISSOURI_LEVY_EQUAL_ANNUAL,
+        MISSOURI_LEVY_HOA_ANNUAL,
+    )
+
+    transfer = Decimal("31935")
+    provision = Decimal("39659")
+    rows = [
+        SimpleNamespace(
+            component_key="equal_base",
+            component_label="Equal Base",
+            annual_amount=MISSOURI_LEVY_EQUAL_ANNUAL,
+        ),
+        SimpleNamespace(
+            component_key="reserve_transfer",
+            component_label="Reserve Allocation",
+            annual_amount=transfer,
+        ),
+    ]
+    totals = {
+        "equal_base": PoolLineFundTotals(
+            operating_mapped=MISSOURI_LEVY_EQUAL_ANNUAL,
+            reserve_mapped=Decimal("0"),
+        ),
+        "reserve_transfer": PoolLineFundTotals(
+            operating_mapped=Decimal("0"),
+            reserve_mapped=transfer,
+        ),
+    }
+    ops, res, source = assessment_split_from_schedule_components(
+        rows,
+        total_regular_assessment_revenue=MISSOURI_LEVY_HOA_ANNUAL,
+        fallback_reserve_assessment=provision,
+        pool_line_fund_totals=totals,
+    )
+    assert "line_fund" in source
+    assert res != provision
+    assert abs(res - transfer) <= Decimal("80")

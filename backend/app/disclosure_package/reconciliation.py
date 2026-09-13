@@ -173,6 +173,8 @@ _BUDGET_RESERVE_RE = re.compile(
     r"|reserve\s+contribution"
     r"|reserve\s+funding"
     r"|reserve\s+allocation"
+    r"|reserve\s*-\s*allocation"
+    r"|allocation\s*/\s*transfer"
     r"|allocation\s+to\s+reserve"
     r"|transfer\s+to\s+reserve"
     r"|reserve\s+transfer"
@@ -793,6 +795,31 @@ def resolve_reserve_funding_facts(
     )
 
 
+def is_reserve_interest_line(item: LineItem) -> bool:
+    """True when a revenue line is reserve-fund interest, not late fees or ops."""
+    if not getattr(item, "is_revenue", False):
+        return False
+    label = (item.label or "").lower()
+    if "interest" not in label:
+        return False
+    if re.search(r"late\s+fees?", label):
+        return False
+    fund = str(getattr(item, "fund_type", "") or "").lower()
+    category = (item.category or "").lower()
+    section = (item.section or "").lower()
+    if getattr(item, "is_reserve", False):
+        return True
+    if fund in {"reserve", "replacement"}:
+        return True
+    if category in {"reserve_income", "reserve"}:
+        return True
+    if "reserve" in label or "replacement" in label:
+        return True
+    if "reserve" in section or "replacement" in section:
+        return True
+    return False
+
+
 def resolve_reserve_interest_tax_facts(
     *,
     reserve_interest_income_override: object,
@@ -808,7 +835,7 @@ def resolve_reserve_interest_tax_facts(
         (
             Decimal(item.amount or 0)
             for item in budget_line_items
-            if item.is_revenue and item.label and "interest" in item.label.lower()
+            if is_reserve_interest_line(item)
         ),
         Decimal("0"),
     )

@@ -556,5 +556,96 @@ def test_validate_inputs_warns_when_budget_and_study_reserve_funding_differ():
         e.field_path == "reserve_funding.source"
         and "Reserve study cash-flow contribution differs" in e.message
         and e.code == "reserve_funding_conflict"
+        and e.severity == "blocking"
         for e in errors
     )
+
+
+def test_validate_inputs_funding_conflict_is_warning_with_overwrite_reason():
+    from app.disclosure_package.preflight import validate_inputs
+    from app.disclosure_package.package_specs import OLD_MILL_2026
+    from app.disclosure_package.schemas import (
+        BudgetDraft,
+        LineItem,
+        ReserveFundingPlanRow,
+        ReserveStudySnapshot,
+    )
+    spec = OLD_MILL_2026.model_copy(update={"fiscal_year": 2026})
+    reserve_snapshot = ReserveStudySnapshot(
+        study_date="September 2025",
+        components=_valid_reserve_snapshot().components,
+        funding_plan_rows=[
+            ReserveFundingPlanRow(year=2026, annual_contribution=Decimal("850998"))
+        ],
+    )
+    budget = BudgetDraft(line_items=[
+        LineItem(label="Assessment Income", amount=Decimal("2025540"), is_revenue=True),
+        LineItem(label="Monthly Contribution to Reserve", amount=Decimal("824414")),
+    ])
+    errors = validate_inputs(
+        spec=spec,
+        budget_draft=budget,
+        reserve_snapshot=reserve_snapshot,
+        hoa_metadata=_valid_hoa_metadata(),
+        appendices_root=None,
+        hoa_settings_overrides={"reserve_funding_overwrite_reason": "Board kept study figure"},
+    )
+    assert any(
+        e.code == "reserve_funding_conflict" and e.severity == "warning"
+        for e in errors
+    )
+
+
+def test_validate_inputs_blocks_undated_nonzero_cash():
+    from app.disclosure_package.preflight import validate_inputs
+    from app.disclosure_package.package_specs import OLD_MILL_2026
+
+    errors = validate_inputs(
+        spec=OLD_MILL_2026,
+        budget_draft=_valid_budget(),
+        reserve_snapshot=_valid_reserve_snapshot(),
+        hoa_metadata=_valid_hoa_metadata(),
+        hoa_settings_overrides={"reserve_cash_balance_eoy_prior": "360000"},
+    )
+    assert any(e.code == "undated_or_mismatched_cash" and e.severity == "blocking" for e in errors)
+
+
+def test_validate_inputs_blocks_empty_calendar_when_study_uploaded():
+    from app.disclosure_package.preflight import validate_inputs
+    from app.disclosure_package.package_specs import OLD_MILL_2026
+    from app.disclosure_package.schemas import ReserveStudySnapshot
+
+    snap = ReserveStudySnapshot(
+        study_date="September 2025",
+        components=_valid_reserve_snapshot().components,
+        funding_plan_rows=[],
+        study_was_uploaded=True,
+    )
+    errors = validate_inputs(
+        spec=OLD_MILL_2026,
+        budget_draft=_valid_budget(),
+        reserve_snapshot=snap,
+        hoa_metadata=_valid_hoa_metadata(),
+    )
+    assert any(e.code == "missing_funding_calendar" and e.severity == "blocking" for e in errors)
+
+
+def test_validate_inputs_blocks_dropped_reviewed_component():
+    from app.disclosure_package.preflight import validate_inputs
+    from app.disclosure_package.package_specs import OLD_MILL_2026
+    from app.disclosure_package.schemas import ReserveStudySnapshot, SkippedReserveStudyRow
+
+    snap = ReserveStudySnapshot(
+        study_date="September 2025",
+        components=_valid_reserve_snapshot().components,
+        skipped_reviewed_rows=[
+            SkippedReserveStudyRow(line_item="Elevator", reason="missing useful life")
+        ],
+    )
+    errors = validate_inputs(
+        spec=OLD_MILL_2026,
+        budget_draft=_valid_budget(),
+        reserve_snapshot=snap,
+        hoa_metadata=_valid_hoa_metadata(),
+    )
+    assert any(e.code == "dropped_reviewed_component" and e.severity == "blocking" for e in errors)

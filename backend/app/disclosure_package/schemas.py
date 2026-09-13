@@ -141,12 +141,25 @@ class ReserveFundingPlanRow(BaseModel):
         return warnings
 
 
+class SkippedReserveStudyRow(BaseModel):
+    """A reviewed reserve-study row that compile could not consume."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    line_item: str
+    reason: str
+    excluded: bool = False
+    exclude_reason: Optional[str] = None
+
+
 class ReserveStudySnapshot(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     study_date: str
     components: List[ReserveStudyComponent] = Field(default_factory=list)
     funding_plan_rows: List[ReserveFundingPlanRow] = Field(default_factory=list)
+    skipped_reviewed_rows: List[SkippedReserveStudyRow] = Field(default_factory=list)
+    study_was_uploaded: bool = False
 
 
 class HOAMetadata(BaseModel):

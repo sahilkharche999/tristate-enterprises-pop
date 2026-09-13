@@ -63,6 +63,7 @@ _BUDGET_DRAFT_COLUMN_DEFINITIONS: dict[str, str] = {
     "enriched_storage_key": "TEXT",
     "reserve_study_upload_id": "INTEGER",
     "reserve_study_rows_json": "TEXT",
+    "reserve_funding_plan_rows_json": "TEXT",
     "reserve_study_warnings_json": "TEXT",
     "reserve_study_status": "TEXT DEFAULT 'none'",
     "reserve_inflation_rate": "REAL DEFAULT 0",
@@ -107,6 +108,12 @@ _HOA_SETTINGS_COLUMN_DEFINITIONS: dict[str, str] = {
     "income_tax_provision_override": "REAL",
     "reserve_funding_source": "TEXT DEFAULT 'reserve_study_provision'",
     "reserve_funding_manual_amount": "REAL",
+    # New-row default is `auto` on schema.sql / ORM. Do not rewrite this
+    # brownfield ADD COLUMN default — existing DBs already have the column.
+    "reserve_funding_overwrite_reason": "TEXT",
+    "reserve_cash_by_fiscal_year_json": "TEXT",
+    "reserve_cash_as_of_date": "TEXT",
+    "use_study_funding_calendar": "INTEGER NOT NULL DEFAULT 0",
     "special_assessments_json": "TEXT DEFAULT '[]'",
     "additional_assessments_needed_json": "TEXT DEFAULT '[]'",
     "outstanding_loan_json": "TEXT",
@@ -1050,7 +1057,12 @@ def ensure_assessment_setup_readiness_column() -> None:
                 "ALTER TABLE assessment_setups ADD COLUMN "
                 "allocation_readiness_status TEXT NOT NULL DEFAULT 'ok'"
             )
-            raw_conn.commit()
+        if cols and "source_document_stale" not in cols:
+            raw_conn.execute(
+                "ALTER TABLE assessment_setups ADD COLUMN "
+                "source_document_stale INTEGER NOT NULL DEFAULT 0"
+            )
+        raw_conn.commit()
     finally:
         raw_conn.close()
 

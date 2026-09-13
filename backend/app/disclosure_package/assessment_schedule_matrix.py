@@ -1208,6 +1208,7 @@ def _line_to_engine_input(line_id: int, line: Any) -> BudgetLineInput:
             "proposed_amount": _get(line, "proposed_amount"),
             "proposedAmount": _get(line, "proposedAmount"),
             "annual_budget": _get(line, "annual_budget"),
+            "percent_change": _get(line, "percent_change"),
             "projection": _get(line, "projection"),
             "amount": _get(line, "amount"),
         }
@@ -1730,6 +1731,7 @@ def _rebase_component_dollars_to_assessment_revenue(
     mappings: list[BudgetLineMappingInput],
     pools: list[PoolDefinition],
     approved_assessment_revenue_annual: Decimal,
+    frozen_pool_keys: Optional[set[str]] = None,
 ) -> tuple[list[BudgetLineInput], list[BudgetLineMappingInput]] | None:
     """Rescale the regular (non-special) pool component dollars so they sum to
     the approved Assessment Income, preserving the DRE pool split.
@@ -1747,23 +1749,37 @@ def _rebase_component_dollars_to_assessment_revenue(
     if approved_assessment_revenue_annual <= Decimal("0"):
         return None
 
+    frozen_pool_keys = frozen_pool_keys or set()
     visible_regular_keys = {
         pool.pool_key for pool in pools if _pool_is_visible(pool)
     }
-    if not visible_regular_keys:
+    residual_keys = {
+        key for key in visible_regular_keys if key not in frozen_pool_keys
+    }
+    if not residual_keys:
         return None
 
     pool_totals = _pool_totals_annual_for_mappings(
         budget_lines=budget_lines, mappings=mappings,
     )
+    frozen_sum = sum(
+        (
+            amount
+            for key, amount in pool_totals.items()
+            if key in frozen_pool_keys
+        ),
+        start=Decimal("0"),
+    )
     regular_totals = {
         key: amount
         for key, amount in pool_totals.items()
-        if key in visible_regular_keys and amount > Decimal("0")
+        if key in residual_keys and amount > Decimal("0")
     }
     current_sum = sum(regular_totals.values(), start=Decimal("0"))
-    if current_sum <= Decimal("0"):
+    residual_target = approved_assessment_revenue_annual - frozen_sum
+    if current_sum <= Decimal("0") or residual_target <= Decimal("0"):
         return None
+    approved_assessment_revenue_annual = residual_target
 
     routing = {
         (
@@ -3329,6 +3345,10 @@ def build_matrix_from_approved_assessment_setup(
         budget_lines=budget_lines,
         mappings=mappings,
     )
+    pre_rebase_pool_line_fund_totals = _pool_line_fund_totals_for_dual_fund_split(
+        budget_lines=budget_lines,
+        mappings=mappings,
+    )
     if not mappings:
         generated_revenue_split = _generated_revenue_split_by_dre_pool_proportions(
             payload=payload,
@@ -3358,15 +3378,26 @@ def build_matrix_from_approved_assessment_setup(
             )
         )
     else:
+        frozen_pool_keys: set[str] = set()
+        try:
+            for slice_row in list_slices(
+                connection,
+                assessment_setup_id=setup_id,
+                statuses=("approved",),
+            ):
+                if getattr(slice_row, "pool_key", None):
+                    frozen_pool_keys.add(slice_row.pool_key)
+        except Exception:
+            frozen_pool_keys = set()
         # The homeowner schedule is driven by the Assessment Income line, not the
-        # sum of mapped operating expenses: rebase the regular pool dollars to
-        # Assessment Income while preserving the DRE pool/unit split. No income
-        # line (or no assessable basis) → keep today's expense-sum behavior.
+        # sum of mapped operating expenses: rebase residual pool dollars to
+        # Assessment Income minus frozen CC&R exception slices.
         rebased = _rebase_component_dollars_to_assessment_revenue(
             budget_lines=budget_lines,
             mappings=mappings,
             pools=pools,
             approved_assessment_revenue_annual=approved_assessment_revenue_annual,
+            frozen_pool_keys=frozen_pool_keys,
         )
         if rebased is not None:
             budget_lines, mappings = rebased
@@ -3374,7 +3405,8 @@ def build_matrix_from_approved_assessment_setup(
                 ReviewNote(
                     message=(
                         "Component dollars scaled to approved Assessment Income; "
-                        "DRE pool split preserved."
+                        "approved CC&R exception slices kept exact and residual "
+                        "pool absorbed the difference."
                     ),
                     severity="info",
                 )
@@ -3562,10 +3594,7 @@ def build_matrix_from_approved_assessment_setup(
         pending_review_issues=empty_special_pool_issues + manual_issues,
         source_pages=_source_pages_from_payload(payload),
         internal_review_notes=internal_review_notes,
-        pool_line_fund_totals=_pool_line_fund_totals_for_dual_fund_split(
-            budget_lines=budget_lines,
-            mappings=mappings,
-        ),
+        pool_line_fund_totals=pre_rebase_pool_line_fund_totals,
         evidence_refs=[
             EvidenceRef(
                 field="recipient_grain",

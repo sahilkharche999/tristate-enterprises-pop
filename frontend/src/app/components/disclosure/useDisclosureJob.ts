@@ -41,7 +41,7 @@ export interface UseDisclosureJobValue {
   stage: DisclosurePackageStage;
   elapsedMs: number;
   error: string | null;
-  generate: (hoaId: number, fiscalYear: number) => Promise<void>;
+  generate: (hoaId: number, fiscalYear: number, packageId?: number) => Promise<void>;
   reset: () => void;
 }
 

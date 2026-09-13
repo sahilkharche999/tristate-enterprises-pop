@@ -144,3 +144,44 @@ class TestUploadDREDocument:
         assert response.page_count is None
         # The file still saved (operator can see the upload and decide to delete)
         assert (storage_root / response.file_id).exists()
+
+    def test_new_ccr_upload_stales_approved_setup(
+        self, db: sqlite3.Connection, storage_root: Path
+    ) -> None:
+        from app.disclosure_package.preflight import check_stale_assessment_setup
+
+        property_id = db.execute("SELECT id FROM properties").fetchone()[0]
+        first = upload_dre_document(
+            property_id=property_id,
+            file_bytes=_synth_pdf_bytes(1),
+            original_filename="ccr-v1.pdf",
+            uploaded_by="ops",
+            connection=db,
+            document_type="ccr",
+        )
+        db.execute(
+            "INSERT INTO assessment_setups "
+            "(property_id, source_dre_document_id, setup_type, display_mode, status) "
+            "VALUES (?, ?, 'fixed', 'fixed', 'approved')",
+            (property_id, first.dre_document_id),
+        )
+        db.commit()
+        upload_dre_document(
+            property_id=property_id,
+            file_bytes=_synth_pdf_bytes(1),
+            original_filename="ccr-v2.pdf",
+            uploaded_by="ops",
+            connection=db,
+            document_type="ccr",
+        )
+        stale = db.execute(
+            "SELECT source_document_stale FROM assessment_setups "
+            "WHERE source_dre_document_id = ?",
+            (first.dre_document_id,),
+        ).fetchone()
+        assert stale is not None
+        assert stale[0] == 1
+        errors = check_stale_assessment_setup(
+            property_id=property_id, connection=db,
+        )
+        assert any(e.code == "stale_assessment_setup" for e in errors)

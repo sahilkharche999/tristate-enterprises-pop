@@ -119,6 +119,7 @@ export function PriorYearAssessmentCard({
     try {
       await confirmPriorAssessmentSchedule(hoaId, {
         fiscal_year: draftYear,
+        package_fiscal_year: fiscalYear,
         rows: cleaned,
       });
       setDraftRows(null);

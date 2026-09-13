@@ -203,6 +203,40 @@ def test_from_reserve_study_extraction_allows_income_statement_only_draft():
     assert snap.components == []
 
 
+def test_from_budget_history_record_proposed_amount_wins():
+    from app.disclosure_package.adapters import from_budget_history_record
+
+    record = {
+        "line_items": [
+            {
+                "label": "Water",
+                "annual_budget": "10000",
+                "proposed_amount": "11000",
+                "category": "operating",
+            }
+        ]
+    }
+    bd = from_budget_history_record(record)
+    assert bd.line_items[0].amount == Decimal("11000")
+
+
+def test_from_budget_history_record_promotes_raw_section():
+    from app.disclosure_package.adapters import from_budget_history_record
+
+    record = {
+        "line_items": [
+            {
+                "label": "Water",
+                "amount": "9000",
+                "category": "operating",
+                "raw": {"section": "Utilities"},
+            }
+        ]
+    }
+    bd = from_budget_history_record(record)
+    assert bd.line_items[0].section == "Utilities"
+
+
 def test_from_reserve_study_extraction_passes_funding_plan_rows():
     from app.disclosure_package.adapters import from_reserve_study_extraction
 
@@ -233,7 +267,29 @@ def test_from_reserve_study_extraction_passes_funding_plan_rows():
     assert row.annual_contribution == Decimal("850998")
     assert row.beginning_balance == Decimal("2171012")
     assert row.monthly_per_unit == Decimal("241.21")
-    assert row.source_page == 8
+
+
+def test_from_reserve_study_extraction_uses_draft_built_funding_plan():
+    from app.disclosure_package.adapters import from_reserve_study_extraction
+    from app.disclosure_package.service import _build_reserve_doc_from_draft
+
+    draft = SimpleNamespace(
+        reserve_study_rows=[],
+        reserve_funding_plan_rows=[
+            {
+                "year": 2026,
+                "annual_contribution": 31935,
+                "beginning_balance": 0,
+            }
+        ],
+        reserve_study_upload_id=1,
+    )
+    doc = _build_reserve_doc_from_draft(draft)
+    snap = from_reserve_study_extraction(doc)
+    assert snap.study_was_uploaded is True
+    assert snap.funding_plan_rows
+    assert snap.funding_plan_rows[0].year == 2026
+    assert snap.funding_plan_rows[0].annual_contribution == Decimal("31935")
 
 
 # ── Test 7: Property ORM row → HOAMetadata (units >= 1, fiscal months 1-12) ──

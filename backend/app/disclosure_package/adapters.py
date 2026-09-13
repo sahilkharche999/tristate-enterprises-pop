@@ -32,6 +32,7 @@ from .schemas import (
     ReserveFundingPlanRow,
     ReserveStudyComponent,
     ReserveStudySnapshot,
+    SkippedReserveStudyRow,
 )
 
 
@@ -117,22 +118,10 @@ def from_budget_history_record(record: Any) -> BudgetDraft:
         #      disclosure must recompute it here or the forecast silently
         #      ignores every proposed increase.
         #   3. amount — legacy synonym for direct-payload callers/tests.
-        money_value: Any = None
-        proposed = _attr_or_key(raw, "proposed_amount")
-        if proposed is None:
-            proposed = _attr_or_key(raw, "proposedAmount")
-        annual = _attr_or_key(raw, "annual_budget")
-        if proposed is not None:
-            money_value = proposed
-        elif annual is not None:
-            pct = _attr_or_key(raw, "percent_change")
-            if pct in (None, ""):
-                money_value = annual
-            else:
-                money_value = _to_decimal(annual) * (
-                    Decimal(1) + _to_decimal(pct) / Decimal(100)
-                )
-        else:
+        from .line_amounts import resolve_canonical_line_amount
+
+        money_value, _source = resolve_canonical_line_amount(raw)
+        if money_value is None:
             money_value = _attr_or_key(raw, "amount")
 
         explicit_revenue = _attr_or_key(raw, "is_revenue")
@@ -141,11 +130,15 @@ def from_budget_history_record(record: Any) -> BudgetDraft:
         derived_revenue, derived_reserve = _CATEGORY_TO_FLAGS.get(
             (category or "").strip().lower(), (False, False)
         )
+        nested_raw = _attr_or_key(raw, "raw") or {}
+        section = _attr_or_key(raw, "section")
+        if not section and isinstance(nested_raw, dict):
+            section = nested_raw.get("section") or nested_raw.get("Section")
 
         items.append(LineItem(
             label=str(_attr_or_key(raw, "label", "")),
             amount=_to_decimal(money_value),
-            section=_attr_or_key(raw, "section"),
+            section=section,
             category=category,
             is_reserve=(
                 bool(explicit_reserve) if explicit_reserve is not None
@@ -183,18 +176,48 @@ def from_reserve_study_extraction(document: Any) -> ReserveStudySnapshot:
     raw_funding_rows = _attr_or_key(document, "funding_plan_rows") or []
     components: list[ReserveStudyComponent] = []
     funding_plan_rows: list[ReserveFundingPlanRow] = []
+    skipped_reviewed_rows: list[SkippedReserveStudyRow] = []
+    study_was_uploaded = bool(
+        raw_rows
+        or raw_funding_rows
+        or _attr_or_key(document, "study_was_uploaded")
+    )
     for raw in raw_rows:
+        line_item = str(_attr_or_key(raw, "line_item") or "(unnamed)")
+        excluded = bool(_attr_or_key(raw, "excluded"))
+        exclude_reason = _attr_or_key(raw, "exclude_reason")
         useful_life = _attr_or_key(raw, "useful_life")
-        if useful_life in (None, 0):
-            continue
         remaining_life = _attr_or_key(raw, "remaining_life")
         replacement_cost = _attr_or_key(raw, "replacement_cost")
-        if remaining_life is None or replacement_cost is None:
+        if excluded:
+            skipped_reviewed_rows.append(
+                SkippedReserveStudyRow(
+                    line_item=line_item,
+                    reason="operator excluded",
+                    excluded=True,
+                    exclude_reason=str(exclude_reason or "") or None,
+                )
+            )
             continue
-        line_item = _attr_or_key(raw, "line_item")
+        skip_reason = None
+        if useful_life in (None, 0):
+            skip_reason = "missing useful life"
+        elif remaining_life is None:
+            skip_reason = "missing remaining life"
+        elif replacement_cost is None:
+            skip_reason = "missing replacement cost"
+        if skip_reason:
+            skipped_reviewed_rows.append(
+                SkippedReserveStudyRow(
+                    line_item=line_item,
+                    reason=skip_reason,
+                    excluded=False,
+                )
+            )
+            continue
         year_new = _attr_or_key(raw, "year_new")
         components.append(ReserveStudyComponent(
-            line_item=str(line_item or "(unnamed)"),
+            line_item=line_item,
             useful_life=int(useful_life),
             remaining_life=int(remaining_life),
             replacement_cost=_to_decimal(replacement_cost),
@@ -228,6 +251,8 @@ def from_reserve_study_extraction(document: Any) -> ReserveStudySnapshot:
         study_date=str(study_date),
         components=components,
         funding_plan_rows=funding_plan_rows,
+        skipped_reviewed_rows=skipped_reviewed_rows,
+        study_was_uploaded=study_was_uploaded,
     )
 
 

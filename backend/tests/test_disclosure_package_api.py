@@ -128,6 +128,13 @@ def _seed_active_draft_for(db_session, hoa_id: int) -> None:
             "year_new": 2010,
         }
     ]
+    funding_plan_rows = [
+        {
+            "year": OLD_MILL_FY,
+            "annual_contribution": 200,
+            "beginning_balance": 0,
+        }
+    ]
     draft = BudgetDraft(
         property_id=hoa_id,
         source_upload_id=None,
@@ -135,6 +142,7 @@ def _seed_active_draft_for(db_session, hoa_id: int) -> None:
         status=BUDGET_DRAFT_ACTIVE,
         line_items_json=json.dumps(line_items),
         reserve_study_rows_json=json.dumps(reserve_rows),
+        reserve_funding_plan_rows_json=json.dumps(funding_plan_rows),
         reserve_study_status="completed",
         global_note=None,
         statement_month=12,
@@ -150,6 +158,14 @@ def _seed_active_draft_for(db_session, hoa_id: int) -> None:
     )
     db_session.add(draft)
     db_session.commit()
+
+
+def _prepare_ready_hoa(db_session, hoa_id: int) -> None:
+    """Seed a draft and skip mapping so generate preflight can pass."""
+    prop = db_session.query(Property).filter(Property.id == hoa_id).one()
+    prop.assessment_mode = "fixed"
+    db_session.commit()
+    _seed_active_draft_for(db_session, hoa_id)
 
 
 def _make_fake_render(storage_root: Path):
@@ -260,6 +276,7 @@ def test_generate_returns_202_for_old_mill(
         dp_service, "run_render_job", _make_fake_render(budget_storage_root)
     )
     hoa_id = _get_old_mill_id(db_session)
+    _prepare_ready_hoa(db_session, hoa_id)
 
     response = client.post(
         "/api/disclosure-package/generate",
@@ -273,15 +290,22 @@ def test_generate_returns_202_for_old_mill(
     assert body["property_id"] == hoa_id
 
 
-def test_non_old_mill_returns_501(client, db_session):
-    """REQ-D11-016: POST /generate for non-Old-Mill HOA → 501."""
+def test_non_old_mill_generate_uses_universal_template(
+    client, db_session, budget_storage_root, monkeypatch
+):
+    """Every HOA shares STANDARD_PACKAGE_SPEC; generate is not Old-Mill-only."""
+    from app.disclosure_package import service as dp_service
+
+    monkeypatch.setattr(
+        dp_service, "run_render_job", _make_fake_render(budget_storage_root)
+    )
     other_hoa_id = _get_other_hoa_id(db_session)
+    _prepare_ready_hoa(db_session, other_hoa_id)
     response = client.post(
         "/api/disclosure-package/generate",
         json={"hoa_id": other_hoa_id, "fiscal_year": 2026},
     )
-    assert response.status_code == 501, response.text
-    assert "not yet available" in response.json()["detail"].lower()
+    assert response.status_code == 202, response.text
 
 
 def test_generate_unknown_hoa_returns_404(client):
@@ -305,6 +329,7 @@ def test_concurrent_regenerate_returns_409(
 
     monkeypatch.setattr(dp_service, "run_render_job", _noop)
     hoa_id = _get_old_mill_id(db_session)
+    _prepare_ready_hoa(db_session, hoa_id)
 
     first = client.post(
         "/api/disclosure-package/generate",
@@ -337,6 +362,7 @@ def test_status_reaches_completed_after_background_task(
         dp_service, "run_render_job", _make_fake_render(budget_storage_root)
     )
     hoa_id = _get_old_mill_id(db_session)
+    _prepare_ready_hoa(db_session, hoa_id)
 
     response = client.post(
         "/api/disclosure-package/generate",
@@ -363,6 +389,7 @@ def test_download_returns_pdf(
         dp_service, "run_render_job", _make_fake_render(budget_storage_root)
     )
     hoa_id = _get_old_mill_id(db_session)
+    _prepare_ready_hoa(db_session, hoa_id)
 
     job_id = client.post(
         "/api/disclosure-package/generate",
@@ -373,7 +400,7 @@ def test_download_returns_pdf(
     assert download.status_code == 200, download.text
     assert download.headers["content-type"] == "application/pdf"
     cd = download.headers.get("content-disposition", "")
-    assert "old-mill-2026-disclosure-package.pdf" in cd, cd
+    assert "2026-disclosure-package.pdf" in cd, cd
     assert download.content.startswith(b"%PDF"), "expected PDF bytes"
 
 
@@ -385,6 +412,7 @@ def test_download_pending_job_returns_409(
 
     monkeypatch.setattr(dp_service, "run_render_job", lambda *a, **kw: None)
     hoa_id = _get_old_mill_id(db_session)
+    _prepare_ready_hoa(db_session, hoa_id)
 
     job_id = client.post(
         "/api/disclosure-package/generate",
@@ -405,6 +433,7 @@ def test_get_audit_returns_calls(
         dp_service, "run_render_job", _make_fake_render(budget_storage_root)
     )
     hoa_id = _get_old_mill_id(db_session)
+    _prepare_ready_hoa(db_session, hoa_id)
 
     job_id = client.post(
         "/api/disclosure-package/generate",
@@ -433,6 +462,7 @@ def test_cross_user_access_returns_404(
 
     monkeypatch.setattr(dp_service, "run_render_job", lambda *a, **kw: None)
     hoa_id = _get_old_mill_id(db_session)
+    _prepare_ready_hoa(db_session, hoa_id)
 
     # User A (default conftest user, id=1) creates a job
     response = client.post(
@@ -482,6 +512,7 @@ def test_reproducible_audit_outputs(
     fake = _make_fake_render(budget_storage_root)
     monkeypatch.setattr(dp_service, "run_render_job", fake)
     hoa_id = _get_old_mill_id(db_session)
+    _prepare_ready_hoa(db_session, hoa_id)
 
     job_a = client.post(
         "/api/disclosure-package/generate",

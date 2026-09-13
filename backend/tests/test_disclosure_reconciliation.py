@@ -4,11 +4,13 @@ from decimal import Decimal
 
 from app.disclosure_package.reconciliation import (
     ReserveFundingPlanRow,
+    find_budget_reserve_contribution,
     normalize_packet_archetype,
     resolve_assessment_presentation_facts,
     parse_optional_decimal_setting,
     resolve_assessment_facts,
     resolve_reserve_funding_facts,
+    resolve_reserve_interest_tax_facts,
     normalize_reserve_funding_source,
 )
 from app.disclosure_package.schemas import LineItem
@@ -53,6 +55,19 @@ def test_reserve_funding_prefers_manual_amount_when_source_manual() -> None:
     assert facts.budget_annual_contribution == Decimal("824414")
     assert facts.study_recommended_annual_contribution == Decimal("900000")
     assert facts.component_annual_provision == Decimal("558381")
+
+
+def test_find_budget_reserve_contribution_matches_missouri_allocation_transfer() -> None:
+    amount, label = find_budget_reserve_contribution(
+        [
+            LineItem(label="Assessment Income", amount=Decimal("104458"), is_revenue=True),
+            LineItem(label="Reserve - Allocation/Transfer", amount=Decimal("31935")),
+            LineItem(label="Management", amount=Decimal("18000")),
+        ]
+    )
+    assert amount == Decimal("31935")
+    assert label is not None
+    assert "Allocation/Transfer" in label
 
 
 def test_reserve_funding_auto_prefers_budget_contribution_over_component_provision() -> None:
@@ -165,3 +180,24 @@ def test_assessment_presentation_facts_for_variable_matrix() -> None:
     assert facts.assessments_vary is True
     assert facts.should_show_single_monthly_amount is False
     assert facts.assessment_change_phrase == "assessments vary by ownership interest"
+
+
+def test_reserve_interest_excludes_late_fee_and_operating_interest() -> None:
+    facts = resolve_reserve_interest_tax_facts(
+        reserve_interest_income_override=None,
+        income_tax_provision_override=None,
+        budget_line_items=[
+            LineItem(label="Late Fees & Interest", amount=Decimal("200"), is_revenue=True),
+            LineItem(label="Interest Income", amount=Decimal("100"), is_revenue=True),
+            LineItem(
+                label="Reserve Interest Income",
+                amount=Decimal("100"),
+                is_revenue=True,
+                is_reserve=True,
+            ),
+        ],
+        reserve_funding_plan_rows=[],
+        fiscal_year=2025,
+    )
+    assert facts.reserve_interest_income == Decimal("100.00")
+    assert facts.interest_source == "budget_interest_income"

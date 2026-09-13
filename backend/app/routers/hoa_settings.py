@@ -46,8 +46,12 @@ def _row_to_dict(row) -> Dict[str, Any]:
         "financial_packet_archetype": row.financial_packet_archetype or "dual-fund",
         "reserve_interest_income_override": row.reserve_interest_income_override,
         "income_tax_provision_override": row.income_tax_provision_override,
-        "reserve_funding_source": row.reserve_funding_source or "reserve_study_provision",
+        "reserve_funding_source": row.reserve_funding_source or "auto",
         "reserve_funding_manual_amount": row.reserve_funding_manual_amount,
+        "reserve_funding_overwrite_reason": getattr(row, "reserve_funding_overwrite_reason", None),
+        "reserve_cash_by_fiscal_year_json": getattr(row, "reserve_cash_by_fiscal_year_json", None),
+        "reserve_cash_as_of_date": getattr(row, "reserve_cash_as_of_date", None),
+        "use_study_funding_calendar": bool(getattr(row, "use_study_funding_calendar", 0)),
         "special_assessments_json": row.special_assessments_json or "[]",
         "additional_assessments_needed_json": row.additional_assessments_needed_json or "[]",
         "outstanding_loan_json": row.outstanding_loan_json,
@@ -72,6 +76,42 @@ def _row_to_dict(row) -> Dict[str, Any]:
     }
 
 
+def _reserve_funding_candidates(session: Session, hoa_id: int) -> Dict[str, Any]:
+    """Read-only comparison amounts shown next to the funding-source picker."""
+    candidates: Dict[str, Any] = {
+        "budget": None,
+        "study": None,
+        "provision": None,
+    }
+    try:
+        from ..services import budget_history_service
+        from ..disclosure_package.adapters import (
+            from_budget_history_record,
+            from_reserve_study_extraction,
+        )
+        from ..disclosure_package.formulas import total_year_replacement_provision
+        from ..disclosure_package.reconciliation import find_budget_reserve_contribution
+        from ..disclosure_package.service import _build_reserve_doc_from_draft
+
+        draft = budget_history_service.get_active_draft(session, hoa_id)
+        budget_draft = from_budget_history_record(draft)
+        budget_amount, _label = find_budget_reserve_contribution(budget_draft.line_items)
+        if budget_amount is not None:
+            candidates["budget"] = float(budget_amount)
+        reserve_doc = _build_reserve_doc_from_draft(draft, session=session, hoa_id=hoa_id)
+        snapshot = from_reserve_study_extraction(reserve_doc)
+        provision = total_year_replacement_provision(components=snapshot.components)
+        if provision:
+            candidates["provision"] = float(provision)
+        for row in snapshot.funding_plan_rows:
+            if row.annual_contribution is not None:
+                candidates["study"] = float(row.annual_contribution)
+                break
+    except Exception:
+        return candidates
+    return candidates
+
+
 @router.get("/{hoa_id}/settings/disclosure")
 async def get_disclosure_settings(
     hoa_id: int,
@@ -81,7 +121,9 @@ async def get_disclosure_settings(
     if not session.query(Property).filter_by(id=hoa_id).one_or_none():
         raise HTTPException(status_code=404, detail=f"HOA not found: {hoa_id}")
     row = hoa_settings_service.get_or_create(session, hoa_id=hoa_id)
-    return _row_to_dict(row)
+    payload = _row_to_dict(row)
+    payload["reserve_funding_candidates"] = _reserve_funding_candidates(session, hoa_id)
+    return payload
 
 
 @router.put("/{hoa_id}/settings/disclosure")

@@ -93,6 +93,7 @@ export interface BudgetDraftPayload {
   line_items: JsonObject[];
   reserve_study_status?: string;
   reserve_study_rows: JsonObject[];
+  reserve_funding_plan_rows?: JsonObject[];
   reserve_study_warnings: string[];
   global_note?: string | null;
   statement_month?: number | null;
@@ -241,6 +242,19 @@ export interface ReserveStudyRow {
   estimated_liability?: number | null;
   source_page?: number | null;
   flags?: string[];
+  excluded?: boolean;
+  exclude_reason?: string | null;
+}
+
+export interface ReserveFundingPlanRow {
+  year: number;
+  beginning_balance?: number | null;
+  annual_contribution?: number | null;
+  interest_income?: number | null;
+  reserve_expenditures?: number | null;
+  ending_balance?: number | null;
+  percent_funded?: number | null;
+  source_page?: number | null;
 }
 
 export interface BundleFileStatus {
@@ -263,6 +277,7 @@ export interface BudgetBundleUploadResponse {
 export interface SaveReserveStudyPayload {
   rows: JsonObject[];
   warnings?: string[];
+  funding_plan_rows?: JsonObject[];
 }
 
 export interface ApplyReserveStudyResponse {

@@ -61,6 +61,7 @@ import {
   type BudgetVersionSummary,
   type ExtractionDebugInfo,
   type ExtractionQualityWarning,
+  type ReserveFundingPlanRow,
   type ReserveStudyRow,
 } from '../api/budgetHistory';
 import { DrePdfCompareView } from './DrePdfCompareView';
@@ -155,10 +156,12 @@ function normalizedDraftSnapshot(
 function normalizedReserveStudySnapshot(
   rows: ReserveStudyRow[],
   warnings: string[],
+  fundingPlanRows: ReserveFundingPlanRow[] = [],
 ) {
   return JSON.stringify({
     rows,
     warnings,
+    fundingPlanRows,
   });
 }
 
@@ -166,6 +169,7 @@ function reserveSnapshotFromDraft(draft: BudgetDraftPayload | null): string {
   return normalizedReserveStudySnapshot(
     ((draft?.reserve_study_rows ?? []) as ReserveStudyRow[]),
     draft?.reserve_study_warnings ?? [],
+    ((draft?.reserve_funding_plan_rows ?? []) as ReserveFundingPlanRow[]),
   );
 }
 
@@ -281,6 +285,7 @@ export function BudgetScreen({
   // lives only in this component, so reload clears it — by design.
   const [qualityWarning, setQualityWarning] = useState<ExtractionQualityWarning | null>(null);
   const [reserveStudyRows, setReserveStudyRows] = useState<ReserveStudyRow[]>([]);
+  const [reserveFundingPlanRows, setReserveFundingPlanRows] = useState<ReserveFundingPlanRow[]>([]);
   const [reserveStudyWarnings, setReserveStudyWarnings] = useState<string[]>([]);
   const [reserveStudyStatus, setReserveStudyStatus] = useState<string>('none');
   const [reserveStudyApplyMessage, setReserveStudyApplyMessage] = useState<string | null>(null);
@@ -316,6 +321,7 @@ export function BudgetScreen({
     setIsEnrichedCompareOpen(true);
   }, []);
   const reserveRowsRef = useRef<ReserveStudyRow[]>([]);
+  const reserveFundingPlanRef = useRef<ReserveFundingPlanRow[]>([]);
   const reserveWarningsRef = useRef<string[]>([]);
   const autoSaveInFlightRef = useRef(false);
   const lastAutoSaveAttemptSnapshotRef = useRef<string | null>(null);
@@ -396,11 +402,15 @@ export function BudgetScreen({
 
   useEffect(() => {
     reserveRowsRef.current = reserveStudyRows;
+    reserveFundingPlanRef.current = reserveFundingPlanRows;
     reserveWarningsRef.current = reserveStudyWarnings;
-  }, [reserveStudyRows, reserveStudyWarnings]);
+  }, [reserveStudyRows, reserveFundingPlanRows, reserveStudyWarnings]);
 
   const hydrateReserveState = (draft: BudgetDraftPayload) => {
     setReserveStudyRows((draft.reserve_study_rows ?? []) as ReserveStudyRow[]);
+    setReserveFundingPlanRows(
+      (draft.reserve_funding_plan_rows ?? []) as ReserveFundingPlanRow[],
+    );
     setReserveStudyWarnings(draft.reserve_study_warnings ?? []);
     setReserveStudyStatus(draft.reserve_study_status ?? 'none');
     setReserveStudyUploadId(draft.reserve_study_upload_id ?? null);
@@ -417,6 +427,7 @@ export function BudgetScreen({
       setGrowthFactorNote('');
       setIsComparePanelOpen(false);
       setReserveStudyRows([]);
+      setReserveFundingPlanRows([]);
       setReserveStudyWarnings([]);
       setReserveStudyStatus('none');
       lastPersistedReserveSnapshotRef.current = reserveSnapshotFromDraft(null);
@@ -432,6 +443,7 @@ export function BudgetScreen({
     const currentReserveSnapshot = normalizedReserveStudySnapshot(
       reserveRowsRef.current,
       reserveWarningsRef.current,
+      reserveFundingPlanRef.current,
     );
     const hasUnsavedLocalReserveEdits =
       currentReserveSnapshot !== lastPersistedReserveSnapshotRef.current;
@@ -820,31 +832,38 @@ export function BudgetScreen({
     return persistedDraft;
   };
 
-  const workingReserveStudySnapshot = normalizedReserveStudySnapshot(reserveStudyRows, reserveStudyWarnings);
+  const workingReserveStudySnapshot = normalizedReserveStudySnapshot(
+    reserveStudyRows,
+    reserveStudyWarnings,
+    reserveFundingPlanRows,
+  );
   const hasUnsavedReserveStudyChanges =
     workingReserveStudySnapshot !== lastPersistedReserveSnapshotRef.current;
 
   const persistReserveStudySnapshot = async (
     rows: ReserveStudyRow[] = reserveRowsRef.current,
     warnings: string[] = reserveWarningsRef.current,
+    fundingPlanRows: ReserveFundingPlanRow[] = reserveFundingPlanRef.current,
   ): Promise<BudgetDraftPayload> => {
     if (!draftId) {
       throw new Error('Create a draft first.');
     }
 
-    const snapshotSent = normalizedReserveStudySnapshot(rows, warnings);
+    const snapshotSent = normalizedReserveStudySnapshot(rows, warnings, fundingPlanRows);
     const savePromise = (async () => {
       setIsSavingReserveStudy(true);
       try {
         const draft = await saveReserveStudyRows(hoaId, draftId, {
           rows: rows as unknown as Record<string, unknown>[],
           warnings,
+          funding_plan_rows: fundingPlanRows as unknown as Record<string, unknown>[],
         });
         const savedSnapshot = reserveSnapshotFromDraft(draft);
         lastPersistedReserveSnapshotRef.current = savedSnapshot;
         const localSnapshotNow = normalizedReserveStudySnapshot(
           reserveRowsRef.current,
           reserveWarningsRef.current,
+          reserveFundingPlanRef.current,
         );
         if (localSnapshotNow === snapshotSent) {
           hydrateReserveState(draft);
@@ -872,11 +891,13 @@ export function BudgetScreen({
     const latestReserveSnapshot = normalizedReserveStudySnapshot(
       reserveRowsRef.current,
       reserveWarningsRef.current,
+      reserveFundingPlanRef.current,
     );
     if (!nextDraft || latestReserveSnapshot !== lastPersistedReserveSnapshotRef.current) {
       nextDraft = await persistReserveStudySnapshot(
         reserveRowsRef.current,
         reserveWarningsRef.current,
+        reserveFundingPlanRef.current,
       );
     }
     return nextDraft;
@@ -1201,6 +1222,16 @@ export function BudgetScreen({
         if (field === 'quantity') {
           return { ...row, quantity: value.trim() === '' ? null : value };
         }
+        if (field === 'exclude_reason') {
+          return { ...row, exclude_reason: value };
+        }
+        if (field === 'excluded') {
+          return {
+            ...row,
+            excluded: value === 'true',
+            exclude_reason: value === 'true' ? row.exclude_reason : null,
+          };
+        }
         const nextValue = value === '' ? null : Number(value);
         const updates: Partial<ReserveStudyRow> = {
           [field]: Number.isFinite(nextValue as number) ? nextValue : null,
@@ -1214,6 +1245,27 @@ export function BudgetScreen({
         return {
           ...row,
           ...updates,
+        };
+      }),
+    );
+    setReserveStudyApplyMessage(null);
+  };
+
+  const handleFundingPlanChange = (
+    index: number,
+    field: keyof ReserveFundingPlanRow,
+    value: string,
+  ) => {
+    setReserveFundingPlanRows((current) =>
+      current.map((row, rowIndex) => {
+        if (rowIndex !== index) return row;
+        if (field === 'year') {
+          const nextYear = Number(value);
+          return { ...row, year: Number.isFinite(nextYear) ? nextYear : row.year };
+        }
+        return {
+          ...row,
+          [field]: value === '' ? null : Number(value),
         };
       }),
     );
@@ -1237,6 +1289,8 @@ export function BudgetScreen({
         estimated_liability: null,
         source_page: null,
         flags: [],
+        excluded: false,
+        exclude_reason: null,
       },
     ]);
     setReserveStudyApplyMessage(null);
@@ -2105,6 +2159,8 @@ export function BudgetScreen({
           const reserveStudyTable = (
             <ReserveStudyView
               rows={reserveStudyRows}
+              fundingPlanRows={reserveFundingPlanRows}
+              onFundingPlanChange={handleFundingPlanChange}
               warnings={reserveStudyWarnings}
               status={reserveStudyStatus}
               onRowChange={handleReserveStudyRowChange}

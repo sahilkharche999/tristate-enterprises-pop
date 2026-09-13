@@ -88,6 +88,7 @@ class BudgetDraftPayload(BaseModel):
     line_items: list[JsonObject] = Field(default_factory=list)
     reserve_study_status: str = "none"
     reserve_study_rows: list[JsonObject] = Field(default_factory=list)
+    reserve_funding_plan_rows: list[JsonObject] = Field(default_factory=list)
     reserve_study_warnings: list[str] = Field(default_factory=list)
     global_note: Optional[str] = None
     statement_month: Optional[int] = None
@@ -251,6 +252,7 @@ class BudgetBundleUploadResponse(BaseModel):
 
 class BudgetReserveStudySaveRequest(BaseModel):
     rows: list[JsonObject] = Field(default_factory=list)
+    funding_plan_rows: list[JsonObject] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
 
 

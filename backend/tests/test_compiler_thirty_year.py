@@ -319,3 +319,119 @@ def test_board_deferral_reduces_disbursements() -> None:
     assert cf["board_approved_deferral"][0] == Decimal("20000")
     # Total disbursements = repair − deferral = 80,000.
     assert cf["total_cash_disbursements"][0] == Decimal("80000")
+
+
+def test_thirty_year_year0_uses_adopted_contribution_not_provision() -> None:
+    """Year 0 regular assessments equal the scenario adopted annual amount."""
+    adopted = Decimal("31935")
+    units = 9
+    monthly = (adopted / Decimal(units) / Decimal(12)).quantize(Decimal("0.01"))
+    out = _build_thirty_year_plan(
+        spec=OLD_MILL_2026,
+        hoa_metadata=HOAMetadata(
+            hoa_id=1,
+            name="131 Missouri Street Homeowners Association",
+            units=units,
+            fiscal_year_start_month=1,
+            fiscal_year_end_month=12,
+        ),
+        components=[
+            ReserveStudyComponent(
+                line_item="Roofing",
+                useful_life=25,
+                remaining_life=10,
+                replacement_cost=Decimal("39659") * Decimal("25"),
+            ),
+        ],
+        total_estimated_liability=Decimal("231959"),
+        total_year_replacement_provision=Decimal("39659"),
+        cash_eoy_prior=Decimal("0"),
+        fiscal_year_start=2025,
+        inflation_rate=Decimal("0.03"),
+        interest_rate=Decimal("0"),
+        assessment_schedule=[],
+        base_replacement_fund_monthly_per_unit=monthly,
+    )
+    cf = out["thirty_year_cash_flow"]
+    assert cf["regular_assessments"][0] == adopted.quantize(Decimal("1"))
+    assert out["thirty_year_funding_plan"][0]["annual_contribution"] == int(adopted)
+    assert out["thirty_year_funding_plan"][0]["annual_contribution"] != 39659
+
+
+def test_legacy_funding_plan_resets_remaining_life_after_replacement() -> None:
+    from app.disclosure_package.compiler import _legacy_funding_plan
+    from app.disclosure_package.formulas import estimated_liability_for, percent_funded
+
+    zeros = [Decimal("0")] * 30
+    cash_end = [Decimal("50000")] * 30
+    cash_flow = {
+        "years": list(range(2026, 2056)),
+        "cash_balance_beginning": cash_end,
+        "regular_assessments": zeros,
+        "repair_replacement_costs": zeros,
+        "interest_income": zeros,
+        "cash_balance_end": cash_end,
+    }
+    rows = _legacy_funding_plan(
+        cash_flow=cash_flow,
+        per_component=[
+            {
+                "line_item": "Roof",
+                "useful_life": 5,
+                "remaining_life": 0,
+                "replacement_cost": Decimal("10000"),
+            }
+        ],
+        inflation=Decimal("0"),
+        total_estimated_liability_now=Decimal("10000"),
+    )
+    year0_liab = Decimal(estimated_liability_for(
+        replacement_cost=Decimal("10000"),
+        useful_life=5,
+        remaining_life=0,
+    ))
+    year1_liab = Decimal(estimated_liability_for(
+        replacement_cost=Decimal("10000"),
+        useful_life=5,
+        remaining_life=5,
+    ))
+    assert rows[0]["estimated_liability"] == int(year0_liab)
+    assert rows[1]["estimated_liability"] == int(year1_liab)
+    assert rows[1]["estimated_liability"] < rows[0]["estimated_liability"]
+    assert rows[0]["percent_funded"] == int(
+        percent_funded(cash_reserves=Decimal("50000"), estimated_liability=year0_liab)
+    )
+
+
+def test_cover_percent_funded_equals_year0_table() -> None:
+    from app.disclosure_package.compiler import _compute_all
+    from app.disclosure_package.schemas import (
+        BudgetDraft,
+        LineItem,
+        ReserveStudyComponent,
+        ReserveStudySnapshot,
+    )
+
+    snapshot = ReserveStudySnapshot(
+        study_date="September 2025",
+        components=[
+            ReserveStudyComponent(
+                line_item="Roof",
+                useful_life=20,
+                remaining_life=10,
+                replacement_cost=Decimal("200000"),
+            )
+        ],
+    )
+    computed = _compute_all(
+        spec=OLD_MILL_2026.model_copy(update={"hoa_id": 1, "fiscal_year": 2026}),
+        budget_draft=BudgetDraft(line_items=[
+            LineItem(label="Assessment Income", amount=Decimal("100"), is_revenue=True),
+            LineItem(label="Reserve - Allocation/Transfer", amount=Decimal("12000")),
+        ]),
+        reserve_snapshot=snapshot,
+        hoa_metadata=_hoa(),
+        effective_hoa_settings={"reserve_cash_as_of_date": "2025-12-31", "reserve_cash_balance_eoy_prior": "50000"},
+    )["computed"]
+    year0 = computed["thirty_year_funding_plan"][0]
+    assert int(computed["percent_funded"]) == int(year0["percent_funded"])

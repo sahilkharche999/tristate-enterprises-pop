@@ -191,3 +191,37 @@ class TestLiveEditsDoNotBleedIntoFinalizedSnapshots:
         assert loaded_before["assessment_setup"] == loaded_after["assessment_setup"]
         assert loaded_before["budget"] == loaded_after["budget"]
         assert loaded_before["status"] == "finalized"
+
+
+    def test_settings_change_after_finalize_does_not_change_snapshots(self, db):
+        from app.disclosure_package.compile_inputs import should_use_snapshots
+
+        pid = _pid(db)
+        pkg = create_annual_package(
+            property_id=pid, budget_year=2026, fiscal_year=2026, connection=db,
+        )
+        approve_annual_package(
+            property_id=pid, package_id=pkg.package_id,
+            approved_assessment_revenue_annual=Decimal("60000"),
+            approved_by="ops", connection=db,
+        )
+        freeze_package_snapshots(
+            package_id=pkg.package_id,
+            connection=db,
+            compile_context={"hoa_settings_overrides": {"reserve_cash_balance_eoy_prior": 1}},
+            **_SAMPLE_INPUTS,
+        )
+        before = load_package_snapshots(package_id=pkg.package_id, connection=db)
+        db.execute(
+            "INSERT INTO hoa_settings (property_id, reserve_cash_balance_eoy_prior) "
+            "VALUES (?, 999999)",
+            (pid,),
+        )
+        db.commit()
+        after = load_package_snapshots(package_id=pkg.package_id, connection=db)
+        assert should_use_snapshots(package_id=pkg.package_id, connection=db) is True
+        assert before["reserve"] == after["reserve"]
+        assert before["budget"] == after["budget"]
+        assert after["compile_context"]["hoa_settings_overrides"][
+            "reserve_cash_balance_eoy_prior"
+        ] == 1

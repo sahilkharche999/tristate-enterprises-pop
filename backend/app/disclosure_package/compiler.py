@@ -46,6 +46,7 @@ from pydantic import BaseModel, ConfigDict
 
 from .audit import audit_context
 from .formulas import (
+    estimated_liability_for,
     excess_revenues_over_expenses_operations,
     excess_revenues_over_expenses_replacement,
     expenses_administration_operating,
@@ -80,10 +81,9 @@ from .reconciliation import (
     resolve_assessment_presentation_facts,
     resolve_assessment_facts,
     resolve_packet_archetype_facts,
-    resolve_reserve_funding_facts,
-    resolve_reserve_interest_tax_facts,
     resolve_reserve_liability_facts,
 )
+from .scenario import build_package_scenario
 from .assessment_schedule_matrix import (
     AssessmentScheduleMatrix,
     build_universal_assessment_matrix,
@@ -372,6 +372,7 @@ def _cash_flow_rows(
     replacement_costs_by_year_inflated: list[Decimal],
     board_deferrals_by_year: list[Decimal],
     fiscal_year_start: int,
+    study_contributions_by_year: Optional[dict[int, Decimal]] = None,
 ) -> dict[str, Any]:
     """Build the pivoted cash-flow matrix that the cash-flow panel template renders.
 
@@ -395,6 +396,16 @@ def _cash_flow_rows(
         (monthly_per_unit_by_year[i] * Decimal(units) * Decimal(12)).quantize(Decimal("1"))
         for i in range(_HORIZON_YEARS)
     ]
+    if study_contributions_by_year:
+        for i, year in enumerate(years):
+            study_amount = study_contributions_by_year.get(year)
+            if study_amount is None:
+                continue
+            regular_assessments[i] = Decimal(study_amount).quantize(Decimal("1"))
+            if units > 0:
+                monthly_per_unit_by_year[i] = (
+                    Decimal(study_amount) / Decimal(units) / Decimal(12)
+                ).quantize(Decimal("0.01"))
     special_assessments_row = [
         (special_assessments_per_unit_by_year[i] * Decimal(units)).quantize(Decimal("1"))
         for i in range(_HORIZON_YEARS)
@@ -478,19 +489,47 @@ def _legacy_funding_plan(
     Keys: year, beginning_balance, annual_contribution, annual_expenditure,
     interest, ending_balance, estimated_liability, percent_funded.
     """
+    states = [
+        {
+            "useful_life": int(component.get("useful_life") or 0),
+            "remaining_life": int(component.get("remaining_life") or 0),
+            "replacement_cost": Decimal(str(component.get("replacement_cost") or 0)),
+        }
+        for component in per_component
+        if not component.get("is_header") and int(component.get("useful_life") or 0) > 0
+    ]
+    if not states and total_estimated_liability_now:
+        states = []
+
     rows: list[dict[str, Any]] = []
     for offset in range(_HORIZON_YEARS):
         factor = (Decimal("1") + inflation) ** offset
-        liability = (total_estimated_liability_now * factor).quantize(Decimal("1"))
+        if states:
+            liability = Decimal("0")
+            for state in states:
+                inflated_cost = (state["replacement_cost"] * factor).quantize(Decimal("0.01"))
+                liability += Decimal(
+                    estimated_liability_for(
+                        replacement_cost=inflated_cost,
+                        useful_life=max(state["useful_life"], 0),
+                        remaining_life=max(state["remaining_life"], 0),
+                    )
+                )
+            for state in states:
+                if state["remaining_life"] <= 0:
+                    state["remaining_life"] = state["useful_life"]
+                else:
+                    state["remaining_life"] -= 1
+        else:
+            liability = (total_estimated_liability_now * factor).quantize(Decimal("1"))
+        # Cash for that year = opening/beginning balance, matching §5565
+        # (scenario cash / current liability on year 0).
+        beginning = cash_flow["cash_balance_beginning"][offset]
         ending = cash_flow["cash_balance_end"][offset]
-        pct = (
-            (ending / liability * Decimal("100")).quantize(Decimal("1"))
-            if liability
-            else Decimal("0")
-        )
+        pct = percent_funded(cash_reserves=beginning, estimated_liability=liability)
         rows.append({
             "year": cash_flow["years"][offset],
-            "beginning_balance": int(cash_flow["cash_balance_beginning"][offset]),
+            "beginning_balance": int(beginning),
             "annual_contribution": int(cash_flow["regular_assessments"][offset]),
             "annual_expenditure": int(cash_flow["repair_replacement_costs"][offset]),
             "interest": int(cash_flow["interest_income"][offset]),
@@ -516,6 +555,7 @@ def _build_thirty_year_plan(
     base_replacement_fund_monthly_per_unit: Optional[Decimal] = None,
     special_assessments: Optional[list[dict[str, Any]]] = None,
     board_deferrals: Optional[list[dict[str, Any]]] = None,
+    study_contributions_by_year: Optional[dict[int, Decimal]] = None,
 ) -> dict[str, Any]:
     """30-year reserve funding study outputs (drifting-puzzling-grove rebuild).
 
@@ -605,6 +645,7 @@ def _build_thirty_year_plan(
         replacement_costs_by_year_inflated=inflated_aggregate,
         board_deferrals_by_year=deferrals_by_year,
         fiscal_year_start=fiscal_year_start,
+        study_contributions_by_year=study_contributions_by_year,
     )
 
     legacy = _legacy_funding_plan(
@@ -830,15 +871,32 @@ def _compute_all(
             "the reserve study so the date is auto-extracted."
         )
 
-    cash_setting = parse_optional_decimal_setting(settings.get("reserve_cash_balance_eoy_prior"))
-    if cash_setting is None:
+    package_scenario = build_package_scenario(
+        fiscal_year=spec.fiscal_year,
+        units=hoa_metadata.units,
+        budget_line_items=budget_draft.line_items,
+        reserve_snapshot=reserve_snapshot,
+        settings=settings,
+    )
+    if package_scenario.opening_reserve_cash.is_dated:
+        cash = package_scenario.opening_reserve_cash.value
+    elif parse_optional_decimal_setting(settings.get("reserve_cash_balance_eoy_prior")) is None:
         cash = Decimal("0")
         data_gaps.append(
             "Disclosure setting 'reserve_cash_balance_eoy_prior' is unset — "
             "reserve cash balance treated as $0 for funding calculations."
         )
     else:
-        cash = cash_setting
+        # Undated leftover must not enter another year. Use $0 for math;
+        # preflight blocks issuance when blocking_reasons is non-empty.
+        cash = Decimal("0")
+        data_gaps.extend(package_scenario.blocking_reasons)
+    if not package_scenario.opening_reserve_cash.is_dated and cash == Decimal("0"):
+        data_gaps.extend(
+            reason
+            for reason in package_scenario.blocking_reasons
+            if reason not in data_gaps
+        )
     fund_balance_boy_op = _setting_decimal("fund_balance_boy_operations") or Decimal("0")
     pct = percent_funded(cash_reserves=cash, estimated_liability=total_liab)
     under_total = under_funded_balance_total(
@@ -850,15 +908,7 @@ def _compute_all(
         units=hoa_metadata.units,
     )
 
-    reserve_funding_facts = resolve_reserve_funding_facts(
-        funding_source=settings.get("reserve_funding_source"),
-        manual_annual_amount=settings.get("reserve_funding_manual_amount"),
-        budget_line_items=budget_draft.line_items,
-        reserve_funding_plan_rows=reserve_snapshot.funding_plan_rows,
-        component_annual_provision=total_prov or Decimal("0"),
-        units=hoa_metadata.units,
-        fiscal_year=spec.fiscal_year,
-    )
+    reserve_funding_facts = package_scenario.funding_facts
     data_gaps.extend(reserve_funding_facts.warnings)
     monthly_replacement_contribution_total = reserve_funding_facts.monthly_total
     base_2026_monthly = reserve_funding_facts.monthly_per_unit
@@ -891,13 +941,7 @@ def _compute_all(
         if not c.useful_life or int(c.useful_life) <= 0
     )
 
-    reserve_interest_tax_facts = resolve_reserve_interest_tax_facts(
-        reserve_interest_income_override=settings.get("reserve_interest_income_override"),
-        income_tax_provision_override=settings.get("income_tax_provision_override"),
-        budget_line_items=budget_draft.line_items,
-        reserve_funding_plan_rows=reserve_snapshot.funding_plan_rows,
-        fiscal_year=spec.fiscal_year,
-    )
+    reserve_interest_tax_facts = package_scenario.interest_tax_facts
     data_gaps.extend(reserve_interest_tax_facts.warnings)
     interest_revenue_total = reserve_interest_tax_facts.reserve_interest_income
     income_tax_provision = reserve_interest_tax_facts.reserve_tax_provision
@@ -1135,6 +1179,17 @@ def _compute_all(
                 ),
                 special_assessments=special_assessments,
                 board_deferrals=board_deferrals_list,
+                study_contributions_by_year=(
+                    {
+                        row.year: Decimal(row.annual_contribution)
+                        for row in reserve_snapshot.funding_plan_rows
+                        if row.annual_contribution is not None
+                    }
+                    if package_scenario.use_study_funding_calendar
+                    else {
+                        spec.fiscal_year: package_scenario.adopted_contribution.value
+                    }
+                ),
             ),
             "data_gaps": data_gaps,
             # Priority-A structured inputs (drifting-puzzling-grove) — templates
@@ -1150,6 +1205,7 @@ def _compute_all(
             "reserve_funding_source": reserve_funding_facts.source,
             "reserve_funding_source_label": reserve_funding_facts.source_label,
             "reserve_funding_facts": reserve_funding_facts.model_dump(),
+            "package_scenario": package_scenario.model_dump(),
             "reserve_interest_tax_facts": reserve_interest_tax_facts.model_dump(),
             "reserve_liability_facts": reserve_liability_facts.model_dump(),
             "annual_statement_facts": annual_statement_facts.model_dump(),

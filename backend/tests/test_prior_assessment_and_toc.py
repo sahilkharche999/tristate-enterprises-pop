@@ -118,6 +118,24 @@ def test_resolve_falls_back_to_seed():
     assert prior.rows[0].total_monthly_assessment == Decimal("10.00")
 
 
+def test_resolve_rejects_seed_year_not_package_year_minus_one():
+    c = _conn()
+    save_prior_seed(
+        c,
+        property_id=1,
+        fiscal_year=2024,
+        rows=[{"recipient_label": "A", "monthly": "10.00"}],
+    )
+    assert (
+        resolve_prior_assessment_matrix(
+            c, property_id=1, fiscal_year=2026, hoa_name="Test HOA",
+        )
+        is None
+    )
+    st = prior_status(c, property_id=1, fiscal_year=2026)
+    assert st["status"] == "missing"
+
+
 def test_resolve_missing():
     c = _conn()
     assert (

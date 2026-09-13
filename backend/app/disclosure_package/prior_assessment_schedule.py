@@ -280,6 +280,13 @@ def resolve_prior_assessment_matrix(
     if seed is None:
         return None
     seed_year, rows = seed
+    if int(seed_year) != prior_year:
+        logger.warning(
+            "prior schedule seed year %s is not package year %s minus one; omitting table",
+            seed_year,
+            fiscal_year,
+        )
+        return None
     name = hoa_name or "Association"
     return matrix_from_seed_rows(hoa_name=name, fiscal_year=seed_year, rows=rows)
 
@@ -714,6 +721,16 @@ def prior_status(
     seed = load_prior_seed(connection, property_id=property_id)
     if seed is not None:
         seed_year, rows = seed
+        if int(seed_year) != prior_year:
+            return {
+                "status": "missing",
+                "prior_fiscal_year": prior_year,
+                "source": None,
+                "message": (
+                    f"Prior schedule seed is for {seed_year}, not {prior_year}. "
+                    "Confirm last year’s schedule or finalize that year’s package."
+                ),
+            }
         return {
             "status": "seeded",
             "prior_fiscal_year": seed_year,

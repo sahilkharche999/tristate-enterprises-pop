@@ -88,9 +88,16 @@ export interface BoardDeferralEntry {
 }
 
 export type ReserveFundingSource =
+  | 'auto'
   | 'reserve_study_provision'
   | 'budget_allocation_line'
   | 'manual';
+
+export interface ReserveFundingCandidates {
+  budget: number | null;
+  study: number | null;
+  provision: number | null;
+}
 
 export type FinancialPacketArchetype = 'dual-fund' | 'reserve-only';
 
@@ -119,6 +126,11 @@ export interface HOADisclosureSettings {
   income_tax_provision_override: number | null;
   reserve_funding_source: ReserveFundingSource;
   reserve_funding_manual_amount: number | null;
+  reserve_funding_overwrite_reason: string | null;
+  reserve_cash_by_fiscal_year_json: string | null;
+  reserve_cash_as_of_date: string | null;
+  use_study_funding_calendar: boolean;
+  reserve_funding_candidates?: ReserveFundingCandidates;
   special_assessments_json: string;          // JSON-encoded SpecialAssessmentEntry[]
   additional_assessments_needed_json: string; // JSON-encoded SpecialAssessmentEntry[]
   outstanding_loan_json: string | null;       // JSON-encoded OutstandingLoan or null

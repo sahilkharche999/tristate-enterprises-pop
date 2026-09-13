@@ -13,7 +13,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from './ui/alert-dialog';
-import type { ReserveStudyRow } from '../api/budgetHistory';
+import type { ReserveFundingPlanRow, ReserveStudyRow } from '../api/budgetHistory';
 import {
   getDisplayEstimatedLiability,
   getDisplayYearReplacementProvision,
@@ -22,6 +22,8 @@ import { clampTableZoomPercent, TABLE_ZOOM_STEP } from './tableZoom.ts';
 
 interface ReserveStudyViewProps {
   rows: ReserveStudyRow[];
+  fundingPlanRows?: ReserveFundingPlanRow[];
+  onFundingPlanChange?: (index: number, field: keyof ReserveFundingPlanRow, value: string) => void;
   warnings: string[];
   status: string;
   onRowChange: (index: number, field: keyof ReserveStudyRow, value: string) => void;
@@ -59,6 +61,8 @@ interface ReserveStudyViewProps {
 
 export function ReserveStudyView({
   rows,
+  fundingPlanRows = [],
+  onFundingPlanChange,
   warnings,
   status,
   onRowChange,
@@ -198,6 +202,54 @@ export function ReserveStudyView({
           </div>
         ) : null}
 
+        {fundingPlanRows.length > 0 ? (
+          <div className={`${compact ? 'mt-3' : 'mt-6'} overflow-x-auto rounded-xl border border-[#e5e5e5]`}>
+            <p className="px-4 pt-3 text-xs font-medium uppercase tracking-[0.18em] text-[#737373]">
+              Funding-plan calendar
+            </p>
+            <table className="min-w-[920px] w-full bg-white text-sm">
+              <thead>
+                <tr className="text-left text-xs uppercase tracking-[0.12em] text-[#737373]">
+                  <th className="px-4 py-2">Year</th>
+                  <th className="px-4 py-2">Contribution</th>
+                  <th className="px-4 py-2">Interest</th>
+                  <th className="px-4 py-2">Spend</th>
+                  <th className="px-4 py-2">Beginning</th>
+                  <th className="px-4 py-2">Ending</th>
+                </tr>
+              </thead>
+              <tbody>
+                {fundingPlanRows.map((row, index) => (
+                  <tr key={`funding-${row.year}-${index}`} className="border-t border-[#f0f0f0]">
+                    <td className="px-4 py-2">{row.year}</td>
+                    {(
+                      [
+                        'annual_contribution',
+                        'interest_income',
+                        'reserve_expenditures',
+                        'beginning_balance',
+                        'ending_balance',
+                      ] as const
+                    ).map((field) => (
+                      <td key={field} className="px-4 py-2">
+                        <Input
+                          type="number"
+                          value={row[field] ?? ''}
+                          disabled={!onFundingPlanChange}
+                          onChange={(event) =>
+                            onFundingPlanChange?.(index, field, event.target.value)
+                          }
+                          className="w-32 border-[#e5e5e5] bg-white"
+                        />
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : null}
+
         <div className={`${compact ? 'mt-3' : 'mt-6'} flex items-center justify-end gap-1.5`}>
           <Button
             type="button"
@@ -240,7 +292,7 @@ export function ReserveStudyView({
             className={compact ? undefined : 'max-h-[70vh] overflow-auto'}
             style={{ zoom: tableZoomPercent / 100 }}
           >
-            <table className="min-w-[1540px] bg-white">
+            <table className="min-w-[1720px] bg-white">
               <colgroup>
                 <col className="w-[72px]" />
                 <col className="w-[300px]" />
@@ -251,6 +303,7 @@ export function ReserveStudyView({
                 <col className="w-[126px]" />
                 <col className="w-[126px]" />
                 <col className="w-[200px]" />
+                <col className="w-[180px]" />
                 <col className="w-[96px]" />
               </colgroup>
               <thead
@@ -266,13 +319,14 @@ export function ReserveStudyView({
                   <th className="px-4 py-3">Year Rplc. Prov.</th>
                   <th className="px-4 py-3">Est. Liab.</th>
                   <th className="px-4 py-3">Flags</th>
+                  <th className="px-4 py-3">Exclude</th>
                   <th className="px-4 py-3 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {rows.length === 0 ? (
                   <tr>
-                    <td colSpan={10} className="px-4 py-8 text-center text-sm text-[#737373]">
+                    <td colSpan={11} className="px-4 py-8 text-center text-sm text-[#737373]">
                       No reserve-study rows yet. Add one manually or upload a reserve-study PDF.
                     </td>
                   </tr>
@@ -441,6 +495,30 @@ export function ReserveStudyView({
                           )}
                           </div>
                         </div>
+                      </td>
+                      <td className="px-4 py-3">
+                        <label className="flex flex-col gap-1 text-xs text-[#525252]">
+                          <span className="inline-flex items-center gap-1">
+                            <input
+                              type="checkbox"
+                              checked={Boolean(row.excluded)}
+                              onChange={(event) =>
+                                onRowChange(index, 'excluded', event.target.checked ? 'true' : 'false')
+                              }
+                            />
+                            Excluded
+                          </span>
+                          {row.excluded ? (
+                            <Input
+                              value={row.exclude_reason ?? ''}
+                              onChange={(event) =>
+                                onRowChange(index, 'exclude_reason', event.target.value)
+                              }
+                              placeholder="Reason"
+                              className="w-40 border-[#e5e5e5] bg-white"
+                            />
+                          ) : null}
+                        </label>
                       </td>
                       <td className="px-4 py-3 text-right">
                         <Button

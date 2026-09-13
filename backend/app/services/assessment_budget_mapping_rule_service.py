@@ -317,22 +317,9 @@ def select_assessment_mapping_amount(
     line: dict,
 ) -> tuple[Optional[Decimal], str]:
     """Pick one canonical current-year amount for assessment mapping review."""
-    explicit_amount = _decimal_or_none(line.get("assessment_mapping_amount"))
-    if explicit_amount is not None:
-        return explicit_amount, str(line.get("source_column_used") or "assessment_mapping_amount")
+    from ..disclosure_package.line_amounts import resolve_canonical_line_amount
 
-    for field, source in (
-        ("proposed_amount", "proposed_amount"),
-        ("proposedAmount", "proposed_amount"),
-        ("annual_budget", "annual_budget"),
-        ("projection", "projection"),
-        ("amount", "amount"),
-    ):
-        amount = _decimal_or_none(line.get(field))
-        if amount is not None:
-            return amount, source
-
-    return None, "none"
+    return resolve_canonical_line_amount(line)
 
 
 def active_budget_lines_for_property(

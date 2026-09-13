@@ -126,3 +126,26 @@ def test_rebase_penny_remainder_lands_on_last_pool():
     assert totals["p1"] == Decimal("33.33")
     assert totals["p2"] == Decimal("33.33")
     assert totals["p3"] == Decimal("33.34")   # remainder
+
+
+def test_rebase_frozen_painting_slice_unchanged_residual_absorbs():
+    """Approved CC&R painting slice stays $7,181; residual absorbs the $100 gap.
+
+    P&L / line-fund totals stay on pre-rebase mapped lines. Rebase still
+    drives the schedule, but frozen exception pools are not treated as
+    post-rebase expense rows.
+    """
+    lines = [_line("painting", 7181, 1), _line("mgmt", 10000, 2)]
+    mappings = [_map("painting", "painting"), _map("mgmt", "residual")]
+    pools = [_pool("painting", 1), _pool("residual", 2)]
+    rebased = _rebase_component_dollars_to_assessment_revenue(
+        budget_lines=lines,
+        mappings=mappings,
+        pools=pools,
+        approved_assessment_revenue_annual=Decimal("17281"),
+        frozen_pool_keys={"painting"},
+    )
+    assert rebased is not None
+    totals = _totals(*rebased)
+    assert totals["painting"] == Decimal("7181")
+    assert totals["residual"] == Decimal("10100")

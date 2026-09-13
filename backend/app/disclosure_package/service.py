@@ -133,6 +133,7 @@ def _assessment_revenue_for_budget_draft(budget_draft: Any) -> Decimal:
                 "proposed_amount": _line_item_value(item, "proposed_amount"),
                 "proposedAmount": _line_item_value(item, "proposedAmount"),
                 "annual_budget": _line_item_value(item, "annual_budget"),
+                "percent_change": _line_item_value(item, "percent_change"),
                 "projection": _line_item_value(item, "projection"),
                 "amount": _line_item_value(item, "amount"),
             }
@@ -452,12 +453,20 @@ def _build_reserve_doc_from_draft(
     via the Disclosure Settings form).
     """
     rows = list(getattr(draft_payload, "reserve_study_rows", []) or [])
+    funding_plan_rows = list(
+        getattr(draft_payload, "reserve_funding_plan_rows", []) or []
+    )
     study_date = ""
     if session is not None and hoa_id is not None:
         from ..services import hoa_settings_service as _hoa_settings_service
         settings_row = _hoa_settings_service.get_or_create(session, hoa_id=hoa_id)
         study_date = getattr(settings_row, "reserve_study_date", None) or ""
-    return SimpleNamespace(study_date=study_date, rows=rows)
+    return SimpleNamespace(
+        study_date=study_date,
+        rows=rows,
+        funding_plan_rows=funding_plan_rows,
+        study_was_uploaded=bool(rows or funding_plan_rows or getattr(draft_payload, "reserve_study_upload_id", None)),
+    )
 
 
 def _resolve_pool_forecast_overlay(
@@ -595,6 +604,10 @@ def _resolve_preflight_inputs(
         "income_tax_provision_override",
         "reserve_funding_source",
         "reserve_funding_manual_amount",
+        "reserve_funding_overwrite_reason",
+        "reserve_cash_by_fiscal_year_json",
+        "reserve_cash_as_of_date",
+        "use_study_funding_calendar",
         "special_assessments_json",
         "additional_assessments_needed_json",
         "outstanding_loan_json",
@@ -1123,6 +1136,39 @@ def run_preflight_detailed(
         property_id=hoa_id,
         connection=session.connection().connection,
     )
+    from .preflight import (
+        check_appendix_cadence,
+        check_special_assessments,
+        check_stale_assessment_setup,
+    )
+    import json as _json
+
+    raw_specials = bundle.overrides.get("special_assessments_json") or "[]"
+    if isinstance(raw_specials, str):
+        try:
+            special_entries = _json.loads(raw_specials)
+        except _json.JSONDecodeError:
+            special_entries = []
+    else:
+        special_entries = raw_specials if isinstance(raw_specials, list) else []
+    errors = errors + check_special_assessments(
+        entries=special_entries if isinstance(special_entries, list) else [],
+    )
+    errors = errors + check_stale_assessment_setup(
+        property_id=hoa_id,
+        connection=session.connection().connection,
+    )
+    try:
+        from .appendix_manifest import list_appendix_documents
+
+        appendix_docs = list_appendix_documents(session, hoa_id)
+        if isinstance(appendix_docs, list):
+            errors = errors + check_appendix_cadence(
+                appendix_documents=appendix_docs,
+                package_fiscal_year=fiscal_year,
+            )
+    except Exception:
+        logger.debug("appendix cadence preflight skipped for HOA %s", hoa_id, exc_info=True)
     # Soft YoY warning: prior assessment table omitted when no source exists.
     try:
         from .prior_assessment_schedule import prior_status
@@ -1483,6 +1529,8 @@ def assemble_finalize_snapshots(
         compile_context["prior_assessment_matrix"] = prior_matrix.model_dump(
             mode="json",
         )
+    else:
+        compile_context["prior_assessment_not_on_file"] = True
     try:
         from app.allocation_resolution.service import freeze_resolution_snapshot
         from app.services.assessment_budget_mapping_rule_service import (

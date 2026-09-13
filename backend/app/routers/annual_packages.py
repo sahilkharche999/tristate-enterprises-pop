@@ -213,6 +213,10 @@ class PriorScheduleRow(BaseModel):
 
 class ConfirmPriorScheduleRequest(BaseModel):
     fiscal_year: int = Field(..., description="Year the amounts applied (usually Y-1)")
+    package_fiscal_year: Optional[int] = Field(
+        default=None,
+        description="Package year; seed year must equal this minus one",
+    )
     rows: list[PriorScheduleRow]
 
 
@@ -296,6 +300,17 @@ def confirm_prior_assessment_schedule(
 
     if not payload.rows:
         raise HTTPException(status_code=422, detail="At least one schedule row is required")
+    if (
+        payload.package_fiscal_year is not None
+        and int(payload.fiscal_year) != int(payload.package_fiscal_year) - 1
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Prior schedule year must be package year minus one "
+                f"({int(payload.package_fiscal_year) - 1}), not {payload.fiscal_year}"
+            ),
+        )
     rows = [r.model_dump(exclude_none=True) for r in payload.rows]
     raw = session.connection().connection
     save_prior_seed(

@@ -148,4 +148,26 @@ def resolve_appendix_manifest(
     ]
 
 
-__all__ = ["ResolvedAppendix", "resolve_appendix_manifest"]
+def list_appendix_documents(session: object, hoa_id: int) -> list[dict]:
+    """Cadence-check shape for ``check_appendix_cadence``.
+
+    Uses the live appendix catalog (not the per-package manifest) so
+    preflight can see annual/required rows even before a package exists.
+    """
+    from app.services.appendix_service import list_appendices
+
+    raw = session.connection().connection  # type: ignore[attr-defined]
+    docs = list_appendices(property_id=hoa_id, connection=raw)
+    return [
+        {
+            "display_title": doc.display_title,
+            "cadence": doc.cadence,
+            "annual_year": doc.annual_year,
+            "valid_through_year": doc.valid_through_year,
+            "required_flag": doc.required_flag,
+        }
+        for doc in docs
+    ]
+
+
+__all__ = ["ResolvedAppendix", "list_appendix_documents", "resolve_appendix_manifest"]

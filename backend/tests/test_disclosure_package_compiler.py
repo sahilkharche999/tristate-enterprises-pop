@@ -1483,3 +1483,52 @@ def test_real_render_toc_and_footer_page_numbers_match_assembled_pdf(
         assert "---- Page Reference ----" in pageref_text
     finally:
         doc.close()
+
+
+def test_missouri_scenario_contribution_is_shared_across_cover_note6_pnl_and_year0() -> None:
+    """Cover, Note 6, P&L replacement column, and 30-year year 0 all read
+    the income-statement transfer — not component provision."""
+    spec = OLD_MILL_2026.model_copy(update={"fiscal_year": 2025})
+    transfer = Decimal("31935")
+    draft = BudgetDraft(line_items=[
+        LineItem(label="Assessment Income", amount=Decimal("104458"), is_revenue=True),
+        LineItem(label="Reserve - Allocation/Transfer", amount=transfer),
+        LineItem(label="Management", amount=Decimal("18000"), section="Administration"),
+    ])
+    provision_cost = Decimal("39659") * Decimal("25")
+    snapshot = ReserveStudySnapshot(
+        study_date="January 2025",
+        components=[
+            ReserveStudyComponent(
+                line_item="Roofing",
+                useful_life=25,
+                remaining_life=10,
+                replacement_cost=provision_cost,
+                year_new=2010,
+            ),
+        ],
+    )
+    hoa = HOAMetadata(
+        hoa_id=1,
+        name="131 Missouri Street Homeowners Association",
+        units=9,
+        fiscal_year_start_month=1,
+        fiscal_year_end_month=12,
+    )
+
+    computed = compiler_module._compute_all(
+        spec,
+        draft,
+        snapshot,
+        hoa,
+        {"reserve_funding_source": "auto"},
+    )["computed"]
+
+    expected_monthly = (transfer / Decimal("12")).quantize(Decimal("0.01"))
+    assert computed["package_scenario"]["adopted_contribution"]["value"] == transfer
+    assert computed["reserve_funding_facts"]["annual_contribution"] == transfer
+    assert computed["monthly_replacement_contribution_total"] == expected_monthly
+    assert computed["annual_statement_facts"]["reserve_assessment_revenue"] == transfer
+    assert computed["total_year_replacement_provision"] != transfer
+    assert computed["thirty_year_cash_flow"]["regular_assessments"][0] == transfer.quantize(Decimal("1"))
+    assert computed["thirty_year_funding_plan"][0]["annual_contribution"] == int(transfer)

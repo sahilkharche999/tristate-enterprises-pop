@@ -1125,6 +1125,7 @@ def _statement_to_budget_line_items(
                 "label": item.label,
                 "name": item.label,
                 "category": category,
+                "section": item.section_label or category,
                 "current_actual": item.current_actual,
                 "current_budget": item.current_budget,
                 "current_variance": item.current_variance,
@@ -1438,6 +1439,7 @@ def _table_to_line_items(
             "account_code": account_code,
             "label": label,
             "category": category,
+            "section": section,
             # Project ALL seven numeric columns from the enriched workbook so
             # downstream validation (`validate_extracted_statement`) can see
             # them. Cummins Park exposed why this matters: that PDF has rows
@@ -1541,6 +1543,9 @@ def _serialize_draft(draft: BudgetDraft, upload: Optional[BudgetUpload] = None) 
         line_items=line_items,
         reserve_study_status=draft.reserve_study_status or "none",
         reserve_study_rows=reserve_study_rows,
+        reserve_funding_plan_rows=_json_loads(
+            getattr(draft, "reserve_funding_plan_rows_json", None), []
+        ),
         reserve_study_warnings=_json_loads(draft.reserve_study_warnings_json, []),
         global_note=draft.global_note,
         statement_month=draft.statement_month,
@@ -2626,15 +2631,26 @@ def _persist_reserve_study_to_draft(
             draft_row.reserve_study_rows_json = _json_dumps(
                 [row.model_dump() for row in reserve_result.rows]
             )
+            funding_rows = list(getattr(reserve_result, "funding_plan_rows", None) or [])
+            draft_row.reserve_funding_plan_rows_json = _json_dumps(
+                [row.model_dump() if hasattr(row, "model_dump") else row for row in funding_rows]
+            )
             draft_row.reserve_study_warnings_json = _json_dumps(reserve_result.warnings)
             draft_row.updated_by_user_id = actor["id"]
             draft_row.actor_name = _actor_name(actor)
             draft_row.updated_at = _now_text()
             extracted_date = getattr(reserve_result, "study_date", None)
+            from ..services import hoa_settings_service as _hoa_settings_service
+            settings_row = _hoa_settings_service.get_or_create(session, hoa_id=hoa_id)
             if extracted_date:
-                from ..services import hoa_settings_service as _hoa_settings_service
-                settings_row = _hoa_settings_service.get_or_create(session, hoa_id=hoa_id)
                 settings_row.reserve_study_date = str(extracted_date)
+            existing_schedule = getattr(settings_row, "assessment_increase_schedule_json", None)
+            if existing_schedule in (None, "", "[]") and funding_rows:
+                from .reserve_study_extractor import derive_increase_brackets_from_funding_plan
+
+                brackets = derive_increase_brackets_from_funding_plan(funding_rows)
+                if brackets:
+                    settings_row.assessment_increase_schedule_json = _json_dumps(brackets)
             session.commit()
 
     return reserve_upload, reserve_status
@@ -2714,6 +2730,9 @@ def replace_budget_source(
     preserved = {
         "reserve_study_upload_id": draft.reserve_study_upload_id,
         "reserve_study_rows_json": draft.reserve_study_rows_json,
+        "reserve_funding_plan_rows_json": getattr(
+            draft, "reserve_funding_plan_rows_json", None
+        ),
         "reserve_study_warnings_json": draft.reserve_study_warnings_json,
         "reserve_study_status": draft.reserve_study_status,
         "global_note": draft.global_note,
@@ -3026,6 +3045,8 @@ def save_reserve_study_rows(
         for row in normalized_rows
     )
     draft.reserve_study_rows_json = _json_dumps(normalized_rows)
+    if payload.funding_plan_rows:
+        draft.reserve_funding_plan_rows_json = _json_dumps(payload.funding_plan_rows)
     draft.reserve_study_warnings_json = _json_dumps(payload.warnings)
     draft.reserve_study_status = "review_required" if has_review_flags else "completed"
     draft.updated_by_user_id = actor["id"]

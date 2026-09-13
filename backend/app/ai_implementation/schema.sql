@@ -138,6 +138,7 @@ CREATE TABLE IF NOT EXISTS budget_drafts (
     status                   TEXT NOT NULL CHECK(status IN ('active', 'superseded', 'generated')),
     line_items_json          TEXT NOT NULL,
     reserve_study_rows_json  TEXT,
+    reserve_funding_plan_rows_json TEXT,
     reserve_study_warnings_json TEXT,
     reserve_study_status     TEXT DEFAULT 'none'
                              CHECK(reserve_study_status IN ('none', 'pending', 'completed', 'review_required', 'failed')),
@@ -325,8 +326,12 @@ CREATE TABLE IF NOT EXISTS hoa_settings (
     financial_packet_archetype          TEXT DEFAULT 'dual-fund',
     reserve_interest_income_override    REAL,
     income_tax_provision_override       REAL,
-    reserve_funding_source              TEXT DEFAULT 'reserve_study_provision',
+    reserve_funding_source              TEXT DEFAULT 'auto',
     reserve_funding_manual_amount       REAL,
+    reserve_funding_overwrite_reason    TEXT,
+    reserve_cash_by_fiscal_year_json    TEXT,
+    reserve_cash_as_of_date             TEXT,
+    use_study_funding_calendar          INTEGER NOT NULL DEFAULT 0,
     special_assessments_json            TEXT DEFAULT '[]',
     additional_assessments_needed_json  TEXT DEFAULT '[]',
     outstanding_loan_json               TEXT,
@@ -428,6 +433,7 @@ CREATE TABLE IF NOT EXISTS assessment_setups (
                              CHECK (status IN ('draft','approved','superseded')),
     allocation_readiness_status TEXT NOT NULL DEFAULT 'ok'
                              CHECK (allocation_readiness_status IN ('ok','needs_review')),
+    source_document_stale    INTEGER NOT NULL DEFAULT 0,
     version_int              INTEGER NOT NULL DEFAULT 0,
     created_at               TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at               TEXT NOT NULL DEFAULT (datetime('now'))
