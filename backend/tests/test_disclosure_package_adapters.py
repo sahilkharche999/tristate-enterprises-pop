@@ -187,9 +187,11 @@ def test_from_reserve_study_extraction_skips_rows_without_useful_life():
         ],
     )
     snap = from_reserve_study_extraction(doc)
-    # Only the valid row survives.
+    # Only the valid row survives. Blank rows are excluded, not blocking.
     assert len(snap.components) == 1
     assert snap.components[0].line_item == "Valid"
+    assert {row.line_item for row in snap.skipped_reviewed_rows} == {"Header Row", "Zero-life"}
+    assert all(row.excluded for row in snap.skipped_reviewed_rows)
 
 
 def test_from_reserve_study_extraction_ignores_section_headers():

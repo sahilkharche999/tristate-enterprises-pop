@@ -1256,6 +1256,41 @@ def test_canonicalize_reserve_rows_derives_yearly_provision_and_estimated_liabil
     assert "missing_estimated_liability" not in rows[0].flags
 
 
+def test_canonicalize_reserve_rows_excludes_rows_with_no_component_values():
+    rows, _reference_year = canonicalize_reserve_study_rows(
+        [
+            ExtractedReserveStudyRow(
+                row_id="108",
+                line_item="108 Sauna Heaters - Replace -REMOVED",
+                useful_life=None,
+                remaining_life=None,
+                replacement_cost=0,
+            ),
+            ExtractedReserveStudyRow(
+                row_id="roof-1",
+                line_item="Roof",
+                useful_life=20,
+                remaining_life=1,
+                replacement_cost=100000,
+            ),
+            ExtractedReserveStudyRow(
+                row_id="header-1",
+                row_type="header",
+                line_item="Clubhouse",
+            ),
+        ],
+        explicit_reference_year=2026,
+    )
+
+    blank = rows[0]
+    assert blank.excluded is True
+    assert blank.exclude_reason == "Study row has no useful life."
+    assert rows[1].excluded is False
+    assert rows[1].exclude_reason is None
+    assert rows[2].row_type == "header"
+    assert rows[2].excluded is False
+
+
 def test_canonicalize_reserve_rows_preserves_header_rows_without_flags():
     rows, reference_year = canonicalize_reserve_study_rows(
         [
@@ -2196,3 +2231,134 @@ def test_parse_funding_plan_rows_from_text_cash_flow_fixture():
     assert rows[0].annual_contribution == 31935.0
     assert rows[0].beginning_balance == 360000.0
     assert rows[1].interest_income == 1300.0
+    assert rows[0].row_kind == "annual"
+
+
+def test_map_funding_calendar_rows_reads_sma_contribution_not_beginning_balance():
+    from app.services.reserve_study_extractor import (
+        _FundingPlanCalendarExtraction,
+        _FundingPlanWireRow,
+        map_funding_calendar_rows,
+    )
+
+    extraction = _FundingPlanCalendarExtraction(
+        rows=[
+            _FundingPlanWireRow(
+                year=2026,
+                row_kind="annual",
+                annual_contribution=834312,
+                percent_funded=77,
+            )
+        ]
+    )
+    rows = map_funding_calendar_rows(extraction, source_page=2)
+    assert len(rows) == 1
+    assert rows[0].annual_contribution == 834312
+    assert rows[0].beginning_balance is None
+    assert rows[0].percent_funded == 77
+    assert rows[0].row_kind == "annual"
+    assert rows[0].source_page == 2
+
+
+def test_map_funding_calendar_rows_keeps_partial_years_and_milestones():
+    from app.services.reserve_study_extractor import (
+        _FundingPlanCalendarExtraction,
+        _FundingPlanWireRow,
+        map_funding_calendar_rows,
+    )
+
+    extraction = _FundingPlanCalendarExtraction(
+        rows=[
+            _FundingPlanWireRow(year=2026, row_kind="annual", annual_contribution=834312),
+            _FundingPlanWireRow(year=2045, row_kind="annual", annual_contribution=900000),
+            _FundingPlanWireRow(
+                year=2055,
+                row_kind="milestone",
+                annual_contribution=999999,
+                ending_balance=5890000,
+                percent_funded=100,
+            ),
+        ]
+    )
+    rows = map_funding_calendar_rows(extraction, source_page=7)
+    assert [row.year for row in rows] == [2026, 2045, 2055]
+    assert rows[0].row_kind == "annual"
+    assert rows[1].row_kind == "annual"
+    assert rows[2].row_kind == "milestone"
+    assert rows[2].annual_contribution is None
+    assert rows[2].ending_balance == 5890000
+
+
+def test_funding_plan_rows_for_pages_uses_gemini_json_and_skips_text_parser(monkeypatch):
+    import asyncio
+
+    from app.ai_implementation.pipeline.document_extraction_provider import (
+        DocumentPromptContext,
+        RenderedPage,
+    )
+    from app.services.reserve_study_extractor import (
+        _FundingPlanCalendarExtraction,
+        _FundingPlanWireRow,
+        _funding_plan_rows_for_pages,
+    )
+
+    async def _fake_call(messages, response_schema, temperature=0.0, timeout=120.0):
+        assert response_schema is _FundingPlanCalendarExtraction
+        assert any(
+            part.get("type") == "image" for part in messages[-1]["content"]
+        )
+        return _FundingPlanCalendarExtraction(
+            rows=[
+                _FundingPlanWireRow(
+                    year=2026,
+                    row_kind="annual",
+                    annual_contribution=834312,
+                    percent_funded=77,
+                )
+            ]
+        )
+
+    monkeypatch.setattr(
+        "app.services.reserve_study_extractor.call_llm_vision",
+        _fake_call,
+    )
+    rows, mode = asyncio.run(
+        _funding_plan_rows_for_pages(
+            page_numbers=[2],
+            page_texts={2: "2026\t834,312\t0\t77%"},
+            page_images={2: RenderedPage(page_number=2, content=b"png")},
+            prompt_context=DocumentPromptContext(filename="old-mill.pdf"),
+        )
+    )
+    assert mode == "calendar_gemini"
+    assert rows[0].annual_contribution == 834312
+    assert rows[0].beginning_balance is None
+
+
+def test_funding_plan_rows_fall_back_to_text_parser_when_gemini_is_unavailable(monkeypatch):
+    import asyncio
+
+    from app.ai_implementation.pipeline.document_extraction_provider import DocumentPromptContext
+    from app.services.reserve_study_extractor import _funding_plan_rows_for_pages
+
+    async def _unavailable(messages, response_schema, temperature=0.0, timeout=120.0):
+        raise RuntimeError("GEMINI_MODEL is not set")
+
+    monkeypatch.setattr(
+        "app.services.reserve_study_extractor.call_llm_vision",
+        _unavailable,
+    )
+    rows, mode = asyncio.run(
+        _funding_plan_rows_for_pages(
+            page_numbers=[4],
+            page_texts={
+                4: "2026 1000.00 2000.00 30.00 40.00 5000.00 70\n",
+            },
+            page_images={4: None},
+            prompt_context=DocumentPromptContext(filename="fallback.pdf"),
+        )
+    )
+    assert mode == "calendar_text_pass"
+    assert rows[0].year == 2026
+    assert rows[0].annual_contribution == 2000.0
+    assert rows[0].row_kind == "annual"

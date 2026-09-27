@@ -65,6 +65,7 @@ class ReserveFundingPlanRow(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     year: int = Field(ge=1900, le=3000)
+    row_kind: Literal["annual", "milestone"] = "annual"
     beginning_balance: Optional[Decimal] = None
     annual_contribution: Optional[Decimal] = None
     monthly_per_unit: Optional[Decimal] = None

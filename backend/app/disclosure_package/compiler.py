@@ -77,6 +77,7 @@ from .reconciliation import (
     assessment_split_from_schedule_components,
     build_annual_statement_facts,
     is_interfund_reserve_transfer_line,
+    is_nonrecurring_forecast_revenue_line,
     parse_optional_decimal_setting,
     resolve_assessment_presentation_facts,
     resolve_assessment_facts,
@@ -853,6 +854,16 @@ def _compute_all(
 
     total_liab = total_estimated_liability(components=reserve_snapshot.components)
     total_prov = total_year_replacement_provision(components=reserve_snapshot.components)
+    liability_override = parse_optional_decimal_setting(
+        settings.get("reserve_liability_override")
+    )
+    if liability_override is not None:
+        total_liab = liability_override.quantize(Decimal("1"))
+    provision_override = parse_optional_decimal_setting(
+        settings.get("annual_replacement_provision_override")
+    )
+    if provision_override is not None:
+        total_prov = provision_override.quantize(Decimal("1"))
 
     # Data gaps: track every value that fell back to a default because the
     # operator's draft / settings did not supply it. Surfaced at the top of
@@ -899,6 +910,11 @@ def _compute_all(
         )
     fund_balance_boy_op = _setting_decimal("fund_balance_boy_operations") or Decimal("0")
     pct = percent_funded(cash_reserves=cash, estimated_liability=total_liab)
+    percent_funded_override = parse_optional_decimal_setting(
+        settings.get("percent_funded_override")
+    )
+    if percent_funded_override is not None:
+        pct = int(percent_funded_override)
     under_total = under_funded_balance_total(
         estimated_liability=total_liab, cash_reserves=cash
     )
@@ -1038,15 +1054,21 @@ def _compute_all(
             and li.label
             and "assessment" not in li.label.lower()
             and "interest" not in li.label.lower()
+            and not is_nonrecurring_forecast_revenue_line(li.label)
         ),
         Decimal("0"),
     )
     # Fix 1: exclude interfund contribution mirrors from other replacement revenue.
+    # Also drop one-time settlement / insurance-proceeds lines — those are
+    # not adopted forecast revenue (Missouri YTD settlement annualized to
+    # $429,328 on the printed P&L).
     other_replacement_revenue = sum(
         (
             Decimal(li.amount or 0)
             for li in statement_reserve_revenue_lis
-            if li.label and "interest" not in li.label.lower()
+            if li.label
+            and "interest" not in li.label.lower()
+            and not is_nonrecurring_forecast_revenue_line(li.label)
         ),
         Decimal("0"),
     )
@@ -1184,6 +1206,7 @@ def _compute_all(
                         row.year: Decimal(row.annual_contribution)
                         for row in reserve_snapshot.funding_plan_rows
                         if row.annual_contribution is not None
+                        and getattr(row, "row_kind", "annual") != "milestone"
                     }
                     if package_scenario.use_study_funding_calendar
                     else {
@@ -1402,6 +1425,9 @@ def compile_package(
         "financial_packet_archetype": "dual-fund",
         "reserve_interest_income_override": None,
         "income_tax_provision_override": None,
+        "reserve_liability_override": None,
+        "annual_replacement_provision_override": None,
+        "percent_funded_override": None,
         "reserve_funding_source": "auto",
         "reserve_funding_manual_amount": None,
         "special_assessments_json": "[]",
@@ -1426,6 +1452,37 @@ def compile_package(
         for key, value in hoa_settings_overrides.items():
             if value is not None:
                 effective_hoa_settings[key] = value
+
+    # Note 6 increase-schedule chip reads spec.static_data, not hoa_settings.
+    # Copy the operator / pool calendar so the printed table matches the
+    # 30-year cash-flow brackets.
+    schedule_raw = effective_hoa_settings.get("assessment_increase_schedule_json")
+    if isinstance(schedule_raw, str) and schedule_raw.strip():
+        try:
+            schedule_loaded = json.loads(schedule_raw)
+        except (json.JSONDecodeError, TypeError):
+            schedule_loaded = []
+    elif isinstance(schedule_raw, list):
+        schedule_loaded = schedule_raw
+    else:
+        schedule_loaded = []
+    schedule_tuples: list[tuple[int, int, Decimal]] = []
+    for bracket in schedule_loaded or []:
+        if not isinstance(bracket, dict):
+            continue
+        schedule_tuples.append((
+            int(bracket.get("start_year") or 0),
+            int(bracket.get("end_year") or 0),
+            Decimal(str(bracket.get("rate") or 0)),
+        ))
+    if schedule_tuples:
+        spec = spec.model_copy(
+            update={
+                "static_data": spec.static_data.model_copy(
+                    update={"assessment_increase_schedule": schedule_tuples}
+                )
+            }
+        )
 
     # 2b. Per-HOA logo (task 2.3): resolve the stored file to an inline
     #     base64 data URI rather than a file:// <img src>. render.py's

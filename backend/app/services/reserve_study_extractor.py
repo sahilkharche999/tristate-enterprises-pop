@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from decimal import Decimal, ROUND_HALF_EVEN
 from math import isclose
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 import pdfplumber
 from pydantic import BaseModel, ConfigDict, Field
@@ -158,6 +158,26 @@ def _resolve_reference_year(
     return study_year
 
 
+def _blank_reserve_component_reason(
+    *,
+    useful_life: Optional[int],
+    remaining_life: Optional[int],
+    replacement_cost: Optional[float],
+) -> Optional[str]:
+    """Reason to exclude a component row the formula cannot use.
+
+    A printed zero cost is a real value. A zero useful life is not: the
+    annual-provision formula divides by it.
+    """
+    if useful_life in (None, 0):
+        return "Study row has no useful life."
+    if remaining_life is None:
+        return "Study row has no remaining life."
+    if replacement_cost is None:
+        return "Study row has no replacement cost."
+    return None
+
+
 def _canonicalize_single_reserve_row(
     row: ExtractedReserveStudyRow,
     *,
@@ -237,15 +257,23 @@ def _canonicalize_single_reserve_row(
     if lifecycle_inconsistent and "lifecycle_inconsistent" not in extra_flags:
         extra_flags.append("lifecycle_inconsistent")
 
-    normalized = row.model_copy(
-        update={
-            "remaining_life": normalized_remaining_life,
-            "reference_year": normalized_reference_year,
-            "year_replacement_provision": year_replacement_provision,
-            "estimated_liability": estimated_liability,
-            "flags": extra_flags,
-        }
+    update: dict[str, Any] = {
+        "remaining_life": normalized_remaining_life,
+        "reference_year": normalized_reference_year,
+        "year_replacement_provision": year_replacement_provision,
+        "estimated_liability": estimated_liability,
+        "flags": extra_flags,
+    }
+    blank_reason = _blank_reserve_component_reason(
+        useful_life=row.useful_life,
+        remaining_life=normalized_remaining_life,
+        replacement_cost=row.replacement_cost,
     )
+    if blank_reason:
+        update["excluded"] = True
+        if not str(row.exclude_reason or "").strip():
+            update["exclude_reason"] = blank_reason
+    normalized = row.model_copy(update=update)
     return _apply_row_flags(normalized)
 
 
@@ -1229,12 +1257,44 @@ async def _discover_from_prepared(
 
 
 _FUNDING_PLAN_SYSTEM_PROMPT = (
-    "You extract a year-by-year reserve funding calendar from cash-flow / "
-    "funding-plan / liability-schedule pages. Do not extract component inventory "
-    "rows. For each calendar year return year, beginning_balance, "
-    "annual_contribution, interest_income, reserve_expenditures, ending_balance, "
-    "and percent_funded when printed. Skip totals and invented years."
+    "You extract a reserve funding calendar from cash-flow, funding-plan, "
+    "or disclosure-summary pages. Do not extract component inventory rows.\n"
+    "Read each table by its column headers, not by a fixed column order. "
+    "Map a printed contribution, reserve assessment, or reserve income into "
+    "annual_contribution. Map a special assessment into neither beginning "
+    "balance nor contribution. Map percent funded into percent_funded.\n"
+    "A row that names one calendar year, such as 2027, is row_kind=annual. "
+    "A row that names a span, such as '10 Years', '20 Years', or '30 Years', "
+    "is row_kind=milestone and its year is the ending year of that span.\n"
+    "Return null for any amount the page does not print. Do not invent years, "
+    "do not fill gaps, and do not calculate a missing column from other columns. "
+    "Skip totals and section headers that are not a year or a milestone."
 )
+
+
+class _FundingPlanWireRow(BaseModel):
+    """Gemini-facing funding row. Fields stay optional so partial studies fit."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    year: int
+    row_kind: Literal["annual", "milestone"] = "annual"
+    beginning_balance: Optional[float] = None
+    annual_contribution: Optional[float] = None
+    monthly_per_unit: Optional[float] = None
+    interest_income: Optional[float] = None
+    reserve_expenditures: Optional[float] = None
+    ending_balance: Optional[float] = None
+    fully_funded_balance: Optional[float] = None
+    percent_funded: Optional[float] = None
+
+
+class _FundingPlanCalendarExtraction(BaseModel):
+    """Root object required by Gemini constrained JSON."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    rows: list[_FundingPlanWireRow] = Field(default_factory=list)
 
 _FUNDING_YEAR_LINE_RE = re.compile(
     r"^(19\d{2}|20\d{2}|21\d{2})\b(.*)$"
@@ -1286,12 +1346,190 @@ def parse_funding_plan_rows_from_text(
     return rows
 
 
+_FUNDING_PAGE_HINTS = (
+    "funding plan",
+    "funding summary",
+    "cash flow",
+    "cash-flow",
+    "financial summary",
+    "percent funded",
+    "disclosure summary",
+)
+
+
+def _is_funding_calendar_page(item: ReserveStudyPageClassification) -> bool:
+    """True for an explicit funding flag or a funding-summary title.
+
+    Classification often marks a five-year funding summary as unrelated and
+    leaves ``is_year_provision_or_liability_schedule`` false. The title is
+    enough to send that page to the calendar extractor.
+    """
+    if item.is_year_provision_or_liability_schedule:
+        return True
+    blob = " ".join([item.table_title_hint or "", *(item.reasons or [])]).lower()
+    return any(hint in blob for hint in _FUNDING_PAGE_HINTS)
+
+
+def _funding_row_kind(value: object) -> Literal["annual", "milestone"]:
+    kind = str(value or "annual").strip().lower()
+    if kind == "milestone":
+        return "milestone"
+    return "annual"
+
+
+def map_funding_calendar_rows(
+    extraction: _FundingPlanCalendarExtraction | None,
+    *,
+    source_page: int,
+) -> list[ExtractedReserveStudyFundingPlanRow]:
+    """Map a Gemini calendar object onto stored funding rows.
+
+    Drops years outside the domain range and stamps the source page. A
+    milestone keeps its printed amounts but is not an annual contribution.
+    """
+    if extraction is None:
+        return []
+    mapped: list[ExtractedReserveStudyFundingPlanRow] = []
+    for raw in extraction.rows:
+        if raw.year < 1900 or raw.year > 3000:
+            continue
+        kind = _funding_row_kind(raw.row_kind)
+        mapped.append(
+            ExtractedReserveStudyFundingPlanRow(
+                year=raw.year,
+                row_kind=kind,
+                beginning_balance=raw.beginning_balance,
+                annual_contribution=None if kind == "milestone" else raw.annual_contribution,
+                monthly_per_unit=raw.monthly_per_unit,
+                interest_income=raw.interest_income,
+                reserve_expenditures=raw.reserve_expenditures,
+                ending_balance=raw.ending_balance,
+                fully_funded_balance=raw.fully_funded_balance,
+                percent_funded=raw.percent_funded,
+                source_page=source_page,
+            )
+        )
+    return mapped
+
+
+def _prefer_funding_row(
+    existing: ExtractedReserveStudyFundingPlanRow,
+    incoming: ExtractedReserveStudyFundingPlanRow,
+) -> ExtractedReserveStudyFundingPlanRow:
+    """Keep an annual source row ahead of a milestone for the same year."""
+    if existing.row_kind != "milestone" and incoming.row_kind == "milestone":
+        return existing
+    if existing.row_kind == "milestone" and incoming.row_kind != "milestone":
+        return incoming
+    return existing
+
+
+async def _extract_funding_plan_page(
+    *,
+    page_number: int,
+    page_text: str,
+    page_image: Optional[RenderedPage],
+    prompt_context: DocumentPromptContext,
+) -> Optional[_FundingPlanCalendarExtraction]:
+    """Read one funding page with the same Gemini JSON client as components.
+
+    Returns None when Gemini is unavailable or the call fails. A successful
+    call with no rows is an empty extraction, not a failure.
+    """
+    text_is_empty = not (page_text or "").strip()
+    if text_is_empty:
+        prompt_body = (
+            f"Filename: {prompt_context.filename}\n"
+            f"Page: {page_number}\n\n"
+            "No extracted text was available for this page. Read the funding "
+            "calendar from the image only."
+        )
+    else:
+        prompt_body = (
+            f"Filename: {prompt_context.filename}\n"
+            f"Page: {page_number}\n\n"
+            f"PAGE TEXT:\n{page_text}"
+        )
+    user_content: list[dict[str, Any]] = [{"type": "text", "text": prompt_body}]
+    if page_image is not None and page_image.content is not None:
+        user_content.append(
+            {
+                "type": "image",
+                "data": page_image.content,
+                "mime_type": page_image.mime_type,
+            }
+        )
+    try:
+        return await call_llm_vision(
+            [
+                {"role": "system", "content": _FUNDING_PLAN_SYSTEM_PROMPT},
+                {"role": "user", "content": user_content},
+            ],
+            _FundingPlanCalendarExtraction,
+            temperature=0.0,
+            timeout=_RESERVE_VISION_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        logger.exception(
+            "Funding calendar Gemini call failed for %s page %s",
+            prompt_context.filename,
+            page_number,
+        )
+        return None
+
+
+async def _funding_plan_rows_for_pages(
+    *,
+    page_numbers: list[int],
+    page_texts: dict[int, str],
+    page_images: dict[int, Optional[RenderedPage]],
+    prompt_context: DocumentPromptContext,
+) -> tuple[list[ExtractedReserveStudyFundingPlanRow], str]:
+    """Gemini JSON first. Text parser only for pages Gemini could not read."""
+    if not page_numbers:
+        return [], "calendar_text_pass"
+    extracted = await asyncio.gather(
+        *[
+            _extract_funding_plan_page(
+                page_number=page_number,
+                page_text=page_texts.get(page_number, ""),
+                page_image=page_images.get(page_number),
+                prompt_context=prompt_context,
+            )
+            for page_number in page_numbers
+        ]
+    )
+    rows: list[ExtractedReserveStudyFundingPlanRow] = []
+    gemini_read_a_page = False
+    for page_number, extraction in zip(page_numbers, extracted):
+        if extraction is None:
+            rows.extend(
+                parse_funding_plan_rows_from_text(
+                    page_texts.get(page_number, ""),
+                    source_page=page_number,
+                )
+            )
+            continue
+        gemini_read_a_page = True
+        rows.extend(map_funding_calendar_rows(extraction, source_page=page_number))
+    by_year: dict[int, ExtractedReserveStudyFundingPlanRow] = {}
+    for row in rows:
+        current = by_year.get(row.year)
+        by_year[row.year] = row if current is None else _prefer_funding_row(current, row)
+    mode = "calendar_gemini" if gemini_read_a_page else "calendar_text_pass"
+    return [by_year[year] for year in sorted(by_year)], mode
+
+
 def derive_increase_brackets_from_funding_plan(
     rows: list[ExtractedReserveStudyFundingPlanRow],
 ) -> list[dict[str, Any]]:
     """Year-over-year contribution ratios as Settings increase brackets."""
     ordered = sorted(
-        (row for row in rows if row.annual_contribution),
+        (
+            row
+            for row in rows
+            if row.annual_contribution and row.row_kind != "milestone"
+        ),
         key=lambda row: row.year,
     )
     if len(ordered) < 2:
@@ -1461,26 +1699,37 @@ async def extract_reserve_study(
             f"Merged {duplicates_merged} duplicate reserve-study row(s) detected across extracted pages."
         )
     funding_page_numbers = sorted(
-        {
-            item.page_number
-            for item in discovery.classifications
-            if item.is_year_provision_or_liability_schedule
-        }
+        item.page_number
+        for item in discovery.classifications
+        if _is_funding_calendar_page(item)
     )
     funding_plan_rows: list[ExtractedReserveStudyFundingPlanRow] = []
+    funding_plan_extract = "calendar_text_pass"
     if funding_page_numbers:
         funding_texts = _extract_reserve_study_page_texts_for_pages(path, funding_page_numbers)
+        empty_funding_pages = [
+            page_number
+            for page_number in funding_page_numbers
+            if not funding_texts.get(page_number, "").strip()
+        ]
+        high_dpi_funding_images = _render_reserve_study_page_subset(
+            path,
+            empty_funding_pages,
+            dpi=_VISION_ONLY_EXTRACTION_DPI,
+        )
+        funding_images: dict[int, Optional[RenderedPage]] = {}
         for page_number in funding_page_numbers:
-            funding_plan_rows.extend(
-                parse_funding_plan_rows_from_text(
-                    funding_texts.get(page_number, ""),
-                    source_page=page_number,
-                )
+            prepared_page = pages_by_number.get(page_number)
+            funding_images[page_number] = high_dpi_funding_images.get(
+                page_number,
+                prepared_page.page_image if prepared_page is not None else None,
             )
-        by_year: dict[int, ExtractedReserveStudyFundingPlanRow] = {}
-        for row in funding_plan_rows:
-            by_year.setdefault(row.year, row)
-        funding_plan_rows = [by_year[year] for year in sorted(by_year)]
+        funding_plan_rows, funding_plan_extract = await _funding_plan_rows_for_pages(
+            page_numbers=funding_page_numbers,
+            page_texts=funding_texts,
+            page_images=funding_images,
+            prompt_context=prepared.prompt_context,
+        )
         if not funding_plan_rows:
             unique_warnings.append(
                 "Cash-flow / funding-plan pages were found, but no year rows "
@@ -1507,7 +1756,7 @@ async def extract_reserve_study(
             "ocr_text_pages": ocr_text_pages,
             "ocr_fallback_pages": ocr_fallback_pages,
             "duplicates_merged": duplicates_merged,
-            "funding_plan_extract": "calendar_text_pass",
-            "funding_plan_prompt": "v1-calendar-only",
+            "funding_plan_extract": funding_plan_extract,
+            "funding_plan_prompt": "v2-gemini-calendar",
         },
     )

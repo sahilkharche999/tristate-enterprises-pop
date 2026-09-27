@@ -403,6 +403,37 @@ def test_legacy_funding_plan_resets_remaining_life_after_replacement() -> None:
     )
 
 
+def test_partial_study_calendar_still_renders_thirty_years() -> None:
+    """A study that ends before 2055 fills those years and leaves the rest calculated."""
+    out = _build_thirty_year_plan(
+        spec=OLD_MILL_2026,
+        hoa_metadata=_hoa(),
+        components=[],
+        total_estimated_liability=Decimal("0"),
+        total_year_replacement_provision=Decimal("575114"),
+        cash_eoy_prior=Decimal("2600000"),
+        fiscal_year_start=2026,
+        inflation_rate=Decimal("0.03"),
+        interest_rate=Decimal("0.01"),
+        assessment_schedule=[],
+        base_replacement_fund_monthly_per_unit=Decimal("171.78"),
+        special_assessments=[],
+        board_deferrals=[],
+        study_contributions_by_year={
+            2026: Decimal("834312"),
+            2030: Decimal("834312"),
+            2045: Decimal("900000"),
+        },
+    )
+    cash_flow = out["thirty_year_cash_flow"]
+    assert cash_flow["years"] == list(range(2026, 2056))
+    assert len(cash_flow["regular_assessments"]) == 30
+    assert cash_flow["regular_assessments"][0] == Decimal("834312")
+    assert cash_flow["regular_assessments"][4] == Decimal("834312")
+    assert cash_flow["regular_assessments"][19] == Decimal("900000")
+    assert cash_flow["regular_assessments"][20] != Decimal("900000")
+
+
 def test_cover_percent_funded_equals_year0_table() -> None:
     from app.disclosure_package.compiler import _compute_all
     from app.disclosure_package.schemas import (

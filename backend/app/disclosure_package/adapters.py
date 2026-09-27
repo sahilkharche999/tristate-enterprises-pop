@@ -36,6 +36,12 @@ from .schemas import (
 )
 
 
+def _funding_row_kind(value: Any) -> str:
+    """Keep milestone checkpoints out of the annual contribution override."""
+    kind = str(value or "annual").strip().lower()
+    return kind if kind in {"annual", "milestone"} else "annual"
+
+
 def _to_decimal(value: Any) -> Decimal:
     """Coerce int/float/str/Decimal/None to Decimal via string round-trip.
 
@@ -192,16 +198,6 @@ def from_reserve_study_extraction(document: Any) -> ReserveStudySnapshot:
         useful_life = _attr_or_key(raw, "useful_life")
         remaining_life = _attr_or_key(raw, "remaining_life")
         replacement_cost = _attr_or_key(raw, "replacement_cost")
-        if excluded:
-            skipped_reviewed_rows.append(
-                SkippedReserveStudyRow(
-                    line_item=line_item,
-                    reason="operator excluded",
-                    excluded=True,
-                    exclude_reason=str(exclude_reason or "") or None,
-                )
-            )
-            continue
         skip_reason = None
         if useful_life in (None, 0):
             skip_reason = "missing useful life"
@@ -209,12 +205,13 @@ def from_reserve_study_extraction(document: Any) -> ReserveStudySnapshot:
             skip_reason = "missing remaining life"
         elif replacement_cost is None:
             skip_reason = "missing replacement cost"
-        if skip_reason:
+        if excluded or skip_reason:
             skipped_reviewed_rows.append(
                 SkippedReserveStudyRow(
                     line_item=line_item,
-                    reason=skip_reason,
-                    excluded=False,
+                    reason="operator excluded" if excluded and not skip_reason else (skip_reason or "operator excluded"),
+                    excluded=True,
+                    exclude_reason=str(exclude_reason or "") or None,
                 )
             )
             continue
@@ -249,6 +246,7 @@ def from_reserve_study_extraction(document: Any) -> ReserveStudySnapshot:
             percent_funded=_to_decimal(_attr_or_key(raw, "percent_funded"))
             if _attr_or_key(raw, "percent_funded") is not None else None,
             source_page=_attr_or_key(raw, "source_page"),
+            row_kind=_funding_row_kind(_attr_or_key(raw, "row_kind")),
         ))
     return ReserveStudySnapshot(
         study_date=str(study_date),
