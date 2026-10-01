@@ -450,7 +450,8 @@ def test_compile_package_reuses_resolved_reserve_funding_across_templates(
 
     cash_flow = contexts["thirty_year_cash_flow_panel.html"]["computed"]["thirty_year_cash_flow"]
     assert cash_flow["replace_fund_assmnt_per_unit_per_mo"][0] == expected_monthly_per_unit
-    assert cash_flow["regular_assessments"][0] == Decimal("824412")
+    # Year 1 prints the adopted transfer, the same dollars as the cover and P&L.
+    assert cash_flow["regular_assessments"][0] == Decimal("824414")
 
 
 def test_compile_package_assessment_override_updates_resolved_annual_revenue(
@@ -592,7 +593,7 @@ def test_compile_package_builds_canonical_dual_fund_statement_facts(
     ])
 
     compile_package(
-        spec=OLD_MILL_2026,
+        spec=OLD_MILL_2026.model_copy(update={"fiscal_year": 2026}),
         budget_draft=draft,
         reserve_snapshot=_reserve_snapshot(),
         hoa_metadata=_hoa_metadata(),
@@ -600,6 +601,7 @@ def test_compile_package_builds_canonical_dual_fund_statement_facts(
         appendices_root=appendices,
         hoa_settings_overrides={
             "reserve_cash_balance_eoy_prior": 1_500_000,
+            "reserve_cash_as_of_date": "2025-12-31",
             "fund_balance_boy_operations": 100_000,
             "income_tax_provision_override": 6_200,
         },
@@ -837,10 +839,11 @@ def test_compile_package_uses_hoa_settings_for_reserve_cash_balance(
 
     overrides = {
         "reserve_cash_balance_eoy_prior": 9_999_999,
+        "reserve_cash_as_of_date": "2025-12-31",
         "fund_balance_boy_operations": 12345,
     }
     result = compile_package(
-        spec=OLD_MILL_2026,
+        spec=OLD_MILL_2026.model_copy(update={"fiscal_year": 2026}),
         budget_draft=_budget_draft(),
         reserve_snapshot=_reserve_snapshot(),
         hoa_metadata=_hoa_metadata(),
@@ -862,22 +865,28 @@ def test_hoa_settings_overrides_drive_percent_funded(
     _patch_render(monkeypatch)
 
     base_run = compile_package(
-        spec=OLD_MILL_2026,
+        spec=OLD_MILL_2026.model_copy(update={"fiscal_year": 2026}),
         budget_draft=_budget_draft(),
         reserve_snapshot=_reserve_snapshot(),
         hoa_metadata=_hoa_metadata(),
         output_dir=tmp_path / "base",
         appendices_root=appendices,
-        hoa_settings_overrides={"reserve_cash_balance_eoy_prior": 1_000_000},
+        hoa_settings_overrides={
+            "reserve_cash_balance_eoy_prior": 1_000_000,
+            "reserve_cash_as_of_date": "2025-12-31",
+        },
     )
     high_run = compile_package(
-        spec=OLD_MILL_2026,
+        spec=OLD_MILL_2026.model_copy(update={"fiscal_year": 2026}),
         budget_draft=_budget_draft(),
         reserve_snapshot=_reserve_snapshot(),
         hoa_metadata=_hoa_metadata(),
         output_dir=tmp_path / "high",
         appendices_root=appendices,
-        hoa_settings_overrides={"reserve_cash_balance_eoy_prior": 2_000_000},
+        hoa_settings_overrides={
+            "reserve_cash_balance_eoy_prior": 2_000_000,
+            "reserve_cash_as_of_date": "2025-12-31",
+        },
     )
 
     base_audit = json.loads((tmp_path / "base" / "audit.json").read_text())
