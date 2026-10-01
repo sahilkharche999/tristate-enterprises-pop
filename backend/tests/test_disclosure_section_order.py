@@ -281,3 +281,65 @@ def test_note_page_chips_all_point_at_packed_template():
     ):
         assert var_map[token] == "18"
         assert bv.TOC_PAGE_TOKENS[token] == "notes_packed.html"
+
+
+def test_note_page_chips_use_each_notes_own_anchor_page():
+    var_map = bv.build_var_map(
+        hoa=SimpleNamespace(
+            name="X", city="Y", state="CA", units=2,
+            entity_type=None, incorporation_year=None,
+            fiscal_year_end_month=12,
+        ),
+        fiscal_year=2026,
+        hoa_settings={},
+        computed={},
+        toc_page_numbers={
+            "notes_packed.html": 13,
+            "notes_packed.html#note_1_3": 13,
+            "notes_packed.html#note_4_5": 14,
+            "notes_packed.html#note_6": 14,
+            "notes_packed.html#note_7": 15,
+            "notes_packed.html#note_8": 15,
+        },
+    )
+    assert var_map["page_notes_1_to_3"] == "13"
+    assert var_map["page_note_4_5"] == "14"
+    assert var_map["page_note_6"] == "14"
+    assert var_map["page_note_7"] == "15"
+    assert var_map["page_note_8"] == "15"
+
+
+def test_package_toc_note_rows_use_each_notes_own_page():
+    html = str(
+        bv.build_block_map(
+            fiscal_year=2026,
+            computed={},
+            package_templates=["notes_packed.html"],
+            toc_page_numbers={
+                "notes_packed.html": 13,
+                "notes_packed.html#note_1_3": 13,
+                "notes_packed.html#note_4_5": 14,
+                "notes_packed.html#note_6": 14,
+                "notes_packed.html#note_7": 15,
+                "notes_packed.html#note_8": 15,
+            },
+        )["package_toc_rows"]
+    )
+
+    def page_after(title: str) -> str:
+        rest = html.split(title, 1)[1]
+        return rest.split('<span class="toc-page">', 1)[1].split("<", 1)[0]
+
+    assert page_after("Note 3 — Basis of Presentation") == "13"
+    assert page_after("Note 4 — Revenues") == "14"
+    assert page_after("Note 6 — Funding Plan") == "14"
+    assert page_after("Note 7 — Significant Assumptions") == "15"
+    assert page_after("Note 8 — Outstanding Loans") == "15"
+
+
+def test_note_page_chips_are_labeled_by_note():
+    assert bv.TOKEN_CATALOG["page_notes_1_to_3"] == "Page number — Notes 1–3"
+    assert bv.TOKEN_CATALOG["page_note_8"] == "Page number — Note 8"
+    assert not any(
+        "notes_packed.html" in label for label in bv.TOKEN_CATALOG.values()
+    )

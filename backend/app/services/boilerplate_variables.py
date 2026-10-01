@@ -118,6 +118,32 @@ TOC_PAGE_TOKENS: dict[str, str] = {
 TOKEN_CATALOG.update(
     {name: f"Page number — {template}" for name, template in TOC_PAGE_TOKENS.items()}
 )
+# The five note chips share one template, so name them by note instead.
+TOKEN_CATALOG.update(
+    {
+        "page_notes_1_to_3": "Page number — Notes 1–3",
+        "page_note_4_5": "Page number — Notes 4–5",
+        "page_note_6": "Page number — Note 6",
+        "page_note_7": "Page number — Note 7",
+        "page_note_8": "Page number — Note 8",
+    }
+)
+
+
+def _toc_page(pages: Mapping[str, Any], token: str) -> Any:
+    """Page for a TOC chip: the note's own anchor page, else its template's."""
+    from app.disclosure_package.section_order import (
+        NOTE_ANCHOR_BY_TOKEN,
+        toc_anchor_key,
+    )
+
+    template = TOC_PAGE_TOKENS[token]
+    anchor = NOTE_ANCHOR_BY_TOKEN.get(token)
+    if anchor is not None:
+        page = pages.get(toc_anchor_key(template, anchor))
+        if page is not None:
+            return page
+    return pages.get(template)
 
 
 # ── chip provenance ─────────────────────────────────────────────────────────
@@ -779,8 +805,8 @@ def build_var_map(
         ),
     }
 
-    for token, template_name in TOC_PAGE_TOKENS.items():
-        page = toc_page_numbers.get(template_name)
+    for token in TOC_PAGE_TOKENS:
+        page = _toc_page(toc_page_numbers, token)
         var_map[token] = str(page) if page is not None else "—"
 
     return var_map
@@ -1020,9 +1046,9 @@ def _package_toc_rows(
     for template in templates:
         entry = CATALOG_BY_TEMPLATE[template]
         if entry.bundle:
-            note_page = pages.get(template)
-            page_text = str(note_page) if note_page is not None else "—"
-            for title, _token in NOTE_TOC_ROWS:
+            for title, token in NOTE_TOC_ROWS:
+                note_page = _toc_page(pages, token)
+                page_text = str(note_page) if note_page is not None else "—"
                 rows.append(
                     f'<li><span class="toc-entry">{escape(title)}</span>'
                     f'<span class="toc-page">{escape(page_text)}</span></li>'

@@ -40,6 +40,21 @@ NOTE_TOC_ROWS: tuple[tuple[str, str], ...] = (
     ("Note 8 — Outstanding Loans", "page_note_8"),
 )
 
+# Each note's page chip reads the page where its section anchor (the
+# ``id`` in notes_packed.html) lands, not the first page of the packed notes.
+NOTE_ANCHOR_BY_TOKEN: dict[str, str] = {
+    "page_notes_1_to_3": "note_1_3",
+    "page_note_4_5": "note_4_5",
+    "page_note_6": "note_6",
+    "page_note_7": "note_7",
+    "page_note_8": "note_8",
+}
+
+
+def toc_anchor_key(template: str, anchor: str) -> str:
+    """Key under which the compiler stores an anchor's absolute page."""
+    return f"{template}#{anchor}"
+
 
 @dataclass(frozen=True)
 class SectionCatalogEntry:

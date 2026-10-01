@@ -86,3 +86,51 @@ def test_budget_toc_baseline_uses_package_toc_rows():
     assert 'data-block="package_toc_rows"' in content
     assert 'data-block="appendix_toc_rows"' in content
     assert "page_pro_forma_disclosure_summary" not in content
+
+
+def test_each_packed_note_has_an_anchor():
+    html = (TEMPLATES / "notes_packed.html").read_text()
+    for anchor in ("note_1_3", "note_4_5", "note_6", "note_7", "note_8"):
+        assert f'id="{anchor}"' in html
+
+
+def test_long_notes_anchor_on_the_page_where_each_note_starts():
+    import pytest
+
+    try:
+        from weasyprint import HTML  # noqa: F401
+    except OSError:
+        pytest.skip("WeasyPrint system libraries are not available in this environment")
+
+    from app.disclosure_package.compiler import _pdf_anchor_page_offsets
+    from app.disclosure_package.render import render_template
+    from tests.test_disclosure_package_render import _build_context
+
+    long_body = "<p>" + ("Disclosure text. " * 60) + "</p>"
+    ctx = _build_context()
+    ctx["narrative"] = {
+        "note_1_3": "<h2>Note 1 — The Association</h2>" + long_body * 4,
+        "note_4_5": "<h2>Note 4 — Revenues</h2>" + long_body * 4,
+        "note_6": "<h2>Note 6 — Funding Plan</h2><p>Short.</p>",
+        "note_7": "<h2>Note 7 — Assumptions</h2>" + long_body * 4,
+        "note_8": "<h2>Note 8 — Loans</h2><p>Short.</p>",
+    }
+    pdf_bytes = render_template(template_name="notes_packed.html", context=ctx)
+    offsets = _pdf_anchor_page_offsets(pdf_bytes)
+    assert set(offsets) >= {"note_1_3", "note_4_5", "note_6", "note_7", "note_8"}
+    assert offsets["note_1_3"] == 0
+    assert offsets["note_4_5"] > offsets["note_1_3"]
+    assert offsets["note_7"] > offsets["note_4_5"]
+
+    import fitz
+
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        for anchor, heading in (
+            ("note_4_5", "Note 4 — Revenues"),
+            ("note_7", "Note 7 — Assumptions"),
+            ("note_8", "Note 8 — Loans"),
+        ):
+            assert heading in doc[offsets[anchor]].get_text()
+    finally:
+        doc.close()

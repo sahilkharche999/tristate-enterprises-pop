@@ -86,6 +86,7 @@ from .reconciliation import (
     resolve_reserve_liability_facts,
 )
 from .scenario import build_package_scenario
+from .section_order import CATALOG_BY_TEMPLATE, toc_anchor_key
 from .assessment_schedule_matrix import (
     AssessmentScheduleMatrix,
     build_universal_assessment_matrix,
@@ -122,6 +123,21 @@ def _pdf_page_count(pdf_bytes: bytes) -> int:
     from pypdf import PdfReader
 
     return len(PdfReader(BytesIO(pdf_bytes)).pages)
+
+
+def _pdf_anchor_page_offsets(pdf_bytes: bytes) -> dict[str, int]:
+    """0-based page of each named destination (WeasyPrint writes one per
+    element ``id``). Empty when the PDF carries none — callers fall back to
+    the template's first page."""
+    from pypdf import PdfReader
+
+    reader = PdfReader(BytesIO(pdf_bytes))
+    offsets: dict[str, int] = {}
+    for name, dest in reader.named_destinations.items():
+        page = reader.get_destination_page_number(dest)
+        if page is not None and page >= 0:
+            offsets[str(name).lstrip("/")] = page
+    return offsets
 
 
 def _humanize_filename_title(filename: str) -> str:
@@ -1837,6 +1853,18 @@ def compile_package(
         for entry in spec.entries:
             if isinstance(entry, GeneratedPage):
                 toc_page_numbers[entry.template] = running_page
+                # Packed notes share pages, so each note's TOC row reads
+                # where its own section anchor landed.
+                catalog_entry = CATALOG_BY_TEMPLATE.get(entry.template)
+                if catalog_entry is not None and catalog_entry.bundle:
+                    offsets = _pdf_anchor_page_offsets(
+                        pdf_bytes_by_template[entry.template]
+                    )
+                    for anchor in catalog_entry.bundle:
+                        if anchor in offsets:
+                            toc_page_numbers[
+                                toc_anchor_key(entry.template, anchor)
+                            ] = running_page + offsets[anchor]
                 running_page += page_counts[entry.template]
                 # Insurance PDF pages immediately follow the cover (not in TOC rows).
                 if entry.template == insurance_cover_template:
