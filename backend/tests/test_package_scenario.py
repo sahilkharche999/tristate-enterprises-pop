@@ -104,3 +104,30 @@ def test_operator_provision_overwrite_is_labeled() -> None:
     assert scenario.adopted_contribution.is_overwrite is True
     assert scenario.overwrite_reason
     assert "overwrite" in scenario.adopted_contribution.source_label.lower() or scenario.adopted_contribution.is_overwrite
+
+
+def test_levy_adopted_overrides_replace_study_liability_and_provision() -> None:
+    scenario = build_package_scenario(
+        fiscal_year=2026,
+        units=9,
+        budget_line_items=_missouri_lines(),
+        reserve_snapshot=_missouri_snapshot(),
+        settings={
+            "reserve_funding_source": "manual",
+            "reserve_funding_manual_amount": Decimal("29340"),
+            "reserve_funding_overwrite_reason": "2026 Levy Erlanger adopted pro forma",
+            "reserve_liability_override": Decimal("340000"),
+            "annual_replacement_provision_override": Decimal("42000"),
+            "reserve_interest_income_override": Decimal("4500"),
+            "income_tax_provision_override": Decimal("1300"),
+            "reserve_cash_balance_eoy_prior": MISSOURI_UNDATED_CASH,
+            "reserve_cash_as_of_date": "2025-12-31",
+        },
+    )
+    assert scenario.adopted_contribution.value == Decimal("29340")
+    assert scenario.fully_funded_liability.value == Decimal("340000")
+    assert scenario.component_annual_provision is not None
+    assert scenario.component_annual_provision.value == Decimal("42000")
+    assert scenario.reserve_interest.value == Decimal("4500.00")
+    assert scenario.opening_reserve_cash.value == MISSOURI_UNDATED_CASH
+    assert scenario.opening_reserve_cash.is_dated is True

@@ -247,6 +247,17 @@ def is_interfund_reserve_transfer_line(
     return False
 
 
+_NONRECURRING_FORECAST_RE = re.compile(
+    r"settlement|one[\s-]?time|insurance proceeds",
+    re.IGNORECASE,
+)
+
+
+def is_nonrecurring_forecast_revenue_line(label: object) -> bool:
+    """True for one-time reserve/operating income that must not forecast."""
+    return bool(_NONRECURRING_FORECAST_RE.search(str(label or "")))
+
+
 class PoolLineFundTotals(BaseModel):
     """Mapped budget-line dollars for one schedule pool, by dual-fund nature.
 
@@ -539,19 +550,11 @@ def assessment_split_from_schedule_components(
             ops_q = total
         return ops_q, res_q, source_base
 
-    # Matrix present with a reserve share but does not reconcile to assessment
-    # income — scale relative ops/reserve split to assessment income.
-    scale_ops = (total * ops / combined).quantize(Decimal("0.01"))
-    scale_res = (total - scale_ops).quantize(Decimal("0.01"))
-    if scale_res < 0:
-        scale_res = Decimal("0.00")
-        scale_ops = total
-    scaled_source = (
-        "schedule_matrix_scaled"
-        if not used_line_fund
-        else "schedule_matrix_line_fund"
-    )
-    return scale_ops, scale_res, scaled_source
+    # Matrix present with a reserve share but does not reconcile to
+    # assessment income. Do not invent a scaled split — that turned
+    # Missouri's $31,935 transfer into $31,904 on the P&L while the
+    # cover printed the adopted contribution. Use adopted funding.
+    return _settings_fallback("settings_funding_fallback_unreconciled_matrix")
 
 
 def parse_optional_decimal_setting(value: object) -> Optional[Decimal]:

@@ -124,6 +124,9 @@ export interface HOADisclosureSettings {
   financial_packet_archetype: FinancialPacketArchetype;
   reserve_interest_income_override: number | null;
   income_tax_provision_override: number | null;
+  reserve_liability_override: number | null;
+  annual_replacement_provision_override: number | null;
+  percent_funded_override: number | null;
   reserve_funding_source: ReserveFundingSource;
   reserve_funding_manual_amount: number | null;
   reserve_funding_overwrite_reason: string | null;

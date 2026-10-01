@@ -46,6 +46,11 @@ def _row_to_dict(row) -> Dict[str, Any]:
         "financial_packet_archetype": row.financial_packet_archetype or "dual-fund",
         "reserve_interest_income_override": row.reserve_interest_income_override,
         "income_tax_provision_override": row.income_tax_provision_override,
+        "reserve_liability_override": getattr(row, "reserve_liability_override", None),
+        "annual_replacement_provision_override": getattr(
+            row, "annual_replacement_provision_override", None
+        ),
+        "percent_funded_override": getattr(row, "percent_funded_override", None),
         "reserve_funding_source": row.reserve_funding_source or "auto",
         "reserve_funding_manual_amount": row.reserve_funding_manual_amount,
         "reserve_funding_overwrite_reason": getattr(row, "reserve_funding_overwrite_reason", None),

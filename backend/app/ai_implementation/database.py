@@ -106,6 +106,9 @@ _HOA_SETTINGS_COLUMN_DEFINITIONS: dict[str, str] = {
     "financial_packet_archetype": "TEXT DEFAULT 'dual-fund'",
     "reserve_interest_income_override": "REAL",
     "income_tax_provision_override": "REAL",
+    "reserve_liability_override": "REAL",
+    "annual_replacement_provision_override": "REAL",
+    "percent_funded_override": "REAL",
     "reserve_funding_source": "TEXT DEFAULT 'reserve_study_provision'",
     "reserve_funding_manual_amount": "REAL",
     # New-row default is `auto` on schema.sql / ORM. Do not rewrite this

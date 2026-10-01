@@ -24,7 +24,8 @@ def resolve_canonical_line_amount(line: Any) -> Tuple[Optional[Decimal], str]:
     """Resolve one annual amount with the package-year column precedence.
 
     Precedence: assessment_mapping_amount → proposed_amount →
-    annual_budget × percent_change → projection → amount.
+    annual_budget × percent_change → unbudgeted $0 Proposed →
+    projection → amount.
     """
     explicit = _decimal_or_none(_get(line, "assessment_mapping_amount"))
     if explicit is not None:
@@ -49,6 +50,16 @@ def resolve_canonical_line_amount(line: Any) -> Tuple[Optional[Decimal], str]:
                     "annual_budget_percent_change",
                 )
         return annual, "annual_budget"
+
+    raw = _get(line, "raw") or {}
+    raw_proposed = None
+    if isinstance(raw, dict):
+        raw_proposed = _decimal_or_none(raw.get("Proposed"))
+    # A $0 Proposed with no annual budget is an unbudgeted actual
+    # (Missouri settlement: YTD $321,996 annualized to projection
+    # $429,328). Do not treat that as adopted forecast revenue.
+    if raw_proposed == Decimal("0"):
+        return Decimal("0"), "unbudgeted_zero_proposed"
 
     projection = _decimal_or_none(_get(line, "projection"))
     if projection is not None:

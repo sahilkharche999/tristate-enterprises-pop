@@ -59,6 +59,9 @@ const MONEY_SCALAR_KEYS = new Set<string>([
   'approved_monthly_assessment_per_unit',
   'reserve_interest_income_override',
   'income_tax_provision_override',
+  'reserve_liability_override',
+  'annual_replacement_provision_override',
+  'percent_funded_override',
   'reserve_funding_manual_amount',
 ]);
 
@@ -376,6 +379,9 @@ export const HOADisclosureSettingsForm = forwardRef<
     ['approved_monthly_assessment_per_unit', 'Approved monthly assessment per unit (overrides derived; cents preserved)', 'number'],
     ['reserve_interest_income_override', 'Reserve interest income override (annual; blank = derive from budget or reserve study)', 'number'],
     ['income_tax_provision_override', 'Income tax provision override (annual; blank = derive from interest revenue)', 'number'],
+    ['reserve_liability_override', 'Estimated reserve liability override (blank = sum of study components)', 'number'],
+    ['annual_replacement_provision_override', 'Annual replacement provision override (P&L; blank = study components)', 'number'],
+    ['percent_funded_override', 'Percent funded override (whole percent; blank = cash ÷ liability)', 'number'],
     ['reserve_funding_manual_amount', 'Reserve funding manual amount (annual; used when source = manual)', 'number'],
     ['letter_date', 'Cover-letter date (free text, e.g. "November 18, 2025")', 'text'],
     ['accountant_report_date', 'Accountants’ compilation report date (free text)', 'text'],
@@ -762,6 +768,9 @@ export const HOADisclosureSettingsForm = forwardRef<
                       ? key === 'approved_monthly_assessment_per_unit' ||
                         key === 'reserve_interest_income_override' ||
                         key === 'income_tax_provision_override' ||
+                        key === 'reserve_liability_override' ||
+                        key === 'annual_replacement_provision_override' ||
+                        key === 'percent_funded_override' ||
                         key === 'reserve_funding_manual_amount' ||
                         key === 'replacement_fund_monthly_assessment_per_unit'
                         ? null

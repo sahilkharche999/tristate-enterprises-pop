@@ -21,3 +21,17 @@ def test_annual_budget_applies_percent_change() -> None:
     )
     assert amount == Decimal("11000")
     assert source == "annual_budget_percent_change"
+
+
+def test_unbudgeted_settlement_projection_is_not_forecast_revenue() -> None:
+    amount, source = resolve_canonical_line_amount(
+        {
+            "label": "Settlement Income",
+            "annual_budget": None,
+            "projection": "429328.01",
+            "current_actual": "321996.01",
+            "raw": {"Proposed": 0, "Projection": 429328.01},
+        }
+    )
+    assert amount == Decimal("0")
+    assert source == "unbudgeted_zero_proposed"

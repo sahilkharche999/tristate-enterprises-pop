@@ -204,6 +204,16 @@ def build_package_scenario(
     funding_rows = reserve_snapshot.funding_plan_rows
     provision = total_year_replacement_provision(components=components)
     liability = total_estimated_liability(components=components)
+    provision_override = parse_optional_decimal_setting(
+        settings.get("annual_replacement_provision_override")
+    )
+    if provision_override is not None:
+        provision = provision_override.quantize(Decimal("1"))
+    liability_override = parse_optional_decimal_setting(
+        settings.get("reserve_liability_override")
+    )
+    if liability_override is not None:
+        liability = liability_override.quantize(Decimal("1"))
 
     funding_facts = resolve_reserve_funding_facts(
         funding_source=settings.get("reserve_funding_source"),
@@ -274,8 +284,13 @@ def build_package_scenario(
         concept="fully_funded_liability",
         value=liability,
         fiscal_year=fiscal_year,
-        source_label="sum of component estimated liabilities",
+        source_label=(
+            "operator overwrite of estimated liability"
+            if liability_override is not None
+            else "sum of component estimated liabilities"
+        ),
         source_document_id="reserve_study",
+        is_overwrite=liability_override is not None,
     )
     interest_fact = ScenarioFact(
         concept="reserve_interest",

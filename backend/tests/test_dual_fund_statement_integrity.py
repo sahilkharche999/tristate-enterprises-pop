@@ -8,6 +8,7 @@ from app.disclosure_package.reconciliation import (
     assessment_split_from_schedule_components,
     build_annual_statement_facts,
     is_interfund_reserve_transfer_line,
+    is_nonrecurring_forecast_revenue_line,
     resolve_reserve_liability_facts,
 )
 
@@ -38,6 +39,12 @@ def test_interfund_transfer_fix1b_reserve_income_mirror() -> None:
     # Real operating costs stay expenses.
     assert not is_interfund_reserve_transfer_line("Management Fee")
     assert not is_interfund_reserve_transfer_line("Assessment Income")
+
+
+def test_settlement_is_nonrecurring_forecast_revenue() -> None:
+    assert is_nonrecurring_forecast_revenue_line("45511 - Settlement Income")
+    assert is_nonrecurring_forecast_revenue_line("Insurance Proceeds")
+    assert not is_nonrecurring_forecast_revenue_line("45000 - Reserve Income")
 
 
 
@@ -415,8 +422,13 @@ def test_annual_statement_excludes_transfer_style_other_revenue_from_inflation()
     assert facts.excess_revenues_over_expenses_operations > Decimal("-10000")
 
 
-def test_missouri_line_fund_split_uses_transfer_not_provision() -> None:
-    """Missouri replacement column follows mapped transfer $31,935, not provision."""
+def test_missouri_unreconciled_matrix_uses_adopted_contribution() -> None:
+    """When pool annuals do not equal assessment income, use adopted funding.
+
+    Missouri equal + transfer is $104,526 vs assessments $104,458. Scaling
+    that leftover printed $31,904 instead of the $31,935 / $29,340 adopted
+    contribution. Fall back so P&L matches cover / Levy.
+    """
     from app.disclosure_package.reconciliation import PoolLineFundTotals
     from tests.support.missouri_allocation_fixture import (
         MISSOURI_LEVY_EQUAL_ANNUAL,
@@ -424,7 +436,7 @@ def test_missouri_line_fund_split_uses_transfer_not_provision() -> None:
     )
 
     transfer = Decimal("31935")
-    provision = Decimal("39659")
+    levy_adopted = Decimal("29340")
     rows = [
         SimpleNamespace(
             component_key="equal_base",
@@ -450,9 +462,48 @@ def test_missouri_line_fund_split_uses_transfer_not_provision() -> None:
     ops, res, source = assessment_split_from_schedule_components(
         rows,
         total_regular_assessment_revenue=MISSOURI_LEVY_HOA_ANNUAL,
-        fallback_reserve_assessment=provision,
+        fallback_reserve_assessment=levy_adopted,
         pool_line_fund_totals=totals,
     )
-    assert "line_fund" in source
-    assert res != provision
-    assert abs(res - transfer) <= Decimal("80")
+    assert source == "settings_funding_fallback_unreconciled_matrix"
+    assert res == levy_adopted
+    assert ops == MISSOURI_LEVY_HOA_ANNUAL - levy_adopted
+
+
+def test_levy_2026_statement_facts_match_adopted_pro_forma() -> None:
+    """Levy 2026 P&L: $75,118 / $29,340 / $104,458 + $4,500 interest."""
+    liab = resolve_reserve_liability_facts(
+        cash_reserve_balance_eoy_prior=Decimal("360000"),
+        total_estimated_liability=Decimal("340000"),
+        under_funded_balance_total=Decimal("-20000"),
+        under_funded_balance_per_unit=Decimal("-2222"),
+        percent_funded=Decimal("100"),
+        annual_replacement_provision=Decimal("42000"),
+    )
+    facts = build_annual_statement_facts(
+        packet_archetype="dual-fund",
+        total_regular_assessment_revenue=Decimal("104458"),
+        reserve_assessment_revenue=Decimal("29340"),
+        reserve_interest_income=Decimal("4500"),
+        reserve_tax_provision=Decimal("1300"),
+        other_operating_revenue=Decimal("0"),
+        other_replacement_revenue=Decimal("0"),
+        total_operating_expenses=Decimal("75118"),
+        beginning_balance_operations=Decimal("25000"),
+        reserve_liability_facts=liab,
+    )
+    assert facts.operating_assessment_revenue == Decimal("75118.00")
+    assert facts.reserve_assessment_revenue == Decimal("29340.00")
+    assert facts.total_revenues_operations == Decimal("75118.00")
+    assert facts.total_revenues_replacement == Decimal("33840.00")
+    assert facts.total_revenues == Decimal("108958.00")
+    assert facts.replacement_provision_expense == Decimal("42000.00")
+    assert facts.total_expenses_operations == Decimal("75118.00")
+    assert facts.total_expenses_replacement == Decimal("43300.00")
+    assert facts.total_expenses == Decimal("118418.00")
+    assert facts.excess_revenues_over_expenses_operations == Decimal("0.00")
+    assert facts.excess_revenues_over_expenses_replacement == Decimal("-9460.00")
+    assert facts.beginning_balance_operations == Decimal("25000.00")
+    assert facts.beginning_balance_replacement == Decimal("20000.00")
+    assert facts.ending_balance_operations == Decimal("25000.00")
+    assert facts.ending_balance_replacement == Decimal("10540.00")
