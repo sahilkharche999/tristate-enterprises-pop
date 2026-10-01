@@ -16,7 +16,7 @@
  * scalars and `<div|li data-block="NAME">` for system-generated blocks. Both
  * are resolved server-side at compile time — never evaluated in the browser.
  */
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { Editor } from '@tiptap/react';
 import { EditorContent, useEditor } from '@tiptap/react';
 import {
@@ -41,6 +41,41 @@ export { buildEditorExtensions };
 
 const EDITOR_CLASS =
   'min-h-[min(50vh,360px)] w-full flex-1 rounded-md border border-[#d4d4d4] px-3 py-2 text-sm text-[#1a1a1a] focus:outline-none focus:ring-2 focus:ring-[#1a1a1a] letter-body';
+
+export const FONT_FACE_CLASSES = [
+  { id: 'font-condensed', label: 'Condensed (current)' },
+  { id: 'font-sans', label: 'Sans' },
+  { id: 'font-serif', label: 'Serif' },
+  { id: 'font-dejavu-sans', label: 'DejaVu Sans' },
+  { id: 'font-dejavu-serif', label: 'DejaVu Serif' },
+] as const;
+
+export const FONT_SIZE_CLASSES = [
+  { id: 'text-8pt', label: '8 pt' },
+  { id: 'text-9pt', label: '9 pt' },
+  { id: 'text-10pt', label: '10 pt' },
+  { id: 'text-11pt', label: '11 pt' },
+  { id: 'text-12pt', label: '12 pt' },
+  { id: 'text-14pt', label: '14 pt' },
+] as const;
+
+const FONT_FACE_IDS = new Set<string>(FONT_FACE_CLASSES.map((item) => item.id));
+const FONT_SIZE_IDS = new Set<string>(FONT_SIZE_CLASSES.map((item) => item.id));
+
+/** Swap one face or size class and keep every other class on the span. */
+export function replaceTypographyClass(
+  current: string,
+  group: Set<string>,
+  next: string,
+): string {
+  const kept = current.split(/\s+/).filter((token) => token && !group.has(token));
+  if (!kept.includes(next)) kept.push(next);
+  return kept.join(' ');
+}
+
+function activeTypographyClass(className: string, group: Set<string>): string {
+  return className.split(/\s+/).find((token) => group.has(token)) ?? '';
+}
 
 const DOCUMENT_EDITOR_CLASS =
   'min-h-full w-full flex-1 px-6 py-4 text-sm text-[#1a1a1a] focus:outline-none letter-body';
@@ -86,6 +121,23 @@ export function EditorToolbar({
   disabled?: boolean;
 }) {
   const inTable = editor.isActive('table');
+  const [, setSelectionTick] = useState(0);
+  useEffect(() => {
+    const bump = () => setSelectionTick((n) => n + 1);
+    editor.on('selectionUpdate', bump);
+    editor.on('transaction', bump);
+    return () => {
+      editor.off('selectionUpdate', bump);
+      editor.off('transaction', bump);
+    };
+  }, [editor]);
+  const activeClass = String(editor.getAttributes('classSpan').class || '');
+  const activeFace = activeTypographyClass(activeClass, FONT_FACE_IDS);
+  const activeSize = activeTypographyClass(activeClass, FONT_SIZE_IDS);
+  const applyTypography = (group: Set<string>, next: string) => {
+    const className = replaceTypographyClass(activeClass, group, next);
+    editor.chain().focus().setMark('classSpan', { class: className }).run();
+  };
 
   return (
     <div className="flex flex-wrap items-center gap-1 rounded-md border border-[#d4d4d4] bg-[#fafafa] p-1">
@@ -112,6 +164,44 @@ export function EditorToolbar({
       >
         <BoldIcon className="h-4 w-4" />
       </ToolbarButton>
+      <label className="sr-only" htmlFor="bp-font-face">
+        Font
+      </label>
+      <select
+        id="bp-font-face"
+        className="rounded border border-[#d4d4d4] bg-white px-2 py-1 text-xs text-[#1a1a1a] disabled:opacity-50"
+        disabled={disabled}
+        value={activeFace}
+        onChange={(e) => {
+          if (e.target.value) applyTypography(FONT_FACE_IDS, e.target.value);
+        }}
+      >
+        <option value="">Font</option>
+        {FONT_FACE_CLASSES.map((item) => (
+          <option key={item.id} value={item.id}>
+            {item.label}
+          </option>
+        ))}
+      </select>
+      <label className="sr-only" htmlFor="bp-font-size">
+        Font size
+      </label>
+      <select
+        id="bp-font-size"
+        className="rounded border border-[#d4d4d4] bg-white px-2 py-1 text-xs text-[#1a1a1a] disabled:opacity-50"
+        disabled={disabled}
+        value={activeSize}
+        onChange={(e) => {
+          if (e.target.value) applyTypography(FONT_SIZE_IDS, e.target.value);
+        }}
+      >
+        <option value="">Size</option>
+        {FONT_SIZE_CLASSES.map((item) => (
+          <option key={item.id} value={item.id}>
+            {item.label}
+          </option>
+        ))}
+      </select>
       <ToolbarButton
         active={editor.isActive('bulletList')}
         disabled={disabled}

@@ -11,6 +11,7 @@ rendered output unescaped.
 from __future__ import annotations
 
 import pytest
+from pathlib import Path
 
 from app.disclosure_package.render import _build_env
 from app.services import boilerplate_sanitize as sanitize
@@ -65,6 +66,38 @@ def test_legacy_plain_text_passes_through_byte_for_byte():
 def test_indent_class_survives_sanitize():
     out = sanitize.sanitize_slot_html('<p class="indent-2">Indented</p>')
     assert 'class="indent-2"' in out
+
+
+def test_font_classes_survive_sanitize():
+    html = '<p><span class="font-serif text-12pt">Letter</span></p>'
+    out = sanitize.sanitize_slot_html(html)
+    assert 'font-serif' in out
+    assert 'text-12pt' in out
+    assert 'Letter' in out
+
+
+def test_shared_css_defines_editor_font_classes():
+    from pathlib import Path
+
+    css = (
+        Path(__file__).resolve().parents[1]
+        / "app/disclosure_package/templates/standard/_shared.css"
+    ).read_text()
+    for name, declaration in (
+        (".font-condensed", "DejaVu Sans Condensed"),
+        (".font-sans", "Liberation Sans"),
+        (".font-serif", "Liberation Serif"),
+        (".font-dejavu-sans", "DejaVu Sans"),
+        (".font-dejavu-serif", "DejaVu Serif"),
+        (".text-8pt", "8pt"),
+        (".text-9pt", "9pt"),
+        (".text-10pt", "10pt"),
+        (".text-11pt", "11pt"),
+        (".text-12pt", "12pt"),
+        (".text-14pt", "14pt"),
+    ):
+        assert name in css
+        assert declaration in css
 
 
 # ── variable-token resolution (9.x) ─────────────────────────────────────────

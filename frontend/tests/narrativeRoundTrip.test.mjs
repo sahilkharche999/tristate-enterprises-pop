@@ -79,6 +79,14 @@ for (const [name, html] of baselines) {
   });
 }
 
+test('a font and size span survives a round trip through the editor schema', () => {
+  const html = '<p><span class="font-serif text-12pt">Letter</span></p>';
+  const out = roundTrip(html);
+  assert.match(out, /font-serif/);
+  assert.match(out, /text-12pt/);
+  assert.match(out, /Letter/);
+});
+
 // ── the specific losses that motivated this file ───────────────────────────
 
 test('block-level classes survive', () => {

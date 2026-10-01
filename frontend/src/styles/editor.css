@@ -181,3 +181,22 @@
 .ProseMirror section[data-doc-id]:last-child {
   border-bottom: none;
 }
+
+/* Match the PDF letter: DejaVu Sans Condensed at 9pt, with local fallbacks
+ * for machines that do not have the disclosure fonts installed. */
+.ProseMirror.letter-body {
+  font-family: "DejaVu Sans Condensed", "Arial Narrow", "Liberation Sans", Arial, sans-serif;
+  font-size: 9pt;
+}
+
+.ProseMirror .font-condensed { font-family: "DejaVu Sans Condensed", "Arial Narrow", "Liberation Sans", sans-serif; }
+.ProseMirror .font-sans { font-family: "Liberation Sans", Arial, Helvetica, sans-serif; }
+.ProseMirror .font-serif { font-family: "Liberation Serif", "Times New Roman", Times, serif; }
+.ProseMirror .font-dejavu-sans { font-family: "DejaVu Sans", "Liberation Sans", Arial, sans-serif; }
+.ProseMirror .font-dejavu-serif { font-family: "DejaVu Serif", "Liberation Serif", "Times New Roman", serif; }
+.ProseMirror .text-8pt { font-size: 8pt; }
+.ProseMirror .text-9pt { font-size: 9pt; }
+.ProseMirror .text-10pt { font-size: 10pt; }
+.ProseMirror .text-11pt { font-size: 11pt; }
+.ProseMirror .text-12pt { font-size: 12pt; }
+.ProseMirror .text-14pt { font-size: 14pt; }

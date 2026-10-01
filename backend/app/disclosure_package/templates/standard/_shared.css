@@ -629,3 +629,17 @@ table th {
     text-align: left;
     background: #f3f3f3;
 }
+
+/* Operator font and size on narrative text. Classes only — the sanitizer
+ * drops style attributes. Families are the ones installed in the PDF image. */
+.font-condensed { font-family: "DejaVu Sans Condensed", Tahoma, "Liberation Sans", sans-serif; }
+.font-sans { font-family: "Liberation Sans", Arial, Helvetica, sans-serif; }
+.font-serif { font-family: "Liberation Serif", "Times New Roman", Times, serif; }
+.font-dejavu-sans { font-family: "DejaVu Sans", "Liberation Sans", Arial, sans-serif; }
+.font-dejavu-serif { font-family: "DejaVu Serif", "Liberation Serif", "Times New Roman", serif; }
+.text-8pt { font-size: 8pt; }
+.text-9pt { font-size: 9pt; }
+.text-10pt { font-size: 10pt; }
+.text-11pt { font-size: 11pt; }
+.text-12pt { font-size: 12pt; }
+.text-14pt { font-size: 14pt; }
