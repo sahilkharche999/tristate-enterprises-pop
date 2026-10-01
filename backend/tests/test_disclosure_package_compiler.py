@@ -617,6 +617,55 @@ def test_compile_package_builds_canonical_dual_fund_statement_facts(
     assert computed["annual_statement_facts"]["total_revenues_replacement"] == Decimal("846414")
 
 
+def test_interest_named_operating_income_is_not_dropped() -> None:
+    """Late fees and operating interest stay in other operating income.
+
+    Reserve interest stays on its own row and is not added again as other
+    replacement income. A non-interest reserve revenue line still is.
+    """
+    from app.disclosure_package.compiler import _compute_all
+
+    draft = BudgetDraft(line_items=[
+        LineItem(label="Assessment Income", amount=Decimal("2025540"), is_revenue=True),
+        LineItem(label="Late Fees & Interest", amount=Decimal("18000"), is_revenue=True),
+        LineItem(label="Interest Earned Operating", amount=Decimal("1000"), is_revenue=True),
+        LineItem(label="Monthly Contribution to Reserve", amount=Decimal("824414")),
+        LineItem(
+            label="Interest Earned Reserve",
+            amount=Decimal("40000"),
+            is_reserve=True,
+            is_revenue=True,
+        ),
+        LineItem(
+            label="Change in Asset Value",
+            amount=Decimal("5000"),
+            is_reserve=True,
+            is_revenue=True,
+        ),
+    ])
+
+    computed = _compute_all(
+        spec=OLD_MILL_2026,
+        budget_draft=draft,
+        reserve_snapshot=_reserve_snapshot(),
+        hoa_metadata=_hoa_metadata(),
+        effective_hoa_settings={
+            "financial_packet_archetype": "dual-fund",
+            "reserve_funding_source": "budget_allocation_line",
+            "reserve_cash_balance_eoy_prior": 0,
+            "fund_balance_boy_operations": 0,
+        },
+        assessment_matrix=_summary_assessment_matrix(),
+    )
+
+    facts = computed["computed"]["annual_statement_facts"]
+    assert facts["other_operating_revenue"] == Decimal("19000.00")
+    assert facts["reserve_interest_income"] == Decimal("40000.00")
+    assert facts["other_replacement_revenue"] == Decimal("5000.00")
+    assert facts["total_revenues_operations"] == Decimal("1220126.00")
+    assert facts["total_revenues_replacement"] == Decimal("869414.00")
+
+
 def test_compile_package_keeps_packet_archetype_independent_from_variable_wording(
     monkeypatch,
     tmp_path: Path,

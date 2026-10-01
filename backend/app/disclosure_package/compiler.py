@@ -78,6 +78,7 @@ from .reconciliation import (
     build_annual_statement_facts,
     is_interfund_reserve_transfer_line,
     is_nonrecurring_forecast_revenue_line,
+    is_reserve_interest_line,
     parse_optional_decimal_setting,
     resolve_assessment_presentation_facts,
     resolve_assessment_facts,
@@ -1046,6 +1047,9 @@ def _compute_all(
         percent_funded=pct,
         annual_replacement_provision=total_prov,
     )
+    # Reserve interest has its own statement row. Skip only those lines here.
+    # Late fees and operating interest stay in other operating income even
+    # when the label contains the word "interest".
     other_operating_revenue = sum(
         (
             Decimal(li.amount or 0)
@@ -1053,7 +1057,7 @@ def _compute_all(
             if li.is_revenue
             and li.label
             and "assessment" not in li.label.lower()
-            and "interest" not in li.label.lower()
+            and not is_reserve_interest_line(li)
             and not is_nonrecurring_forecast_revenue_line(li.label)
         ),
         Decimal("0"),
@@ -1061,13 +1065,14 @@ def _compute_all(
     # Fix 1: exclude interfund contribution mirrors from other replacement revenue.
     # Also drop one-time settlement / insurance-proceeds lines — those are
     # not adopted forecast revenue (Missouri YTD settlement annualized to
-    # $429,328 on the printed P&L).
+    # $429,328 on the printed P&L). Reserve interest is excluded by
+    # is_reserve_interest_line so it is not added again beside that row.
     other_replacement_revenue = sum(
         (
             Decimal(li.amount or 0)
             for li in statement_reserve_revenue_lis
             if li.label
-            and "interest" not in li.label.lower()
+            and not is_reserve_interest_line(li)
             and not is_nonrecurring_forecast_revenue_line(li.label)
         ),
         Decimal("0"),

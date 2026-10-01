@@ -250,6 +250,9 @@ export const HOADisclosureSettingsForm = forwardRef<
   // pool's basis. `previews` holds the last fetched allocation table per pool_key.
   const [specialPools, setSpecialPools] = useState<SpecialAssessmentPool[]>([]);
   const [previews, setPreviews] = useState<Record<string, SpecialAssessmentPreview>>({});
+  // Number inputs are controlled. Number("0.") is 0, so a decimal like 0.025
+  // snaps back to 0 while it is being typed. Keep the raw text until blur.
+  const [numberDrafts, setNumberDrafts] = useState<Record<string, string>>({});
   const baselineRef = useRef<string | null>(null);
   const onReadyChangeRef = useRef(onReadyChange);
   const onDirtyChangeRef = useRef(onDirtyChange);
@@ -259,6 +262,7 @@ export const HOADisclosureSettingsForm = forwardRef<
   useEffect(() => {
     setSettings(null);
     setError(null);
+    setNumberDrafts({});
     baselineRef.current = null;
     onReadyChangeRef.current?.(false);
     onDirtyChangeRef.current?.(false);
@@ -309,6 +313,7 @@ export const HOADisclosureSettingsForm = forwardRef<
         ...next,
         reserve_funding_candidates: next.reserve_funding_candidates ?? candidates,
       });
+      setNumberDrafts({});
       baselineRef.current = disclosureFingerprint(next);
       onDirtyChangeRef.current?.(false);
       setSavedAt(new Date().toLocaleTimeString());
@@ -760,26 +765,58 @@ export const HOADisclosureSettingsForm = forwardRef<
             <input
               type={type}
               step={type === 'number' ? 'any' : undefined}
-              value={settings[key] === null || settings[key] === undefined ? '' : String(settings[key])}
+              inputMode={type === 'number' ? 'decimal' : undefined}
+              value={
+                type === 'number' && numberDrafts[String(key)] !== undefined
+                  ? numberDrafts[String(key)]
+                  : settings[key] === null || settings[key] === undefined
+                    ? ''
+                    : String(settings[key])
+              }
               onChange={(e) => {
-                if (type === 'number') {
-                  const v =
-                    e.target.value === ''
-                      ? key === 'approved_monthly_assessment_per_unit' ||
-                        key === 'reserve_interest_income_override' ||
-                        key === 'income_tax_provision_override' ||
-                        key === 'reserve_liability_override' ||
-                        key === 'annual_replacement_provision_override' ||
-                        key === 'percent_funded_override' ||
-                        key === 'reserve_funding_manual_amount' ||
-                        key === 'replacement_fund_monthly_assessment_per_unit'
-                        ? null
-                        : 0
-                      : Number(e.target.value);
-                  update(key, v as never);
-                } else {
+                if (type !== 'number') {
                   update(key, e.target.value as never);
+                  return;
                 }
+                const raw = e.target.value;
+                const draftKey = String(key);
+                const clearDraft = () =>
+                  setNumberDrafts((prev) => {
+                    if (!(draftKey in prev)) return prev;
+                    const next = { ...prev };
+                    delete next[draftKey];
+                    return next;
+                  });
+                if (raw === '') {
+                  clearDraft();
+                  const empty =
+                    key === 'approved_monthly_assessment_per_unit' ||
+                    key === 'reserve_interest_income_override' ||
+                    key === 'income_tax_provision_override' ||
+                    key === 'reserve_liability_override' ||
+                    key === 'annual_replacement_provision_override' ||
+                    key === 'percent_funded_override' ||
+                    key === 'reserve_funding_manual_amount' ||
+                    key === 'replacement_fund_monthly_assessment_per_unit'
+                      ? null
+                      : 0;
+                  update(key, empty as never);
+                  return;
+                }
+                if (!/^-?\d*\.?\d*$/.test(raw)) return;
+                setNumberDrafts((prev) => ({ ...prev, [draftKey]: raw }));
+                if (raw === '-' || raw === '.' || raw === '-.' || raw.endsWith('.')) return;
+                const parsed = Number(raw);
+                if (Number.isFinite(parsed)) update(key, parsed as never);
+              }}
+              onBlur={() => {
+                const draftKey = String(key);
+                setNumberDrafts((prev) => {
+                  if (!(draftKey in prev)) return prev;
+                  const next = { ...prev };
+                  delete next[draftKey];
+                  return next;
+                });
               }}
               className="w-full border border-[#d4d4d4] rounded px-2 py-1 text-sm"
             />
@@ -1094,7 +1131,7 @@ export const HOADisclosureSettingsForm = forwardRef<
               >
                 <option value="auto">Income statement (default)</option>
                 <option value="budget_allocation_line">
-                  Budget &ldquo;Reserve - Allocation/Transfer&rdquo; line ÷ 12
+                  Budget &ldquo;Reserve = Allocation/Transfer&rdquo; line ÷ 12
                 </option>
                 <option value="reserve_study_provision">
                   Reserve study annual provision ÷ 12

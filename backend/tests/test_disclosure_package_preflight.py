@@ -556,7 +556,46 @@ def test_validate_inputs_warns_when_budget_and_study_reserve_funding_differ():
         e.field_path == "reserve_funding.source"
         and "Reserve study cash-flow contribution differs" in e.message
         and e.code == "reserve_funding_conflict"
-        and e.severity == "blocking"
+        and e.severity == "warning"
+        for e in errors
+    )
+    assert not any(
+        e.code == "reserve_funding_conflict" and e.severity == "blocking"
+        for e in errors
+    )
+
+
+def test_validate_inputs_blocks_when_study_source_differs_from_budget_without_reason():
+    from app.disclosure_package.preflight import validate_inputs
+    from app.disclosure_package.package_specs import OLD_MILL_2026
+    from app.disclosure_package.schemas import (
+        BudgetDraft,
+        LineItem,
+        ReserveFundingPlanRow,
+        ReserveStudySnapshot,
+    )
+    spec = OLD_MILL_2026.model_copy(update={"fiscal_year": 2026})
+    reserve_snapshot = ReserveStudySnapshot(
+        study_date="September 2025",
+        components=_valid_reserve_snapshot().components,
+        funding_plan_rows=[
+            ReserveFundingPlanRow(year=2026, annual_contribution=Decimal("850998"))
+        ],
+    )
+    budget = BudgetDraft(line_items=[
+        LineItem(label="Assessment Income", amount=Decimal("2025540"), is_revenue=True),
+        LineItem(label="Monthly Contribution to Reserve", amount=Decimal("824414")),
+    ])
+    errors = validate_inputs(
+        spec=spec,
+        budget_draft=budget,
+        reserve_snapshot=reserve_snapshot,
+        hoa_metadata=_valid_hoa_metadata(),
+        appendices_root=None,
+        hoa_settings_overrides={"reserve_funding_source": "reserve_study_cash_flow"},
+    )
+    assert any(
+        e.code == "reserve_funding_conflict" and e.severity == "blocking"
         for e in errors
     )
 

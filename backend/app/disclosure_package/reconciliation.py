@@ -708,6 +708,16 @@ def resolve_assessment_presentation_facts(
     )
 
 
+def _display_reserve_transfer_label(label: Optional[str]) -> Optional[str]:
+    """Show the transfer name with '=' so the hyphen is not read as minus."""
+    if not label:
+        return label
+    return (
+        label.replace("Reserve - Allocation/Transfer", "Reserve = Allocation/Transfer")
+        .replace("Reserve -Allocation/Transfer", "Reserve = Allocation/Transfer")
+    )
+
+
 def resolve_reserve_funding_facts(
     *,
     funding_source: object,
@@ -737,7 +747,7 @@ def resolve_reserve_funding_facts(
     elif source == "budget_reserve_contribution" and budget is not None:
         selected_source = "budget_reserve_contribution"
         selected_amount = budget
-        source_label = f"approved budget reserve contribution ({budget_label})"
+        source_label = f"approved budget reserve contribution ({_display_reserve_transfer_label(budget_label)})"
     elif source == "reserve_study_cash_flow" and study is not None:
         selected_source = "reserve_study_cash_flow"
         selected_amount = study
@@ -754,7 +764,7 @@ def resolve_reserve_funding_facts(
     elif budget is not None:
         selected_source = "budget_reserve_contribution"
         selected_amount = budget
-        source_label = f"approved budget reserve contribution ({budget_label})"
+        source_label = f"approved budget reserve contribution ({_display_reserve_transfer_label(budget_label)})"
     elif study is not None:
         selected_source = "reserve_study_cash_flow"
         selected_amount = study

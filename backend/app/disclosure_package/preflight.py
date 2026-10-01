@@ -411,10 +411,14 @@ def validate_inputs(
     for warning in reserve_funding_facts.warnings:
         code, suggested_fix = _reserve_funding_issue_details(warning)
         is_conflict = code == "reserve_funding_conflict"
+        # The budget transfer is the board amount. Picking it is the decision.
+        # A different study figure stays visible and does not block generate.
+        chosen_budget = reserve_funding_facts.source == "budget_reserve_contribution"
+        blocks = is_conflict and not overwrite_reason and not chosen_budget
         errors.append(PreflightError(
             field_path="reserve_funding.source",
             message=warning,
-            severity="blocking" if is_conflict and not overwrite_reason else "warning",
+            severity="blocking" if blocks else "warning",
             code=code,
             affected_value=reserve_funding_facts.model_dump(mode="json"),
             suggested_fix=suggested_fix,
