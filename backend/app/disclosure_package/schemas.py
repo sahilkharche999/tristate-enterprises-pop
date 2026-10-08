@@ -57,6 +57,9 @@ class ReserveStudyComponent(BaseModel):
     remaining_life: int = Field(ge=0)
     replacement_cost: Decimal = Field(ge=Decimal("0"))
     year_new: Optional[int] = Field(default=None, ge=1900, le=3000)
+    # Category headers the study prints immediately above this row
+    # (e.g. ["BUILDING SYSTEMS", "Balcony"]), verbatim and in order.
+    section_headers: list[str] = Field(default_factory=list)
 
 
 class ReserveFundingPlanRow(BaseModel):

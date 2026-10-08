@@ -257,6 +257,19 @@ class CompileResult(BaseModel):
 _HORIZON_YEARS = 30
 
 
+def _header_rows(component: Any) -> list[dict[str, Any]]:
+    """Group-header rows for the study categories printed above ``component``."""
+    return [
+        {
+            "is_header": True,
+            "line_item": header,
+            "expenditures_by_year": [Decimal("0")] * _HORIZON_YEARS,
+            "total_expenditures": Decimal("0"),
+        }
+        for header in getattr(component, "section_headers", None) or []
+    ]
+
+
 def _per_component_expenditures(
     components: Any, fiscal_year_start: int
 ) -> list[dict[str, Any]]:
@@ -288,6 +301,7 @@ def _per_component_expenditures(
                 "total_expenditures": Decimal("0"),
             })
             continue
+        out.extend(_header_rows(c))
 
         useful_life = getattr(c, "useful_life", None)
         replacement_cost = getattr(c, "replacement_cost", None)
@@ -335,7 +349,6 @@ def _per_component_expenditures(
             "replacement_cost": Decimal(str(replacement_cost)) if replacement_cost is not None else Decimal("0"),
             "year_replacement_provision": year_provision,
             "estimated_liability_through_year_25": estimated_liability,
-            "year_new": getattr(c, "year_new", None),
             "expenditures_by_year": expenditures,
             "total_expenditures": total,
         })
@@ -506,6 +519,12 @@ def _legacy_funding_plan(
 
     Keys: year, beginning_balance, annual_contribution, annual_expenditure,
     interest, ending_balance, estimated_liability, percent_funded.
+
+    Every row is stated at Dec 31 of its year (§5570(b)(4) item 7):
+    liability after that year's aging, priced one year past the prior row,
+    and percent funded = ending cash ÷ that liability. A component replaced
+    during the year ends it one year old (RL = UL − 1), which keeps the next
+    replacement at RL + UL — the same cadence as the expenditure schedule.
     """
     states = [
         {
@@ -516,35 +535,33 @@ def _legacy_funding_plan(
         for component in per_component
         if not component.get("is_header") and int(component.get("useful_life") or 0) > 0
     ]
-    if not states and total_estimated_liability_now:
-        states = []
 
     rows: list[dict[str, Any]] = []
     for offset in range(_HORIZON_YEARS):
-        factor = (Decimal("1") + inflation) ** offset
+        # Year-0 liability (the schedule's "at Dec 31, prior year") is in
+        # current dollars, so Dec 31 of year `offset` is offset + 1 years on.
+        factor = (Decimal("1") + inflation) ** (offset + 1)
         if states:
+            for state in states:
+                if state["remaining_life"] <= 0:
+                    state["remaining_life"] = state["useful_life"] - 1
+                else:
+                    state["remaining_life"] -= 1
             liability = Decimal("0")
             for state in states:
                 inflated_cost = (state["replacement_cost"] * factor).quantize(Decimal("0.01"))
                 liability += Decimal(
                     estimated_liability_for(
                         replacement_cost=inflated_cost,
-                        useful_life=max(state["useful_life"], 0),
-                        remaining_life=max(state["remaining_life"], 0),
+                        useful_life=state["useful_life"],
+                        remaining_life=state["remaining_life"],
                     )
                 )
-            for state in states:
-                if state["remaining_life"] <= 0:
-                    state["remaining_life"] = state["useful_life"]
-                else:
-                    state["remaining_life"] -= 1
         else:
             liability = (total_estimated_liability_now * factor).quantize(Decimal("1"))
-        # Cash for that year = opening/beginning balance, matching §5565
-        # (scenario cash / current liability on year 0).
         beginning = cash_flow["cash_balance_beginning"][offset]
         ending = cash_flow["cash_balance_end"][offset]
-        pct = percent_funded(cash_reserves=beginning, estimated_liability=liability)
+        pct = percent_funded(cash_reserves=ending, estimated_liability=liability)
         rows.append({
             "year": cash_flow["years"][offset],
             "beginning_balance": int(beginning),
@@ -1166,6 +1183,7 @@ def _compute_all(
                 cash_balance_eoy_prior=cash, excess=excess_rep
             ),
             "total_estimated_liability": total_liab,
+            "estimated_replacement_fund_cash": cash,
             "total_year_replacement_provision": total_prov,
             "percent_funded": pct,
             "under_funded_balance_total": under_total,
@@ -1181,11 +1199,13 @@ def _compute_all(
             "board_deferral_count": 0,
             "signed_contracts_count": 0,
             "reserve_components": [
-                {
+                row
+                for c in reserve_snapshot.components
+                for row in (*_header_rows(c), {
+                    "is_header": False,
                     "line_item": c.line_item,
                     "useful_life": c.useful_life,
                     "remaining_life": c.remaining_life,
-                    "year_new": c.year_new,
                     "replacement_cost": c.replacement_cost,
                     "year_replacement_provision": (
                         c.replacement_cost / c.useful_life if c.useful_life else 0
@@ -1197,8 +1217,7 @@ def _compute_all(
                         if c.useful_life
                         else 0
                     ),
-                }
-                for c in reserve_snapshot.components
+                })
             ],
             # Plan 11-06 / 11-09 may extend; placeholder for templates that
             # reference the field. StrictUndefined fails loudly if a

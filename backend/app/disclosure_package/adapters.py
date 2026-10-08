@@ -188,9 +188,14 @@ def from_reserve_study_extraction(document: Any) -> ReserveStudySnapshot:
         or raw_funding_rows
         or _attr_or_key(document, "study_was_uploaded")
     )
+    # Headers attach to the next kept component; skipped rows pass them on.
+    pending_headers: list[str] = []
     for raw in raw_rows:
         row_type = str(_attr_or_key(raw, "row_type") or "").strip().lower()
         if row_type == "header":
+            header = str(_attr_or_key(raw, "line_item") or "").strip()
+            if header:
+                pending_headers.append(header)
             continue
         line_item = str(_attr_or_key(raw, "line_item") or "(unnamed)")
         excluded = bool(_attr_or_key(raw, "excluded"))
@@ -222,7 +227,9 @@ def from_reserve_study_extraction(document: Any) -> ReserveStudySnapshot:
             remaining_life=int(remaining_life),
             replacement_cost=_to_decimal(replacement_cost),
             year_new=year_new,
+            section_headers=pending_headers,
         ))
+        pending_headers = []
     for raw in raw_funding_rows:
         year = _attr_or_key(raw, "year")
         if year is None:

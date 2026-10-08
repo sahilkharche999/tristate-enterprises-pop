@@ -194,31 +194,36 @@ def test_from_reserve_study_extraction_skips_rows_without_useful_life():
     assert all(row.excluded for row in snap.skipped_reviewed_rows)
 
 
-def test_from_reserve_study_extraction_ignores_section_headers():
+def test_from_reserve_study_extraction_attaches_section_headers_to_next_component():
     from app.disclosure_package.adapters import from_reserve_study_extraction
+
+    def header(label):
+        return SimpleNamespace(line_item=label, row_type="header", useful_life=None,
+                               remaining_life=None, replacement_cost=None)
+
+    def item(label, **kw):
+        return SimpleNamespace(line_item=label, row_type="item", useful_life=25,
+                               remaining_life=10, replacement_cost=50000.0, **kw)
 
     doc = SimpleNamespace(
         study_date="October 25, 2024",
         rows=[
-            SimpleNamespace(
-                line_item="Building Exteriors",
-                row_type="header",
-                useful_life=None,
-                remaining_life=None,
-                replacement_cost=None,
-            ),
-            SimpleNamespace(
-                line_item="Roof",
-                row_type="item",
-                useful_life=25,
-                remaining_life=10,
-                replacement_cost=50000.0,
-            ),
+            header("BUILDING SYSTEMS"),
+            header("Balcony"),
+            item("Balcony Inspection"),
+            item("Deck Coating"),
+            header("Clubhouse"),
+            item("Sauna", excluded=True),
+            item("Roof"),
         ],
     )
     snap = from_reserve_study_extraction(doc)
-    assert [c.line_item for c in snap.components] == ["Roof"]
-    assert snap.skipped_reviewed_rows == []
+    assert [(c.line_item, c.section_headers) for c in snap.components] == [
+        ("Balcony Inspection", ["BUILDING SYSTEMS", "Balcony"]),
+        ("Deck Coating", []),
+        ("Roof", ["Clubhouse"]),  # carried past the excluded row
+    ]
+    assert [r.line_item for r in snap.skipped_reviewed_rows] == ["Sauna"]
 
 
 def test_from_reserve_study_extraction_allows_income_statement_only_draft():

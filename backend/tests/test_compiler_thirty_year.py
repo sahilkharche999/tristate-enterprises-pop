@@ -358,49 +358,45 @@ def test_thirty_year_year0_uses_adopted_contribution_not_provision() -> None:
     assert out["thirty_year_funding_plan"][0]["annual_contribution"] != 39659
 
 
-def test_legacy_funding_plan_resets_remaining_life_after_replacement() -> None:
+def test_legacy_funding_plan_states_each_year_at_december_31() -> None:
+    """Item-7 rows: liability after the year's aging, % = ending cash ÷ it.
+    A component replaced during the year ends it one year old (RL = UL − 1)."""
     from app.disclosure_package.compiler import _legacy_funding_plan
-    from app.disclosure_package.formulas import estimated_liability_for, percent_funded
 
     zeros = [Decimal("0")] * 30
-    cash_end = [Decimal("50000")] * 30
     cash_flow = {
         "years": list(range(2026, 2056)),
-        "cash_balance_beginning": cash_end,
+        "cash_balance_beginning": [Decimal("1000")] * 30,
         "regular_assessments": zeros,
         "repair_replacement_costs": zeros,
         "interest_income": zeros,
-        "cash_balance_end": cash_end,
+        "cash_balance_end": [Decimal("1500")] * 30,
+    }
+    roof = {
+        "line_item": "Roof",
+        "useful_life": 5,
+        "remaining_life": 0,
+        "replacement_cost": Decimal("10000"),
     }
     rows = _legacy_funding_plan(
         cash_flow=cash_flow,
-        per_component=[
-            {
-                "line_item": "Roof",
-                "useful_life": 5,
-                "remaining_life": 0,
-                "replacement_cost": Decimal("10000"),
-            }
-        ],
+        per_component=[dict(roof)],
         inflation=Decimal("0"),
         total_estimated_liability_now=Decimal("10000"),
     )
-    year0_liab = Decimal(estimated_liability_for(
-        replacement_cost=Decimal("10000"),
-        useful_life=5,
-        remaining_life=0,
-    ))
-    year1_liab = Decimal(estimated_liability_for(
-        replacement_cost=Decimal("10000"),
-        useful_life=5,
-        remaining_life=5,
-    ))
-    assert rows[0]["estimated_liability"] == int(year0_liab)
-    assert rows[1]["estimated_liability"] == int(year1_liab)
-    assert rows[1]["estimated_liability"] < rows[0]["estimated_liability"]
-    assert rows[0]["percent_funded"] == int(
-        percent_funded(cash_reserves=Decimal("50000"), estimated_liability=year0_liab)
+    # Replaced in 2026 → one year old at 12/31/2026, two at 12/31/2027.
+    assert [r["estimated_liability"] for r in rows[:2]] == [2000, 4000]
+    # Next replacement in 2031 (RL + UL) → back to one year old.
+    assert rows[5]["estimated_liability"] == 2000
+    assert rows[0]["percent_funded"] == 75  # 1500 ending ÷ 2000, not 1000 beginning
+
+    inflated = _legacy_funding_plan(
+        cash_flow=cash_flow,
+        per_component=[dict(roof)],
+        inflation=Decimal("0.10"),
+        total_estimated_liability_now=Decimal("10000"),
     )
+    assert inflated[0]["estimated_liability"] == 2200  # priced one year on
 
 
 def test_partial_study_calendar_still_renders_thirty_years() -> None:
@@ -434,7 +430,9 @@ def test_partial_study_calendar_still_renders_thirty_years() -> None:
     assert cash_flow["regular_assessments"][20] != Decimal("900000")
 
 
-def test_cover_percent_funded_equals_year0_table() -> None:
+def test_cover_percent_funded_is_prior_year_end_and_table_is_year_end() -> None:
+    """§5570 item 6 is as of Dec 31 of the prior year; item 7 rows are as of
+    Dec 31 of each forecast year, so year 0 differs from the cover figure."""
     from app.disclosure_package.compiler import _compute_all
     from app.disclosure_package.schemas import (
         BudgetDraft,
@@ -464,5 +462,14 @@ def test_cover_percent_funded_equals_year0_table() -> None:
         hoa_metadata=_hoa(),
         effective_hoa_settings={"reserve_cash_as_of_date": "2025-12-31", "reserve_cash_balance_eoy_prior": "50000"},
     )["computed"]
+    from app.disclosure_package.formulas import percent_funded
+
     year0 = computed["thirty_year_funding_plan"][0]
-    assert int(computed["percent_funded"]) == int(year0["percent_funded"])
+    assert int(computed["percent_funded"]) == percent_funded(
+        cash_reserves=Decimal("50000"),
+        estimated_liability=computed["total_estimated_liability"],
+    )
+    assert year0["percent_funded"] == percent_funded(
+        cash_reserves=Decimal(year0["ending_balance"]),
+        estimated_liability=Decimal(year0["estimated_liability"]),
+    )
