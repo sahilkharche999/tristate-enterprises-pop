@@ -105,7 +105,9 @@ _DISCOVERY_SYSTEM_PROMPT = (
 
 _EXTRACTION_SYSTEM_PROMPT = (
     "You are extracting reserve-study component rows from ONE reserve-study table page.\n"
-    "Return both reserve-study table header rows and component rows in visible order.\n"
+    "Return both category header rows and component rows in visible order.\n"
+    "A category header is a group name printed above the components it covers, such as BUILDING SYSTEMS, Balcony, Clubhouse, or Pool #1.\n"
+    "Never return column titles as header rows (lines like Description, R.L., U.L., Useful Life, Quantity, Unit Cost, Total Cost), even when they repeat at the top of a page. Also skip page titles, footnotes, and references such as See General Information for Definitions.\n"
     "For header rows, set row_type='header', put the visible header text in line_item, and leave numeric/value fields null.\n"
     "For component rows, set row_type='item' and use these fields when they are explicitly visible: line_item, useful_life, remaining_life, quantity, replacement_cost, year_new, year_replacement_provision, estimated_liability.\n"
     "Also return page-level metadata when explicitly visible: study_date, study_year, applicable_fiscal_year, reference_year, first_forecast_year.\n"
