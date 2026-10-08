@@ -44,7 +44,7 @@
         <th>Est.<br>Rem.<br>Life</th>
         <th>Curr.<br>Repl.<br>Cost</th>
         <th>Year<br>Rplc.<br>Prov.</th>
-        <th>Est.<br>{{ (fiscal_year - 1) % 100 }}-{{ (fiscal_year + 24) % 100 }}<br>Liab.</th>
+        <th>Est.<br>12-{{ '%02d' % ((fiscal_year - 1) % 100) }}<br>Liab.</th>
         {% for offset in range(slice_start, slice_end) %}
           <th>{{ fiscal_year + offset }}</th>
         {% endfor %}
