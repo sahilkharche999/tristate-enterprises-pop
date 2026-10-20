@@ -53,11 +53,11 @@ def _upload_document(
     filename: str,
     content_type: str,
     *,
-    source_mode: str = "income_statement",
+    source_mode: "str | None" = "income_statement",
 ):
     return client.post(
         "/hoa/1/budget/upload",
-        data={"source_mode": source_mode},
+        data={"source_mode": source_mode} if source_mode else {},
         files={"file": (filename, b"placeholder bytes", content_type)},
     )
 
@@ -86,6 +86,7 @@ def _valid_pdf_statement() -> ExtractedFinancialStatement:
         {
             "document_family": "pdf_visual_document",
             "report_type": "income_statement",
+            "statement_period": "harness statement period",
             "line_items": [
                 {
                     "account_code_text": "40000",
@@ -160,7 +161,7 @@ def test_excel_upload_materializes_approved_assessment_mapping(
 def test_upload_pdf_uses_vlm_extractor_before_pipeline(client, budget_history_test_harness, monkeypatch, tmp_path):
     called = {"pdf": 0, "normalize": 0}
 
-    async def _fake_extract(path: str):
+    async def _fake_extract(path: str, **kwargs):
         called["pdf"] += 1
         return _valid_pdf_statement()
 
@@ -184,67 +185,51 @@ def test_upload_pdf_uses_vlm_extractor_before_pipeline(client, budget_history_te
     assert called["normalize"] == 1
 
 
-def test_upload_proforma_excel_uses_gemini_statement_extraction(
+def test_upload_excel_detected_as_final_budget_uses_final_budget_math(
     client,
     budget_history_test_harness,
     monkeypatch,
 ):
-    called = {"gemini_excel": 0, "proforma_parser": 0}
+    calls = []
 
-    def _fake_gemini_excel(*args, **kwargs):
-        called["gemini_excel"] += 1
+    def _fake_extract_budget_source(path, *, route, original_filename, kind_override):
+        calls.append(kind_override)
         return ExtractedFinancialStatement.model_validate(
             {
                 "document_family": "excel_budget_workbook",
-                "report_type": "income_statement",
+                "report_type": "final_budget",
+                "statement_period": "2027",
                 "line_items": [
-                    {
-                        "account_code_text": "40000",
-                        "label": "Assessments",
-                        "section_kind": "income",
-                        "annual_budget": 1148083.2,
-                        "evidence": {"source_column": "final_budget"},
-                    },
-                    {
-                        "account_code_text": "50050",
-                        "label": "Management Service Contract",
-                        "section_kind": "operating",
-                        "annual_budget": 61740.0,
-                        "evidence": {"source_column": "final_budget"},
-                    },
+                    {"label": "Assessments", "section_kind": "income", "annual_budget": 2025540.0},
+                    {"label": "Management Service", "section_kind": "operating", "annual_budget": 93744.0},
+                    {"label": "MONTHLY CONTRIBUTION TO RESERVE", "section_kind": "operating",
+                     "annual_budget": 808916.36},
                 ],
                 "confidence": 0.9,
             }
         )
 
-    def _unexpected_proforma_parser(*args, **kwargs):
-        called["proforma_parser"] += 1
-        raise AssertionError("Deterministic pro-forma parser should not run for pro-forma Excel")
-
     monkeypatch.setattr(
-        "app.services.budget_history_service._extract_proforma_excel_statement_sync",
-        _fake_gemini_excel,
-        raising=False,
-    )
-    monkeypatch.setattr(
-        "app.services.budget_history_service._parse_proforma_excel_source",
-        _unexpected_proforma_parser,
+        "app.services.budget_history_service._extract_budget_source", _fake_extract_budget_source
     )
 
     response = _upload_document(
         client,
-        "401 Esprit Park 2025 Budget.xlsx",
+        "442 Old Mill Budget 2027Final.xlsx",
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        source_mode="proforma_final_budget",
+        source_mode=None,
     )
 
     assert response.status_code == 200, response.text
     payload = response.json()
+    assert calls == [None]  # nothing chosen by the operator: Gemini decides
     assert payload["review_required"] is False
-    assert payload["draft"]["status"] == "active"
-    assert payload["draft"]["source_mode"] == "proforma_final_budget"
-    assert called["gemini_excel"] == 1
-    assert called["proforma_parser"] == 0
+    draft = payload["draft"]
+    assert draft["source_mode"] == "proforma_final_budget"
+    assert draft["growth_factor"] == 1.0
+    contribution = next(item for item in draft["line_items"] if item["label"].startswith("MONTHLY CONTRIBUTION"))
+    assert contribution["category"] == "reserve_expense"
+    assert contribution["reserve_group"] == "transfer"
 
 
 def test_bundle_upload_proforma_mode_carries_source_mode_to_draft(
@@ -304,7 +289,7 @@ def test_pdf_upload_materializes_approved_assessment_mapping(
 ):
     setup_id = _seed_approved_assessment_rule(db_session)
 
-    async def _fake_extract(path: str):
+    async def _fake_extract(path: str, **kwargs):
         return _valid_pdf_statement()
 
     def _fake_normalize(statement):
@@ -335,7 +320,7 @@ def test_upload_pdf_uses_pdf_header_hint_when_vlm_omits_statement_period(
     monkeypatch,
     tmp_path,
 ):
-    async def _fake_extract(path: str):
+    async def _fake_extract(path: str, **kwargs):
         return ExtractedFinancialStatement.model_validate(
             {
                 "document_family": "pdf_visual_document",
@@ -370,16 +355,12 @@ def test_upload_pdf_uses_pdf_header_hint_when_vlm_omits_statement_period(
         output_path.write_bytes(b"normalized workbook")
         return str(output_path)
 
-    def _unexpected_infer_growth_factor(*args, **kwargs):
-        raise AssertionError("workbook inference should not run when PDF header hint is available")
-
     monkeypatch.setattr("app.services.budget_history_service.extract_pdf_statement", _fake_extract)
     monkeypatch.setattr("app.services.budget_history_service.build_normalized_statement_workbook", _fake_normalize)
     monkeypatch.setattr(
         "app.services.budget_history_service.extract_pdf_statement_period_hint",
         lambda path: "08/21/2025 to 09/20/2025 Page: 1",
     )
-    monkeypatch.setattr("app.services.budget_history_service.infer_growth_factor_from_input", _unexpected_infer_growth_factor)
 
     response = _upload_document(client, "2238 Market.pdf", "application/pdf")
 
@@ -390,7 +371,7 @@ def test_upload_pdf_uses_pdf_header_hint_when_vlm_omits_statement_period(
 
 
 def test_upload_pdf_validation_failure_returns_review_required(client, budget_history_test_harness, monkeypatch):
-    async def _failed_extract(path: str):
+    async def _failed_extract(path: str, **kwargs):
         return DocumentExtractionFailure(
             code="validation_failed",
             message="Structured PDF extraction failed deterministic validation checks.",
@@ -461,8 +442,8 @@ def test_variant_excel_low_confidence_returns_review_required(client, budget_his
     payload = response.json()
     assert payload["review_required"] is True
     assert payload["draft"] is None
-    assert "was not accepted as an income statement" in payload["review_reason"]
-    assert any("Expected budget source format" in warning for warning in payload["warnings"])
+    assert "was read as an income statement but was not accepted" in payload["review_reason"]
+    assert any("year-to-date actuals and an annual budget" in warning for warning in payload["warnings"])
 
 
 def test_bundle_upload_returns_separate_budget_and_reserve_statuses(
@@ -537,10 +518,10 @@ def test_bundle_upload_budget_review_required_explains_expected_income_statement
     assert response.status_code == 200
     payload = response.json()
     assert payload["budget_source"]["status"] == "review_required"
-    assert "was not accepted as an income statement" in payload["budget_source"]["review_reason"]
+    assert "was read as an income statement but was not accepted" in payload["budget_source"]["review_reason"]
     assert payload["budget_source"]["debug_info"]["code"] == "validation_failed"
-    assert any("Expected budget source format" in warning for warning in payload["budget_source"]["warnings"])
-    assert any("Income Statement Esprit Park Aug 2025.xlsx" in warning for warning in payload["budget_source"]["warnings"])
+    assert any("year-to-date actuals and an annual budget" in warning for warning in payload["budget_source"]["warnings"])
+    assert any("Read as: Final budget" in warning for warning in payload["budget_source"]["warnings"])
 
 
 def test_bundle_upload_can_offer_continue_with_budget_only_when_reserve_fails(

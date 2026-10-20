@@ -4,15 +4,12 @@ import test from 'node:test';
 import {
   BUDGET_SOURCE_MODE_OPTIONS,
   budgetSourceModeCreateSuccess,
-  budgetSourceModeHelperCopy,
   budgetSourceModeLabel,
-  budgetSourceModeMissingUploadError,
-  budgetSourceModeUploadPlaceholder,
   createBudgetBundleFormData,
   createBudgetSourceFormData,
 } from '../src/app/lib/budgetSourceMode.ts';
 
-test('budget source mode labels and copy switch by mode', () => {
+test('budget source mode labels and copy name the detected kind', () => {
   assert.deepEqual(
     BUDGET_SOURCE_MODE_OPTIONS.map((option) => option.value),
     ['income_statement', 'proforma_final_budget'],
@@ -20,23 +17,25 @@ test('budget source mode labels and copy switch by mode', () => {
 
   assert.equal(budgetSourceModeLabel('income_statement'), 'Income Statement');
   assert.equal(budgetSourceModeLabel('proforma_final_budget'), 'Pro Forma / Final Budget');
-  assert.match(budgetSourceModeHelperCopy('income_statement'), /income statement/i);
-  assert.match(budgetSourceModeHelperCopy('proforma_final_budget'), /jan-dec/i);
-  assert.match(budgetSourceModeUploadPlaceholder('proforma_final_budget'), /pro forma/i);
-  assert.match(budgetSourceModeCreateSuccess('proforma_final_budget'), /pro forma/i);
-  assert.match(budgetSourceModeMissingUploadError('proforma_final_budget'), /pro forma/i);
+  assert.equal(budgetSourceModeCreateSuccess('proforma_final_budget'), 'Draft created from a final budget.');
+  assert.equal(budgetSourceModeCreateSuccess('income_statement'), 'Draft created from an income statement.');
 });
 
-test('budget upload form-data builders include source_mode', () => {
+test('budget upload form-data builders send source_mode only as an override', () => {
   const budgetFile = new File(['budget'], 'budget.xlsx', {
     type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   });
   const reserveFile = new File(['reserve'], 'reserve.pdf', { type: 'application/pdf' });
 
-  const budgetOnlyFormData = createBudgetSourceFormData(budgetFile, 'proforma_final_budget');
-  assert.equal(budgetOnlyFormData.get('source_mode'), 'proforma_final_budget');
-  assert.equal(budgetOnlyFormData.get('file')?.name, 'budget.xlsx');
+  const detected = createBudgetSourceFormData(budgetFile, null);
+  assert.equal(detected.has('source_mode'), false);
+  assert.equal(detected.get('file')?.name, 'budget.xlsx');
+  assert.equal(
+    createBudgetSourceFormData(budgetFile, 'proforma_final_budget').get('source_mode'),
+    'proforma_final_budget',
+  );
 
+  assert.equal(createBudgetBundleFormData(budgetFile, reserveFile, null).has('source_mode'), false);
   const bundleFormData = createBudgetBundleFormData(
     budgetFile,
     reserveFile,

@@ -60,12 +60,53 @@ class FakeBudgetPipeline:
         Path(self.output_path).write_bytes(b"fake generated workbook")
 
 
-def fake_write_percent_changes_by_label(path: str, sheet: str, changes):
+def fake_write_percent_changes_by_label(path: str, sheet: str, changes, **kwargs):
     return len(changes) if changes else 0
 
 
-def fake_infer_growth_factor_from_input(input_path: str, fiscal_year_start_month: int):
-    return 1.25, 6, f"stub:{fiscal_year_start_month}"
+# Excel uploads in harness tests skip Gemini: this period string maps to the
+# stub growth factor below; real periods (PDF tests) use the real inference.
+HARNESS_STATEMENT_PERIOD = "harness statement period"
+
+
+def _fake_infer_growth_factor_from_statement_period(real):
+    def fake(statement_period, fiscal_year_start_month):
+        if statement_period == HARNESS_STATEMENT_PERIOD:
+            return 1.25, 6, f"stub:{fiscal_year_start_month}"
+        return real(statement_period, fiscal_year_start_month)
+
+    return fake
+
+
+def harness_statement(report_type: str = "income_statement"):
+    from app.models.financial_document_extraction import ExtractedFinancialStatement
+
+    return ExtractedFinancialStatement.model_validate(
+        {
+            "document_family": "excel_budget_workbook",
+            "report_type": report_type,
+            "statement_period": HARNESS_STATEMENT_PERIOD,
+            "line_items": [
+                {"account_code_text": "4010", "label": "Assessment Revenue", "section_kind": "income",
+                 "ytd_actual": 60000.0, "annual_budget": 120000.0},
+                {"account_code_text": "6100", "label": "Insurance", "section_kind": "operating",
+                 "ytd_actual": 16000.0, "annual_budget": 32000.0},
+            ],
+        }
+    )
+
+
+def _fake_extract_budget_source(service):
+    """Stand-in for Gemini: PDFs still go through extract_pdf_statement (which
+    tests monkeypatch); Excel files return a small statement of the requested kind."""
+
+    def fake(path, *, route, original_filename, kind_override):
+        if route.path == "pdf_vlm":
+            return service._extract_pdf_statement_sync(path, source_mode=kind_override, filename=original_filename)
+        kind = "final_budget" if kind_override == "proforma_final_budget" else "income_statement"
+        return harness_statement(kind)
+
+    return fake
 
 
 def fake_read_sheet_as_table(path: str, sheet: str):
@@ -198,14 +239,17 @@ def budget_history_test_harness(monkeypatch, budget_storage_root):
     )
 
     _maybe_patch(monkeypatch, "app.services.budget_history_service", "BudgetPipeline", FakeBudgetPipeline)
-    _maybe_patch(
-        monkeypatch,
-        "app.services.budget_history_service",
-        "infer_growth_factor_from_input",
-        fake_infer_growth_factor_from_input,
-    )
 
     service_module = _maybe_import("app.services.budget_history_service")
+    if service_module is not None:
+        monkeypatch.setattr(
+            service_module,
+            "infer_growth_factor_from_statement_period",
+            _fake_infer_growth_factor_from_statement_period(
+                service_module.infer_growth_factor_from_statement_period
+            ),
+        )
+        monkeypatch.setattr(service_module, "_extract_budget_source", _fake_extract_budget_source(service_module))
     if service_module is not None and hasattr(service_module, "macros_service"):
         monkeypatch.setattr(service_module.macros_service, "read_sheet_as_table", fake_read_sheet_as_table)
         monkeypatch.setattr(

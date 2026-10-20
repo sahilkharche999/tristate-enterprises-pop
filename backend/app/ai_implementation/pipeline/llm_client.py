@@ -39,7 +39,13 @@ def _strip_unsupported_schema_keys(schema: dict) -> dict:
             continue
         if key == "$ref":
             continue
-        if isinstance(value, dict):
+        if key == "properties" and isinstance(value, dict):
+            # Keys here are field names, not schema keywords: a field called
+            # "title" or "default" must survive (it is still listed in "required").
+            cleaned[key] = {
+                name: _strip_unsupported_schema_keys(sub) for name, sub in value.items()
+            }
+        elif isinstance(value, dict):
             cleaned[key] = _strip_unsupported_schema_keys(value)
         elif isinstance(value, list):
             cleaned[key] = [
@@ -86,7 +92,9 @@ def _vision_log_context(
         "_ReserveStudyBatchClassification": "reserve_discovery",
         "ExtractedReserveStudyPage": "reserve_extract_page",
         "ExtractedFinancialStatementPage": "budget_extract_page",
-        "StatementPageSelection": "budget_page_selection",
+        "StatementPageWithTotals": "budget_extract_page",
+        "PageClassificationBatch": "budget_page_classification",
+        "DisclosureFacts": "disclosure_facts",
     }
     purpose = purpose_by_schema.get(schema_name, schema_name)
     pages = []
@@ -200,19 +208,31 @@ def get_llm_client() -> genai.Client:
 GEMINI_BACKOFF_DELAYS: list[float] = [2, 4, 8]
 
 
+def _thinking_config(thinking_budget: Optional[int]) -> Optional[types.ThinkingConfig]:
+    return None if thinking_budget is None else types.ThinkingConfig(thinking_budget=thinking_budget)
+
+
 async def call_llm(
     messages: list[dict],
     response_schema: type[BaseModel],
     temperature: float = 0.3,
     timeout: float = 10.0,
+    *,
+    thinking_budget: Optional[int] = None,
+    backoff_delays: Optional[list[float]] = None,
+    timeout_retries: Optional[int] = None,
 ) -> Optional[Any]:
     """Call Gemini API with controlled generation. Returns parsed Pydantic instance.
 
     Per D-04: Uses response_schema for schema-enforced output at decode level.
     Per D-06: Only rate-limit retry with exponential backoff (no validation-retry).
+    ``thinking_budget=0`` turns model thinking off; ``backoff_delays`` overrides
+    the retry schedule (one attempt per delay, plus the first);
+    ``timeout_retries`` caps how many of those retries a timeout may use —
+    429/5xx answers come back fast, a timed-out call already cost ``timeout``.
     """
     client = get_llm_client()
-    backoff_delays = GEMINI_BACKOFF_DELAYS
+    backoff_delays = GEMINI_BACKOFF_DELAYS if backoff_delays is None else backoff_delays
 
     # Build contents: extract system instruction, collect user parts
     system_text = None
@@ -230,8 +250,10 @@ async def call_llm(
         response_schema=gemini_schema,
         temperature=temperature,
         system_instruction=system_text,
+        thinking_config=_thinking_config(thinking_budget),
     )
 
+    timeouts = 0
     for attempt, delay in enumerate([0] + backoff_delays):
         try:
             if delay > 0:
@@ -267,7 +289,8 @@ async def call_llm(
             # Previously returned None immediately, giving the call a single
             # shot — which silently dropped pages whose first call happened
             # to be slow (e.g. cold start, dense page, network jitter).
-            if attempt >= len(backoff_delays):
+            timeouts += 1
+            if attempt >= len(backoff_delays) or (timeout_retries is not None and timeouts > timeout_retries):
                 logger.error("Gemini call timed out after %.1fs on final attempt (attempt %d)", timeout, attempt + 1)
                 return None
             wait = backoff_delays[min(attempt, len(backoff_delays) - 1)]
@@ -285,6 +308,10 @@ async def call_llm_vision(
     response_schema: type[BaseModel],
     temperature: float = 0.0,
     timeout: float = 120.0,
+    *,
+    thinking_budget: Optional[int] = None,
+    backoff_delays: Optional[list[float]] = None,
+    timeout_retries: Optional[int] = None,
 ) -> Optional[Any]:
     """Call Gemini with text + images in one request. Returns parsed Pydantic instance.
 
@@ -295,9 +322,11 @@ async def call_llm_vision(
     Default timeout is 120s (up from 60s): vision calls ship a full-page PNG
     plus the page text, and Gemini routinely approaches 60s on dense operating
     statements. 120s gives comfortable headroom while still bounding the call.
+    ``thinking_budget`` / ``backoff_delays`` / ``timeout_retries`` work as in
+    :func:`call_llm`.
     """
     client = get_llm_client()
-    backoff_delays = GEMINI_BACKOFF_DELAYS
+    backoff_delays = GEMINI_BACKOFF_DELAYS if backoff_delays is None else backoff_delays
 
     system_text = None
     content_parts: list = []
@@ -343,8 +372,10 @@ async def call_llm_vision(
         response_schema=gemini_schema,
         temperature=temperature,
         system_instruction=system_text,
+        thinking_config=_thinking_config(thinking_budget),
     )
 
+    timeouts = 0
     for attempt, delay in enumerate([0] + backoff_delays):
         try:
             if delay > 0:
@@ -386,7 +417,8 @@ async def call_llm_vision(
             # downstream as if it were complete. See also the strict-mode
             # guard in pdf_vlm_extractor._extract_full_document which refuses
             # partial results even if a page fails all retries here.
-            if attempt >= len(backoff_delays):
+            timeouts += 1
+            if attempt >= len(backoff_delays) or (timeout_retries is not None and timeouts > timeout_retries):
                 logger.error(
                     "Gemini vision call timed out after %.1fs on final attempt (attempt %d): %s",
                     timeout,

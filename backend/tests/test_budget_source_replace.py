@@ -126,3 +126,54 @@ def test_replace_superseded_draft_returns_409(client, budget_history_test_harnes
     # Replacing against the now-superseded draft id is rejected.
     resp = _replace(client, draft_id)
     assert resp.status_code == 409, resp.text
+
+
+def test_replace_reads_the_new_files_kind_instead_of_keeping_the_old_mode(
+    client, budget_history_test_harness, db_session, monkeypatch
+):
+    """Bob's Oct 19 case: the draft came from an income statement and the
+    replacement is a final budget. The old flow forced Income Statement mode."""
+    from app.services import budget_history_service as svc
+    from tests.conftest import harness_statement
+
+    up = _upload(client)
+    draft_id = up.json()["draft"]["id"]
+    assert up.json()["draft"]["source_mode"] == "income_statement"
+
+    seen = []
+
+    def _final_budget(path, *, route, original_filename, kind_override):
+        seen.append(kind_override)
+        return harness_statement("final_budget")
+
+    monkeypatch.setattr(svc, "_extract_budget_source", _final_budget)
+    rep = _replace(client, draft_id, filename="442 Old Mill Budget 2027Final.xlsx")
+
+    assert rep.status_code == 200, rep.text
+    assert seen == [None]  # nothing forced: the file decides
+    draft = rep.json()["draft"]
+    assert draft["source_mode"] == "proforma_final_budget"
+    assert draft["growth_factor"] == 1.0
+
+
+def test_replace_honours_the_operators_read_as_choice(client, budget_history_test_harness, monkeypatch):
+    from app.services import budget_history_service as svc
+    from tests.conftest import harness_statement
+
+    up = _upload(client)
+    seen = []
+
+    def _extract(path, *, route, original_filename, kind_override):
+        seen.append(kind_override)
+        return harness_statement("income_statement")
+
+    monkeypatch.setattr(svc, "_extract_budget_source", _extract)
+    rep = client.post(
+        f"/hoa/1/budget/drafts/{up.json()['draft']['id']}/source/upload",
+        data={"source_mode": "proforma_final_budget"},
+        files={"file": ("ambiguous.xlsx", b"placeholder bytes", XLSX)},
+    )
+
+    assert rep.status_code == 200, rep.text
+    assert seen == ["proforma_final_budget"]
+    assert rep.json()["draft"]["source_mode"] == "proforma_final_budget"

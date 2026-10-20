@@ -156,6 +156,10 @@ class HOASettings(Base):
     boilerplate_overrides_json = Column(Text)
     # Optional uploaded reference PDF for the workbench (storage-root-relative).
     boilerplate_reference_filename = Column(Text)
+    # Facts read from uploaded budget files (disclosure_facts_service).
+    disclosure_facts_json = Column(Text)
+    # Optimistic lock for the settings form's whole-record PUT (If-Match).
+    version_int = Column(Integer, nullable=False, default=0, server_default="0")
     updated_at = Column(Text, server_default=_CREATED_AT_DEFAULT)
 
 

@@ -5,7 +5,6 @@ from pathlib import Path
 from app.ai_implementation.db import BUDGET_DRAFT_ACTIVE, BudgetDraft, BudgetUpload
 from app.models.financial_document_extraction import ExtractedFinancialStatement
 from app.services import macros_service
-from app.services.budget_history_service import _table_to_line_items
 
 
 def _seed_assessment_rule_for_history(db_session) -> int:
@@ -134,95 +133,6 @@ def _sheet_row(*values, width: int = 39):
     for index, value in enumerate(values):
         row[index] = value
     return row
-
-
-def test_table_to_line_items_supports_headerless_income_statement_layout():
-    table = {
-        "headers": ["Esprit Park Owners Association"] + [None] * 38,
-        "rows": [
-            _sheet_row("Statement of Revenues and Expenses 8/1/2025 - 8/31/2025"),
-            _sheet_row(),
-            _sheet_row(None, None, None, None, None, None, "Current Period"),
-            _sheet_row(None, None, None, "Actual", None, None, None, None, None, None, "Budget"),
-            _sheet_row("Operating Income"),
-            _sheet_row(None, "41170 - Utility Refund (Conservice)", None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, 24340.0, None, None, None, None, None, None, None, None, None, None, None, None, 50000.0, None, None, None, None, 36510.0, 0),
-            _sheet_row(None, "40000 - Assessment Income", None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, 765386.88, None, None, None, None, None, None, None, None, None, None, None, None, 1148080.32, None, None, None, None, 1148080.32, 0),
-            _sheet_row(None, "51610 - Bank Charges", None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, 30.0, None, None, None, None, None, None, None, None, None, None, None, None, "-", None, None, None, None, 45.0, 0),
-            _sheet_row("Total Administration Expenses", None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, 150497.98, None, None, None, None, None, None, None, None, None, None, None, None, 287748, None, None, None, None, 223346.22, None),
-            _sheet_row("Allocation to Reserves"),
-            _sheet_row(None, "90000 - Reserve - Allocation/Transfer", None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, 177478.0, None, None, None, None, None, None, None, None, None, None, None, None, 266217.0, None, None, None, None, None, None),
-            _sheet_row("Reserve Income"),
-            _sheet_row(None, "45000 - Reserve Income", None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, 177478.0, None, None, None, None, None, None, None, None, None, None, None, None, 266217.0, None, None, None, None, None, None),
-            _sheet_row(None, "47001 - Change in Asset Value", None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, 806.84, None, None, None, None, None, None, None, None, None, None, None, None, 7000.0, None, None, None, None, None, None),
-            _sheet_row("Reserve Expenses (Per Reserve Study)"),
-            _sheet_row(None, "95220 - Roof", None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, 1500.0, None, None, None, None, None, None, None, None, None, None, None, None, 3000.0, None, None, None, None, 2250.0, 0),
-        ],
-    }
-
-    line_items, _warnings = _table_to_line_items(table)
-
-    assert [item["label"] for item in line_items[:2]] == [
-        "41170 - Utility Refund (Conservice)",
-        "40000 - Assessment Income",
-    ]
-    utility_refund = next(item for item in line_items if item["label"] == "41170 - Utility Refund (Conservice)")
-    assert utility_refund["category"] == "income"
-    assert utility_refund["annual_budget"] == 50000.0
-    assert utility_refund["read_only"] is False
-    assert [item["label"] for item in line_items[1:3]] == [
-        "40000 - Assessment Income",
-        "51610 - Bank Charges",
-    ]
-    assessment_income = next(item for item in line_items if item["label"] == "40000 - Assessment Income")
-    assert assessment_income["account_code"] == 40000
-    assert assessment_income["ytd_actual"] == 765386.88
-    assert assessment_income["annual_budget"] == 1148080.32
-    assert assessment_income["projection"] == 1148080.32
-    assert assessment_income["percent_change"] == 0
-    assert assessment_income["read_only"] is False
-    # Section-based classification: "Allocation to Reserves" is not a recognized section header,
-    # so this item inherits the current section state ("income"). Not read_only (editable).
-    reserve_transfer = next(item for item in line_items if item["label"] == "90000 - Reserve - Allocation/Transfer")
-    assert reserve_transfer["read_only"] is False
-    # "Reserve Income" section → category=reserve, read_only=True (Reserve
-    # Income items come from the reserve study extraction, not editable
-    # budget input). See READ_ONLY_SECTIONS in income_statement_parser.py.
-    reserve_income = next(item for item in line_items if item["label"] == "45000 - Reserve Income")
-    assert reserve_income["category"] in ("reserve", "reserve_income", "reserve_expense")
-    assert reserve_income["read_only"] is True
-    reserve_asset_value = next(item for item in line_items if item["label"] == "47001 - Change in Asset Value")
-    assert reserve_asset_value["category"] in ("reserve", "reserve_income", "reserve_expense")
-    assert reserve_asset_value["read_only"] is True
-    assert all(item["label"] != "Total Administration Expenses" for item in line_items)
-    # "Reserve Expenses (Per Reserve Study)" triggers read_only=True for items in that sub-section
-    reserve_item = next(item for item in line_items if item["label"] == "95220 - Roof")
-    assert reserve_item["read_only"] is True
-    assert reserve_item["category"] in ("reserve", "reserve_income", "reserve_expense")
-
-
-def test_table_to_line_items_marks_reserve_expense_block_rows_as_reserve_components():
-    table = {
-        "headers": ["Income Statement"] + [None] * 38,
-        "rows": [
-            _sheet_row("Reserve Expenses (Per Reserve Study)"),
-            _sheet_row(None, "91432 - Circulation Pump 5 H.P.", None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, 0.0, None, None, None, None, None, None, None, None, None, None, None, None, 109008.0, None, None, None, None, None, None),
-            _sheet_row(None, "95220 - Roof", None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, 217758.0, None, None, None, None, None, None, None, None, None, None, None, None, 0.0, None, None, None, None, None, None),
-            _sheet_row(None, "47000 - Interest Earned Reserve", None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, 6322.0, None, None, None, None, None, None, None, None, None, None, None, None, 8600.0, None, None, None, None, None, None),
-        ],
-    }
-
-    line_items, _warnings = _table_to_line_items(table)
-
-    circulation_pump = next(item for item in line_items if item["label"] == "91432 - Circulation Pump 5 H.P.")
-    roof = next(item for item in line_items if item["label"] == "95220 - Roof")
-    reserve_interest = next(item for item in line_items if item["label"] == "47000 - Interest Earned Reserve")
-
-    assert circulation_pump["category"] in ("reserve", "reserve_income", "reserve_expense")
-    assert circulation_pump["read_only"] is True
-    assert roof["category"] in ("reserve", "reserve_income", "reserve_expense")
-    assert roof["read_only"] is True
-    assert reserve_interest["category"] in ("reserve", "reserve_income", "reserve_expense")
-    assert reserve_interest["read_only"] is True
 
 
 def test_upload_creates_history(client, budget_history_test_harness):
@@ -514,7 +424,7 @@ def test_generate_version_uses_draft_percent_changes_in_persisted_output(
     def percent_aware_preview(path: str, max_rows: int):
         return preview_by_output_path[path]
 
-    def capture_percent_changes(path: str, sheet: str, changes):
+    def capture_percent_changes(path: str, sheet: str, changes, **kwargs):
         changes_by_input_path[path] = dict(changes)
 
     monkeypatch.setattr(
@@ -745,12 +655,16 @@ def test_generate_pdf_origin_draft_uses_persisted_enriched_workbook(
     db_session.add(draft)
     db_session.commit()
 
+    from app.services.normalized_statement_workbook import build_normalized_statement_workbook
+
     enriched = storage_root / draft.enriched_storage_key
     enriched.parent.mkdir(parents=True, exist_ok=True)
-    enriched.write_bytes(b"normalized workbook bytes")
+    build_normalized_statement_workbook(
+        budget_history_service._canonical_statement_from_line_items(line_items, family="pdf_visual_document"),
+        str(enriched),
+    )
 
-    seen_input_suffixes: list[str] = []
-    seen_known_columns: list[dict | None] = []
+    seen_known_columns: list = []
 
     class CapturingPipeline:
         def __init__(self, **kwargs):
@@ -762,13 +676,6 @@ def test_generate_pdf_origin_draft_uses_persisted_enriched_workbook(
             Path(self.intermediate_path).write_bytes(b"fake enriched workbook")
             Path(self.output_path).write_bytes(b"fake generated workbook")
 
-    def _assert_xlsx_only(path: str) -> str:
-        suffix = Path(path).suffix.lower()
-        seen_input_suffixes.append(suffix)
-        assert suffix == ".xlsx"
-        return path
-
-    monkeypatch.setattr(budget_history_service, "_ensure_xlsx", _assert_xlsx_only)
     monkeypatch.setattr(budget_history_service, "BudgetPipeline", CapturingPipeline)
 
     response = client.post(
@@ -781,14 +688,13 @@ def test_generate_pdf_origin_draft_uses_persisted_enriched_workbook(
     )
 
     assert response.status_code == 200, response.text
-    assert seen_input_suffixes == [".xlsx"]
+    # The persisted normalized workbook is used as-is: one pipeline run.
     assert seen_known_columns == [{"ytd_actual": 6, "annual_budget": 9}]
 
     version_id = response.json()["version"]["id"]
     reopen_response = client.post(f"/hoa/1/versions/{version_id}/reopen")
 
     assert reopen_response.status_code == 200
-    assert seen_input_suffixes == [".xlsx"]
     assert seen_known_columns == [{"ytd_actual": 6, "annual_budget": 9}]
     assert reopen_response.json()["draft"]["enriched_file_available"] is True
 
@@ -829,7 +735,7 @@ def test_save_draft_refreshes_persisted_enriched_download(
             ],
         }
 
-    def capture_percent_changes(path: str, sheet: str, changes):
+    def capture_percent_changes(path: str, sheet: str, changes, **kwargs):
         changes_by_input_path[path] = dict(changes)
 
     monkeypatch.setattr(

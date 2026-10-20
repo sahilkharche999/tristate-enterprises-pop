@@ -29,12 +29,9 @@ test('budget upload form-data builders include assessment_mode', () => {
   });
   const reserveFile = new File(['reserve'], 'reserve.pdf', { type: 'application/pdf' });
 
-  const budgetOnlyFormData = createBudgetSourceFormData(
-    budgetFile,
-    'proforma_final_budget',
-    'fixed',
-  );
+  const budgetOnlyFormData = createBudgetSourceFormData(budgetFile, null, 'fixed');
   assert.equal(budgetOnlyFormData.get('assessment_mode'), 'fixed');
+  assert.equal(budgetOnlyFormData.has('source_mode'), false);
 
   const bundleFormData = createBudgetBundleFormData(
     budgetFile,

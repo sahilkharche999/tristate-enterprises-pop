@@ -4,19 +4,24 @@ Uses pdfplumber text extraction + Gemini (hybrid text + image mode) for single-c
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from copy import deepcopy
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Any
+from typing import Literal, Optional, Any
 
 from pydantic import BaseModel, Field, ValidationError
 
 from ..config import settings
 from ..models.financial_document_extraction import (
+    DisclosureFacts,
     DocumentExtractionFailure,
     ExtractedFinancialStatement,
     ExtractedFinancialStatementPage,
+    StatedTotal,
+    WireModel,
 )
 from ..ai_implementation.pipeline.document_extraction_provider import (
     DocumentPromptContext,
@@ -25,6 +30,7 @@ from ..ai_implementation.pipeline.document_extraction_provider import (
 from .financial_statement_validation import (
     derive_statement_confidence,
     has_blocking_validation_issues,
+    totals_for_validation,
     validate_extracted_statement,
 )
 
@@ -42,148 +48,154 @@ logger = logging.getLogger(__name__)
 _HYBRID_RENDER_DPI = 72
 _SCANNED_FALLBACK_RENDER_DPI = 200
 _PROFORMA_SOURCE_MODE = "proforma_final_budget"
-_BUDGET_VISION_TIMEOUT_SECONDS = 240.0
+_INCOME_STATEMENT_SOURCE_MODE = "income_statement"
+# Per Gemini call: busy answers (429/5xx) are retried after 4, 8 and 16 s, a
+# timeout only once, so classification + pages stay under the 600 s proxy limit.
+_BUDGET_VISION_TIMEOUT_SECONDS = 120.0
+_GEMINI_RETRY_DELAYS = [4.0, 8.0, 16.0]
+_GEMINI_TIMEOUT_RETRIES = 1
+_CLASSIFY_BATCH_PAGES = 40
+_MAX_PDF_PAGES = 300
+_MAX_STATEMENT_PAGES = 8
+_MAX_FACT_PAGES = 10
 
 
-class StatementPageCandidate(BaseModel):
-    page: int = Field(ge=1)
-    classification: str = Field(default="unknown")
-    selected: bool = False
-    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
-    reason: str = ""
+PageType = Literal[
+    "income_statement", "reserve_income_statement", "operating_budget", "budget_summary",
+    "balance_sheet", "reserve_study", "assessment_schedule", "letter_or_notes", "other",
+]
 
 
-class StatementPageSelection(BaseModel):
-    selected_pages: list[int] = Field(default_factory=list)
-    candidates: list[StatementPageCandidate] = Field(default_factory=list)
-    rejected_pages: list[StatementPageCandidate] = Field(default_factory=list)
+class PageClassification(WireModel):
+    page: int
+    page_type: PageType
+    page_heading: Optional[str] = Field(description="The page's main heading as printed.")
+    year_or_period: Optional[str] = Field(description="The fiscal year or period printed on the page.")
+    has_detail_rows: Optional[bool] = Field(description="True when the page lists individual line items with amounts.")
+    has_disclosure_facts: Optional[bool] = Field(
+        description=(
+            "True when the page states any of: assessment per unit per month, reserve fund balance, "
+            "percent funded, reserve study preparer or date, the accountants, interest or inflation "
+            "assumptions, planned assessment increases, loans."
+        ),
+    )
 
 
-class StatementPagesNotFound(RuntimeError):
-    def __init__(self, selection: StatementPageSelection):
-        super().__init__(
-            "No income statement pages with annual budget columns were found in this PDF package."
-        )
-        self.selection = selection
+class PageClassificationBatch(WireModel):
+    pages: list[PageClassification]
 
 
-_PAGE_SELECTION_SYSTEM_PROMPT = """You are classifying pages from a scanned HOA financial PDF package.
+class StatementPageWithTotals(ExtractedFinancialStatementPage):
+    """Per-page extraction that also returns the page's printed totals."""
 
-Goal:
-Find the page numbers that should be sent to a financial-statement line-item extractor for budget drafting.
+    totals: list[StatedTotal] = Field(default_factory=list)
 
-Select pages ONLY if they are income statement / revenues and expenses pages that contain detail line items. This includes operating statement pages and reserve income/expense statement pages when they are part of the same financial statement package.
 
-A page SHOULD be selected when:
-- The title or header indicates an operating statement, such as:
-  - Statement of Revenues and Expenses
-  - Income and Expense to Budget
-  - Operating Income and Expense
-  - Statement of Operating Revenues and Expenses
-  - Budget Comparison
-  - Income Statement
-- The page contains detail line items with account codes or account labels.
-- The page has budget-related columns, especially:
-  - Annual Budget
-  - Budget
-  - Current Period Budget
-  - Year To Date Budget
-- The page is part of a continued operating statement split across multiple pages.
-- The page is a reserve income/expense statement page with detail line items, such as:
-  - Reserve Income
-  - Reserve Expense
-  - Reserve Fund Activity
-  - Reserve Income and Expense to Budget
+class NotABudgetSource(RuntimeError):
+    def __init__(self, pages: list[PageClassification]):
+        super().__init__("No income statement or budget pages were found in this PDF.")
+        self.pages = pages
 
-A strong preference rule:
-- Prefer the detailed contiguous income statement block that appears to be the source statement for the period.
-- Prefer pages with detail rows over grouped or presentation-style summaries.
-- Account-code or GL-style rows are a strong signal that a page is a detailed source statement, but this is a preferred signal, not a hard requirement. Some valid source statements use descriptive line labels without account codes.
-- If both of these appear in the same PDF package, prefer the detailed source-statement block and reject the later restatement block:
-  - detailed source rows such as account-code, GL-style, or line-by-line operating/revenue/expense rows
-  - summarized restatement rows such as grouped client-style labels, accountant summary pages, disclosure-style summaries, forecasted statements, or pro forma presentations
-- Select the continuation pages of the chosen detailed block, including a reserve income/expense tail when it is clearly part of that same statement package.
 
-A page SHOULD NOT be selected when it is:
-- Cover letter, title page, table of contents, notes, assumptions, compilation report
-- Assessment schedule or assessments per unit/month
-- Reserve study schedule or component schedule
-- Insurance disclosure
-- Balance sheet
-- AP aging
-- GL trial balance
-- Check register or check images
-- Invoice backup
-- Bank statement
-- Any page with only totals and no detail line items
-- Any page whose main purpose is per-unit assessments rather than income/expense budget drafting
-- Later forecasted, pro forma, accountant summary, board summary, or disclosure summary pages that restate the same economics in grouped/client-style labels instead of source detail rows
+_PAGE_CLASSIFICATION_SYSTEM_PROMPT = """You classify every page image of one PDF that an HOA manager uploaded as the starting point for a budget. Return one entry per page shown, using the page number printed before each image.
 
-Important:
-- Do not select pages merely because they contain dollar amounts.
-- Do not select an assessment schedule even if it has monthly assessment or annual total columns.
-- Prefer statement pages with an Annual Budget column, but do not reject a reserve income/expense continuation page only because its Annual Budget column is blank.
-- If there are multiple consecutive pages of the same operating or reserve statement, select all of them.
-- If a reserve income/expense statement appears separately, select it and classify it as reserve_statement.
-- Do not select reserve study component schedules; classify those as reserve_study_schedule and reject them.
-- Do not combine detailed source rows and summarized restatement rows into the same financial line-item list.
-- When duplicate economics appear in multiple formats within one package, choose one coherent page block: the most detailed contiguous source statement.
+page_type:
+- income_statement: actual results for a past period with detail rows (Statement of Revenues and Expenses, Income and Expense to Budget, Budget Comparison, Income Statement): actual, current month or year-to-date columns, usually beside budget or annual budget columns.
+- reserve_income_statement: the reserve fund's income/expense statement in that same kind of actual-vs-budget report.
+- operating_budget: a budget for a fiscal year with detail rows and no actual results: pro forma operating budget, operating and cash flow statement (often Jan-Dec monthly columns), proposed/approved/final budget, forecasted statement of revenues and expenses.
+- budget_summary: a page restating a budget in a few grouped lines (disclosure summaries, assessment and reserve funding disclosure summary, charts).
+- balance_sheet; reserve_study (component inventories, funding plans, reserve cash-flow projections); assessment_schedule (dues per unit); letter_or_notes (cover letters, notices, policies, notes, compilation reports, contents pages); other.
 
-Return JSON only:
+page_heading: the page's main heading as printed. year_or_period: the fiscal year or period printed on it. has_detail_rows: true when the page lists individual line items with amounts. has_disclosure_facts: see the schema."""
 
-{
-  "selected_pages": [28, 29],
-  "candidates": [
-    {
-      "page": 28,
-      "classification": "operating_statement",
-      "selected": true,
-      "confidence": 0.96,
-      "reason": "Statement of Revenues and Expenses with Annual Budget column and detail line items"
-    }
-  ],
-  "rejected_pages": [
-    {
-      "page": 24,
-      "classification": "assessment_schedule",
-      "selected": false,
-      "reason": "Assessments per unit per month, not an income statement"
-    }
-  ]
-}"""
+_FACTS_SYSTEM_PROMPT = """You read pages from an HOA annual budget / disclosure package and return the facts in the schema, only when the pages state them. Never compute or guess: if a fact is not printed, return null for it. Each fact gives the value as printed, its number, the fiscal year it applies to, the as-of date for balances (YYYY-MM-DD, also when it is only named in the label, e.g. 'as of 12/31/26' -> 2026-12-31), the PDF page, and a short quote. Standard disclosure questions that only mention the possibility of a special assessment are not facts."""
 
-_PROFORMA_PAGE_SELECTION_SYSTEM_PROMPT = """You are classifying pages from an HOA pro forma / final budget PDF package.
 
-Goal:
-Find the page numbers that should be sent to a financial-statement extractor for pro forma / final budget drafting.
+@dataclass
+class PageChoice:
+    """Which pages to extract and how to read them."""
 
-Select pages ONLY if they are spreadsheet-export operating/cash-flow budget pages with detail rows. Prefer pages with:
-- Titles like OPERATING AND CASH FLOW STATEMENT, PRO FORMA OPERATING AND CASH FLOW STATEMENT, or similar
-- Jan-Dec month grids
-- Income: / Expense: sections
-- Annual columns such as Budget, Proposed, Final, Approved, or Annual Budget
+    source_mode: str
+    pages: list[int]
+    reserve_pages: set[int]
+    note: str
+    fact_pages: list[int]
 
-Reject pages that are:
-- Cover pages, notes, assumptions, reserve-study schedules, assessments-per-unit schedules, balance sheets
-- Summary-only pages without detail rows
-- Ratio or dashboard pages where most columns are percentages instead of money
-- Later presentation summaries that restate the same budget in grouped labels instead of detail rows
 
-When multiple candidate pages exist, choose the most detailed contiguous operating/cash-flow statement block.
+def _page_ranges(pages: list[int]) -> str:
+    """[3, 4, 5, 9] -> "3–5, 9"."""
+    runs: list[list[int]] = []
+    for page in sorted(set(pages)):
+        if runs and page == runs[-1][1] + 1:
+            runs[-1][1] = page
+        else:
+            runs.append([page, page])
+    return ", ".join(str(a) if a == b else f"{a}–{b}" for a, b in runs)
 
-Return JSON only using the same schema as the default page-selection prompt."""
+
+def _choose_pages(
+    pages: list[PageClassification],
+    kind_override: Optional[str] = None,
+) -> Optional[PageChoice]:
+    """Pick the statement or budget block from the classified pages.
+
+    A detailed operating budget wins over income statements (a disclosure
+    package may carry both); with no budget or statement pages the file is
+    not a budget source. ``kind_override`` (the operator's choice) picks the
+    kind; its pages are used when Gemini found any, otherwise the other kind's.
+    """
+    budget = [p.page for p in pages if p.page_type == "operating_budget" and p.has_detail_rows]
+    statement = [
+        p.page for p in pages
+        if p.page_type in ("income_statement", "reserve_income_statement") and p.has_detail_rows
+    ]
+    if kind_override == _PROFORMA_SOURCE_MODE:
+        source_mode, pool = kind_override, budget or statement
+    elif kind_override == _INCOME_STATEMENT_SOURCE_MODE:
+        source_mode, pool = kind_override, statement or budget
+    elif budget:
+        source_mode, pool = _PROFORMA_SOURCE_MODE, budget
+    else:
+        source_mode, pool = _INCOME_STATEMENT_SOURCE_MODE, statement
+    if not pool:
+        return None
+
+    if source_mode == _PROFORMA_SOURCE_MODE:
+        # One contiguous block: two budget presentations (e.g. the manager's
+        # monthly grid and the CPA's forecast) must not be mixed.
+        chosen = [pool[0]]
+        for page in pool[1:]:
+            if page != chosen[-1] + 1:
+                break
+            chosen.append(page)
+    else:
+        chosen = list(pool)
+    chosen = chosen[:_MAX_STATEMENT_PAGES]
+
+    by_page = {p.page: p for p in pages}
+    first = by_page[chosen[0]]
+    kind_label = "a final budget" if source_mode == _PROFORMA_SOURCE_MODE else "an income statement"
+    note = (
+        f"Read as {kind_label} from {'page' if len(chosen) == 1 else 'pages'} "
+        f"{_page_ranges(chosen)} of {len(pages)}"
+    )
+    if first.page_heading:
+        note += f" ({' '.join(first.page_heading.split())[:90]})"
+    note += "."
+    others = [page for page in (budget + statement) if page not in chosen]
+    if others:
+        note += f" Also found statement or budget pages at {_page_ranges(others)}, not used."
+    return PageChoice(
+        source_mode=source_mode,
+        pages=chosen,
+        reserve_pages={p for p in chosen if by_page[p].page_type == "reserve_income_statement"},
+        note=note,
+        fact_pages=[p.page for p in pages if p.has_disclosure_facts][:_MAX_FACT_PAGES],
+    )
 
 
 def _is_proforma_mode(prompt_context: DocumentPromptContext) -> bool:
     return (prompt_context.source_mode or "").strip().lower() == "proforma_final_budget"
-
-
-def _page_selection_prompt(prompt_context: DocumentPromptContext) -> str:
-    return (
-        _PROFORMA_PAGE_SELECTION_SYSTEM_PROMPT
-        if _is_proforma_mode(prompt_context)
-        else _PAGE_SELECTION_SYSTEM_PROMPT
-    )
 
 
 def _operating_prompt(prompt_context: DocumentPromptContext, is_reserve_page: bool) -> str:
@@ -257,10 +269,6 @@ def _get_pdf_page_count(pdf_path: str) -> int:
         document.close()
 
 
-def _should_run_page_selection(pdf_path: str) -> bool:
-    return _get_pdf_page_count(pdf_path) > settings.DOCUMENT_VLM_PAGE_SELECTION_THRESHOLD
-
-
 def render_pdf_pages_for_numbers(
     path: str,
     page_numbers: list[int],
@@ -310,10 +318,6 @@ def _parse_currency_text(value: str) -> Optional[float]:
     except ValueError:
         return None
     return -parsed if negative else parsed
-
-
-def _render_page_selection_images(pdf_path: str, max_pages: int) -> list[RenderedPage]:
-    return render_pdf_pages(pdf_path, max_pages=max_pages, dpi=_HYBRID_RENDER_DPI)
 
 
 def _log_schema_validation_failure_sample(
@@ -461,53 +465,90 @@ def _build_schema_retry_note(
     )
 
 
-async def _select_income_statement_pages(
-    pdf_path: str,
-    prompt_context: DocumentPromptContext,
-    *,
-    max_pages: int,
-) -> StatementPageSelection:
+async def _classify_pages(pdf_path: str, filename: str) -> list[PageClassification]:
+    """Classify every page in batches run at the same time (72 DPI images)."""
     from ..ai_implementation.pipeline.llm_client import call_llm_vision
 
-    rendered_pages = _render_page_selection_images(pdf_path, max_pages=max_pages)
-    user_content_parts: list[dict] = [
-        {
-            "type": "text",
-            "text": (
-                f"Filename: {prompt_context.filename}\n"
-                f"Rendered page count: {len(rendered_pages)}\n\n"
-                "Classify these pages and identify the operating income statement pages."
-            ),
-        }
-    ]
-    for page in rendered_pages:
-        user_content_parts.append(
-            {
-                "type": "text",
-                "text": f"PDF page {page.page_number}",
-            }
-        )
-        if page.content is not None:
-            user_content_parts.append(
-                {
-                    "type": "image",
-                    "data": page.content,
-                    "mime_type": page.mime_type,
-                }
-            )
+    page_count = _get_pdf_page_count(pdf_path)
 
-    result = await call_llm_vision(
-        [
-            {"role": "system", "content": _page_selection_prompt(prompt_context)},
-            {"role": "user", "content": user_content_parts},
-        ],
-        StatementPageSelection,
-        temperature=0.0,
-        timeout=120.0,
+    async def classify(first: int, last: int) -> list[PageClassification]:
+        rendered = await asyncio.to_thread(
+            render_pdf_pages_for_numbers, pdf_path, list(range(first, last + 1)), dpi=_HYBRID_RENDER_DPI
+        )
+        parts: list[dict] = [
+            {"type": "text", "text": f"Filename: {filename}\nPages {first}-{last} of {page_count}."}
+        ]
+        for page in rendered:
+            parts.append({"type": "text", "text": f"PDF page {page.page_number}"})
+            if page.content is not None:
+                parts.append({"type": "image", "data": page.content, "mime_type": page.mime_type})
+        result = await call_llm_vision(
+            [
+                {"role": "system", "content": _PAGE_CLASSIFICATION_SYSTEM_PROMPT},
+                {"role": "user", "content": parts},
+            ],
+            PageClassificationBatch,
+            temperature=0.0,
+            timeout=_BUDGET_VISION_TIMEOUT_SECONDS,
+            thinking_budget=0,
+            backoff_delays=_GEMINI_RETRY_DELAYS,
+            timeout_retries=_GEMINI_TIMEOUT_RETRIES,
+        )
+        if result is None:
+            raise RuntimeError(f"Gemini could not classify pages {first}-{last}.")
+        return [page for page in result.pages if first <= page.page <= last]
+
+    batches = await asyncio.gather(
+        *(
+            classify(start, min(start + _CLASSIFY_BATCH_PAGES - 1, page_count))
+            for start in range(1, page_count + 1, _CLASSIFY_BATCH_PAGES)
+        )
     )
-    if isinstance(result, StatementPageSelection):
-        return result
-    return StatementPageSelection()
+    return sorted((page for batch in batches for page in batch), key=lambda page: page.page)
+
+
+async def _extract_disclosure_facts(
+    pdf_path: str,
+    pages: list[int],
+    filename: str,
+) -> Optional[DisclosureFacts]:
+    """Read disclosure facts from the pages the classifier flagged."""
+    from ..ai_implementation.pipeline.llm_client import call_llm_vision
+
+    def build_parts() -> list[dict]:
+        import fitz  # type: ignore
+
+        document = fitz.open(pdf_path)
+        try:
+            parts: list[dict] = [{"type": "text", "text": f"Filename: {filename}"}]
+            for number in pages:
+                page = document[number - 1]
+                text = page.get_text().strip()
+                has_text = len(text) > 30
+                parts.append({
+                    "type": "text",
+                    "text": f"PDF page {number}" + (f"\nTEXT:\n{text[:6000]}" if has_text else " (scanned image)"),
+                })
+                scale = (110 if has_text else 160) / 72.0
+                pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale))
+                parts.append({"type": "image", "data": pixmap.tobytes("png"), "mime_type": "image/png"})
+            return parts
+        finally:
+            document.close()
+
+    parts = await asyncio.to_thread(build_parts)
+    return await call_llm_vision(
+        [
+            {"role": "system", "content": _FACTS_SYSTEM_PROMPT},
+            {"role": "user", "content": parts},
+        ],
+        DisclosureFacts,
+        temperature=0.0,
+        timeout=_BUDGET_VISION_TIMEOUT_SECONDS,
+        thinking_budget=0,
+        backoff_delays=_GEMINI_RETRY_DELAYS,
+        timeout_retries=_GEMINI_TIMEOUT_RETRIES,
+    )
 
 
 def _extract_pdf_text_table(path: str, max_pages: int = 6) -> str:
@@ -618,6 +659,14 @@ def _extract_pdf_text_table_for_pages(path: str, selected_pages: list[int]) -> s
     return "\n".join(all_text_parts)
 
 
+_TOTALS_INSTRUCTION = (
+    "\n\nTOTALS: put every printed total row on this page (Total Income, Total Operating "
+    "Expenses, Total Reserve Expenses, Net Income, ...) in totals, never in line_items. For each: "
+    "label; section_kind = the section whose detail rows it adds up (income, operating, "
+    "reserve_income or reserve_expense; null when it spans sections, such as net income or total "
+    "expenses including reserves); source_row = this page number; annual_budget and ytd_actual as printed."
+)
+
 _PAGE_SYSTEM_PROMPT_OPERATING = (
     "You are a financial document parser. You receive the text content of ONE PAGE "
     "of an HOA income statement extracted from a PDF, plus an image of that page. "
@@ -669,7 +718,7 @@ _PAGE_SYSTEM_PROMPT_OPERATING = (
     '  "report_type": "income_statement"\n'
     '  "statement_period": "MM/DD/YYYY to MM/DD/YYYY" or null\n'
     '  "line_items": [ ... ]\n'
-    '  "totals": []\n'
+    '  "totals": [see TOTALS below]\n'
     '  "validation_issues": []\n'
     '  "confidence": 0.0\n\n'
     "Each line_items entry:\n"
@@ -759,7 +808,7 @@ _PAGE_SYSTEM_PROMPT_RESERVE = (
     '  "report_type": "income_statement"\n'
     '  "statement_period": null\n'
     '  "line_items": [ ... ]\n'
-    '  "totals": []\n'
+    '  "totals": [see TOTALS below]\n'
     '  "validation_issues": []\n'
     '  "confidence": 0.0\n\n'
     "Each line_items entry:\n"
@@ -803,79 +852,6 @@ def _split_pages_with_numbers(pdf_text: str) -> list[tuple[int, str]]:
     return pages
 
 
-def _is_reserve_statement_page(page_text: str) -> bool:
-    """Detect if a page belongs to a separate Reserve statement (not the Operating statement).
-
-    Strategy: inspect the page header area (first ~500 chars, which typically
-    contains the statement title and date range). A page is a reserve
-    statement if:
-
-    1. No operating-statement marker appears in the header (early-exit guard
-       against false positives on operating pages that happen to mention
-       "Reserve Contribution" as a section).
-    2. A reserve-statement title pattern appears in the header.
-
-    This used to require the exact phrase "income statement" or
-    "fund statement" to appear alongside "reserve", which missed common
-    real-world variants like:
-        "Reserve Income and Expense to Budget"   (Esprit Park)
-        "Reserve Fund Activity"
-        "Reserve Funding Schedule"
-        "Reserve Study Summary"
-    When those pages were misclassified as operating, the operating-page
-    prompt would dutifully classify their items as 'income' or 'operating'
-    (per the strict rule we added), inflating the operating INCOME total
-    with reserve-income rows and leaving reserve-expense rows at zero.
-    """
-    header_area = page_text[:500].lower()
-
-    # Step 1 — operating markers disqualify. These are strings that only
-    # appear on operating statements, never on reserve-only pages.
-    operating_markers = (
-        "operating income",       # "Operating Income Statement", "Operating Income & Expense"
-        "operating statement",
-        "operating expense",      # some PDFs title the operating side this way
-        "statement of operating",
-    )
-    if any(marker in header_area for marker in operating_markers):
-        return False
-
-    # Step 2 — reserve title markers. Any of these in the header area means
-    # the page is a reserve statement. All are generic HOA-accounting title
-    # fragments, not PDF-specific — they describe the kind of report, not a
-    # specific HOA's naming convention.
-    reserve_title_markers = (
-        "reserve income",         # "Reserve Income and Expense to Budget", "Reserve Income Statement"
-        "reserve fund",           # "Reserve Fund Statement", "Reserve Fund Activity"
-        "reserve statement",
-        "reserve activity",
-        "reserve budget",
-        "reserve study",
-        "reserve funding",
-    )
-    if any(marker in header_area for marker in reserve_title_markers):
-        return True
-
-    # Step 3 — legacy fallback: "reserve" + generic "statement" keyword.
-    # Catches rare title formats like "Income Statement / Reserve" that
-    # don't match the title markers above but still clearly name a reserve
-    # report (e.g., Mathilda's page 4 header).
-    if "reserve" in header_area and ("income statement" in header_area or "fund statement" in header_area):
-        return True
-
-    return False
-
-
-def _is_reserve_statement_classification(classification: str) -> bool:
-    normalized = (classification or "").strip().lower()
-    return (
-        "reserve" in normalized
-        and "study" not in normalized
-        and "schedule" not in normalized
-        and "component" not in normalized
-    )
-
-
 async def _extract_single_page(
     page_num: int,
     page_text: str,
@@ -884,7 +860,7 @@ async def _extract_single_page(
     is_reserve_page: bool,
     *,
     no_text_layer: bool = False,
-    response_schema: type[ExtractedFinancialStatementPage] = ExtractedFinancialStatementPage,
+    response_schema: type[ExtractedFinancialStatementPage] = StatementPageWithTotals,
 ) -> Optional[ExtractedFinancialStatementPage]:
     """Extract line items from a single page via Gemini hybrid call.
 
@@ -897,7 +873,7 @@ async def _extract_single_page(
     import asyncio
     from ..ai_implementation.pipeline.llm_client import call_llm_vision
 
-    system_prompt = _operating_prompt(prompt_context, is_reserve_page)
+    system_prompt = _operating_prompt(prompt_context, is_reserve_page) + _TOTALS_INSTRUCTION
     page_type = "Reserve statement" if is_reserve_page else "Operating statement"
     notes_line = " | ".join(prompt_context.notes) if prompt_context.notes else "none"
 
@@ -959,6 +935,8 @@ async def _extract_single_page(
         response_schema,
         temperature=0.0,
         timeout=_BUDGET_VISION_TIMEOUT_SECONDS,
+        backoff_delays=_GEMINI_RETRY_DELAYS,
+        timeout_retries=_GEMINI_TIMEOUT_RETRIES,
     )
 
     # Stamp page_number on all extracted items
@@ -983,6 +961,8 @@ async def _extract_full_document(
     prompt_context: DocumentPromptContext,
     schema: type[ExtractedFinancialStatement],
     max_pages: int,
+    *,
+    choice: Optional[PageChoice] = None,
 ) -> Optional[ExtractedFinancialStatement | dict[str, Any]]:
     """Extract full document via parallel per-page Gemini calls.
 
@@ -997,41 +977,18 @@ async def _extract_full_document(
     "no text layer" ValueError from ``_extract_pdf_text_table``; text-based
     PDFs still use the hybrid text+image path.
     """
-    import asyncio
-
-    page_count = _get_pdf_page_count(pdf_path)
-    page_selection: StatementPageSelection | None = None
-    selected_pages: list[int] | None = None
-    selected_page_classifications: dict[int, str] = {}
-    if page_count > settings.DOCUMENT_VLM_PAGE_SELECTION_THRESHOLD:
-        page_selection = await _select_income_statement_pages(
-            pdf_path,
-            prompt_context,
-            max_pages=min(page_count, settings.DOCUMENT_VLM_PAGE_SELECTION_MAX_PAGES),
-        )
-        selected_pages = sorted(
-            {
-                int(page)
-                for page in page_selection.selected_pages
-                if 1 <= int(page) <= page_count
-            }
-        )
-        if not selected_pages:
-            raise StatementPagesNotFound(page_selection)
-        selected_page_classifications = {
-            int(candidate.page): candidate.classification
-            for candidate in page_selection.candidates
-            if candidate.selected and 1 <= int(candidate.page) <= page_count
-        }
+    if choice is None:
+        pages = await _classify_pages(pdf_path, prompt_context.filename)
+        choice = _choose_pages(pages, prompt_context.source_mode)
+        if choice is None:
+            raise NotABudgetSource(pages)
+    selected_pages: list[int] = list(choice.pages)
 
     # Try the hybrid path first. If pdfplumber reports no text layer we fall
     # through to vision-only; any other exception bubbles up unchanged.
     no_text_layer = False
     try:
-        if selected_pages is not None:
-            pdf_text = _extract_pdf_text_table_for_pages(pdf_path, selected_pages)
-        else:
-            pdf_text = _extract_pdf_text_table(pdf_path, max_pages=max_pages)
+        pdf_text = _extract_pdf_text_table_for_pages(pdf_path, selected_pages)
         page_entries = _split_pages_with_numbers(pdf_text)
     except ValueError as exc:
         if not _is_scanned_pdf_error(exc):
@@ -1051,10 +1008,7 @@ async def _extract_full_document(
     # hybrid PDFs stay at the default 72 DPI to keep payloads small — their
     # numerics come from the text block anyway.
     render_dpi = _SCANNED_FALLBACK_RENDER_DPI if no_text_layer else _HYBRID_RENDER_DPI
-    if selected_pages is not None:
-        rendered_pages = render_pdf_pages_for_numbers(pdf_path, selected_pages, dpi=render_dpi)
-    else:
-        rendered_pages = render_pdf_pages(pdf_path, max_pages=max_pages, dpi=render_dpi)
+    rendered_pages = render_pdf_pages_for_numbers(pdf_path, selected_pages, dpi=render_dpi)
     if no_text_layer:
         # In scanned mode we have no text to split — use the rendered page
         # count as the authoritative page count and pass empty strings so the
@@ -1069,21 +1023,19 @@ async def _extract_full_document(
     # Metadata about HOW this extraction was produced. Surfaced to the
     # end user via the upload response so the frontend can show a quality
     # warning when we took the degraded vision-only path.
-    extraction_metadata: dict[str, Any] = {}
-    if page_selection is not None:
-        extraction_metadata["page_selection_used"] = True
-        extraction_metadata["selected_pages"] = selected_pages or []
-        extraction_metadata["selection_candidates"] = [
-            candidate.model_dump() for candidate in page_selection.candidates
-        ]
-    else:
-        extraction_metadata["page_selection_used"] = False
+    extraction_metadata: dict[str, Any] = {
+        "page_selection_used": True,
+        "selected_pages": selected_pages,
+        "pages_used": selected_pages,
+        "pages_note": choice.note,
+    }
     if no_text_layer:
         extraction_metadata["used_vision_only_fallback"] = True
         extraction_metadata["fallback_reason"] = "no_text_layer"
         extraction_metadata["render_dpi"] = render_dpi
 
     images_by_page = {page.page_number: page for page in rendered_pages}
+    report_type = "final_budget" if choice.source_mode == _PROFORMA_SOURCE_MODE else "income_statement"
 
     # If only 1 page, use simpler single-call path
     if len(page_entries) == 1:
@@ -1093,12 +1045,7 @@ async def _extract_full_document(
         # covers the vast majority of real HOA statements. If a reserve-only
         # scan ever shows up in production, we'll need vision-only reserve
         # detection as a follow-up.
-        if no_text_layer:
-            is_reserve = _is_reserve_statement_classification(
-                selected_page_classifications.get(page_num, "")
-            )
-        else:
-            is_reserve = _is_reserve_statement_page(page_text)
+        is_reserve = page_num in choice.reserve_pages
         page_result = await _extract_single_page(
             page_num,
             page_text,
@@ -1110,10 +1057,10 @@ async def _extract_full_document(
             return None
         return ExtractedFinancialStatement(
             document_family="pdf_visual_document",
-            report_type="income_statement",
+            report_type=report_type,
             statement_period=page_result.statement_period,
             line_items=page_result.line_items,
-            totals=[],
+            totals=totals_for_validation(list(getattr(page_result, "totals", None) or [])),
             validation_issues=[],
             confidence=0.0,
             extraction_metadata=extraction_metadata,
@@ -1124,13 +1071,7 @@ async def _extract_full_document(
     page_infos = []
     for page_num, text in page_entries:
         image = images_by_page.get(page_num)
-        if no_text_layer:
-            is_reserve = _is_reserve_statement_classification(
-                selected_page_classifications.get(page_num, "")
-            )
-        else:
-            is_reserve = _is_reserve_statement_page(text)
-        page_infos.append((page_num, text, image, is_reserve))
+        page_infos.append((page_num, text, image, page_num in choice.reserve_pages))
 
     logger.info(
         "Parallel extraction: %d pages (%d operating, %d reserve)%s",
@@ -1185,11 +1126,13 @@ async def _extract_full_document(
 
     # All pages succeeded — merge results
     all_line_items = []
+    printed_totals: list[Any] = []
     statement_period = None
 
     for result in results:
         if hasattr(result, "line_items"):
             all_line_items.extend(result.line_items)
+        printed_totals.extend(getattr(result, "totals", None) or [])
         if not statement_period and hasattr(result, "statement_period") and result.statement_period:
             statement_period = result.statement_period
 
@@ -1203,18 +1146,16 @@ async def _extract_full_document(
             "formatted in an unsupported layout."
         )
 
-    # Deduplicate by (account_code_text, label) — keep the one with more numeric fields
+    # Drop only exact repeats (a row carried onto the next page). Rows that
+    # share a label but sit in different sections or carry different amounts
+    # are distinct lines (e.g. "Interest Income" in operating and reserve).
     seen: dict[tuple, Any] = {}
     for item in all_line_items:
-        key = (item.account_code_text, item.label)
-        if key in seen:
-            existing = seen[key]
-            new_count = sum(1 for v in [item.ytd_actual, item.annual_budget, item.current_actual] if v is not None)
-            old_count = sum(1 for v in [existing.ytd_actual, existing.annual_budget, existing.current_actual] if v is not None)
-            if new_count > old_count:
-                seen[key] = item
-        else:
-            seen[key] = item
+        key = (
+            item.account_code_text, item.label, item.section_kind,
+            item.current_actual, item.ytd_actual, item.annual_budget,
+        )
+        seen.setdefault(key, item)
 
     deduped_items = list(seen.values())
 
@@ -1222,14 +1163,33 @@ async def _extract_full_document(
 
     return ExtractedFinancialStatement(
         document_family="pdf_visual_document",
-        report_type="income_statement",
+        report_type=report_type,
         statement_period=statement_period,
         line_items=deduped_items,
-        totals=[],
+        totals=totals_for_validation(printed_totals),
         validation_issues=[],
         confidence=0.0,
         extraction_metadata=extraction_metadata,
     )
+
+
+def _page_types_summary(pages: list[PageClassification]) -> str:
+    by_type: dict[str, list[int]] = {}
+    for page in pages:
+        by_type.setdefault(page.page_type.replace("_", " "), []).append(page.page)
+    return "; ".join(f"{kind} p{_page_ranges(numbers)}" for kind, numbers in by_type.items())
+
+
+async def _facts_or_none(task: Optional[asyncio.Task]) -> Optional[dict[str, Any]]:
+    """Facts are a bonus: a failed facts call never fails the upload."""
+    if task is None:
+        return None
+    try:
+        facts = await task
+    except Exception as exc:
+        logger.warning("Disclosure facts extraction failed: %s", exc)
+        return None
+    return facts.model_dump() if facts is not None else None
 
 
 async def extract_pdf_statement(
@@ -1237,121 +1197,171 @@ async def extract_pdf_statement(
     provider: Optional[Any] = None,
     *,
     max_pages: Optional[int] = None,
-    source_mode: str = "income_statement",
+    source_mode: Optional[str] = None,
+    filename: Optional[str] = None,
 ) -> ExtractedFinancialStatement | DocumentExtractionFailure:
-    """Extract a canonical financial statement from a PDF.
+    """Extract a canonical financial statement from any budget-source PDF.
 
-    Primary path: pdfplumber text extraction + Gemini hybrid text+image model (single call).
-    Falls back to vision path if a custom provider is supplied.
+    Gemini classifies every page first; the chosen block decides whether the
+    PDF is read as an income statement or a final budget (``report_type``),
+    unless ``source_mode`` overrides it. Pages that state disclosure facts are
+    read at the same time as the statement pages. A custom ``provider``
+    (tests) skips classification and reads the first pages as before.
     """
     prompt_context = DocumentPromptContext(
-        filename=Path(path).name,
+        filename=filename or Path(path).name,
         route_family="pdf_visual_document",
         source_mode=source_mode,
     )
 
-    last_validation_issues: list[dict[str, Any]] = []
-
-    for attempt in range(2):
-        raw_result: Any = None
+    choice: Optional[PageChoice] = None
+    facts_task: Optional[asyncio.Task] = None
+    if provider is None:
         try:
-            if provider is not None:
-                # Custom provider (tests) — use vision path
-                rendered_pages = render_pdf_pages(path, max_pages=max_pages or settings.DOCUMENT_VLM_MAX_PAGES)
-                raw_result = await provider.extract_statement(
-                    rendered_pages,
-                    schema=ExtractedFinancialStatement,
-                    prompt_context=prompt_context,
+            page_count = _get_pdf_page_count(path)
+            if page_count > _MAX_PDF_PAGES:
+                return DocumentExtractionFailure(
+                    code="pdf_too_long",
+                    message=(
+                        f"This PDF has {page_count} pages; the limit is {_MAX_PDF_PAGES}. "
+                        "Upload the budget or statement pages on their own."
+                    ),
+                    details={"page_count": page_count},
                 )
-            else:
-                # Default path: hybrid text+image single-call extraction
-                raw_result = await _extract_full_document(
-                    path, prompt_context, ExtractedFinancialStatement,
-                    max_pages=max_pages or settings.DOCUMENT_VLM_MAX_PAGES,
-                )
-                if raw_result is None:
-                    raise RuntimeError("Gemini extraction returned no structured result.")
-
-            statement = (
-                raw_result
-                if isinstance(raw_result, ExtractedFinancialStatement)
-                else ExtractedFinancialStatement.model_validate(raw_result)
-            )
-        except ValidationError as exc:
-            _log_schema_validation_failure_sample(
-                raw_result,
-                path=path,
-                source_mode=source_mode,
-                attempt=attempt + 1,
-            )
-            if attempt == 0:
-                prompt_context = deepcopy(prompt_context)
-                prompt_context.notes.append(
-                    _build_schema_retry_note(
-                        raw_result,
-                        exc,
-                        path=path,
-                        source_mode=source_mode,
-                    )
-                )
-                continue
-            return DocumentExtractionFailure(
-                code="schema_validation_failed",
-                message="Structured PDF extraction could not satisfy the canonical schema.",
-                details={"error": str(exc)},
-            )
-        except StatementPagesNotFound as exc:
-            return DocumentExtractionFailure(
-                code="statement_pages_not_found",
-                message=(
-                    "No income statement pages with annual budget columns were found "
-                    "in this PDF package."
-                ),
-                details={
-                    "selected_pages": exc.selection.selected_pages,
-                    "candidates": [candidate.model_dump() for candidate in exc.selection.candidates],
-                    "rejected_pages": [
-                        candidate.model_dump() for candidate in exc.selection.rejected_pages
-                    ],
-                },
-            )
+            pages = await _classify_pages(path, prompt_context.filename)
         except Exception as exc:
-            # Include the exception message in the surfaced error so the user
-            # sees which page(s) failed (e.g. "page 1: returned None (exhausted
-            # retries)") rather than a generic "provider_error". This is the
-            # path hit by the strict-mode guard in _extract_full_document when
-            # any per-page Gemini call fails after all retries.
             return DocumentExtractionFailure(
                 code="provider_error",
-                message=f"The vision extraction provider failed: {exc}",
+                message=f"Gemini could not read the pages of this PDF: {exc}",
                 details={"error": str(exc)},
             )
-
-        issues = validate_extracted_statement(statement)
-        derived_confidence = derive_statement_confidence(statement, issues)
-        enriched_statement = statement.model_copy(
-            update={
-                "validation_issues": issues,
-                "confidence": derived_confidence,
-            }
+        choice = _choose_pages(pages, source_mode)
+        fact_pages = (
+            [page.page for page in pages if page.has_disclosure_facts][:_MAX_FACT_PAGES]
+            if choice is None
+            else choice.fact_pages
         )
-        if not has_blocking_validation_issues(issues):
-            return enriched_statement
+        if fact_pages:
+            facts_task = asyncio.create_task(
+                _extract_disclosure_facts(path, fact_pages, prompt_context.filename)
+            )
+        if choice is None:
+            return DocumentExtractionFailure(
+                code="not_a_budget_source",
+                message=(
+                    "This PDF has no income statement or budget pages "
+                    f"(found: {_page_types_summary(pages)}). Upload an income statement or a final budget."
+                ),
+                details={
+                    "page_types": [page.model_dump() for page in pages],
+                    "disclosure_facts": await _facts_or_none(facts_task),
+                },
+            )
+        prompt_context.source_mode = choice.source_mode
 
-        last_validation_issues = issues
-        if attempt == 0:
-            prompt_context = deepcopy(prompt_context)
-            prompt_context.notes.append(f"Validation issues from previous attempt: {issues}")
-            continue
+    last_validation_issues: list[dict[str, Any]] = []
+    try:
+
+        for attempt in range(2):
+            raw_result: Any = None
+            try:
+                if provider is not None:
+                    # Custom provider (tests) — use vision path
+                    rendered_pages = render_pdf_pages(path, max_pages=max_pages or settings.DOCUMENT_VLM_MAX_PAGES)
+                    raw_result = await provider.extract_statement(
+                        rendered_pages,
+                        schema=ExtractedFinancialStatement,
+                        prompt_context=prompt_context,
+                    )
+                else:
+                    # Default path: hybrid text+image single-call extraction
+                    raw_result = await _extract_full_document(
+                        path, prompt_context, ExtractedFinancialStatement,
+                        max_pages=max_pages or settings.DOCUMENT_VLM_MAX_PAGES,
+                        choice=choice,
+                    )
+                    if raw_result is None:
+                        raise RuntimeError("Gemini extraction returned no structured result.")
+
+                statement = (
+                    raw_result
+                    if isinstance(raw_result, ExtractedFinancialStatement)
+                    else ExtractedFinancialStatement.model_validate(raw_result)
+                )
+            except ValidationError as exc:
+                _log_schema_validation_failure_sample(
+                    raw_result,
+                    path=path,
+                    source_mode=source_mode,
+                    attempt=attempt + 1,
+                )
+                if attempt == 0:
+                    prompt_context = deepcopy(prompt_context)
+                    prompt_context.notes.append(
+                        _build_schema_retry_note(
+                            raw_result,
+                            exc,
+                            path=path,
+                            source_mode=source_mode,
+                        )
+                    )
+                    continue
+                return DocumentExtractionFailure(
+                    code="schema_validation_failed",
+                    message="Structured PDF extraction could not satisfy the canonical schema.",
+                    details={"error": str(exc)},
+                )
+            except NotABudgetSource as exc:
+                return DocumentExtractionFailure(
+                    code="not_a_budget_source",
+                    message=(
+                        "This PDF has no income statement or budget pages "
+                        f"(found: {_page_types_summary(exc.pages)})."
+                    ),
+                    details={"page_types": [page.model_dump() for page in exc.pages]},
+                )
+            except Exception as exc:
+                # Include the exception message in the surfaced error so the user
+                # sees which page(s) failed (e.g. "page 1: returned None (exhausted
+                # retries)") rather than a generic "provider_error". This is the
+                # path hit by the strict-mode guard in _extract_full_document when
+                # any per-page Gemini call fails after all retries.
+                return DocumentExtractionFailure(
+                    code="provider_error",
+                    message=f"The vision extraction provider failed: {exc}",
+                    details={"error": str(exc)},
+                )
+
+            issues = validate_extracted_statement(statement)
+            derived_confidence = derive_statement_confidence(statement, issues)
+            enriched_statement = statement.model_copy(
+                update={
+                    "validation_issues": issues,
+                    "confidence": derived_confidence,
+                }
+            )
+            if not has_blocking_validation_issues(issues):
+                enriched_statement.extraction_metadata["disclosure_facts"] = await _facts_or_none(facts_task)
+                facts_task = None
+                return enriched_statement
+
+            last_validation_issues = issues
+            if attempt == 0:
+                prompt_context = deepcopy(prompt_context)
+                prompt_context.notes.append(f"Validation issues from previous attempt: {issues}")
+                continue
+
+            return DocumentExtractionFailure(
+                code="validation_failed",
+                message="Structured PDF extraction failed deterministic validation checks.",
+                details={"validation_issues": issues},
+            )
 
         return DocumentExtractionFailure(
             code="validation_failed",
             message="Structured PDF extraction failed deterministic validation checks.",
-            details={"validation_issues": issues},
+            details={"validation_issues": last_validation_issues},
         )
-
-    return DocumentExtractionFailure(
-        code="validation_failed",
-        message="Structured PDF extraction failed deterministic validation checks.",
-        details={"validation_issues": last_validation_issues},
-    )
+    finally:
+        if facts_task is not None:
+            facts_task.cancel()

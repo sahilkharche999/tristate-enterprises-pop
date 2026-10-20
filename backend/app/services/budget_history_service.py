@@ -26,20 +26,16 @@ from ..assessment_mode import (
     package_impact_for_mode_drift,
 )
 from ..config import settings
-from ..generate_budget import infer_growth_factor_from_input
 from ..generate_budget_pipeline import BudgetPipeline
 from ..models.financial_document_extraction import (
     DocumentExtractionFailure,
+    ExcelSourceExtraction,
     ExtractedFinancialStatement,
-    ExtractedFinancialStatementPage,
     ExtractedStatementLineItem,
 )
 from ..models.reserve_study_extraction import ExtractedReserveStudyDocument
 from ..services.income_statement_parser import (
-    parse_rows_with_sections,
-    detect_columns,
     parse_financial_cell as _parse_financial_cell,
-    _parse_financial_float as _parse_financial_float_new,
     _match_section_header,
     _classify_by_account_code,
     SECTION_KINDS,
@@ -58,8 +54,11 @@ from ..services.budget_line_merge_service import auto_apply_merges_on_upload
 from ..services.budget_line_merge_service import finalize_applied_merges
 from ..services.financial_statement_validation import (
     has_blocking_validation_issues,
+    is_reserve_transfer_label,
+    totals_for_validation,
     validate_extracted_statement,
 )
+from ..services.disclosure_facts_service import apply_disclosure_facts
 from ..services.normalized_statement_workbook import build_normalized_statement_workbook
 from ..services.pdf_vlm_extractor import extract_pdf_statement
 from ..services.reserve_study_extractor import canonicalize_reserve_study_row_dicts, extract_reserve_study
@@ -93,6 +92,7 @@ from ..models.budget_history import (
     BudgetTimelineEvent,
     BudgetUploadResponse,
     ExtractionDebugInfo,
+    DisclosureFactFinding,
     ExtractionQualityWarning,
     BudgetVersionCompareCard,
     BudgetVersionCompareResponse,
@@ -128,46 +128,24 @@ from ..ai_implementation.db.models import (
 
 # Enriched workbook output column indices (fixed positions added by the pipeline)
 # These are NOT input indices — they reference AK/AL columns written by IncomeStatementEnricher.
-_COL_PROJECTION_INDEX = 37
-_COL_PERCENT_CHANGE_INDEX = 38
+# Column positions in build_normalized_statement_workbook output (0-based, as
+# BudgetPipeline's known_columns expects). The enricher writes % Change six
+# columns right of the last data column (IncomeStatementEnricher.__init__).
+_NORMALIZED_KNOWN_COLUMNS = {"ytd_actual": 6, "annual_budget": 9}
+_NORMALIZED_PCT_CHANGE_COL = max(_NORMALIZED_KNOWN_COLUMNS.values()) + 1 + 6
 
 _EXPECTED_INCOME_STATEMENT_GUIDANCE = [
     (
-        "Expected budget source format: upload an income statement / statement of revenues "
-        "and expenses, not a monthly operating budget or cash-flow budget workbook."
+        "An income statement needs line items with year-to-date actuals and an annual "
+        "budget amount on most lines."
     ),
-    (
-        "The workbook should have a line-item/account column plus financial comparison columns "
-        "such as Current Period, Year To Date, and Annual Budget."
-    ),
-    (
-        "A good example is 'Income Statement Esprit Park Aug 2025.xlsx': sheet 'Income Statement', "
-        "section rows like Operating Income/Operating Expense, and an Annual Budget column with "
-        "usable values for the line items."
-    ),
+    "If this file is really a final budget, replace it and choose Read as: Final budget.",
 ]
 
 SOURCE_MODE_INCOME_STATEMENT = "income_statement"
 SOURCE_MODE_PROFORMA_FINAL_BUDGET = "proforma_final_budget"
 _PROFORMA_GROWTH_FACTOR = 1.0
 _PROFORMA_GROWTH_FACTOR_NOTE = "pro forma / final budget annual basis"
-_PROFORMA_EXCEL_GEMINI_TIMEOUT_SECONDS = 240.0
-_MONTH_HEADER_ALIASES = {
-    "jan", "january",
-    "feb", "february",
-    "mar", "march",
-    "apr", "april",
-    "may",
-    "jun", "june",
-    "jul", "july",
-    "aug", "august",
-    "sep", "sept", "september",
-    "oct", "october",
-    "nov", "november",
-    "dec", "december",
-}
-
-
 def _normalize_source_mode(source_mode: Optional[str]) -> str:
     normalized = str(source_mode or SOURCE_MODE_INCOME_STATEMENT).strip().lower()
     if normalized == SOURCE_MODE_PROFORMA_FINAL_BUDGET:
@@ -260,44 +238,40 @@ def _update_property_assessment_mode(
     return next_mode
 
 
-def _normalize_header_text(value: Any) -> str:
-    return " ".join(str(value or "").strip().lower().replace("_", " ").split())
+_EXCEL_SOURCE_SYSTEM_PROMPT = """You read one HOA financial workbook and return JSON in the given schema. The input is a cell dump: one line per non-empty row, `R<row>: <cell>=<value> | ...`; blank cells are omitted; each sheet starts with `Sheet: <name>`. Hidden sheets, rows and columns were removed.
 
+1. document_kind:
+- income_statement: actual results for a period that has already happened, usually actual columns (current month and/or year-to-date) beside budget columns and an annual budget column.
+- final_budget: a budget for a fiscal year (pro forma, proposed, approved, adopted or final operating budget). It may have Jan-Dec monthly columns and an annual total, but it has no actual results.
+- other: neither (reserve study, a short facts/prep form, balance sheet only, owner roster, check register).
+kind_evidence: the title or header text that decided it.
 
-def _try_float(value: Any) -> Optional[float]:
-    if value is None:
-        return None
-    if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
-        text = value.strip()
-        if not text or text in {"-", "—"}:
-            return None
-        text = text.replace(",", "").replace("$", "")
-        if text.startswith("(") and text.endswith(")"):
-            text = f"-{text[1:-1]}"
-        try:
-            return float(text)
-        except ValueError:
-            return None
-    return None
+2. line_items: every detail row of the operating statement or budget, including the contribution/transfer to reserves and rows of a separate reserve fund section. Skip section headers, total/subtotal/net rows, blank and note rows. Copy each label exactly as written (keep spelling, case and any account-number prefix). account_code_text: the GL number from its own column or a label prefix like '40000 - '. source_sheet / source_row: where the row is.
+Values: numbers as stored; parentheses are negative; blank or '-' is null.
+- current_actual / current_budget: current-month columns (income statements only).
+- ytd_actual / ytd_budget: year-to-date columns (income statements only).
+- annual_budget: the full-year budget amount. In a budget with monthly columns, the annual total column; never a single month, a percent/share column, or a per-unit amount.
+section_kind: income (operating revenue), operating (operating expenses, including the contribution/transfer to reserves), reserve_income / reserve_expense (rows of a separate reserve fund section).
 
+3. statement_period as printed. period_end: last date covered by the actual/year-to-date columns (YYYY-MM-DD), null for a budget. months_covered: months in the year-to-date columns, null for a budget. fiscal_year: the year the statement or budget is for.
 
-_PROFORMA_EXCEL_SYSTEM_PROMPT = """You are extracting an HOA pro forma / final budget from an Excel workbook.
+4. stated_totals: every total row printed: label, source_row, annual_budget, ytd_actual, and section_kind = the section whose rows it adds up (null for totals that span sections, such as net income or total expenses including reserves).
 
-Return JSON only using the provided schema.
+5. facts: the disclosure facts described in the schema, only where the workbook prints them (null otherwise); never compute them. A balance's as_of_date comes from its label or heading when it names one (e.g. 'Projected Reserves as of 12/31/26' -> 2026-12-31); page is the worksheet row.
 
-Extraction rules:
-- Extract every visible detail budget line item from operating income, operating expense, reserve income, reserve contributions, and reserve expense sections.
-- Use workbook cell positions, nearby headers, indentation, section labels, and account codes to infer each row.
-- Map final/approved/proposed/annual/total budget synonyms to annual_budget. Prefer final or approved budget columns over proposed columns when both exist.
-- If the workbook has Jan-Dec/monthly columns and an annual total/final budget column, use the annual total/final budget value for annual_budget, not one monthly value.
-- Preserve account codes when visible.
-- Set section_kind to income, operating, reserve_income, or reserve_expense.
-- Skip subtotal, total, grand total, blank, comment, formula-check, and header-only rows.
-- Do not collapse the workbook into one summary row. Return all detail rows.
-- Use evidence.source_column to name the source column header you used, such as final_budget, approved_budget, proposed_budget, annual_budget, or total_budget.
+If several sheets hold different statements, use the main one (visible, most complete, latest year), name it in primary_sheet, and do not mix sheets.
 """
+# Above this a workbook is almost certainly carrying old years or scratch
+# sheets; ask the operator to trim it rather than silently cutting rows.
+_EXCEL_PROMPT_MAX_CHARS = 300_000
+_EXCEL_GEMINI_TIMEOUT_SECONDS = 150.0
+# Busy answers (429/5xx) are retried after 4, 8 and 16 s; a timeout only once.
+_GEMINI_RETRY_DELAYS = [4.0, 8.0, 16.0]
+_GEMINI_TIMEOUT_RETRIES = 1
+_SOURCE_KIND_LABELS = {
+    SOURCE_MODE_INCOME_STATEMENT: "an income statement",
+    SOURCE_MODE_PROFORMA_FINAL_BUDGET: "a final budget",
+}
 
 
 def _format_excel_cell_for_prompt(value: Any) -> str:
@@ -310,259 +284,125 @@ def _format_excel_cell_for_prompt(value: Any) -> str:
     return " ".join(str(value).replace("\r", " ").replace("\n", " ").split()).strip()
 
 
-def _extract_excel_workbook_prompt_text(
-    path: str,
-    *,
-    max_rows_per_sheet: int = 250,
-    max_cols_per_sheet: int = 80,
-    max_chars: int = 120_000,
-) -> str:
-    """Serialize workbook cells for Gemini without doing semantic extraction."""
+def _visible_xlsx_rows(path: str):
+    """Yield (sheet title, [(row number, [(coordinate, value), ...]), ...]) for
+    visible sheets, skipping hidden rows and columns."""
     from openpyxl import load_workbook
 
-    workbook = load_workbook(path, data_only=True, read_only=True)
-    lines: list[str] = []
-    char_count = 0
-    try:
-        for worksheet in workbook.worksheets:
-            sheet_header = f"Sheet: {worksheet.title}"
-            lines.append(sheet_header)
-            char_count += len(sheet_header) + 1
-            max_row = min(int(worksheet.max_row or 0), max_rows_per_sheet)
-            max_col = min(int(worksheet.max_column or 0), max_cols_per_sheet)
-            if max_row <= 0 or max_col <= 0:
-                lines.append("(empty)")
-                char_count += len("(empty)") + 1
-                continue
-
-            included_rows = 0
-            for row in worksheet.iter_rows(min_row=1, max_row=max_row, max_col=max_col):
-                cells: list[str] = []
-                row_number = 0
-                for cell in row:
-                    row_number = int(getattr(cell, "row", row_number) or row_number)
-                    text = _format_excel_cell_for_prompt(getattr(cell, "value", None))
-                    if text:
-                        cells.append(f"{cell.coordinate}={text}")
-                if not cells:
-                    continue
-                included_rows += 1
-                row_line = f"R{row_number:03d}: " + " | ".join(cells)
-                lines.append(row_line)
-                char_count += len(row_line) + 1
-                if char_count >= max_chars:
-                    lines.append("[Workbook text truncated for Gemini prompt]")
-                    break
-            if included_rows == 0:
-                empty_note = "(no populated cells in scanned range)"
-                lines.append(empty_note)
-                char_count += len(empty_note) + 1
-            if lines and lines[-1] == "[Workbook text truncated for Gemini prompt]":
-                break
-    finally:
-        workbook.close()
-
-    prompt_text = "\n".join(lines).strip()
-    if not prompt_text:
-        raise ValueError("Workbook did not contain readable cells for Gemini extraction.")
-    return prompt_text
-
-
-def _infer_proforma_category(
-    *,
-    current_section: str,
-    label: str,
-    account_code: Optional[int],
-) -> tuple[str, Optional[str]]:
-    lowered_label = _normalize_compare_text(label)
-    if "reserve interest" in lowered_label:
-        return "reserve_income", "income"
-    if (
-        "contribution to reserve" in lowered_label
-        or "reserve contribution" in lowered_label
-        or "transfer to reserve" in lowered_label
-        or "allocation to reserve" in lowered_label
-    ):
-        return "reserve_expense", "transfer"
-    if account_code is not None and account_code >= 90000:
-        return "reserve_expense", "component"
-    if current_section == "income":
-        return "income", None
-    return "operating", None
-
-
-def _parse_proforma_excel_source(path: str) -> list[dict[str, Any]]:
-    from openpyxl import load_workbook
-
+    # Not read_only: read-only mode reports no dimensions for many exports
+    # (accounting-system .xlsx files), which made every sheet look empty.
     workbook = load_workbook(path, data_only=True)
     try:
-        selected_sheet = None
-        header_row_idx = None
-        month_columns: list[int] = []
-        for sheet_name in workbook.sheetnames:
-            worksheet = workbook[sheet_name]
-            for row_idx in range(1, min(worksheet.max_row, 40) + 1):
-                row_values = [worksheet.cell(row_idx, col).value for col in range(1, worksheet.max_column + 1)]
-                found_months = [
-                    col_idx
-                    for col_idx, cell_value in enumerate(row_values, start=1)
-                    if _normalize_header_text(cell_value) in _MONTH_HEADER_ALIASES
-                ]
-                if len(found_months) >= 6:
-                    selected_sheet = worksheet
-                    header_row_idx = row_idx
-                    month_columns = found_months
-                    break
-            if selected_sheet is not None:
-                break
-
-        if selected_sheet is None or header_row_idx is None or not month_columns:
-            raise ValueError("Could not find a Jan-Dec style month grid in this workbook.")
-
-        first_month_col = min(month_columns)
-        last_month_col = max(month_columns)
-
-        account_code_col = 1 if first_month_col > 1 else None
-        label_col = 2 if first_month_col > 2 else max(1, first_month_col - 1)
-        if account_code_col is not None and label_col == account_code_col:
-            label_col = account_code_col + 1
-
-        candidate_columns: list[tuple[int, int, str]] = []
-        for col_idx in range(last_month_col + 1, selected_sheet.max_column + 1):
-            header_text = _normalize_header_text(selected_sheet.cell(header_row_idx, col_idx).value)
-            if not header_text:
+        for worksheet in workbook.worksheets:
+            if worksheet.sheet_state != "visible":
                 continue
-            if "final" in header_text or "approved" in header_text:
-                priority = 4
-                source_column = "final_budget"
-            elif "proposed" in header_text:
-                priority = 3
-                source_column = "proposed_amount"
-            elif "budget" in header_text:
-                priority = 2
-                source_column = "annual_budget"
-            elif "total" in header_text:
-                priority = 1
-                source_column = "annual_budget"
-            else:
-                continue
-
-            numeric_values = []
-            for row_idx in range(header_row_idx + 1, min(selected_sheet.max_row, header_row_idx + 80) + 1):
-                numeric_value = _try_float(selected_sheet.cell(row_idx, col_idx).value)
-                if numeric_value is not None:
-                    numeric_values.append(numeric_value)
-            if len(numeric_values) < 3:
-                continue
-            tiny_ratio = sum(1 for value in numeric_values if abs(value) <= 1.5) / max(len(numeric_values), 1)
-            if tiny_ratio > 0.7:
-                continue
-            candidate_columns.append((priority, col_idx, source_column))
-
-        if not candidate_columns:
-            raise ValueError("Could not find an annual final/proposed/budget column in this workbook.")
-
-        candidate_columns.sort(key=lambda item: (-item[0], item[1]))
-        best_priority = candidate_columns[0][0]
-        top_candidates = [candidate for candidate in candidate_columns if candidate[0] == best_priority]
-        if len(top_candidates) > 1:
-            raise ValueError("Multiple annual-like columns conflict without a safe precedence rule.")
-
-        _priority, annual_col_idx, annual_source_column = top_candidates[0]
-        annual_col_letter = selected_sheet.cell(header_row_idx, annual_col_idx).column_letter
-
-        line_items: list[dict[str, Any]] = []
-        current_section = "operating"
-        current_section_label = "Expense"
-
-        for row_idx in range(header_row_idx + 1, selected_sheet.max_row + 1):
-            label_raw = selected_sheet.cell(row_idx, label_col).value
-            account_raw = selected_sheet.cell(row_idx, account_code_col).value if account_code_col is not None else None
-            annual_value = _try_float(selected_sheet.cell(row_idx, annual_col_idx).value)
-            month_values = [
-                _try_float(selected_sheet.cell(row_idx, month_col).value)
-                for month_col in month_columns
-            ]
-            non_empty_month_values = [value for value in month_values if value is not None]
-            has_numeric_context = annual_value is not None or bool(non_empty_month_values)
-            label_text = str(label_raw).strip() if label_raw is not None else ""
-            account_text = str(account_raw).strip() if account_raw is not None else ""
-            lowered_label = _normalize_compare_text(label_text)
-
-            if not label_text and not account_text and not has_numeric_context:
-                continue
-
-            if (
-                label_text
-                and not has_numeric_context
-                and not account_text
-            ):
-                if "income" in lowered_label:
-                    current_section = "income"
-                    current_section_label = label_text
-                elif "expense" in lowered_label or "operating" in lowered_label or "maintenance" in lowered_label:
-                    current_section = "operating"
-                    current_section_label = label_text
-                elif "reserve" in lowered_label and "income" in lowered_label:
-                    current_section = "reserve_income"
-                    current_section_label = label_text
-                elif "reserve" in lowered_label:
-                    current_section = "reserve_expense"
-                    current_section_label = label_text
-                continue
-
-            if lowered_label.startswith("total ") or lowered_label.startswith("net ") or lowered_label.startswith("subtotal"):
-                continue
-            if "cash flow" in lowered_label or lowered_label.startswith("cumulative "):
-                continue
-
-            account_code = None
-            if account_text:
-                account_digits = "".join(character for character in account_text if character.isdigit())
-                if account_digits:
-                    try:
-                        account_code = int(account_digits)
-                    except ValueError:
-                        account_code = None
-
-            label = label_text or account_text
-            if not label:
-                continue
-
-            category, reserve_group = _infer_proforma_category(
-                current_section=current_section,
-                label=label,
-                account_code=account_code,
-            )
-
-            item: dict[str, Any] = {
-                "line_item_key": str(account_code) if account_code is not None else label,
-                "account_code": account_code,
-                "label": label,
-                "name": label,
-                "category": category,
-                "current_actual": non_empty_month_values[-1] if non_empty_month_values else None,
-                "ytd_actual": sum(non_empty_month_values) if non_empty_month_values else None,
-                "annual_budget": annual_value,
-                "projection": annual_value,
-                "percent_change": 0.0,
-                "read_only": _effective_read_only({}, category),
-                "reserve_group": reserve_group,
-                "source_column": annual_source_column,
-                "source_page_or_cell": f"{selected_sheet.title}!{annual_col_letter}{row_idx}",
-                "raw": {
-                    "section": current_section_label,
-                    "sheet": selected_sheet.title,
-                },
-            }
-            line_items.append(item)
-
-        if len(line_items) < 2:
-            raise ValueError("Not enough pro-forma line items were extracted from this workbook.")
-
-        return line_items
+            hidden_columns: set[int] = set()
+            for dimension in worksheet.column_dimensions.values():
+                if dimension.hidden and dimension.min and dimension.max:
+                    hidden_columns.update(range(dimension.min, dimension.max + 1))
+            rows = []
+            # ponytail: 256 columns covers any statement layout; formatting-only
+            # sheets can report max_column=16384 and would take minutes to walk.
+            for row in worksheet.iter_rows(max_col=min(worksheet.max_column or 1, 256)):
+                row_number = row[0].row
+                if worksheet.row_dimensions[row_number].hidden:
+                    continue
+                cells = [(cell.coordinate, cell.value) for cell in row if cell.column not in hidden_columns]
+                rows.append((row_number, cells))
+            yield worksheet.title, rows
     finally:
         workbook.close()
+
+
+def _visible_xls_rows(path: str):
+    """Same as :func:`_visible_xlsx_rows` for Excel 97-2003 files."""
+    import xlrd
+    from openpyxl.utils import get_column_letter
+
+    with open(os.devnull, "w") as quiet:
+        try:
+            workbook = xlrd.open_workbook(path, formatting_info=True, logfile=quiet)
+        except Exception:
+            workbook = xlrd.open_workbook(path, logfile=quiet)
+    for sheet in workbook.sheets():
+        if getattr(sheet, "visibility", 0):
+            continue
+        hidden_rows = {r for r, info in (getattr(sheet, "rowinfo_map", {}) or {}).items() if getattr(info, "hidden", 0)}
+        hidden_columns = {c for c, info in (getattr(sheet, "colinfo_map", {}) or {}).items() if getattr(info, "hidden", 0)}
+        rows = []
+        for r in range(sheet.nrows):
+            if r in hidden_rows:
+                continue
+            cells = []
+            for c in range(sheet.ncols):
+                if c in hidden_columns:
+                    continue
+                cell = sheet.cell(r, c)
+                value = cell.value
+                if cell.ctype == xlrd.XL_CELL_DATE:
+                    value = xlrd.xldate_as_datetime(value, workbook.datemode)
+                elif value == "":
+                    value = None
+                cells.append((f"{get_column_letter(c + 1)}{r + 1}", value))
+            rows.append((r + 1, cells))
+        yield sheet.name, rows
+
+
+def _excel_cell_dump(path: str) -> tuple[str, dict[tuple[str, int], list[float]]]:
+    """Serialize visible workbook cells for Gemini, plus the numbers on each
+    row so the answer can be checked against the sheet.
+
+    Raises ValueError when there is nothing to read or too much to send.
+    """
+    rows_by_sheet = _visible_xls_rows(path) if Path(path).suffix.lower() == ".xls" else _visible_xlsx_rows(path)
+    lines: list[str] = []
+    numbers: dict[tuple[str, int], list[float]] = {}
+    for title, rows in rows_by_sheet:
+        lines.append(f"Sheet: {title}")
+        for row_number, cells in rows:
+            texts = []
+            for coordinate, value in cells:
+                text = _format_excel_cell_for_prompt(value)
+                if text:
+                    texts.append(f"{coordinate}={text}")
+            if not texts:
+                continue
+            lines.append(f"R{row_number:03d}: " + " | ".join(texts))
+            numbers[(title, row_number)] = [
+                round(float(value), 2)
+                for _, value in cells
+                if isinstance(value, (int, float)) and not isinstance(value, bool)
+            ]
+    text = "\n".join(lines)
+    if not numbers:
+        raise ValueError("The workbook has no readable cells on its visible sheets.")
+    if len(text) > _EXCEL_PROMPT_MAX_CHARS:
+        raise ValueError(
+            f"The workbook is too large to read ({len(text):,} characters of visible cells). "
+            "Delete or hide sheets that aren't the statement or budget and upload it again."
+        )
+    return text, numbers
+
+
+def _values_missing_from_cited_rows(
+    lines: list[Any],
+    numbers: dict[tuple[str, int], list[float]],
+) -> list[str]:
+    """Every number Gemini returns must appear in the worksheet row it cites."""
+    problems = []
+    for line in lines:
+        candidates = [
+            values
+            for (sheet, row), values in numbers.items()
+            if row == line.source_row and (line.source_sheet in (None, sheet))
+        ]
+        for field in ("current_actual", "current_budget", "ytd_actual", "ytd_budget", "annual_budget"):
+            value = getattr(line, field)
+            if value is None:
+                continue
+            if not any(abs(value - number) < 0.006 for values in candidates for number in values):
+                problems.append(f"{line.label!r}: {field}={value:,.2f} is not in row {line.source_row}")
+    return problems
 
 
 def _default_proforma_statement_month(hoa: Property) -> int:
@@ -860,6 +700,7 @@ def _build_review_required_response(
     code: str,
     warnings: Optional[list[str]] = None,
     details: Optional[dict[str, Any]] = None,
+    disclosure_facts: Optional[list[dict[str, Any]]] = None,
 ) -> BudgetUploadResponse:
     upload.enrichment_status = "failed"
     debug_info = ExtractionDebugInfo(code=code, message=reason, details=details or {})
@@ -881,6 +722,7 @@ def _build_review_required_response(
         review_required=True,
         review_reason=reason,
         debug_info=debug_info,
+        disclosure_facts=[DisclosureFactFinding(**finding) for finding in disclosure_facts or []],
     )
 
 
@@ -902,12 +744,9 @@ def _build_income_statement_validation_feedback(
         }
     )
 
-    reason = f"{original_filename} was not accepted as an income statement. {primary_message}"
+    reason = f"{original_filename} was read as an income statement but was not accepted. {primary_message}"
     if likely_wrong_report:
-        reason += (
-            " This commonly happens when the uploaded workbook is an annual/monthly budget "
-            "or cash-flow report instead of the income statement used for budget drafting."
-        )
+        reason += " Most lines are missing year-to-date or annual budget amounts."
 
     warnings: list[str] = []
     for issue in blocking_issues or issues:
@@ -931,18 +770,19 @@ def _build_proforma_validation_feedback(
     original_filename: str,
     issues: list[dict[str, Any]],
 ) -> tuple[str, list[str]]:
-    primary_issue = issues[0] if issues else {}
+    errors = [issue for issue in issues if issue.get("severity") == "error"]
+    primary_issue = (errors or issues or [{}])[0]
     primary_message = str(
         primary_issue.get("message")
-        or "The workbook did not provide enough final annual budget coverage."
+        or "The file did not provide enough annual budget amounts."
     )
     reason = (
-        f"{original_filename} was not accepted as a pro forma / final budget source. "
+        f"{original_filename} was read as a final budget but was not accepted. "
         f"{primary_message}"
     )
     warnings = [
-        "Expected a spreadsheet-export operating/cash-flow budget with Jan-Dec columns plus one annual final, proposed, or budget column.",
-        "The annual final/proposed/budget column must contain enough populated values to build a safe draft.",
+        "A final budget needs an annual amount (final, approved, proposed or total budget) on most of its lines.",
+        "If this file is really an income statement, replace it and choose Read as: Income statement.",
     ]
     for issue in issues:
         message = str(issue.get("message") or "").strip()
@@ -954,117 +794,199 @@ def _build_proforma_validation_feedback(
 def _extract_pdf_statement_sync(
     path: str,
     *,
-    source_mode: str = SOURCE_MODE_INCOME_STATEMENT,
+    source_mode: Optional[str] = None,
+    filename: Optional[str] = None,
 ) -> ExtractedFinancialStatement | DocumentExtractionFailure:
-    def _extract_coro():
-        try:
-            return extract_pdf_statement(path, source_mode=source_mode)
-        except TypeError as exc:
-            if "source_mode" not in str(exc):
-                raise
-            return extract_pdf_statement(path)
-
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-
-    if loop and loop.is_running():
-        import concurrent.futures
-
-        with concurrent.futures.ThreadPoolExecutor() as pool:
-            return pool.submit(asyncio.run, _extract_coro()).result()
-
-    return asyncio.run(_extract_coro())
+    return _run_sync(lambda: extract_pdf_statement(path, source_mode=source_mode, filename=filename))
 
 
-async def _extract_proforma_excel_statement(
+def _has_any_fact(facts: Any) -> bool:
+    if facts is None:
+        return False
+    return any(
+        isinstance(value, dict) and (value.get("printed") or value.get("number") is not None)
+        for value in facts.model_dump().values()
+    )
+
+
+async def _extract_excel_source(
     path: str,
     *,
     original_filename: Optional[str] = None,
+    kind_override: Optional[str] = None,
 ) -> ExtractedFinancialStatement | DocumentExtractionFailure:
-    """Use Gemini for semantic extraction from a serialized workbook grid."""
+    """Gemini reads the workbook's cells and says what kind of document it is."""
     from ..ai_implementation.pipeline.llm_client import call_llm
 
     try:
-        workbook_text = _extract_excel_workbook_prompt_text(path)
+        workbook_text, row_numbers = _excel_cell_dump(path)
     except Exception as exc:
         return DocumentExtractionFailure(
-            code="provider_error",
-            message=f"The Excel workbook could not be prepared for Gemini extraction: {exc}",
+            code="workbook_unreadable",
+            message=f"The Excel workbook could not be read: {exc}",
             details={"error": str(exc)},
         )
 
     filename = original_filename or Path(path).name
-    messages = [
-        {"role": "system", "content": _PROFORMA_EXCEL_SYSTEM_PROMPT},
-        {
-            "role": "user",
-            "content": (
-                f"Filename: {filename}\n"
-                "Workbook cell dump with A1 coordinates. Blank cells are omitted.\n\n"
-                f"{workbook_text}\n\n"
-                "Extract the pro forma / final budget line items from this workbook."
+    override_note = (
+        f"The operator says this file is {_SOURCE_KIND_LABELS[kind_override]}; read it as one.\n"
+        if kind_override
+        else ""
+    )
+    notes = ""
+    started = datetime.now(timezone.utc)
+    for attempt in range(2):
+        messages = [
+            {"role": "system", "content": _EXCEL_SOURCE_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": f"Filename: {filename}\n{override_note}{notes}\n{workbook_text}",
+            },
+        ]
+        try:
+            raw = await call_llm(
+                messages,
+                ExcelSourceExtraction,
+                temperature=0.0,
+                timeout=_EXCEL_GEMINI_TIMEOUT_SECONDS,
+                thinking_budget=0,
+                backoff_delays=_GEMINI_RETRY_DELAYS,
+                timeout_retries=_GEMINI_TIMEOUT_RETRIES,
+            )
+        except Exception as exc:
+            return DocumentExtractionFailure(
+                code="provider_error",
+                message=f"The Gemini Excel extraction failed: {exc}",
+                details={"error": str(exc)},
+            )
+        if raw is None:
+            return DocumentExtractionFailure(
+                code="provider_error",
+                message="Gemini did not return a reading of this workbook. Please try again in a minute.",
+            )
+        problems = _values_missing_from_cited_rows(raw.line_items, row_numbers)
+        if not problems:
+            break
+        notes = (
+            "A previous reading returned values that are not in the rows it cited; "
+            "read those rows again: " + "; ".join(problems[:20]) + "\n"
+        )
+    else:
+        return DocumentExtractionFailure(
+            code="value_not_in_cited_row",
+            message=(
+                f"{filename}: some amounts Gemini read do not appear in the rows it cited, "
+                "so the file was not accepted. Check the rows below in the workbook."
             ),
-        },
-    ]
+            details={"problems": problems},
+        )
+
+    if raw.document_kind == "other" and not kind_override and not _has_any_fact(raw.facts):
+        # A short facts form (Bob's Budget Prep sheet) read with thinking off
+        # sometimes comes back without its facts; it is tiny, so read it once
+        # more with thinking before giving up on them.
+        try:
+            second = await call_llm(
+                messages,
+                ExcelSourceExtraction,
+                temperature=0.0,
+                timeout=_EXCEL_GEMINI_TIMEOUT_SECONDS,
+                backoff_delays=[],
+            )
+        except Exception:
+            second = None
+        if second is not None and _has_any_fact(second.facts):
+            raw = second
+
+    detected_kind = raw.document_kind
+    kind = kind_override or (
+        SOURCE_MODE_PROFORMA_FINAL_BUDGET if detected_kind == "final_budget"
+        else SOURCE_MODE_INCOME_STATEMENT if detected_kind == "income_statement"
+        else None
+    )
+    facts = raw.facts.model_dump() if raw.facts else None
+    metadata = {
+        "extractor": "gemini_excel",
+        "detected_kind": detected_kind,
+        "kind_evidence": raw.kind_evidence,
+        "association_name": raw.association_name,
+        "primary_sheet": raw.primary_sheet,
+        "period_end": raw.period_end,
+        "months_covered": raw.months_covered,
+        "fiscal_year": raw.fiscal_year,
+        "model": settings.GEMINI_MODEL,
+        "seconds": round((datetime.now(timezone.utc) - started).total_seconds(), 1),
+        "disclosure_facts": facts,
+    }
+    if kind is None:
+        return DocumentExtractionFailure(
+            code="not_a_budget_source",
+            message=(
+                f"{filename} doesn't look like an income statement or a budget "
+                f"({raw.kind_evidence}). Upload an income statement or a final budget."
+            ),
+            details=metadata,
+        )
 
     try:
-        raw_result = await call_llm(
-            messages,
-            ExtractedFinancialStatementPage,
-            temperature=0.0,
-            timeout=_PROFORMA_EXCEL_GEMINI_TIMEOUT_SECONDS,
-        )
-        if raw_result is None:
-            raise RuntimeError("Gemini extraction returned no structured result.")
         return ExtractedFinancialStatement(
             document_family="excel_budget_workbook",
-            report_type="income_statement",
-            statement_period=raw_result.statement_period,
-            line_items=raw_result.line_items,
-            totals=raw_result.totals,
-            validation_issues=raw_result.validation_issues,
-            confidence=raw_result.confidence,
-            extraction_metadata={"extractor": "gemini_excel_text"},
+            report_type="final_budget" if kind == SOURCE_MODE_PROFORMA_FINAL_BUDGET else "income_statement",
+            statement_period=raw.statement_period,
+            line_items=[
+                ExtractedStatementLineItem(
+                    account_code_text=line.account_code_text,
+                    label=line.label,
+                    section_kind=line.section_kind,
+                    current_actual=line.current_actual,
+                    current_budget=line.current_budget,
+                    ytd_actual=line.ytd_actual,
+                    ytd_budget=line.ytd_budget,
+                    annual_budget=line.annual_budget,
+                    evidence={"source_cell": f"{line.source_sheet or raw.primary_sheet}!R{line.source_row}"},
+                )
+                for line in raw.line_items
+            ],
+            totals=totals_for_validation(raw.stated_totals),
+            confidence=0.9,
+            extraction_metadata=metadata,
         )
     except ValidationError as exc:
         return DocumentExtractionFailure(
             code="schema_validation_failed",
-            message="Structured Excel extraction could not satisfy the canonical schema.",
-            details={"error": str(exc)},
-        )
-    except Exception as exc:
-        return DocumentExtractionFailure(
-            code="provider_error",
-            message=f"The Gemini Excel extraction provider failed: {exc}",
+            message=f"{filename}: Gemini found fewer than two budget lines in this workbook.",
             details={"error": str(exc)},
         )
 
 
-def _extract_proforma_excel_statement_sync(
-    path: str,
-    *,
-    original_filename: Optional[str] = None,
-) -> ExtractedFinancialStatement | DocumentExtractionFailure:
-    async def _extract_coro():
-        return await _extract_proforma_excel_statement(
-            path,
-            original_filename=original_filename,
-        )
-
+def _run_sync(make_coroutine):
+    """Run a coroutine from sync code, also when an event loop is already running."""
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         loop = None
-
     if loop and loop.is_running():
         import concurrent.futures
 
         with concurrent.futures.ThreadPoolExecutor() as pool:
-            return pool.submit(asyncio.run, _extract_coro()).result()
+            return pool.submit(asyncio.run, make_coroutine()).result()
+    return asyncio.run(make_coroutine())
 
-    return asyncio.run(_extract_coro())
+
+def _extract_budget_source(
+    path: str,
+    *,
+    route: Any,
+    original_filename: str,
+    kind_override: Optional[str],
+) -> ExtractedFinancialStatement | DocumentExtractionFailure:
+    """Read any budget-source upload with Gemini. ``report_type`` on the result
+    says whether it is an income statement or a final budget."""
+    if route.path == "pdf_vlm":
+        return _extract_pdf_statement_sync(path, source_mode=kind_override, filename=original_filename)
+    return _run_sync(
+        lambda: _extract_excel_source(path, original_filename=original_filename, kind_override=kind_override)
+    )
 
 
 def _extract_reserve_study_sync(path: str) -> ExtractedReserveStudyDocument | DocumentExtractionFailure:
@@ -1112,7 +1034,12 @@ def _statement_to_budget_line_items(
                 else "annual_budget"
             )
         reserve_group = None
-        if category == "reserve_income":
+        if is_reserve_transfer_label(item.label):
+            # The operating-side contribution to reserves, however Gemini
+            # tagged its section: the reserve funding reconciliation looks for
+            # reserve_expense/transfer.
+            category, reserve_group = "reserve_expense", "transfer"
+        elif category == "reserve_income":
             reserve_group = "income"
         elif category == "reserve_expense":
             reserve_group = "component"
@@ -1139,7 +1066,7 @@ def _statement_to_budget_line_items(
                 "reserve_group": reserve_group,
                 "source_column": source_column,
                 "source_page_or_cell": (
-                    f"page {item.page_number}" if item.page_number is not None else None
+                    f"page {item.page_number}" if item.page_number is not None else evidence.get("source_cell")
                 ),
                 "raw": {
                     "section": item.section_label or category,
@@ -1337,10 +1264,9 @@ def _infer_category(label: str, account_code: Optional[int], section: str) -> st
     Returns one of SECTION_KINDS: "income", "operating",
     "reserve_income", "reserve_expense".
 
-    Delegates to the parser's `_match_section_header` (same prefix logic as
-    parse_rows_with_sections) so the PDF pre-processed path stays in lockstep
-    with the raw Excel path. Falls back to account-code ranges when no
-    section header text matches.
+    Delegates to the parser's `_match_section_header` (the section-header
+    prefixes the normalized workbook writes). Falls back to account-code
+    ranges when no section header text matches.
 
     IMPORTANT: Does NOT check label keywords. Section position is authoritative.
     """
@@ -1377,39 +1303,14 @@ def _line_items_to_percent_changes(line_items: list[dict[str, Any]]) -> dict[str
 
 def _table_to_line_items(
     table: dict[str, Any],
-    capture: Optional[dict] = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    """Returns (line_items, warnings).
+    """Read line items back from an enriched normalized statement workbook.
 
-    ``capture`` (C5/C6) is forwarded to ``parse_rows_with_sections`` on the
-    raw-layout branch so the caller receives the document's stated totals
-    and any unparseable promoted-cell review questions.
+    Returns (line_items, warnings). Printed totals come from Gemini's reading
+    of the source file, not from this table.
     """
     warnings: list[str] = []
     headers = [str(header or f"column_{index}") for index, header in enumerate(table.get("headers", []), start=1)]
-
-    if "Label" not in headers:
-        # Raw income statement layout — use section-aware parser
-        rows = table.get("rows", [])
-        col_indices = detect_columns([table.get("headers", [])] + rows[:9])
-        detection_tier = col_indices.pop("_detection_tier", 1)
-        if detection_tier == 3:
-            warnings.append(
-                "Heads up \u2014 the column layout in your file looks a bit different from what we "
-                "usually see. The numbers might not line up perfectly. If anything looks off, try "
-                "re-uploading the standard monthly income statement from your accounting software."
-            )
-        # Scan all header/early rows for enrichment column labels (written by pipeline at row 5)
-        for scan_row in ([table.get("headers", [])] + rows[:9]):
-            for ci, cell in enumerate(scan_row or []):
-                cell_text = str(cell or "").strip().lower()
-                if cell_text == "projection" and "projection" not in col_indices:
-                    col_indices["projection"] = ci
-                elif cell_text in ("% change", "percent change") and "percent_change" not in col_indices:
-                    col_indices["percent_change"] = ci
-        col_indices.setdefault("projection", _COL_PROJECTION_INDEX)
-        col_indices.setdefault("percent_change", _COL_PERCENT_CHANGE_INDEX)
-        return parse_rows_with_sections(rows, col_indices, capture=capture), warnings
 
     # Pre-processed table with "Label" header (from enriched/generated workbook)
     line_items: list[dict[str, Any]] = []
@@ -1426,7 +1327,13 @@ def _table_to_line_items(
             continue
 
         label = raw_label or f"Line Item {len(line_items) + 1}"
-        account_code = raw_account_code
+        # Digit-only codes as int, the shape Excel drafts always had, so merge
+        # rules and notes keyed on account_code keep matching.
+        account_code = (
+            int(str(raw_account_code).strip())
+            if raw_account_code is not None and str(raw_account_code).strip().isdigit()
+            else raw_account_code
+        )
         line_item_key = str(account_code or label)
         section = item.get("Section") or item.get("section") or ""
         category = _infer_category(
@@ -1489,6 +1396,9 @@ def _extract_totals_from_preview(preview: Optional[dict[str, Any]]) -> tuple[flo
         key = None
         for cell in row[:3]:
             candidate = str(cell or "").strip().lower()
+            # The budget generator labels the expense total "Total Operating
+            # Expense"; reading only "Total Expense" left every version at 0.
+            candidate = "total expense" if candidate == "total operating expense" else candidate
             if candidate in totals:
                 key = candidate
                 break
@@ -1925,34 +1835,22 @@ def _render_draft_snapshot_from_upload(
     growth_factor: Optional[float],
     growth_factor_note: Optional[str],
 ) -> tuple[bytes, dict[str, Any]]:
-    if not upload.storage_key:
-        raise LookupError("Source upload file not found")
-
+    # Every source kind renders from the draft's own line items; the original
+    # upload is never re-parsed.
     route = choose_financial_document_route(upload.original_filename, upload.content_type)
-    use_normalized_input = (
-        route.path == "pdf_vlm"
-        or _is_proforma_source_mode(upload.source_mode)
+    canonical_statement = _canonical_statement_from_line_items(
+        line_items,
+        family=route.family or "pdf_visual_document",
     )
-    if use_normalized_input:
-        canonical_statement = _canonical_statement_from_line_items(
-            line_items,
-            family=route.family or "pdf_visual_document",
-        )
-        temp_input_path = build_normalized_statement_workbook(canonical_statement)
-    else:
-        source_path = _budget_storage_path(upload.storage_key)
-        if not source_path.exists():
-            raise LookupError("Source upload file not found")
-        temp_input_path = _write_temp_workbook(source_path.read_bytes(), upload.original_filename)
+    temp_input_path = build_normalized_statement_workbook(canonical_statement)
     temp_output_dir = Path(tempfile.mkdtemp(prefix="budget_draft_snapshot_"))
     try:
-        temp_input_path = _ensure_xlsx(temp_input_path)
-
-        pdf_known_columns = {"ytd_actual": 6, "annual_budget": 9} if use_normalized_input else None
+        pdf_known_columns = _NORMALIZED_KNOWN_COLUMNS
         macros_service.write_percent_changes_by_label(
             temp_input_path,
             "Income Statement",
             _line_items_to_percent_changes(line_items),
+            pct_change_col=_NORMALIZED_PCT_CHANGE_COL,
         )
         intermediate_path = str(temp_output_dir / "Income_Statement_Enriched.xlsx")
         output_path = str(temp_output_dir / "Budget_Pipeline.xlsx")
@@ -2004,12 +1902,34 @@ def _refresh_draft_snapshot_from_upload(
     return preview
 
 
+def _is_normalized_enriched_workbook(path: Path) -> bool:
+    """True for workbooks built by ``build_normalized_statement_workbook``
+    (Section | Account Code | Label header). Drafts created by the retired
+    Excel column parser persisted the raw statement layout instead."""
+    from openpyxl import load_workbook
+
+    try:
+        workbook = load_workbook(path, read_only=True, data_only=True)
+    except Exception:
+        return False
+    try:
+        worksheet = workbook["Income Statement"] if "Income Statement" in workbook.sheetnames else workbook.active
+        header = next(worksheet.iter_rows(min_row=1, max_row=1, max_col=3, values_only=True), ())
+    finally:
+        workbook.close()
+    return tuple(header) == ("Section", "Account Code", "Label")
+
+
 def _ensure_draft_enriched_workbook(
     session: Session,
     draft: BudgetDraft,
+    *,
+    require_normalized: bool = False,
 ) -> Path:
     if _storage_file_available(draft.enriched_storage_key):
-        return _budget_storage_path(draft.enriched_storage_key or "")
+        path = _budget_storage_path(draft.enriched_storage_key or "")
+        if not require_normalized or _is_normalized_enriched_workbook(path):
+            return path
 
     upload = _get_upload(session, draft.source_upload_id)
     if upload is None:
@@ -2029,6 +1949,136 @@ def _ensure_draft_enriched_workbook(
     return _budget_storage_path(draft.enriched_storage_key)
 
 
+_ASSOCIATION_NAME_FILLER = {
+    "a", "an", "and", "assn", "association", "co", "community", "condo", "condominium",
+    "condominiums", "hoa", "homeowners", "homeowner", "inc", "llc", "of", "owners",
+    "owner", "the", "village", "street", "st",
+}
+
+
+def _association_name_tokens(name: Any) -> set[str]:
+    import re
+
+    words = re.findall(r"[a-z0-9]+", str(name or "").lower())
+    return {word for word in words if word not in _ASSOCIATION_NAME_FILLER}
+
+
+def _source_document_warnings(
+    statement: ExtractedFinancialStatement,
+    hoa: Property,
+) -> list[str]:
+    """Plain-language notes about what Gemini read, for the operator."""
+    metadata = statement.extraction_metadata or {}
+    warnings: list[str] = []
+    printed_name = metadata.get("association_name")
+    printed_tokens = _association_name_tokens(printed_name)
+    hoa_tokens = _association_name_tokens(hoa.name)
+    if printed_tokens and hoa_tokens and not printed_tokens & hoa_tokens:
+        warnings.append(
+            f"This file is for \"{printed_name}\", but you are working on \"{hoa.name}\". "
+            "Check that you uploaded the right association's file."
+        )
+    return warnings
+
+
+def _months_sanity_warning(
+    statement: ExtractedFinancialStatement,
+    detected_months: int,
+) -> Optional[str]:
+    """Assessments come in evenly, so YTD / annual on the largest income row
+    shows how many months the statement really covers."""
+    income_rows = [
+        item for item in statement.line_items
+        if item.section_kind == "income" and item.annual_budget and item.ytd_actual
+    ]
+    if not income_rows:
+        return None
+    largest = max(income_rows, key=lambda item: abs(item.annual_budget or 0))
+    implied_months = round(12 * float(largest.ytd_actual) / float(largest.annual_budget))
+    if 1 <= implied_months <= 12 and abs(implied_months - detected_months) >= 2:
+        return (
+            f"The statement period gives {detected_months} months, but year-to-date "
+            f"{largest.label} looks like {implied_months} months of the year. "
+            "Check the fiscal-year start month in this HOA's settings."
+        )
+    return None
+
+
+def _build_extraction_quality_warning(
+    statement: ExtractedFinancialStatement,
+    *,
+    issues: list[dict[str, Any]],
+    notes: list[str],
+) -> Optional[ExtractionQualityWarning]:
+    """One dialog with everything the operator should double-check."""
+    metadata = statement.extraction_metadata or {}
+    lines: list[str] = []
+    code = None
+    for issue in issues:
+        if issue.get("code") == "subtotal_mismatch":
+            details = issue.get("details") or {}
+            lines.append(
+                f"{str(details.get('section_kind', '')).replace('_', ' ').capitalize()}: the file's total is "
+                f"{details.get('expected_total', 0):,.2f}, but the lines read add up to "
+                f"{details.get('actual_total', 0):,.2f}."
+            )
+            code = code or "subtotal_mismatch"
+    for note in notes:
+        lines.append(note)
+        code = code or "source_document_mismatch"
+    if metadata.get("used_vision_only_fallback"):
+        lines.append(
+            "This file was a scanned image, so every number was read from the page picture. "
+            "That's usually accurate, but not always."
+        )
+        code = code or "scanned_pdf_vision_only"
+    pages_note = metadata.get("pages_note")
+    if pages_note:
+        lines.append(pages_note)
+    if not lines:
+        return None
+    return ExtractionQualityWarning(
+        code=code or "pages_used",
+        title="Please double-check the numbers below" if code else "What was read",
+        body="\n".join(lines),
+        severity="warning" if code else "info",
+    )
+
+
+def _apply_upload_facts(
+    session: Session,
+    *,
+    hoa: Property,
+    actor: dict[str, Any],
+    upload: BudgetUpload,
+    facts: Optional[dict[str, Any]],
+    original_filename: str,
+) -> list[dict[str, Any]]:
+    """Put disclosure facts from the upload into HOA settings; never fails the upload."""
+    if not facts:
+        return []
+    try:
+        findings = apply_disclosure_facts(
+            session, hoa=hoa, facts=facts, upload_id=upload.id, filename=original_filename,
+        )
+        if findings:
+            _create_audit_event(
+                session,
+                hoa_id=hoa.id,
+                actor=actor,
+                event_type="disclosure_facts_found",
+                summary=f"Read {len(findings)} disclosure facts from {original_filename}",
+                upload_id=upload.id,
+                payload={"findings": findings},
+            )
+        session.commit()
+        return findings
+    except Exception as exc:  # facts are a bonus on top of the budget lines
+        session.rollback()
+        logger.warning("Could not apply disclosure facts from %s: %s", original_filename, exc)
+        return []
+
+
 def create_upload(
     session: Session,
     *,
@@ -2037,10 +2087,16 @@ def create_upload(
     original_filename: str,
     content_type: Optional[str],
     file_bytes: bytes,
-    source_mode: str = SOURCE_MODE_INCOME_STATEMENT,
+    source_mode: Optional[str] = None,
     assessment_mode: str = ASSESSMENT_MODE_VARIABLE,
 ) -> BudgetUploadResponse:
-    source_mode = _normalize_source_mode(source_mode)
+    """Read a budget-source file with Gemini and build the active draft.
+
+    Gemini decides whether the file is an income statement (YTD actuals are
+    annualized) or a final budget (amounts used as they are); ``source_mode``
+    is the operator's override.
+    """
+    kind_override = _normalize_source_mode(source_mode) if source_mode else None
     hoa = _get_property(session, hoa_id)
     assessment_mode = _update_property_assessment_mode(
         session,
@@ -2050,7 +2106,6 @@ def create_upload(
     )
     timestamp = _now_text()
     sha256 = hashlib.sha256(file_bytes).hexdigest()
-    pdf_result: ExtractedFinancialStatement | DocumentExtractionFailure | None = None
     upload = _create_upload_record(
         session,
         hoa_id=hoa_id,
@@ -2061,7 +2116,7 @@ def create_upload(
         timestamp=timestamp,
         document_role="budget_source",
         enrichment_status="failed",
-        source_mode=source_mode,
+        source_mode=kind_override or SOURCE_MODE_INCOME_STATEMENT,
         assessment_mode=assessment_mode,
     )
 
@@ -2075,7 +2130,7 @@ def create_upload(
         payload={
             "filename": original_filename,
             "sha256": sha256,
-            "source_mode": source_mode,
+            "source_mode_override": kind_override,
             "assessment_mode": assessment_mode,
         },
     )
@@ -2085,48 +2140,57 @@ def create_upload(
     cleanup_paths = {temp_input_path}
     temp_output_dir = Path(tempfile.mkdtemp(prefix="budget_history_"))
     try:
-        if _is_proforma_source_mode(source_mode):
-            parse_warnings: list[str] = []
-            if route.path == "pdf_vlm":
-                pdf_result = _extract_pdf_statement_sync(temp_input_path, source_mode=source_mode)
-                if isinstance(pdf_result, DocumentExtractionFailure):
-                    return _build_review_required_response(
-                        session,
-                        hoa_id=hoa_id,
-                        actor=actor,
-                        upload=upload,
-                        original_filename=original_filename,
-                        reason=pdf_result.message,
-                        code=pdf_result.code,
-                        warnings=[pdf_result.message],
-                        details=pdf_result.details,
-                    )
-                line_items = _statement_to_budget_line_items(pdf_result, source_mode=source_mode)
-                canonical_statement = pdf_result
-            else:
-                normalized_path = _ensure_xlsx(temp_input_path)
-                cleanup_paths.add(normalized_path)
-                temp_input_path = normalized_path
-                excel_result = _extract_proforma_excel_statement_sync(
-                    temp_input_path,
-                    original_filename=original_filename,
+        extracted = _extract_budget_source(
+            temp_input_path,
+            route=route,
+            original_filename=original_filename,
+            kind_override=kind_override,
+        )
+        if isinstance(extracted, DocumentExtractionFailure):
+            response = _build_review_required_response(
+                session,
+                hoa_id=hoa_id,
+                actor=actor,
+                upload=upload,
+                original_filename=original_filename,
+                reason=extracted.message,
+                code=extracted.code,
+                warnings=[extracted.message],
+                details=extracted.details,
+            )
+            # A file that isn't a budget (e.g. Bob's prep sheet) can still
+            # carry facts for the HOA settings.
+            findings = _apply_upload_facts(
+                session, hoa=hoa, actor=actor, upload=upload,
+                facts=(extracted.details or {}).get("disclosure_facts"),
+                original_filename=original_filename,
+            )
+            if findings:
+                response = response.model_copy(
+                    update={"disclosure_facts": [DisclosureFactFinding(**finding) for finding in findings]}
                 )
-                if isinstance(excel_result, DocumentExtractionFailure):
-                    return _build_review_required_response(
-                        session,
-                        hoa_id=hoa_id,
-                        actor=actor,
-                        upload=upload,
-                        original_filename=original_filename,
-                        reason=excel_result.message,
-                        code=excel_result.code,
-                        warnings=[excel_result.message],
-                        details=excel_result.details,
-                    )
-                line_items = _statement_to_budget_line_items(excel_result, source_mode=source_mode)
-                canonical_statement = excel_result
+            return response
+        source_mode = kind_override or (
+            SOURCE_MODE_PROFORMA_FINAL_BUDGET
+            if extracted.report_type == "final_budget"
+            else SOURCE_MODE_INCOME_STATEMENT
+        )
+        upload.source_mode = source_mode
+        metadata = extracted.extraction_metadata or {}
+        extraction_audit = {
+            key: metadata.get(key)
+            for key in (
+                "detected_kind", "kind_evidence", "association_name", "pages_used",
+                "page_types", "period_end", "months_covered", "fiscal_year", "model", "seconds",
+            )
+            if metadata.get(key) is not None
+        }
+        source_notes = _source_document_warnings(extracted, hoa)
 
-            canonical_issues = validate_extracted_statement(canonical_statement)
+        if source_mode == SOURCE_MODE_PROFORMA_FINAL_BUDGET:
+            parse_warnings: list[str] = []
+            line_items = _statement_to_budget_line_items(extracted, source_mode=source_mode)
+            canonical_issues = validate_extracted_statement(extracted)
             if has_blocking_validation_issues(canonical_issues):
                 review_reason, validation_warnings = _build_proforma_validation_feedback(
                     original_filename=original_filename,
@@ -2193,264 +2257,135 @@ def create_upload(
                 hoa_id=hoa_id,
                 line_items=line_items,
             )
+        else:
+            statement_period_hint = extracted.statement_period
+            if not statement_period_hint and route.path == "pdf_vlm":
+                statement_period_hint = extract_pdf_statement_period_hint(temp_input_path)
+            normalized_path = build_normalized_statement_workbook(extracted)
+            cleanup_paths.add(normalized_path)
 
-            upload.enrichment_status = "completed"
-            upload.line_items_json = _json_dumps(line_items)
-            upload.budget_preview_json = _json_dumps(preview)
-            upload.statement_month = statement_month
-            upload.growth_factor = growth_factor
-            upload.growth_factor_note = growth_factor_note
-            upload.source_mode = source_mode
-            upload.assessment_mode = assessment_mode
-
-            _create_audit_event(
-                session,
-                hoa_id=hoa_id,
-                actor=actor,
-                event_type="enrichment_completed",
-                summary=f"Enriched upload for {hoa.name}",
-                upload_id=upload.id,
-                draft_id=draft.id,
-                payload={
-                    "statement_month": statement_month,
-                    "growth_factor": growth_factor,
-                    "source_mode": source_mode,
-                    "assessment_mode": assessment_mode,
-                    "assessment_mapping_counts": mapping_counts,
-                    "auto_applied_merge_count": auto_applied_merge_count,
-                },
+            fiscal_year_start_month = hoa.fiscal_year_start_month or 1
+            inferred = (
+                infer_growth_factor_from_statement_period(statement_period_hint, fiscal_year_start_month)
+                if statement_period_hint
+                else None
             )
-            session.commit()
-
-            quality_warning: Optional[ExtractionQualityWarning] = None
-            if route.path == "pdf_vlm" and isinstance(pdf_result, ExtractedFinancialStatement):
-                metadata = pdf_result.extraction_metadata or {}
-                if metadata.get("used_vision_only_fallback"):
-                    quality_warning = ExtractionQualityWarning(
-                        code="scanned_pdf_vision_only",
-                        title="Please double-check the numbers below",
-                        body=(
-                            "This file was a scanned image, so we had to read every "
-                            "number from the page picture instead of the file's text. "
-                            "That's usually accurate, but not always — please review "
-                            "every line item carefully before saving."
-                        ),
-                        severity="warning",
+            period_end = metadata.get("period_end")
+            if inferred is None and period_end:
+                try:
+                    end = datetime.strptime(str(period_end), "%Y-%m-%d")
+                    inferred = infer_growth_factor_from_statement_period(
+                        end.strftime("%m/%d/%Y"), fiscal_year_start_month
                     )
-
-            return BudgetUploadResponse(
-                upload_id=upload.id,
-                draft=_serialize_draft(draft, upload),
-                timeline_event=_serialize_timeline_event(upload_received_event),
-                warnings=parse_warnings,
-                extraction_quality_warning=quality_warning,
-            )
-
-        statement_period_hint: str | None = None
-        if route.path == "pdf_vlm":
-            pdf_source_path = temp_input_path
-            pdf_result = _extract_pdf_statement_sync(temp_input_path, source_mode=source_mode)
-            if isinstance(pdf_result, DocumentExtractionFailure):
+                except ValueError:
+                    inferred = None
+            if inferred is None:
                 return _build_review_required_response(
                     session,
                     hoa_id=hoa_id,
                     actor=actor,
                     upload=upload,
                     original_filename=original_filename,
-                    reason=pdf_result.message,
-                    code=pdf_result.code,
-                    warnings=[pdf_result.message],
-                    details=pdf_result.details,
-                )
-
-            # Diagnostic: log a sample of what Gemini returned BEFORE the
-            # XLSX round-trip. Used to debug "missing_numeric_coverage"
-            # validation failures — lets us see whether numerics were lost
-            # at the model boundary or during the workbook round-trip below.
-            try:
-                _sample = pdf_result.line_items[:5]
-                logger.info(
-                    "PDF extraction sample (post-Gemini, pre-roundtrip): %d items, first 5 = %s",
-                    len(pdf_result.line_items),
-                    [
-                        {
-                            "label": getattr(item, "label", None),
-                            "section_kind": getattr(item, "section_kind", None),
-                            "current_actual": getattr(item, "current_actual", None),
-                            "current_budget": getattr(item, "current_budget", None),
-                            "ytd_actual": getattr(item, "ytd_actual", None),
-                            "ytd_budget": getattr(item, "ytd_budget", None),
-                            "annual_budget": getattr(item, "annual_budget", None),
-                        }
-                        for item in _sample
-                    ],
-                )
-            except Exception as _log_exc:
-                logger.debug("Could not log PDF extraction sample: %s", _log_exc)
-
-            statement_period_hint = pdf_result.statement_period or extract_pdf_statement_period_hint(pdf_source_path)
-            normalized_path = build_normalized_statement_workbook(pdf_result)
-            cleanup_paths.add(normalized_path)
-            temp_input_path = normalized_path
-        else:
-            normalized_path = _ensure_xlsx(temp_input_path)
-            cleanup_paths.add(normalized_path)
-            temp_input_path = normalized_path
-
-        growth_factor = None
-        if statement_period_hint:
-            inferred = infer_growth_factor_from_statement_period(
-                statement_period_hint,
-                hoa.fiscal_year_start_month or 1,
-            )
-            if inferred is not None:
-                growth_factor, detected_months, source = inferred
-
-        if growth_factor is None:
-            growth_factor, detected_months, source = infer_growth_factor_from_input(
-                temp_input_path,
-                fiscal_year_start_month=hoa.fiscal_year_start_month or 1,
-            )
-        growth_factor_note = f"auto annualization 12/{detected_months} from {source}"
-        statement_month = _extract_statement_month(hoa.fiscal_year_start_month or 1, detected_months)
-        intermediate_path = str(temp_output_dir / "Income_Statement_Enriched.xlsx")
-        output_path = str(temp_output_dir / "Budget_Pipeline.xlsx")
-        # PDF extraction: pass known column positions so enricher skips detection
-        pdf_known_columns = (
-            {"ytd_actual": 6, "annual_budget": 9}
-            if route.path == "pdf_vlm" else None
-        )
-        pipeline = BudgetPipeline(
-            input_path=temp_input_path,
-            intermediate_path=intermediate_path,
-            output_path=output_path,
-            growth_factor=growth_factor,
-            growth_factor_note=growth_factor_note,
-            enrich_only=False,
-            known_columns=pdf_known_columns,
-        )
-        pipeline.run()
-        enriched = macros_service.read_sheet_as_table(intermediate_path, "Income Statement")
-        preview = macros_service.read_first_sheet_preview(output_path, settings.MAX_PREVIEW_ROWS)
-        parse_capture: dict[str, Any] = {}
-        line_items, parse_warnings = _table_to_line_items(enriched, capture=parse_capture)
-        # Diagnostic: log a sample of items AFTER the XLSX round-trip.
-        # Compare against the post-Gemini sample logged earlier to see
-        # whether numerics survived BudgetPipeline column detection and
-        # _table_to_line_items.
-        if route.path == "pdf_vlm":
-            try:
-                _sample_after = line_items[:5]
-                logger.info(
-                    "PDF extraction sample (post-roundtrip, pre-validation): %d items, first 5 = %s",
-                    len(line_items),
-                    [
-                        {
-                            "label": item.get("label"),
-                            "category": item.get("category"),
-                            "ytd_actual": item.get("ytd_actual"),
-                            "annual_budget": item.get("annual_budget"),
-                            "projection": item.get("projection"),
-                            "raw_keys": list((item.get("raw") or {}).keys())[:12],
-                        }
-                        for item in _sample_after
-                    ],
-                )
-                logger.info(
-                    "Enriched workbook headers (%d total) = %s",
-                    len(enriched.get("headers", [])),
-                    enriched.get("headers", []),
-                )
-            except Exception as _log_exc:
-                logger.debug("Could not log post-roundtrip sample: %s", _log_exc)
-        canonical_statement = _canonical_statement_from_line_items(
-            line_items,
-            family=route.family or ("pdf_visual_document" if route.path == "pdf_vlm" else "known_clean_excel_workbook"),
-            stated_totals=parse_capture.get("stated_totals"),
-        )
-        canonical_issues = validate_extracted_statement(canonical_statement)
-        # C5: an unparseable cell in the PROMOTED (annual) column is a
-        # blocking issue — the operator must resolve the raw text before the
-        # draft can feed assessment math. Never silently promoted as $0.
-        for question in parse_capture.get("review_questions", []):
-            canonical_issues.append(
-                {
-                    "code": "unparseable_promoted_cell",
-                    "severity": "error",
-                    "message": (
-                        f"Could not read the Annual Budget value for "
-                        f"'{question.get('label')}' (cell text: "
-                        f"{question.get('raw_text')!r}). Please correct the "
-                        "source document or enter the value manually."
+                    reason=(
+                        f"{original_filename} reads as an income statement, but its period "
+                        "(the month it runs to) could not be found, so the year-to-date "
+                        "actuals can't be annualized."
                     ),
-                    "details": question,
-                }
+                    code="statement_period_missing",
+                    warnings=[],
+                    details={"statement_period": statement_period_hint, **extraction_audit},
+                )
+            growth_factor, detected_months, period_source = inferred
+            growth_factor_note = f"auto annualization 12/{detected_months} from {period_source}"
+            statement_month = _extract_statement_month(fiscal_year_start_month, detected_months)
+            months_note = _months_sanity_warning(extracted, detected_months)
+            if months_note:
+                source_notes.append(months_note)
+
+            intermediate_path = str(temp_output_dir / "Income_Statement_Enriched.xlsx")
+            output_path = str(temp_output_dir / "Budget_Pipeline.xlsx")
+            BudgetPipeline(
+                input_path=normalized_path,
+                intermediate_path=intermediate_path,
+                output_path=output_path,
+                growth_factor=growth_factor,
+                growth_factor_note=growth_factor_note,
+                enrich_only=False,
+                known_columns=_NORMALIZED_KNOWN_COLUMNS,
+            ).run()
+            enriched = macros_service.read_sheet_as_table(intermediate_path, "Income Statement")
+            preview = macros_service.read_first_sheet_preview(output_path, settings.MAX_PREVIEW_ROWS)
+            line_items, parse_warnings = _table_to_line_items(enriched)
+            canonical_statement = _canonical_statement_from_line_items(
+                line_items,
+                family=extracted.document_family,
+            ).model_copy(update={"totals": extracted.totals})
+            canonical_issues = validate_extracted_statement(canonical_statement)
+            if has_blocking_validation_issues(canonical_issues):
+                review_reason, validation_warnings = _build_income_statement_validation_feedback(
+                    original_filename=original_filename,
+                    issues=canonical_issues,
+                )
+                return _build_review_required_response(
+                    session,
+                    hoa_id=hoa_id,
+                    actor=actor,
+                    upload=upload,
+                    original_filename=original_filename,
+                    reason=review_reason,
+                    code="validation_failed",
+                    warnings=parse_warnings + validation_warnings,
+                    details={"validation_issues": canonical_issues, "source_mode": source_mode},
+                )
+
+            _replace_active_draft(session, hoa_id, timestamp)
+            draft = BudgetDraft(
+                property_id=hoa_id,
+                source_upload_id=upload.id,
+                reserve_study_upload_id=None,
+                reopened_from_version_id=None,
+                source_mode=source_mode,
+                assessment_mode=assessment_mode,
+                status=BUDGET_DRAFT_ACTIVE,
+                line_items_json=_json_dumps(line_items),
+                reserve_study_rows_json=_json_dumps([]),
+                reserve_study_warnings_json=_json_dumps([]),
+                reserve_study_status="none",
+                global_note=None,
+                statement_month=statement_month,
+                growth_factor=growth_factor,
+                growth_factor_note=growth_factor_note,
+                reserve_inflation_rate=app_settings_service.get_global_reserve_inflation_rate(session),
+                reserve_inflation_note=None,
+                budget_preview_json=_json_dumps(preview),
+                created_by_user_id=actor["id"],
+                updated_by_user_id=actor["id"],
+                actor_name=_actor_name(actor),
+                created_at=timestamp,
+                updated_at=timestamp,
             )
-        if has_blocking_validation_issues(canonical_issues):
-            review_reason, validation_warnings = _build_income_statement_validation_feedback(
-                original_filename=original_filename,
-                issues=canonical_issues,
+            session.add(draft)
+            session.flush()
+            auto_applied_merge_count = auto_apply_merges_on_upload(
+                property_id=hoa_id,
+                budget_draft_id=draft.id,
+                new_draft_line_items=line_items,
+                db_conn=_raw_sqlite_connection(session),
             )
-            return _build_review_required_response(
+            if auto_applied_merge_count:
+                session.expire(draft, ["line_items_json", "version_int"])
+                line_items = _json_loads(draft.line_items_json, line_items)
+                preview = _refresh_draft_snapshot_from_upload(session, draft, upload)
+            else:
+                _persist_draft_enriched_workbook(
+                    draft,
+                    enriched_bytes=Path(intermediate_path).read_bytes(),
+                )
+            mapping_counts = _materialize_assessment_mappings_for_line_items(
                 session,
                 hoa_id=hoa_id,
-                actor=actor,
-                upload=upload,
-                original_filename=original_filename,
-                reason=review_reason,
-                code="validation_failed",
-                warnings=parse_warnings + validation_warnings,
-                details={"validation_issues": canonical_issues, "source_mode": source_mode},
+                line_items=line_items,
             )
-
-        _replace_active_draft(session, hoa_id, timestamp)
-        draft = BudgetDraft(
-            property_id=hoa_id,
-            source_upload_id=upload.id,
-            reserve_study_upload_id=None,
-            reopened_from_version_id=None,
-            source_mode=source_mode,
-            assessment_mode=assessment_mode,
-            status=BUDGET_DRAFT_ACTIVE,
-            line_items_json=_json_dumps(line_items),
-            reserve_study_rows_json=_json_dumps([]),
-            reserve_study_warnings_json=_json_dumps([]),
-            reserve_study_status="none",
-            global_note=None,
-            statement_month=statement_month,
-            growth_factor=growth_factor,
-            growth_factor_note=growth_factor_note,
-            reserve_inflation_rate=app_settings_service.get_global_reserve_inflation_rate(session),
-            reserve_inflation_note=None,
-            budget_preview_json=_json_dumps(preview),
-            created_by_user_id=actor["id"],
-            updated_by_user_id=actor["id"],
-            actor_name=_actor_name(actor),
-            created_at=timestamp,
-            updated_at=timestamp,
-        )
-        session.add(draft)
-        session.flush()
-        auto_applied_merge_count = auto_apply_merges_on_upload(
-            property_id=hoa_id,
-            budget_draft_id=draft.id,
-            new_draft_line_items=line_items,
-            db_conn=_raw_sqlite_connection(session),
-        )
-        if auto_applied_merge_count:
-            session.expire(draft, ["line_items_json", "version_int"])
-            line_items = _json_loads(draft.line_items_json, line_items)
-            preview = _refresh_draft_snapshot_from_upload(session, draft, upload)
-        else:
-            _persist_draft_enriched_workbook(
-                draft,
-                enriched_bytes=Path(intermediate_path).read_bytes(),
-            )
-        mapping_counts = _materialize_assessment_mappings_for_line_items(
-            session,
-            hoa_id=hoa_id,
-            line_items=line_items,
-        )
 
         upload.enrichment_status = "completed"
         upload.line_items_json = _json_dumps(line_items)
@@ -2473,39 +2408,31 @@ def create_upload(
                 "statement_month": statement_month,
                 "growth_factor": growth_factor,
                 "source_mode": source_mode,
+                "source_mode_override": kind_override,
                 "assessment_mode": assessment_mode,
                 "assessment_mapping_counts": mapping_counts,
                 "auto_applied_merge_count": auto_applied_merge_count,
+                "extraction": extraction_audit,
             },
         )
         session.commit()
-        # If the extractor took a degraded path (e.g. scanned-PDF vision-only
-        # fallback), surface a one-shot quality warning so the frontend can
-        # show a dismissible dialog. The text is written for non-technical
-        # users and explains why they should double-check the numbers.
-        quality_warning: Optional[ExtractionQualityWarning] = None
-        if route.path == "pdf_vlm" and isinstance(pdf_result, ExtractedFinancialStatement):
-            metadata = pdf_result.extraction_metadata or {}
-            if metadata.get("used_vision_only_fallback"):
-                quality_warning = ExtractionQualityWarning(
-                    code="scanned_pdf_vision_only",
-                    title="Please double-check the numbers below",
-                    body=(
-                        "This file was a scanned image, so we had to read every "
-                        "number from the page picture instead of the file's text. "
-                        "That's usually accurate, but not always — please review "
-                        "every line item carefully (especially actuals and budgets) "
-                        "before saving. If you find mistakes, try re-uploading the "
-                        "original Excel file instead."
-                    ),
-                    severity="warning",
-                )
+        findings = _apply_upload_facts(
+            session, hoa=hoa, actor=actor, upload=upload,
+            facts=metadata.get("disclosure_facts"), original_filename=original_filename,
+        )
+
+        non_blocking_issues = [issue for issue in canonical_issues if issue.get("severity") != "error"]
         return BudgetUploadResponse(
             upload_id=upload.id,
             draft=_serialize_draft(draft, upload),
             timeline_event=_serialize_timeline_event(upload_received_event),
-            warnings=parse_warnings,
-            extraction_quality_warning=quality_warning,
+            warnings=parse_warnings + [str(issue.get("message")) for issue in non_blocking_issues if issue.get("message")],
+            extraction_quality_warning=_build_extraction_quality_warning(
+                extracted,
+                issues=non_blocking_issues,
+                notes=source_notes,
+            ),
+            disclosure_facts=[DisclosureFactFinding(**finding) for finding in findings],
         )
     except Exception as exc:
         upload.enrichment_status = "failed"
@@ -2697,6 +2624,7 @@ def replace_budget_source(
     original_filename: str,
     content_type: Optional[str],
     file_bytes: bytes,
+    source_mode: Optional[str] = None,
 ) -> BudgetUploadResponse:
     """Replace the primary budget source file on an existing active draft.
 
@@ -2709,10 +2637,11 @@ def replace_budget_source(
 
     Implementation: delegate to ``create_upload`` (reusing all extraction /
     validation / enrichment / mapping logic unchanged), then carry the
-    preserved fields onto the resulting active draft. Passing the existing
-    draft's ``source_mode``/``assessment_mode`` keeps the same extraction branch
-    and makes the property assessment-mode update a no-op (no mode switch, no
-    ``assessment_mode_changed`` event). On extraction/validation failure,
+    preserved fields onto the resulting active draft. The new file's kind is
+    detected like any upload (``source_mode`` is the operator's override), so
+    a final budget can replace an income statement and vice versa. Passing the
+    existing draft's ``assessment_mode`` makes the property assessment-mode
+    update a no-op (no ``assessment_mode_changed`` event). On extraction/validation failure,
     ``create_upload`` returns a review-required response BEFORE superseding the
     old draft, so the prior active draft is left intact.
     """
@@ -2739,7 +2668,6 @@ def replace_budget_source(
         "reserve_inflation_rate": draft.reserve_inflation_rate,
         "reserve_inflation_note": draft.reserve_inflation_note,
     }
-    existing_source_mode = draft.source_mode
     existing_assessment_mode = draft.assessment_mode
 
     result = create_upload(
@@ -2749,7 +2677,7 @@ def replace_budget_source(
         original_filename=original_filename,
         content_type=content_type,
         file_bytes=file_bytes,
-        source_mode=existing_source_mode,
+        source_mode=source_mode,
         assessment_mode=existing_assessment_mode,
     )
 
@@ -2786,16 +2714,14 @@ def replace_budget_source(
             "replaced_draft_id": draft_id,
             "new_draft_id": new_draft.id,
             "filename": original_filename,
+            "previous_source_mode": draft.source_mode,
+            "source_mode": new_draft.source_mode,
             "reserve_study_preserved": preserved["reserve_study_upload_id"] is not None,
         },
     )
     session.commit()
-    return BudgetUploadResponse(
-        upload_id=result.upload_id,
-        draft=_serialize_draft(new_draft, _get_upload(session, new_draft.source_upload_id)),
-        timeline_event=result.timeline_event,
-        warnings=result.warnings,
-        extraction_quality_warning=result.extraction_quality_warning,
+    return result.model_copy(
+        update={"draft": _serialize_draft(new_draft, _get_upload(session, new_draft.source_upload_id))}
     )
 
 
@@ -2810,10 +2736,9 @@ def create_upload_bundle(
     reserve_filename: str,
     reserve_content_type: Optional[str],
     reserve_file_bytes: bytes,
-    source_mode: str = SOURCE_MODE_INCOME_STATEMENT,
+    source_mode: Optional[str] = None,
     assessment_mode: str = ASSESSMENT_MODE_VARIABLE,
 ) -> BudgetBundleUploadResponse:
-    source_mode = _normalize_source_mode(source_mode)
     hoa = _get_property(session, hoa_id)
     assessment_mode = _update_property_assessment_mode(
         session,
@@ -2838,9 +2763,7 @@ def create_upload_bundle(
         budget_status = _bundle_status_from_budget_response(budget_response, filename=budget_filename)
     else:
         unsupported_reason = (
-            "Unsupported budget file type. Upload an Excel workbook or PDF pro forma / final budget."
-            if _is_proforma_source_mode(source_mode)
-            else "Unsupported budget file type. Upload an Excel workbook or PDF income statement."
+            "Unsupported budget file type. Upload an income statement or final budget as Excel or PDF."
         )
         draft = None
         budget_status = BundleFileStatus(
@@ -2873,6 +2796,8 @@ def create_upload_bundle(
         reserve_study=reserve_status,
         can_continue_with_budget_only=draft is not None and reserve_status.status == "failed",
         can_continue_with_reserve_study_only=draft is None and reserve_upload is not None and budget_status.status == "failed",
+        extraction_quality_warning=budget_response.extraction_quality_warning if budget_route.is_supported else None,
+        disclosure_facts=budget_response.disclosure_facts if budget_route.is_supported else [],
     )
 
 
@@ -3382,22 +3307,11 @@ def create_budget_version(
         line_items=line_items,
     )
 
-    route = choose_financial_document_route(upload.original_filename, upload.content_type)
-    if route.path == "pdf_vlm" or _is_proforma_source_mode(upload.source_mode):
-        source_path = _ensure_draft_enriched_workbook(session, draft)
-        temp_input_path = _write_temp_workbook(source_path.read_bytes(), "enriched-income-statement.xlsx")
-    else:
-        source_path = _budget_storage_path(upload.storage_key)
-        temp_input_path = _write_temp_workbook(source_path.read_bytes(), upload.original_filename)
+    source_path = _ensure_draft_enriched_workbook(session, draft, require_normalized=True)
+    temp_input_path = _write_temp_workbook(source_path.read_bytes(), "enriched-income-statement.xlsx")
     temp_output_dir = Path(tempfile.mkdtemp(prefix="budget_version_"))
     try:
-        temp_input_path = _ensure_xlsx(temp_input_path)
-
-        pdf_known_columns = (
-            {"ytd_actual": 6, "annual_budget": 9}
-            if route.path == "pdf_vlm" or _is_proforma_source_mode(upload.source_mode)
-            else None
-        )
+        pdf_known_columns = _NORMALIZED_KNOWN_COLUMNS
         macros_service.write_percent_changes_by_label(
             temp_input_path,
             "Income Statement",

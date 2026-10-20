@@ -1,6 +1,9 @@
 """Protected HOA-scoped budget history endpoints."""
 
+from typing import Optional
+
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, HTMLResponse
 from sqlalchemy.orm import Session
 
@@ -168,17 +171,20 @@ def suggest_budget_gl_merges(
 @router.post("/hoa/{hoa_id}/budget/upload", response_model=BudgetUploadResponse)
 async def upload_budget(
     hoa_id: int,
-    source_mode: BudgetSourceMode = Form("income_statement"),
+    source_mode: Optional[BudgetSourceMode] = Form(None),
     assessment_mode: AssessmentMode = Form("variable"),
     file: UploadFile = File(...),
     session: Session = Depends(get_session),
     current_user: dict = Depends(get_current_user),
 ) -> BudgetUploadResponse:
+    """``source_mode`` is an operator override; leave it out to let Gemini decide."""
     try:
         if file.size and file.size > MAX_UPLOAD_SIZE:
             raise HTTPException(status_code=413, detail="Uploaded file too large (max 100MB)")
         file_bytes = await file.read()
-        return budget_history_service.create_upload(
+        # Extraction blocks on Gemini for up to a few minutes; keep the event loop free.
+        return await run_in_threadpool(
+            budget_history_service.create_upload,
             session,
             hoa_id=hoa_id,
             actor=current_user,
@@ -188,6 +194,8 @@ async def upload_budget(
             source_mode=source_mode,
             assessment_mode=assessment_mode,
         )
+    except HTTPException:
+        raise
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except Exception as exc:
@@ -197,7 +205,7 @@ async def upload_budget(
 @router.post("/hoa/{hoa_id}/budget/upload-bundle", response_model=BudgetBundleUploadResponse)
 async def upload_budget_bundle(
     hoa_id: int,
-    source_mode: BudgetSourceMode = Form("income_statement"),
+    source_mode: Optional[BudgetSourceMode] = Form(None),
     assessment_mode: AssessmentMode = Form("variable"),
     budget_file: UploadFile = File(...),
     reserve_study_file: UploadFile = File(...),
@@ -211,7 +219,8 @@ async def upload_budget_bundle(
             raise HTTPException(status_code=413, detail="Reserve study file too large (max 100MB)")
         budget_file_bytes = await budget_file.read()
         reserve_file_bytes = await reserve_study_file.read()
-        return budget_history_service.create_upload_bundle(
+        return await run_in_threadpool(
+            budget_history_service.create_upload_bundle,
             session,
             hoa_id=hoa_id,
             actor=current_user,
@@ -224,6 +233,8 @@ async def upload_budget_bundle(
             source_mode=source_mode,
             assessment_mode=assessment_mode,
         )
+    except HTTPException:
+        raise
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except Exception as exc:
@@ -389,6 +400,7 @@ async def save_budget_draft(
 async def replace_budget_source(
     hoa_id: int,
     draft_id: int,
+    source_mode: Optional[BudgetSourceMode] = Form(None),
     file: UploadFile = File(...),
     session: Session = Depends(get_session),
     current_user: dict = Depends(get_current_user),
@@ -396,25 +408,35 @@ async def replace_budget_source(
     """Replace the primary budget source file on an existing active draft.
 
     Lets an operator swap the starting budget file without deleting the draft
-    or the disclosure package. The draft's `source_mode` is kept (no mode
-    switch), the attached reserve study is preserved, and a review-required
-    extraction leaves the prior draft intact. Returns the same
-    `BudgetUploadResponse` shape as the initial upload.
+    or the disclosure package. The new file's kind (income statement or final
+    budget) is detected unless ``source_mode`` overrides it; the attached
+    reserve study is preserved, and a review-required extraction leaves the
+    prior draft intact. Returns the same `BudgetUploadResponse` shape as the
+    initial upload.
     """
     try:
-        return budget_history_service.replace_budget_source(
+        if file.size and file.size > MAX_UPLOAD_SIZE:
+            raise HTTPException(status_code=413, detail="Uploaded file too large (max 100MB)")
+        file_bytes = await file.read()
+        return await run_in_threadpool(
+            budget_history_service.replace_budget_source,
             session,
             hoa_id=hoa_id,
             draft_id=draft_id,
             actor=current_user,
             original_filename=file.filename or "upload.xlsx",
             content_type=file.content_type,
-            file_bytes=await file.read(),
+            file_bytes=file_bytes,
+            source_mode=source_mode,
         )
+    except HTTPException:
+        raise
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @router.post(

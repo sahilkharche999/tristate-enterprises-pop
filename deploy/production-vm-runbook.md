@@ -107,8 +107,9 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_connect_timeout 60s;
-        proxy_send_timeout 300s;
-        proxy_read_timeout 300s;
+        # Budget uploads are read by Gemini; with one retry a long PDF can pass 300 s.
+        proxy_send_timeout 600s;
+        proxy_read_timeout 600s;
     }
 }
 ```

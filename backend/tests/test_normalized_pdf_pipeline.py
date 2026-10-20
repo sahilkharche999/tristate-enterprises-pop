@@ -159,8 +159,79 @@ def test_budget_pipeline_accepts_normalized_pdf_workbook_without_header_row_abov
         growth_factor=12.0 / 9.0,
         growth_factor_note="auto annualization 12/9 from statement_period",
         enrich_only=True,
+        known_columns={"ytd_actual": 6, "annual_budget": 9},
     )
 
     pipeline.run()
 
     assert Path(intermediate_path).exists()
+
+
+def test_rows_without_numeric_account_codes_survive_enrichment_and_generation(tmp_path):
+    """Final budgets like Old Mill's have no GL codes, and some PDFs print dashed
+    codes. Both used to be read as section titles (dropped from the generated
+    budget) or labelled with the code instead of the name."""
+    statement = ExtractedFinancialStatement.model_validate(
+        {
+            "document_family": "excel_budget_workbook",
+            "report_type": "final_budget",
+            "line_items": [
+                {"label": "Assessments", "section_kind": "income", "annual_budget": 2025540.0},
+                {"label": "Clubhouse Rental Income", "section_kind": "income", "annual_budget": 1810.0},
+                {"account_code_text": "50100-00", "label": "Management Fee", "section_kind": "operating", "annual_budget": 93744.0},
+                {"label": "Total Care Landscaping", "section_kind": "operating", "annual_budget": 52200.0},
+            ],
+        }
+    )
+
+    normalized_path = build_normalized_statement_workbook(statement, str(tmp_path / "normalized.xlsx"))
+    intermediate_path = str(tmp_path / "Income_Statement_Enriched.xlsx")
+    output_path = str(tmp_path / "Budget_Pipeline.xlsx")
+    BudgetPipeline(
+        input_path=normalized_path,
+        intermediate_path=intermediate_path,
+        output_path=output_path,
+        growth_factor=1.0,
+        growth_factor_note="pro forma / final budget annual basis",
+        enrich_only=False,
+        known_columns={"ytd_actual": 6, "annual_budget": 9},
+    ).run()
+
+    line_items, _ = _table_to_line_items(macros_service.read_sheet_as_table(intermediate_path, "Income Statement"))
+    assert [li["label"] for li in line_items] == [
+        "Assessments", "Clubhouse Rental Income", "Management Fee", "Total Care Landscaping",
+    ]
+    # The enricher computed Proposed for every row, coded or not.
+    assert [li["raw"]["Proposed"] for li in line_items] == [2025540.0, 1810.0, 93744.0, 52200.0]
+
+    preview = macros_service.read_first_sheet_preview(output_path, 200)
+    labels = [row[1] for row in preview["rows"] if len(row) > 1 and row[1]]
+    assert {"Assessments", "Clubhouse Rental Income", "Management Fee", "Total Care Landscaping"} <= set(labels)
+    assert "50100-00" not in labels
+    preview_rows = {row[1]: row for row in preview["rows"] if len(row) > 1 and row[1]}
+    assert preview_rows["Total Income"][5] == 2027350
+    assert preview_rows["Total Operating Expense"][5] == 145944
+
+
+def test_draft_snapshot_render_applies_operator_percent_change(tmp_path):
+    """The re-render builds a fresh normalized workbook; the operator's % change
+    must land in the column the enricher reads (it used to go to column 39)."""
+    from types import SimpleNamespace
+
+    from app.services.budget_history_service import _render_draft_snapshot_from_upload
+
+    upload = SimpleNamespace(original_filename="Income Statement.pdf", content_type="application/pdf", storage_key="x")
+    line_items = [
+        {"line_item_key": "40000", "account_code": 40000, "label": "Assessment Income", "category": "income",
+         "ytd_actual": 900.0, "annual_budget": 1200.0, "percent_change": 0},
+        {"line_item_key": "Management Service", "label": "Management Service", "category": "operating",
+         "ytd_actual": 600.0, "annual_budget": 1000.0, "percent_change": 10},
+    ]
+    enriched_bytes, _ = _render_draft_snapshot_from_upload(
+        upload, line_items=line_items, growth_factor=1.0, growth_factor_note="test",
+    )
+    path = tmp_path / "enriched.xlsx"
+    path.write_bytes(enriched_bytes)
+    rows, _ = _table_to_line_items(macros_service.read_sheet_as_table(str(path), "Income Statement"))
+    proposed = {row["label"]: row["raw"]["Proposed"] for row in rows}
+    assert proposed == {"Assessment Income": 1200.0, "Management Service": 1100.0}

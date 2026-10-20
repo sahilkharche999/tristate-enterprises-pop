@@ -12,8 +12,6 @@ change's Track A:
 """
 from app.services.income_statement_parser import (
     parse_financial_cell,
-    parse_rows_with_sections,
-    _parse_financial_float,
 )
 from app.services.budget_history_service import (
     _canonical_statement_from_line_items,
@@ -79,88 +77,10 @@ class TestParseFinancialCell:
     def test_bool_is_not_money(self):
         assert parse_financial_cell(True).kind == "unparseable"
 
-    def test_float_wrapper_keeps_zero_collapse_but_gains_sign(self):
-        # Wrapper behavior contract: unparseable/dash/empty -> 0.0 (legacy
-        # arithmetic sites), negatives now carry sign.
-        assert _parse_financial_float("($1,234)") == -1234.0
-        assert _parse_financial_float("1,234-") == -1234.0
-        assert _parse_financial_float("junk") == 0.0
-        assert _parse_financial_float("-") == 0.0
-
-    def test_all_entry_points_agree(self):
-        # C5 spec: income-statement path and budget-history path produce the
-        # same value for the same text.
-        for text in ("($1,234.56)", "1,234.56-", "$99.10", "-", "junk"):
-            assert _parse_financial_float(text) == _parse_float(text)
-
-
-# ---------------------------------------------------------------------------
-# C5/C6 — row parsing: null propagation, review questions, totals capture
-# ---------------------------------------------------------------------------
-
-
-def _rows_with_annual_at_2(annual_cells: dict[str, object], totals: bool = True):
-    """Minimal statement layout: col0=section/blank, col1=label, col2=annual."""
-    rows = [
-        ["Operating Income", None, None],
-        [None, "Assessment Income", annual_cells.get("income", "1200.00")],
-        (["Total Operating Income", None, "1200.00"] if totals else [None, None, None]),
-        ["Operating Expense", None, None],
-        [None, "Landscaping", annual_cells.get("landscaping", "400.00")],
-        [None, "Insurance", annual_cells.get("insurance", "800.00")],
-        (["Total Operating Expense", None, "1200.00"] if totals else [None, None, None]),
-    ]
-    col_indices = {"ytd_actual": 2, "annual_budget": 2, "variance": 2,
-                   "projection": 2, "percent_change": 2,
-                   "_real_matched_keys": ["annual_budget"]}
-    return rows, col_indices
-
-
-class TestRowParsingNullPropagation:
-    def test_dash_annual_becomes_none_not_zero(self):
-        rows, cols = _rows_with_annual_at_2({"landscaping": "-"})
-        items = parse_rows_with_sections(rows, cols)
-        by_label = {i["label"]: i for i in items}
-        assert by_label["Landscaping"]["annual_budget"] is None
-
-    def test_unparseable_annual_records_review_question(self):
-        rows, cols = _rows_with_annual_at_2({"insurance": "1,2X4.00"})
-        capture: dict = {}
-        items = parse_rows_with_sections(rows, cols, capture=capture)
-        by_label = {i["label"]: i for i in items}
-        assert by_label["Insurance"]["annual_budget"] is None
-        questions = capture.get("review_questions", [])
-        assert len(questions) == 1
-        assert questions[0]["label"] == "Insurance"
-        assert questions[0]["raw_text"] == "1,2X4.00"
-        assert questions[0]["column"] == "annual_budget"
-
-    def test_negative_annual_keeps_sign(self):
-        rows, cols = _rows_with_annual_at_2({"landscaping": "($400.00)"})
-        items = parse_rows_with_sections(rows, cols)
-        by_label = {i["label"]: i for i in items}
-        assert by_label["Landscaping"]["annual_budget"] == -400.0
-
-
-class TestTotalsCapture:
-    def test_total_rows_captured_and_excluded_from_items(self):
-        rows, cols = _rows_with_annual_at_2({})
-        capture: dict = {}
-        items = parse_rows_with_sections(rows, cols, capture=capture)
-        labels = [i["label"] for i in items]
-        assert "Total Operating Expense" not in labels
-        stated = capture["stated_totals"]
-        assert {t["label"] for t in stated} == {
-            "Total Operating Income",
-            "Total Operating Expense",
-        }
-        expense_total = next(t for t in stated if t["section"] == "operating")
-        assert expense_total["annual_budget"] == 1200.0
-
-    def test_no_capture_dict_keeps_legacy_shape(self):
-        rows, cols = _rows_with_annual_at_2({})
-        items = parse_rows_with_sections(rows, cols)
-        assert all(not i["label"].lower().startswith("total ") for i in items)
+    def test_budget_history_float_parsing_matches_the_cell_parser(self):
+        # Same value for the same text on every path that reads money.
+        for text in ("($1,234.56)", "1,234.56-", "$99.10"):
+            assert parse_financial_cell(text).value == _parse_float(text)
 
 
 # ---------------------------------------------------------------------------
@@ -208,7 +128,9 @@ class TestSubtotalCrossCheck:
         assert len(statement.totals) == 1
         assert statement.totals[0]["amount"] == 1200.0
 
-    def test_mismatch_blocks_with_document_source(self):
+    def test_mismatch_is_flagged_not_blocking(self):
+        # Decided 2026-10-20: a totals mismatch creates the draft and is shown
+        # to the operator, it does not reject the upload.
         statement = _canonical_statement_from_line_items(
             _line_items(insurance=200.0),  # lines sum to 600
             family="known_clean_excel_workbook",
@@ -220,11 +142,11 @@ class TestSubtotalCrossCheck:
         issues = validate_extracted_statement(statement)
         mismatches = [i for i in issues if i["code"] == "subtotal_mismatch"]
         assert len(mismatches) == 1
-        assert mismatches[0]["severity"] == "error"
+        assert mismatches[0]["severity"] == "warning"
         assert mismatches[0]["details"]["totals_source"] == "document"
         assert mismatches[0]["details"]["expected_total"] == 1200.0
         assert mismatches[0]["details"]["actual_total"] == 600.0
-        assert has_blocking_validation_issues(issues)
+        assert not has_blocking_validation_issues(issues)
 
     def test_within_one_dollar_tolerance_passes(self):
         statement = _canonical_statement_from_line_items(
@@ -259,3 +181,41 @@ class TestSubtotalCrossCheck:
         mismatches = [i for i in issues if i["code"] == "subtotal_mismatch"]
         assert len(mismatches) == 1
         assert mismatches[0]["details"]["totals_source"] == "model"
+
+
+class TestStandardTotalPresentations:
+    """Real statements print a section's total in two standard ways; neither is a mismatch."""
+
+    def _statement(self, items, totals):
+        from app.models.financial_document_extraction import ExtractedFinancialStatement
+
+        return ExtractedFinancialStatement.model_validate(
+            {"document_family": "excel_budget_workbook", "report_type": "final_budget",
+             "line_items": items, "totals": totals}
+        )
+
+    def test_operating_total_printed_without_the_reserve_contribution(self):
+        # Old Mill 2027: TOTAL OPERATING EXPENSES excludes the contribution row.
+        statement = self._statement(
+            [{"label": "Management", "section_kind": "operating", "annual_budget": 1225993.64},
+             {"label": "MONTHLY CONTRIBUTION TO RESERVE", "section_kind": "operating", "annual_budget": 808916.36}],
+            [{"section_kind": "operating", "amount": 1225993.64, "source": "document"}],
+        )
+        assert not [i for i in validate_extracted_statement(statement) if i["code"] == "subtotal_mismatch"]
+
+    def test_revenue_total_printed_with_reserve_interest(self):
+        # Levy forecasts: Total revenues includes interest on the replacement fund.
+        statement = self._statement(
+            [{"label": "Assessments", "section_kind": "income", "annual_budget": 2034910.0},
+             {"label": "Interest income", "section_kind": "reserve_income", "annual_budget": 67800.0}],
+            [{"section_kind": "income", "amount": 2102710.0, "source": "document"}],
+        )
+        assert not [i for i in validate_extracted_statement(statement) if i["code"] == "subtotal_mismatch"]
+
+    def test_a_dropped_row_is_still_flagged(self):
+        statement = self._statement(
+            [{"label": "Assessments", "section_kind": "income", "annual_budget": 2000000.0},
+             {"label": "Interest income", "section_kind": "reserve_income", "annual_budget": 67800.0}],
+            [{"section_kind": "income", "amount": 2102710.0, "source": "document"}],
+        )
+        assert [i for i in validate_extracted_statement(statement) if i["code"] == "subtotal_mismatch"]

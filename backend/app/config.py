@@ -57,8 +57,6 @@ class Settings(BaseSettings):
     GEMINI_MODEL: str = ""
     DB_PATH: str = str(Path(__file__).parent / "ai_implementation" / "data" / "budget_ai.db")
     DOCUMENT_VLM_MAX_PAGES: int = 6
-    DOCUMENT_VLM_PAGE_SELECTION_THRESHOLD: int = 10
-    DOCUMENT_VLM_PAGE_SELECTION_MAX_PAGES: int = 80
     CBR_THRESHOLD: float = 0.95
     # off | new_governing_docs | all_final_packages
     ALLOCATION_RESOLUTION_ENFORCEMENT: str = "new_governing_docs"

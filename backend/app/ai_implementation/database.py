@@ -153,6 +153,10 @@ _HOA_SETTINGS_COLUMN_DEFINITIONS: dict[str, str] = {
     # dre-driven-assessment-engine).
     "tenant_id": "INTEGER NOT NULL DEFAULT 1",
     "version_int": "INTEGER NOT NULL DEFAULT 0",
+    # Disclosure facts found in uploaded budget files, with their source
+    # (file, page, quote) and whether they filled the field or are only a
+    # suggestion — see services/disclosure_facts_service.py.
+    "disclosure_facts_json": "TEXT",
     # Per-HOA disclosure-package letterhead logo (fix-disclosure-layout-toc-
     # special-assessment). Nullable — HOAs without one render the existing
     # default inline SVG mark. Stores a relative filename under

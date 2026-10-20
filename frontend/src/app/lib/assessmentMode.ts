@@ -31,7 +31,7 @@ export function assessmentModeShortLabel(mode: AssessmentMode | null | undefined
 
 export function assessmentModeHelperCopy(mode: AssessmentMode): string {
   if (mode === 'fixed') {
-    return 'Choose this when every unit pays the same dues amount each month. This is separate from the budget document source mode.';
+    return 'Choose this when every unit pays the same dues amount each month. This is separate from what kind of budget file you upload.';
   }
   return 'Choose this when the HOA needs a DRE-backed setup because different groups or units can owe different regular dues.';
 }

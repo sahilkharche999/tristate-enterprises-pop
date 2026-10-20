@@ -403,3 +403,31 @@ def test_get_llm_client_requires_api_key_when_enterprise_disabled(monkeypatch):
 
     with pytest.raises(RuntimeError, match="GEMINI_API_KEY is not set"):
         llm_client_module.get_llm_client()
+
+
+def test_timeouts_use_only_their_own_retry_budget(monkeypatch):
+    """Busy answers (429/5xx) can use every backoff step; a timeout, which
+    already cost the full timeout, only timeout_retries of them."""
+    import asyncio as _asyncio
+
+    from pydantic import BaseModel as _BaseModel
+
+    from app.ai_implementation.pipeline import llm_client as _client
+
+    class _Out(_BaseModel):
+        ok: bool
+
+    calls = []
+
+    class _Models:
+        async def generate_content(self, **kwargs):
+            calls.append(kwargs)
+            await _asyncio.sleep(1)
+
+    monkeypatch.setattr(_client, "get_llm_client", lambda: type("C", (), {"aio": type("A", (), {"models": _Models()})()})())
+    result = _asyncio.run(
+        _client.call_llm([{"role": "user", "content": "x"}], _Out, timeout=0.01,
+                         backoff_delays=[0.01, 0.01, 0.01], timeout_retries=1)
+    )
+    assert result is None
+    assert len(calls) == 2

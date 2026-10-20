@@ -55,9 +55,9 @@ import {
   uploadBudgetSource,
   type BudgetGlMergeListItem,
   type BudgetGlMergeSuggestionPayload,
-  type BudgetSourceMode,
   type BudgetBundleUploadResponse,
   type BudgetDraftPayload,
+  type BudgetUploadResponse,
   type BudgetVersionSummary,
   type ExtractionDebugInfo,
   type ExtractionQualityWarning,
@@ -91,12 +91,10 @@ import {
   BUDGET_SOURCE_MODE_OPTIONS,
   budgetSourceModeCreateSuccess,
   budgetSourceModeGenericDraftError,
-  budgetSourceModeHelperCopy,
   budgetSourceModeLabel,
-  budgetSourceModeMissingUploadError,
-  budgetSourceModeUploadPlaceholder,
-  budgetSourceModeUploadTitle,
+  type BudgetSourceMode,
 } from '../lib/budgetSourceMode';
+import { disclosureFactsSummary } from '../lib/disclosureFacts';
 import { getErrorMessage } from '../lib/errors';
 import { computeTimingInputs } from '../lib/fiscalYear';
 import { formatFiscalYearRangeLabel } from '../lib/hoa';
@@ -173,8 +171,48 @@ function reserveSnapshotFromDraft(draft: BudgetDraftPayload | null): string {
   );
 }
 
-function looksLikeFinalBudgetFilename(filename: string): boolean {
-  return /\b(budget|final|pro[\s_-]*forma)\b/i.test(filename);
+function toastDisclosureFacts(response: Pick<BudgetUploadResponse, 'disclosure_facts'>) {
+  const summary = disclosureFactsSummary(response.disclosure_facts);
+  if (summary) {
+    toast.message(summary, { duration: 10000 });
+  }
+}
+
+// Radix Select items can't use an empty value, so "detect" stands in for no override.
+const DETECT_SOURCE_MODE = 'detect';
+
+function ReadAsSelect({
+  id,
+  value,
+  onChange,
+  disabled = false,
+}: {
+  id: string;
+  value: BudgetSourceMode | null;
+  onChange: (mode: BudgetSourceMode | null) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <Select
+      value={value ?? DETECT_SOURCE_MODE}
+      onValueChange={(next) =>
+        onChange(next === DETECT_SOURCE_MODE ? null : (next as BudgetSourceMode))
+      }
+      disabled={disabled}
+    >
+      <SelectTrigger id={id} className="w-72 max-w-full border-[#e5e5e5] bg-white">
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        <SelectItem value={DETECT_SOURCE_MODE}>Detect automatically (recommended)</SelectItem>
+        {BUDGET_SOURCE_MODE_OPTIONS.map((option) => (
+          <SelectItem key={option.value} value={option.value}>
+            {option.label}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  );
 }
 
 function renderExtractionDebug(debugInfo?: ExtractionDebugInfo | null) {
@@ -267,9 +305,9 @@ export function BudgetScreen({
   const [autoSaveEnabled, setAutoSaveEnabled] = useState(false);
   const [budgetSourceFile, setBudgetSourceFile] = useState<File | null>(null);
   const [reserveStudyFile, setReserveStudyFile] = useState<File | null>(null);
-  const [budgetSourceMode, setBudgetSourceMode] = useState<BudgetSourceMode>(
-    activeDraft?.source_mode ?? 'income_statement',
-  );
+  // "Read as" override for the next upload or Replace; null lets Gemini detect
+  // the kind. Never synced from the draft, whose source_mode is what was detected.
+  const [readAsOverride, setReadAsOverride] = useState<BudgetSourceMode | null>(null);
   const [assessmentMode, setAssessmentMode] = useState<AssessmentMode>(
     activeDraft?.assessment_mode ?? hoa.assessment_mode ?? 'variable',
   );
@@ -280,9 +318,9 @@ export function BudgetScreen({
   >(null);
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
-  // One-shot dismissible quality warning shown when the backend used a
-  // degraded extraction path (e.g. scanned-PDF vision-only fallback). State
-  // lives only in this component, so reload clears it — by design.
+  // One-shot dismissible note from the read: what to double-check (warning,
+  // e.g. scanned-PDF vision-only fallback) or which pages were read (info).
+  // State lives only in this component, so reload clears it — by design.
   const [qualityWarning, setQualityWarning] = useState<ExtractionQualityWarning | null>(null);
   const [reserveStudyRows, setReserveStudyRows] = useState<ReserveStudyRow[]>([]);
   const [reserveFundingPlanRows, setReserveFundingPlanRows] = useState<ReserveFundingPlanRow[]>([]);
@@ -432,7 +470,7 @@ export function BudgetScreen({
       setReserveStudyStatus('none');
       lastPersistedReserveSnapshotRef.current = reserveSnapshotFromDraft(null);
       allowReserveHydrationRef.current = true;
-      setBudgetSourceMode('income_statement');
+      setReadAsOverride(null);
       setAssessmentMode(hoa.assessment_mode ?? 'variable');
       setUploadState('initial');
       return;
@@ -454,7 +492,6 @@ export function BudgetScreen({
     setStatementMonth(activeDraft.statement_month ?? null);
     setWorkingGrowthFactor(activeDraft.growth_factor ?? null);
     setGrowthFactorNote(activeDraft.growth_factor_note ?? '');
-    setBudgetSourceMode(activeDraft.source_mode ?? 'income_statement');
     setAssessmentMode(activeDraft.assessment_mode ?? hoa.assessment_mode ?? 'variable');
     if (isDraftSwitch || allowReserveHydrationRef.current || !hasUnsavedLocalReserveEdits) {
       hydrateReserveState(activeDraft);
@@ -471,7 +508,6 @@ export function BudgetScreen({
     setStatementMonth(draft.statement_month ?? null);
     setWorkingGrowthFactor(draft.growth_factor ?? null);
     setGrowthFactorNote(draft.growth_factor_note ?? '');
-    setBudgetSourceMode(draft.source_mode ?? 'income_statement');
     setAssessmentMode(draft.assessment_mode ?? hoa.assessment_mode ?? 'variable');
     if (options?.hydrateReserve !== false) {
       hydrateReserveState(draft);
@@ -559,22 +595,17 @@ export function BudgetScreen({
       toast.error('Select both the budget file and the reserve study PDF first.');
       return;
     }
-    if (budgetSourceMode === 'income_statement' && looksLikeFinalBudgetFilename(budgetSourceFile.name)) {
-      toast.warning(
-        'This file name looks like a final/pro forma budget. If extraction fails, switch Source Mode to Pro Forma / Final Budget and retry.',
-        { duration: 12000 },
-      );
-    }
     setUploadState('uploading');
     try {
       const response = await uploadBudgetBundle(
         hoaId,
         budgetSourceFile,
         reserveStudyFile,
-        budgetSourceMode,
+        readAsOverride,
         assessmentMode,
       );
       setBundleUploadResult(response);
+      toastDisclosureFacts(response);
 
       if (!response.draft) {
         setUploadState('initial');
@@ -597,6 +628,9 @@ export function BudgetScreen({
 
       hydrateDraftState(response.draft);
       toast.success('Budget draft created from both uploaded files.');
+      if (response.extraction_quality_warning) {
+        setQualityWarning(response.extraction_quality_warning);
+      }
     } catch (error) {
       toast.error(getErrorMessage(error, 'Upload failed. Please try again.'));
       setUploadState('initial');
@@ -611,30 +645,38 @@ export function BudgetScreen({
     toast.success('Continuing with the successful budget draft.');
   };
 
+  // Shared by the first upload and Replace: show the draft the read produced and what it found.
+  const showBudgetRead = (response: BudgetUploadResponse, draft: BudgetDraftPayload) => {
+    hydrateDraftState(draft);
+    toast.success(budgetSourceModeCreateSuccess(draft.source_mode));
+    toastDisclosureFacts(response);
+    for (const warning of response.warnings ?? []) {
+      toast.warning(warning, { duration: 10000 });
+    }
+    if (response.extraction_quality_warning) {
+      setQualityWarning(response.extraction_quality_warning);
+    }
+  };
+
   const handleBudgetOnlyUpload = async () => {
     if (!budgetSourceFile) {
       toast.error('Select a budget file first.');
       return;
-    }
-    if (budgetSourceMode === 'income_statement' && looksLikeFinalBudgetFilename(budgetSourceFile.name)) {
-      toast.warning(
-        'This file name looks like a final/pro forma budget. If extraction fails, switch Source Mode to Pro Forma / Final Budget and retry.',
-        { duration: 12000 },
-      );
     }
     setUploadState('uploading');
     try {
       const response = await uploadBudgetSource(
         hoaId,
         budgetSourceFile,
-        budgetSourceMode,
+        readAsOverride,
         assessmentMode,
       );
       if (!response.draft) {
         const reason =
           response.review_reason ||
-          'We could not build a draft from this file. Please verify the statement and try again.';
+          'We could not build a draft from this file. Please verify the file and try again.';
         toast.error(reason, { duration: 12000 });
+        toastDisclosureFacts(response);
         for (const warning of response.warnings ?? []) {
           toast.warning(warning, { duration: 10000 });
         }
@@ -645,14 +687,7 @@ export function BudgetScreen({
         return;
       }
 
-      hydrateDraftState(response.draft);
-      toast.success(budgetSourceModeCreateSuccess(budgetSourceMode));
-      for (const warning of response.warnings ?? []) {
-        toast.warning(warning, { duration: 10000 });
-      }
-      if (response.extraction_quality_warning) {
-        setQualityWarning(response.extraction_quality_warning);
-      }
+      showBudgetRead(response, response.draft);
     } catch (error) {
       toast.error(getErrorMessage(error, 'Upload failed. Please try again.'));
       setUploadState('initial');
@@ -707,16 +742,21 @@ export function BudgetScreen({
     if (!draftId) return;
     setIsReplacingBudgetFile(true);
     try {
-      const result = await replaceBudgetSource(hoaId, draftId, file);
+      const result = await replaceBudgetSource(hoaId, draftId, file, readAsOverride);
       if (result.review_required || result.draft === null) {
         toast.error(
           result.review_reason ||
             'The replacement file needs review; the current budget was left unchanged.',
         );
+        toastDisclosureFacts(result);
         return;
       }
-      toast.success('Budget file replaced.');
-      window.location.reload();
+      // Replace builds a new draft (new id), so draft-keyed state refreshes
+      // through hydration. The page reload used to clear these two as well: AI
+      // feedback tracked against the old file's lines, and the reserve-apply note.
+      setAppliedSuggestionSnapshot(null);
+      setReserveStudyApplyMessage(null);
+      showBudgetRead(result, result.draft);
     } catch (error) {
       toast.error(getErrorMessage(error, 'Failed to replace budget file.'));
     } finally {
@@ -729,6 +769,7 @@ export function BudgetScreen({
     event.target.value = ''; // allow re-selecting the same filename later
     if (!file || !draftId) return;
     pendingReplaceFileRef.current = file;
+    setReadAsOverride(null);
     setConfirmAction('replace');
   };
 
@@ -778,7 +819,7 @@ export function BudgetScreen({
 
   const persistDraftSnapshot = async (): Promise<BudgetDraftPayload> => {
     if (!draftId) {
-      throw new Error(budgetSourceModeMissingUploadError(budgetSourceMode));
+      throw new Error(budgetSourceModeGenericDraftError());
     }
 
     setIsSavingDraft(true);
@@ -1473,7 +1514,7 @@ export function BudgetScreen({
                 <h2 className="mb-2 text-xl font-semibold text-[#111111]">Create Budget Draft</h2>
                 <p className="text-sm text-[#737373]">
                   {uploadState === 'uploading'
-                    ? 'Processing the selected file...'
+                    ? 'Reading your file with Gemini — usually under 2 minutes.'
                     : 'Select a budget source. Add a reserve study PDF if available.'}
                 </p>
                 {latestVersionSummary && uploadState === 'initial' ? (
@@ -1530,34 +1571,25 @@ export function BudgetScreen({
                     </div>
                   </div>
                 </div>
-                <p className="mb-3 text-xs font-medium uppercase tracking-[0.18em] text-[#737373]">
-                  Budget Source Mode
-                </p>
-                <div className="grid gap-3 md:grid-cols-2">
-                  {BUDGET_SOURCE_MODE_OPTIONS.map((option) => (
-                    <button
-                      key={option.value}
-                      type="button"
-                      onClick={() => setBudgetSourceMode(option.value)}
-                      className={
-                        budgetSourceMode === option.value
-                          ? 'rounded-xl border-2 border-[#111111] bg-white p-4 text-left shadow-sm'
-                          : 'rounded-xl border border-[#d4d4d4] bg-white p-4 text-left shadow-sm hover:border-[#a3a3a3]'
-                      }
-                    >
-                      <p className="text-sm font-medium text-[#111111]">{option.label}</p>
-                      <p className="mt-2 text-xs leading-5 text-[#737373]">{option.description}</p>
-                    </button>
-                  ))}
+                <div className="flex flex-wrap items-center gap-3">
+                  <Label
+                    htmlFor="budget-read-as"
+                    className="text-xs font-medium uppercase tracking-[0.18em] text-[#737373]"
+                  >
+                    Read as
+                  </Label>
+                  <ReadAsSelect
+                    id="budget-read-as"
+                    value={readAsOverride}
+                    onChange={setReadAsOverride}
+                    disabled={uploadState === 'uploading'}
+                  />
                 </div>
-                <p className="mt-4 text-xs leading-5 text-[#737373]">
-                  {budgetSourceModeHelperCopy(budgetSourceMode)}
-                </p>
               </div>
               <div className="grid w-full gap-4 md:grid-cols-2">
                 <FileDropzone
-                  title={budgetSourceModeUploadTitle(budgetSourceMode)}
-                  helper={budgetSourceModeHelperCopy(budgetSourceMode)}
+                  title="Budget source file"
+                  helper="Income statement or final budget — Excel or PDF. Gemini works out which it is."
                   accept=".xlsx,.xls,.pdf"
                   fileName={budgetSourceFile?.name ?? null}
                   disabled={uploadState === 'uploading'}
@@ -1576,7 +1608,7 @@ export function BudgetScreen({
                       ? 'Selected and ready to upload.'
                       : reserveStudyFile
                         ? 'Budget source is still needed.'
-                        : budgetSourceModeUploadPlaceholder(budgetSourceMode)
+                        : 'Excel workbook or PDF'
                   }
                   actionLabel="Select file"
                   onFilesSelected={(files) => setBudgetSourceFile(files?.[0] ?? null)}
@@ -1713,8 +1745,14 @@ export function BudgetScreen({
         >
           <AlertDialogContent>
             <AlertDialogHeader>
-              <AlertDialogTitle className="flex items-center gap-2 text-[#92400e]">
-                <AlertTriangle className="h-5 w-5" aria-hidden="true" />
+              <AlertDialogTitle
+                className={`flex items-center gap-2 ${
+                  qualityWarning.severity === 'info' ? 'text-[#111111]' : 'text-[#92400e]'
+                }`}
+              >
+                {qualityWarning.severity === 'info' ? null : (
+                  <AlertTriangle className="h-5 w-5" aria-hidden="true" />
+                )}
                 {qualityWarning.title}
               </AlertDialogTitle>
               <AlertDialogDescription className="whitespace-pre-line text-[#525252]">
@@ -1755,6 +1793,21 @@ export function BudgetScreen({
                   : 'This creates an immutable budget version (not the homeowner disclosure PDF). The draft may be superseded. Use Disclosure Package separately for the owner PDF.'}
             </AlertDialogDescription>
           </AlertDialogHeader>
+          {confirmAction === 'replace' ? (
+            <div className="space-y-2">
+              <Label htmlFor="replace-read-as">Read as</Label>
+              <ReadAsSelect
+                id="replace-read-as"
+                value={readAsOverride}
+                onChange={setReadAsOverride}
+              />
+              {hasUnsavedDraftChanges || hasUnsavedReserveStudyChanges ? (
+                <p className="text-sm text-[#b45309]">
+                  This draft has unsaved edits; replacing the file discards them.
+                </p>
+              ) : null}
+            </div>
+          ) : null}
           <AlertDialogFooter>
             <AlertDialogCancel
               onClick={() => {
@@ -1809,7 +1862,7 @@ export function BudgetScreen({
                     <span className="text-[#d4d4d4]">•</span>
                     <p className="text-xs text-[#737373]">Draft {draftId ?? 'Unavailable'}</p>
                     <span className="text-[#d4d4d4]">•</span>
-                    <p className="text-xs text-[#737373]">{budgetSourceModeLabel(activeDraft?.source_mode ?? budgetSourceMode)}</p>
+                    <p className="text-xs text-[#737373]">{budgetSourceModeLabel(activeDraft?.source_mode)}</p>
                     <span className="text-[#d4d4d4]">•</span>
                     <p className="text-xs text-[#737373]">
                       {assessmentModeLabel(activeDraft?.assessment_mode ?? assessmentMode)}

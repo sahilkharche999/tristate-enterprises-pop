@@ -211,6 +211,17 @@ export interface ExtractionDebugInfo {
   details: JsonObject;
 }
 
+// A disclosure fact read from the upload and what it did to HOA settings
+// (`value` is the display text here; Settings has the typed value).
+export interface DisclosureFactFinding {
+  field: string;
+  label: string;
+  value: string;
+  status: 'applied' | 'suggested' | 'matches';
+  page: number | null;
+  quote: string | null;
+}
+
 export interface BudgetUploadResponse {
   upload_id: number;
   // Null when the backend decides the extraction needs manual review (PDF
@@ -223,9 +234,11 @@ export interface BudgetUploadResponse {
   review_reason?: string | null;
   debug_info?: ExtractionDebugInfo | null;
   // Set when the extractor took a degraded path (e.g. scanned-PDF
-  // vision-only fallback). The frontend should render this as a one-shot
-  // dismissible dialog so the user knows to double-check the numbers.
+  // vision-only fallback), or as severity 'info' to say which pages were
+  // read. The frontend renders it as a one-shot dismissible dialog.
   extraction_quality_warning?: ExtractionQualityWarning | null;
+  // Also present on review-required responses (a facts sheet is not a budget).
+  disclosure_facts?: DisclosureFactFinding[];
 }
 
 export interface ReserveStudyRow {
@@ -272,6 +285,9 @@ export interface BudgetBundleUploadResponse {
   reserve_study: BundleFileStatus;
   can_continue_with_budget_only: boolean;
   can_continue_with_reserve_study_only: boolean;
+  // From reading the budget file, as on BudgetUploadResponse.
+  extraction_quality_warning?: ExtractionQualityWarning | null;
+  disclosure_facts?: DisclosureFactFinding[];
 }
 
 export interface SaveReserveStudyPayload {
@@ -680,7 +696,7 @@ export async function downloadBudgetDraftEnriched(
 export async function uploadBudgetSource(
   hoaId: number | string,
   file: File,
-  sourceMode: BudgetSourceMode,
+  sourceMode: BudgetSourceMode | null,
   assessmentMode: AssessmentMode,
 ): Promise<BudgetUploadResponse> {
   const formData = createBudgetSourceFormData(file, sourceMode, assessmentMode);
@@ -696,7 +712,7 @@ export async function uploadBudgetBundle(
   hoaId: number | string,
   budgetFile: File,
   reserveStudyFile: File,
-  sourceMode: BudgetSourceMode,
+  sourceMode: BudgetSourceMode | null,
   assessmentMode: AssessmentMode,
 ): Promise<BudgetBundleUploadResponse> {
   const formData = createBudgetBundleFormData(
@@ -835,15 +851,14 @@ export async function replaceBudgetSource(
   hoaId: number | string,
   draftId: number | string,
   file: File,
+  sourceMode: BudgetSourceMode | null = null,
 ): Promise<BudgetUploadResponse> {
-  const formData = new FormData();
-  formData.append('file', file);
   const res = await fetch(
     `${BASE_URL}/hoa/${hoaId}/budget/drafts/${draftId}/source/upload`,
     {
       method: 'POST',
       headers: authHeaders(),
-      body: formData,
+      body: createBudgetSourceFormData(file, sourceMode),
     },
   );
   return handleResponse<BudgetUploadResponse>(res);

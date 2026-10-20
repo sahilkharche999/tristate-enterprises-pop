@@ -19,6 +19,7 @@ def _valid_pdf_statement() -> ExtractedFinancialStatement:
         {
             "document_family": "pdf_visual_document",
             "report_type": "income_statement",
+            "statement_period": "harness statement period",
             "line_items": [
                 {
                     "account_code_text": "40000",
@@ -43,7 +44,7 @@ def _valid_pdf_statement() -> ExtractedFinancialStatement:
 
 
 def _upload_pdf_income_statement(client, monkeypatch, tmp_path, hoa_id: int = 1) -> int:
-    async def _fake_extract(path: str):
+    async def _fake_extract(path: str, **kwargs):
         return _valid_pdf_statement()
 
     def _fake_normalize(statement):

@@ -1,14 +1,16 @@
 """GET / PUT /hoa/{hoa_id}/settings/disclosure for the disclosure-package config."""
+import json
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Body, Depends, File, Header, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from ..ai_implementation.db import get_session
 from ..ai_implementation.db.models import DisclosurePackageJob, Property
 from ..auth.dependencies import get_current_user
+from ..optimistic_lock import parse_if_match
 from ..services import (
     boilerplate_variables,
     hoa_boilerplate,  # REFERENCE_MAX_BYTES only; the slot API is retired
@@ -78,7 +80,19 @@ def _row_to_dict(row) -> Dict[str, Any]:
         "letterhead_logo_mode": (
             getattr(row, "letterhead_logo_mode", None) or "logo_and_text"
         ),
+        # Read-only: facts found in uploaded budget files, keyed by field,
+        # and the version to send back as If-Match on PUT.
+        "disclosure_facts": _json_object(getattr(row, "disclosure_facts_json", None)),
+        "version_int": getattr(row, "version_int", None) or 0,
     }
+
+
+def _json_object(raw: Optional[str]) -> Dict[str, Any]:
+    try:
+        value = json.loads(raw) if raw else {}
+    except (TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
 
 
 def _reserve_funding_candidates(session: Session, hoa_id: int) -> Dict[str, Any]:
@@ -135,11 +149,21 @@ async def get_disclosure_settings(
 async def put_disclosure_settings(
     hoa_id: int,
     payload: dict = Body(...),
+    if_match: Optional[str] = Header(default=None, alias="If-Match"),
     session: Session = Depends(get_session),
     current_user: dict = Depends(get_current_user),  # noqa: ARG001
 ):
     if not session.query(Property).filter_by(id=hoa_id).one_or_none():
         raise HTTPException(status_code=404, detail=f"HOA not found: {hoa_id}")
+    # The form sends the whole record; an upload may have filled fields since
+    # it was loaded, so a stale save must not silently blank them.
+    if if_match is not None:
+        current = hoa_settings_service.get_or_create(session, hoa_id=hoa_id)
+        if parse_if_match(if_match) != (current.version_int or 0):
+            raise HTTPException(
+                status_code=412,
+                detail="These settings changed since you opened them (an upload may have filled some fields). Reload to see the current values.",
+            )
     try:
         row = hoa_settings_service.update(session, hoa_id=hoa_id, payload=payload)
     except ValueError as exc:

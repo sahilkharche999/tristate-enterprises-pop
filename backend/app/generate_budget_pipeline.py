@@ -9,11 +9,8 @@ from typing import Dict, List, Optional
 from openpyxl import load_workbook
 from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
-from .generate_budget import (
-    BudgetGenerator,
-    infer_growth_factor_from_input,
-)
-from .services.income_statement_parser import _match_section_header, detect_columns
+from .generate_budget import BudgetGenerator
+from .services.income_statement_parser import SECTION_KINDS, _match_section_header
 
 
 QUIET_MODE = True
@@ -128,7 +125,7 @@ class IncomeStatementEnricher:
 
     COL_A = 1
     COL_B = 2
-    # Default column positions (Esprit Park layout) — overridden by detect_columns
+    # Defaults are replaced from known_columns (the normalized workbook layout).
     COL_T = 20   # YTD Actual
     COL_AG = 33  # Annual Budget
     COL_AK = 37  # % Diff
@@ -159,19 +156,19 @@ class IncomeStatementEnricher:
         self.sheet_name = sheet_name
         self.am_seed_by_row: Dict[int, float] = {}
         self.an_seed_by_row: Dict[int, float] = {}
-        if known_columns:
-            # PDF extraction path: column positions are known, skip detection
-            self.COL_T = known_columns["ytd_actual"] + 1   # 0-based → 1-based
-            self.COL_AG = known_columns["annual_budget"] + 1
-            max_data_col = max(self.COL_T, self.COL_AG)
-            self.COL_AK = max_data_col + 4
-            self.COL_AL = max_data_col + 5
-            self.COL_AM = max_data_col + 6
-            self.COL_AN = max_data_col + 7
-            self.COL_AO = max_data_col + 8
-            self._detect_data_start_row()
-        else:
-            self._detect_input_columns()
+        if not known_columns:
+            # Every budget source is read by Gemini into the normalized
+            # workbook, whose column positions are fixed.
+            raise ValueError("known_columns is required: the enricher reads the normalized statement workbook")
+        self.COL_T = known_columns["ytd_actual"] + 1   # 0-based → 1-based
+        self.COL_AG = known_columns["annual_budget"] + 1
+        max_data_col = max(self.COL_T, self.COL_AG)
+        self.COL_AK = max_data_col + 4
+        self.COL_AL = max_data_col + 5
+        self.COL_AM = max_data_col + 6
+        self.COL_AN = max_data_col + 7
+        self.COL_AO = max_data_col + 8
+        self._detect_data_start_row()
 
     # Row where enrichment headers are written and data starts on the next row
     HEADER_ROW = 5
@@ -195,50 +192,6 @@ class IncomeStatementEnricher:
                     self.HEADER_ROW = r - 1
                     break
             wb.close()
-        except Exception:
-            pass
-
-    def _detect_input_columns(self):
-        """Detect column positions and data start row from the input file."""
-        try:
-            wb = load_workbook(self.input_path, data_only=True)
-            ws = wb[self.sheet_name] if self.sheet_name in wb.sheetnames else wb.active
-
-            # Detect data start row: find the first row with a recognized section
-            # header (from the parser) or a line item with an account code in col B.
-            # This correctly skips title rows, date rows, and column headers.
-            from .services.income_statement_parser import _match_section_header, _extract_account_code
-            for r in range(1, min(20, ws.max_row + 1)):
-                a = str(ws.cell(row=r, column=self.COL_A).value or "").strip()
-                b = str(ws.cell(row=r, column=self.COL_B).value or "").strip()
-                if _match_section_header(a) is not None:
-                    # Found a section header like "Operating Income"
-                    self.DATA_START_ROW = r
-                    self.HEADER_ROW = r - 1
-                    break
-                if b and _extract_account_code(b) is not None:
-                    # Found a line item with account code like "40000 - Assessment Income"
-                    self.DATA_START_ROW = r
-                    self.HEADER_ROW = r - 1
-                    break
-
-            # Detect column positions
-            scan_rows = []
-            for row in ws.iter_rows(min_row=1, max_row=min(self.DATA_START_ROW + 4, ws.max_row), values_only=True):
-                scan_rows.append(list(row))
-            wb.close()
-            if scan_rows:
-                col_map = detect_columns(scan_rows)
-                if "ytd_actual" in col_map:
-                    self.COL_T = col_map["ytd_actual"] + 1
-                if "annual_budget" in col_map:
-                    self.COL_AG = col_map["annual_budget"] + 1
-                max_data_col = max(self.COL_T, self.COL_AG)
-                self.COL_AK = max_data_col + 4
-                self.COL_AL = max_data_col + 5
-                self.COL_AM = max_data_col + 6
-                self.COL_AN = max_data_col + 7
-                self.COL_AO = max_data_col + 8
         except Exception:
             pass
 
@@ -408,6 +361,10 @@ class IncomeStatementEnricher:
         """Classify a row as 'item', 'total', 'section', or 'empty'."""
         col_a = ws.cell(row=row, column=self.COL_A).value
         col_b = ws.cell(row=row, column=self.COL_B).value
+        # Normalized workbook rows carry their canonical section kind in column A
+        # and may have no account code in column B; they are always line items.
+        if str(col_a or "").strip() in SECTION_KINDS:
+            return 'item'
 
         label = ''
         if col_b:

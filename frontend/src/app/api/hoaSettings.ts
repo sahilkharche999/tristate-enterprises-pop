@@ -101,6 +101,23 @@ export interface ReserveFundingCandidates {
 
 export type FinancialPacketArchetype = 'dual-fund' | 'reserve-only';
 
+/** A fact read from an uploaded budget file and what it did to one setting. */
+export interface HOADisclosureFact {
+  field: string;
+  label: string;
+  // In the setting's own units; for a *_json setting, the parsed array/object.
+  value: unknown;
+  display: string;
+  status: 'applied' | 'suggested' | 'matches';
+  page: number | null;
+  quote: string | null;
+  // Reserve-cash facts: the balance's date, so Use can fill it with the amount.
+  as_of_date?: string | null;
+  upload_id: number;
+  filename: string;
+  found_at: string;
+}
+
 export interface HOADisclosureSettings {
   property_id: number;
   management_company: string | null;
@@ -153,6 +170,10 @@ export interface HOADisclosureSettings {
   /** logo_and_text (default) | logo_only — full brand image without wordmark */
   letterhead_logo_mode?: 'logo_and_text' | 'logo_only';
   has_signature?: boolean;
+  // Read-only: facts from uploaded files keyed by settings field (reserve cash
+  // is `reserve_cash_by_fiscal_year_json:<year>`), and the If-Match version.
+  disclosure_facts?: Record<string, HOADisclosureFact>;
+  version_int?: number;
 }
 
 export async function getHOADisclosureSettings(hoaId: number): Promise<HOADisclosureSettings> {
@@ -160,13 +181,20 @@ export async function getHOADisclosureSettings(hoaId: number): Promise<HOADisclo
   return handleResponse<HOADisclosureSettings>(r);
 }
 
+// `version` comes from the GET; a stale one gets HTTP 412 (an upload may have
+// filled fields since the form loaded).
 export async function putHOADisclosureSettings(
   hoaId: number,
   payload: Partial<HOADisclosureSettings>,
+  version?: number,
 ): Promise<HOADisclosureSettings> {
   const r = await fetch(`${BASE_URL}/hoa/${hoaId}/settings/disclosure`, {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    headers: {
+      'Content-Type': 'application/json',
+      ...authHeaders(),
+      ...(version != null ? { 'If-Match': String(version) } : {}),
+    },
     body: JSON.stringify(payload),
   });
   return handleResponse<HOADisclosureSettings>(r);

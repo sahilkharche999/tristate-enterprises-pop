@@ -217,6 +217,17 @@ class ExtractionDebugInfo(BaseModel):
     details: JsonObject = Field(default_factory=dict)
 
 
+class DisclosureFactFinding(BaseModel):
+    """A disclosure fact read from the upload and what happened to it in HOA settings."""
+
+    field: str
+    label: str
+    value: str
+    status: str  # "applied" (filled an unset field) | "suggested" | "matches"
+    page: Optional[int] = None
+    quote: Optional[str] = None
+
+
 class BudgetUploadResponse(BaseModel):
     upload_id: int
     draft: Optional[BudgetDraftPayload] = None
@@ -231,6 +242,8 @@ class BudgetUploadResponse(BaseModel):
     # None means the upload used the normal high-confidence path; no
     # quality warning is needed.
     extraction_quality_warning: Optional[ExtractionQualityWarning] = None
+    # Facts read from the file for HOA settings (filled when unset, else suggested).
+    disclosure_facts: list[DisclosureFactFinding] = Field(default_factory=list)
 
 
 class BundleFileStatus(BaseModel):
@@ -248,6 +261,9 @@ class BudgetBundleUploadResponse(BaseModel):
     reserve_study: BundleFileStatus
     can_continue_with_budget_only: bool = False
     can_continue_with_reserve_study_only: bool = False
+    # From reading the budget file, as on BudgetUploadResponse.
+    extraction_quality_warning: Optional[ExtractionQualityWarning] = None
+    disclosure_facts: list[DisclosureFactFinding] = Field(default_factory=list)
 
 
 class BudgetReserveStudySaveRequest(BaseModel):

@@ -7,10 +7,12 @@ import {
   useRef,
   useState,
 } from 'react';
+import { toast } from 'sonner';
 import {
   type AssessmentIncreaseBracket,
   type BoardDeferralEntry,
   type FinancialPacketArchetype,
+  type HOADisclosureFact,
   type HOADisclosureSettings,
   type OutstandingLoan,
   type ReserveFundingCandidates,
@@ -23,6 +25,8 @@ import {
   listSpecialAssessmentPools,
   previewSpecialAssessment,
 } from '../api/hoaSettings';
+import { sameFactValue } from '../lib/disclosureFacts';
+import { getErrorMessage } from '../lib/errors';
 import {
   type DisclosureDefaultsTab,
   resolveDisclosureDefaultsTab,
@@ -197,10 +201,48 @@ function parseLoan(raw: string | null | undefined): OutstandingLoan | null {
   }
 }
 
+/** Where an uploaded file's value for a setting came from; offers Use when it differs. */
+function DisclosureFactHint({
+  fact,
+  current,
+  onUse,
+}: {
+  fact: HOADisclosureFact | undefined;
+  current: unknown;
+  onUse: (value: unknown) => void;
+}) {
+  if (!fact) return null;
+  const source = fact.page != null ? `${fact.filename} p.${fact.page}` : fact.filename;
+  return (
+    <p className="mt-1 text-[11px] text-[#737373]" title={fact.quote ?? undefined}>
+      {sameFactValue(current, fact.value) ? (
+        `${fact.status === 'applied' ? 'From' : 'Matches'} ${source}`
+      ) : (
+        <>
+          Found {fact.display} in {source}
+          {fact.value != null ? (
+            <>
+              {' · '}
+              <button
+                type="button"
+                onClick={() => onUse(fact.value)}
+                className="font-medium text-[#111111] underline"
+              >
+                Use
+              </button>
+            </>
+          ) : null}
+        </>
+      )}
+    </p>
+  );
+}
+
 export interface HOADisclosureSettingsFormHandle {
-  /** Returns true on a successful save, false if the save errored (the
-   * form shows its own inline error too). Lets the parent Settings header
-   * button surface a success/failure toast + spinner. */
+  /** Returns true on a successful save, false if it failed. The form reports
+   * failures itself (toast, plus the inline error or, on a stale version, a
+   * reload of the saved values); the parent Settings header button adds the
+   * spinner + success toast. */
   save: () => Promise<boolean>;
   isDirty: () => boolean;
 }
@@ -253,6 +295,8 @@ export const HOADisclosureSettingsForm = forwardRef<
   // Number inputs are controlled. Number("0.") is 0, so a decimal like 0.025
   // snaps back to 0 while it is being typed. Keep the raw text until blur.
   const [numberDrafts, setNumberDrafts] = useState<Record<string, string>>({});
+  // Bumped to re-read the saved settings after a stale-version (412) save.
+  const [reloadKey, setReloadKey] = useState(0);
   const baselineRef = useRef<string | null>(null);
   const onReadyChangeRef = useRef(onReadyChange);
   const onDirtyChangeRef = useRef(onDirtyChange);
@@ -279,7 +323,7 @@ export const HOADisclosureSettingsForm = forwardRef<
     void listSpecialAssessmentPools(hoaId)
       .then(setSpecialPools)
       .catch(() => setSpecialPools([]));
-  }, [hoaId]);
+  }, [hoaId, reloadKey]);
 
   // After settings paint into the DOM, signal ready for field-reveal.
   useLayoutEffect(() => {
@@ -301,14 +345,17 @@ export const HOADisclosureSettingsForm = forwardRef<
       // property_id and has_logo are derived/read-only fields returned by GET;
       // the backend's _ALLOWED_FIELDS allowlist rejects unknown keys, so both
       // must be stripped before resending the full settings blob on save.
+      // version_int goes back as If-Match instead.
       const {
         property_id: _propertyId,
         has_logo: _hasLogo,
         has_signature: _hasSig,
         reserve_funding_candidates: candidates,
+        disclosure_facts: _facts,
+        version_int: version,
         ...writable
       } = settings;
-      const next = await putHOADisclosureSettings(hoaId, writable);
+      const next = await putHOADisclosureSettings(hoaId, writable, version);
       setSettings({
         ...next,
         reserve_funding_candidates: next.reserve_funding_candidates ?? candidates,
@@ -319,7 +366,14 @@ export const HOADisclosureSettingsForm = forwardRef<
       setSavedAt(new Date().toLocaleTimeString());
       return true;
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      const message = getErrorMessage(e, 'Failed to save settings. Please try again.');
+      toast.error(message);
+      if (e && typeof e === 'object' && 'status' in e && e.status === 412) {
+        // An upload filled fields since this form loaded: show what is saved now.
+        setReloadKey((key) => key + 1);
+      } else {
+        setError(message);
+      }
       return false;
     } finally {
       setSaving(false);
@@ -343,6 +397,8 @@ export const HOADisclosureSettingsForm = forwardRef<
     key: 'special_assessments_json' | 'additional_assessments_needed_json',
     next: SpecialAssessmentEntry[],
   ) => update(key, JSON.stringify(next));
+
+  const facts = settings.disclosure_facts ?? {};
 
   const handlePreviewAllocation = async (poolKey: string) => {
     // Preview reflects the SAVED total, so save first (the endpoint reads the
@@ -709,6 +765,18 @@ export const HOADisclosureSettingsForm = forwardRef<
           </Button>
         )}
       </div>
+      <DisclosureFactHint
+        fact={facts.outstanding_loan_json}
+        current={loan}
+        onUse={(found) => {
+          // Keep the loan details the file didn't print.
+          const printed = Object.entries(found as OutstandingLoan).filter(([, v]) => v != null);
+          update(
+            'outstanding_loan_json',
+            JSON.stringify({ ...EMPTY_LOAN, ...loan, ...Object.fromEntries(printed) }),
+          );
+        }}
+      />
       {loan ? (
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
           {([
@@ -747,81 +815,88 @@ export const HOADisclosureSettingsForm = forwardRef<
     scalarFields
       .filter(([key]) => keys.has(key))
       .map(([key, label, type]) => (
-        <label key={key} data-setting-field={key} className="block text-sm">
-          <span className="block text-xs text-[#737373] mb-1">
-            {label}
-            {REQUIRED_MONEY_FIELDS.has(key) ? (
-              <span className="ml-1 font-semibold text-[#92400e]">Required for package</span>
-            ) : null}
-          </span>
-          {type === 'textarea' ? (
-            <textarea
-              rows={2}
-              value={settings[key] === null || settings[key] === undefined ? '' : String(settings[key])}
-              onChange={(e) => update(key, e.target.value as never)}
-              className="w-full border border-[#d4d4d4] rounded px-2 py-1 text-sm"
-            />
-          ) : (
-            <input
-              type={type}
-              step={type === 'number' ? 'any' : undefined}
-              inputMode={type === 'number' ? 'decimal' : undefined}
-              value={
-                type === 'number' && numberDrafts[String(key)] !== undefined
-                  ? numberDrafts[String(key)]
-                  : settings[key] === null || settings[key] === undefined
-                    ? ''
-                    : String(settings[key])
-              }
-              onChange={(e) => {
-                if (type !== 'number') {
-                  update(key, e.target.value as never);
-                  return;
+        <div key={key} data-setting-field={key}>
+          <label className="block text-sm">
+            <span className="block text-xs text-[#737373] mb-1">
+              {label}
+              {REQUIRED_MONEY_FIELDS.has(key) ? (
+                <span className="ml-1 font-semibold text-[#92400e]">Required for package</span>
+              ) : null}
+            </span>
+            {type === 'textarea' ? (
+              <textarea
+                rows={2}
+                value={settings[key] === null || settings[key] === undefined ? '' : String(settings[key])}
+                onChange={(e) => update(key, e.target.value as never)}
+                className="w-full border border-[#d4d4d4] rounded px-2 py-1 text-sm"
+              />
+            ) : (
+              <input
+                type={type}
+                step={type === 'number' ? 'any' : undefined}
+                inputMode={type === 'number' ? 'decimal' : undefined}
+                value={
+                  type === 'number' && numberDrafts[String(key)] !== undefined
+                    ? numberDrafts[String(key)]
+                    : settings[key] === null || settings[key] === undefined
+                      ? ''
+                      : String(settings[key])
                 }
-                const raw = e.target.value;
-                const draftKey = String(key);
-                const clearDraft = () =>
+                onChange={(e) => {
+                  if (type !== 'number') {
+                    update(key, e.target.value as never);
+                    return;
+                  }
+                  const raw = e.target.value;
+                  const draftKey = String(key);
+                  const clearDraft = () =>
+                    setNumberDrafts((prev) => {
+                      if (!(draftKey in prev)) return prev;
+                      const next = { ...prev };
+                      delete next[draftKey];
+                      return next;
+                    });
+                  if (raw === '') {
+                    clearDraft();
+                    const empty =
+                      key === 'approved_monthly_assessment_per_unit' ||
+                      key === 'reserve_interest_income_override' ||
+                      key === 'income_tax_provision_override' ||
+                      key === 'reserve_liability_override' ||
+                      key === 'annual_replacement_provision_override' ||
+                      key === 'percent_funded_override' ||
+                      key === 'reserve_funding_manual_amount' ||
+                      key === 'replacement_fund_monthly_assessment_per_unit'
+                        ? null
+                        : 0;
+                    update(key, empty as never);
+                    return;
+                  }
+                  if (!/^-?\d*\.?\d*$/.test(raw)) return;
+                  setNumberDrafts((prev) => ({ ...prev, [draftKey]: raw }));
+                  if (raw === '-' || raw === '.' || raw === '-.' || raw.endsWith('.')) return;
+                  const parsed = Number(raw);
+                  if (Number.isFinite(parsed)) update(key, parsed as never);
+                }}
+                onBlur={() => {
+                  const draftKey = String(key);
                   setNumberDrafts((prev) => {
                     if (!(draftKey in prev)) return prev;
                     const next = { ...prev };
                     delete next[draftKey];
                     return next;
                   });
-                if (raw === '') {
-                  clearDraft();
-                  const empty =
-                    key === 'approved_monthly_assessment_per_unit' ||
-                    key === 'reserve_interest_income_override' ||
-                    key === 'income_tax_provision_override' ||
-                    key === 'reserve_liability_override' ||
-                    key === 'annual_replacement_provision_override' ||
-                    key === 'percent_funded_override' ||
-                    key === 'reserve_funding_manual_amount' ||
-                    key === 'replacement_fund_monthly_assessment_per_unit'
-                      ? null
-                      : 0;
-                  update(key, empty as never);
-                  return;
-                }
-                if (!/^-?\d*\.?\d*$/.test(raw)) return;
-                setNumberDrafts((prev) => ({ ...prev, [draftKey]: raw }));
-                if (raw === '-' || raw === '.' || raw === '-.' || raw.endsWith('.')) return;
-                const parsed = Number(raw);
-                if (Number.isFinite(parsed)) update(key, parsed as never);
-              }}
-              onBlur={() => {
-                const draftKey = String(key);
-                setNumberDrafts((prev) => {
-                  if (!(draftKey in prev)) return prev;
-                  const next = { ...prev };
-                  delete next[draftKey];
-                  return next;
-                });
-              }}
-              className="w-full border border-[#d4d4d4] rounded px-2 py-1 text-sm"
-            />
-          )}
-        </label>
+                }}
+                className="w-full border border-[#d4d4d4] rounded px-2 py-1 text-sm"
+              />
+            )}
+          </label>
+          <DisclosureFactHint
+            fact={facts[key]}
+            current={settings[key]}
+            onUse={(found) => update(key, found as never)}
+          />
+        </div>
       ));
 
   const forecastScheduleBlock = (() => {
@@ -856,6 +931,11 @@ export const HOADisclosureSettingsForm = forwardRef<
             + Add bracket
           </Button>
         </div>
+        <DisclosureFactHint
+          fact={facts.assessment_increase_schedule_json}
+          current={schedule}
+          onUse={(found) => update_schedule(found as AssessmentIncreaseBracket[])}
+        />
         {schedule.length === 0 ? (
           <p className="text-xs text-[#a3a3a3] italic">
             No brackets — assessment will not escalate over the 30-year window.
@@ -1114,6 +1194,14 @@ export const HOADisclosureSettingsForm = forwardRef<
                       />
                     </label>
                   </div>
+                  <DisclosureFactHint
+                    fact={facts[`reserve_cash_by_fiscal_year_json:${cashYear}`]}
+                    current={yearCash}
+                    onUse={(found) => {
+                      const fact = facts[`reserve_cash_by_fiscal_year_json:${cashYear}`];
+                      updateYearCash(Number(found), fact?.as_of_date || settings.reserve_cash_as_of_date);
+                    }}
+                  />
                 </div>
               );
             })()}

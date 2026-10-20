@@ -100,9 +100,15 @@ def get_or_create(session: Session, *, hoa_id: int) -> HOASettings:
     return row
 
 
+# Returned by GET for the form, never written by PUT.
+_READ_ONLY_FIELDS = {"disclosure_facts", "version_int"}
+
+
 def update(session: Session, *, hoa_id: int, payload: Dict[str, Any]) -> HOASettings:
     row = get_or_create(session, hoa_id=hoa_id)
     for key, value in payload.items():
+        if key in _READ_ONLY_FIELDS:
+            continue
         if key not in _ALLOWED_FIELDS:
             raise ValueError(f"Unknown field: {key!r}")
         if key == "letterhead_logo_mode":
@@ -114,6 +120,7 @@ def update(session: Session, *, hoa_id: int, payload: Dict[str, Any]) -> HOASett
             value = mode
         setattr(row, key, value)
     _merge_dated_cash_into_year_map(row)
+    row.version_int = (row.version_int or 0) + 1
     session.commit()
     session.refresh(row)
     return row

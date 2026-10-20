@@ -100,6 +100,7 @@ def test_config_exposes_separate_document_vlm_settings():
     assert hasattr(settings, "GEMINI_API_KEY")
     assert hasattr(settings, "GEMINI_MODEL")
     assert hasattr(settings, "DOCUMENT_VLM_MAX_PAGES")
-    assert hasattr(settings, "DOCUMENT_VLM_PAGE_SELECTION_THRESHOLD")
+    # Every budget PDF is classified page by page now; no size threshold.
+    assert not hasattr(settings, "DOCUMENT_VLM_PAGE_SELECTION_THRESHOLD")
     assert not hasattr(settings, "DOCUMENT_VLM_ENABLED")
     assert not hasattr(settings, "DOCUMENT_VLM_MAX_RETRIES")

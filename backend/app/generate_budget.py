@@ -17,7 +17,7 @@ import re
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
-from .services.income_statement_parser import _match_section_header
+from .services.income_statement_parser import SECTION_KINDS, _match_section_header
 
 
 QUIET_MODE = True
@@ -197,56 +197,6 @@ def _read_header_cells(input_path: str, sheet_name: str = "Income Statement") ->
             return cells
         finally:
             wb.close()
-
-
-def infer_growth_factor_from_input(
-    input_path: str,
-    default_factor: Optional[float] = DEFAULT_GROWTH_FACTOR,
-    sheet_name: str = "Income Statement",
-    fiscal_year_start_month: int = 1,
-) -> Tuple[float, int, str]:
-    if not (1 <= fiscal_year_start_month <= 12):
-        raise ValueError("fiscal_year_start_month must be between 1 and 12.")
-
-    if not os.path.exists(input_path):
-        raise FileNotFoundError(f"Input workbook not found: {input_path}")
-
-    cells = _read_header_cells(input_path, sheet_name)
-    for row_idx, row in enumerate(cells):
-        for col_idx, value in enumerate(row):
-            if not isinstance(value, str):
-                continue
-            text = value.strip()
-            covered_months = _months_covered_from_date_tokens(text)
-            if covered_months and covered_months > 1:
-                factor = 12.0 / covered_months
-                source = f"row{row_idx + 1}!col{col_idx + 1}"
-                return factor, covered_months, source
-
-            month = _extract_month_from_text(text)
-            if month:
-                elapsed_months = _elapsed_months_from_fiscal_start(
-                    month, fiscal_year_start_month
-                )
-                factor = 12.0 / elapsed_months
-                source = f"row{row_idx + 1}!col{col_idx + 1}"
-                return factor, elapsed_months, source
-
-    month_from_filename = _extract_month_from_text(os.path.basename(input_path))
-    if month_from_filename:
-        elapsed_months = _elapsed_months_from_fiscal_start(
-            month_from_filename, fiscal_year_start_month
-        )
-        return 12.0 / elapsed_months, elapsed_months, "filename"
-
-    if default_factor is not None:
-        fallback_months = int(round(12.0 / default_factor))
-        return default_factor, fallback_months, "default"
-
-    raise ValueError(
-        "Could not infer month coverage from workbook header or filename. "
-        "Provide --growth-factor explicitly (example: --growth-factor 1.5)."
-    )
 
 
 def infer_statement_year_from_input(
@@ -557,10 +507,12 @@ class BudgetGenerator:
             ytd_actual_raw = ws[f'{self.COL_YTD_ACTUAL}{row}'].value
 
             label = ''
+            # Normalized workbook rows: canonical section kind in A, optional
+            # account code in B (any format, or none), label in C.
             normalized_pdf_row = (
-                col_b is not None
+                str(col_a or "").strip() in SECTION_KINDS
                 and col_c is not None
-                and str(col_b).strip().isdigit()
+                and str(col_c).strip() != ""
             )
             if normalized_pdf_row:
                 label = str(col_c).strip()
@@ -578,14 +530,16 @@ class BudgetGenerator:
             # Extract account code from label (e.g. "40000 - Assessment Income" → "40000")
             account_code = ''
             if normalized_pdf_row:
-                account_code = str(col_b).strip()
+                account_code = str(col_b or "").strip()
             else:
                 account_match = re.match(r'^(\d{4,6})\s*[-–—]', label)
                 if account_match:
                     account_code = account_match.group(1)
 
             row_type = 'item'
-            if 'Total' in label:
+            if normalized_pdf_row:
+                pass
+            elif 'Total' in label:
                 row_type = 'total'
             elif col_a and not col_b:
                 row_type = 'title'

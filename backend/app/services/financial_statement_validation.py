@@ -131,23 +131,39 @@ def validate_extracted_statement(statement: ExtractedFinancialStatement) -> list
 
     if totals_by_section:
         sum_by_section: dict[str, float] = defaultdict(float)
+        transfers_by_section: dict[str, float] = defaultdict(float)
         for item in line_items:
             section_kind = (item.section_kind or "").strip().lower()
             if section_kind and item.annual_budget is not None:
                 sum_by_section[section_kind] += float(item.annual_budget)
+                if is_reserve_transfer_label(item.label):
+                    transfers_by_section[section_kind] += float(item.annual_budget)
 
         for section_kind, (expected_total, source) in totals_by_section.items():
             actual_total = sum_by_section.get(section_kind, 0.0)
-            if abs(actual_total - expected_total) > 1.00:
+            # Statements print the same section two standard ways: operating
+            # expenses with or without the contribution to reserves (Tri-State
+            # budgets print it below the operating total), and revenues with or
+            # without reserve interest (CPA forecasts total all funds). A
+            # dropped or doubled row breaks every variant.
+            variants = (
+                actual_total,
+                actual_total - transfers_by_section.get(section_kind, 0.0),
+                actual_total + sum_by_section.get(f"reserve_{section_kind}", 0.0),
+            )
+            if all(abs(variant - expected_total) > 1.00 for variant in variants):
                 stated_by = (
                     "the document states"
                     if source == "document"
                     else "the extraction reported"
                 )
+                # A warning, not a block: the draft is still created and the
+                # operator sees the printed total next to the sum (decided
+                # 2026-10-20; Gemini's section tagging of totals is imperfect).
                 issues.append(
                     {
                         "code": "subtotal_mismatch",
-                        "severity": "error",
+                        "severity": "warning",
                         "message": (
                             f"Subtotal mismatch for section '{section_kind}': "
                             f"line items sum to {actual_total:,.2f} but "
@@ -219,3 +235,48 @@ def derive_statement_confidence(
 
 def has_blocking_validation_issues(issues: list[dict[str, Any]]) -> bool:
     return any(issue.get("severity") == "error" for issue in issues)
+
+
+# Labels of the operating-side contribution to the reserve fund.
+RESERVE_TRANSFER_PHRASES = (
+    "contribution to reserve",
+    "reserve contribution",
+    "transfer to reserve",
+    "allocation to reserve",
+    "reserve allocation",
+    "reserve transfer",
+    "allocation/transfer",
+    "contribution to replacement",
+    "transfer to replacement",
+    "replacement fund contribution",
+)
+
+
+def is_reserve_transfer_label(label: Any) -> bool:
+    lowered = " ".join(str(label or "").lower().split())
+    return any(phrase in lowered for phrase in RESERVE_TRANSFER_PHRASES)
+
+
+def totals_for_validation(stated_totals: list[Any]) -> list[dict[str, Any]]:
+    """Map printed total rows (``StatedTotal`` models or dicts) onto
+    ``ExtractedFinancialStatement.totals`` for the subtotal check.
+
+    Sub-totals partition a section ("Total Utilities" inside operating), so a
+    section's grand total is its largest total — the same rule as
+    ``budget_history_service._canonical_statement_from_line_items``.
+    """
+    best: dict[str, dict[str, Any]] = {}
+    for total in stated_totals:
+        get = total.get if isinstance(total, dict) else lambda key, _t=total: getattr(_t, key, None)
+        section_kind, amount = get("section_kind"), get("annual_budget")
+        if not section_kind or amount is None:
+            continue
+        current = best.get(section_kind)
+        if current is None or abs(amount) > abs(current["amount"]):
+            best[section_kind] = {
+                "section_kind": section_kind,
+                "label": get("label"),
+                "amount": float(amount),
+                "source": "document",
+            }
+    return list(best.values())
