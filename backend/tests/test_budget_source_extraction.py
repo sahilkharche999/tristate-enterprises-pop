@@ -402,3 +402,31 @@ def test_pdf_page_schema_does_not_ask_for_roles():
     from app.services.pdf_vlm_extractor import StatementPageWithTotals
 
     assert "income_role" not in str(StatementPageWithTotals.model_json_schema())
+
+
+def test_a_cited_row_fills_an_amount_gemini_left_out(tmp_path, monkeypatch):
+    # Bob's prep sheet, 2 reads in 5 on the VM key: row and date, no amount.
+    from app.models.financial_document_extraction import DisclosureFacts
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Prep"
+    sheet.append(["Budget Preparation 2027"])
+    sheet.append(["Operating", 167585])
+    sheet.append(["Projected Reserves as of 12/31/26", 2260449.87])
+    sheet.append(["Two amounts", 1, 2])
+    path = tmp_path / "prep.xlsx"
+    workbook.save(path)
+    no_amount = DisclosureFacts.model_validate({
+        "reserve_balance_start_of_budget_year": {"number": None, "as_of_date": "2026-12-31", "page": 3},
+        "monthly_assessment_per_unit": {"number": None, "page": 4},
+    })
+    reply = _reading(kind="other", lines=[], facts=no_amount.model_dump())
+    monkeypatch.setattr("app.ai_implementation.pipeline.llm_client.call_llm", _fake_call_llm([reply], []))
+
+    result = asyncio.run(svc._extract_excel_source(str(path), original_filename="prep.xlsx"))
+
+    facts = result.details["disclosure_facts"]
+    assert facts["reserve_balance_start_of_budget_year"]["number"] == 2260449.87
+    # A row with two numbers is ambiguous: left for the operator.
+    assert facts["monthly_assessment_per_unit"]["number"] is None

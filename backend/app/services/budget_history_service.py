@@ -803,6 +803,41 @@ def _extract_pdf_statement_sync(
     return _run_sync(lambda: extract_pdf_statement(path, source_mode=source_mode, filename=filename))
 
 
+# Amount facts whose worksheet row Gemini cites in `page`. Rates stay out:
+# a cell can hold 0.018 where the fact means 1.8.
+_MONEY_FACTS = (
+    "monthly_assessment_per_unit",
+    "monthly_assessment_per_unit_prior_year",
+    "reserve_portion_of_monthly_assessment",
+    "reserve_balance_start_of_budget_year",
+)
+
+
+def _fill_fact_numbers_from_cited_rows(
+    facts: Optional[dict[str, Any]],
+    row_numbers: dict[tuple[str, int], list[float]],
+    sheet: Optional[str],
+) -> Optional[dict[str, Any]]:
+    """Take an amount from the row Gemini cited when it left the number out.
+
+    Bob's Budget Prep sheet came back 2 times in 5 with the row and date of
+    "Projected Reserves as of 12/31/26" but no amount. A row holding exactly
+    one number leaves no doubt which number it is.
+    """
+    for name in _MONEY_FACTS:
+        fact = (facts or {}).get(name)
+        if not isinstance(fact, dict) or fact.get("number") is not None or not fact.get("page"):
+            continue
+        cited = {row_sheet: values for (row_sheet, row), values in row_numbers.items() if row == fact["page"]}
+        if len(cited) > 1 and sheet in cited:
+            cited = {sheet: cited[sheet]}
+        cited = list(cited.values())
+        if len(cited) == 1 and len(cited[0]) == 1:
+            fact["number"] = cited[0][0]
+            fact["printed"] = fact.get("printed") or str(cited[0][0])
+    return facts
+
+
 def _has_any_fact(facts: Any) -> bool:
     if facts is None:
         return False
@@ -907,7 +942,9 @@ async def _extract_excel_source(
         else SOURCE_MODE_INCOME_STATEMENT if detected_kind == "income_statement"
         else None
     )
-    facts = raw.facts.model_dump() if raw.facts else None
+    facts = _fill_fact_numbers_from_cited_rows(
+        raw.facts.model_dump() if raw.facts else None, row_numbers, raw.primary_sheet
+    )
     metadata = {
         "extractor": "gemini_excel",
         "detected_kind": detected_kind,
