@@ -29,6 +29,7 @@ from ..config import settings
 from ..generate_budget_pipeline import BudgetPipeline
 from ..models.financial_document_extraction import (
     INCOME_ROLE_RULES,
+    IncomeRowRoles,
     DocumentExtractionFailure,
     ExcelSourceExtraction,
     ExtractedFinancialStatement,
@@ -976,6 +977,56 @@ def _run_sync(make_coroutine):
     return asyncio.run(make_coroutine())
 
 
+_INCOME_ROLE_SYSTEM_PROMPT = (
+    "You classify the operating income rows of one HOA budget or income statement. "
+    "For every numbered row return its number and income_role.\n\n" + INCOME_ROLE_RULES
+)
+
+
+async def _tag_income_roles(statement: ExtractedFinancialStatement) -> ExtractedFinancialStatement:
+    """Tag a PDF statement's operating income rows in one quick call.
+
+    PDF pages are read without roles (asking for them there slowed scanned
+    pages past their timeout). If this call fails the rows stay untagged and
+    the package keeps the label rule, so an upload never fails here.
+    """
+    from ..ai_implementation.pipeline.llm_client import call_llm
+
+    income = [index for index, item in enumerate(statement.line_items) if item.section_kind == "income"]
+    if not income:
+        return statement
+    listing = "\n".join(
+        f"{number}. {statement.line_items[index].label} | "
+        f"{statement.line_items[index].section_label or 'income'} | "
+        f"{statement.line_items[index].annual_budget}"
+        for number, index in enumerate(income, start=1)
+    )
+    try:
+        answer = await call_llm(
+            [
+                {"role": "system", "content": _INCOME_ROLE_SYSTEM_PROMPT},
+                {"role": "user", "content": f"Rows (label | section | annual amount):\n{listing}"},
+            ],
+            IncomeRowRoles,
+            temperature=0.0,
+            timeout=30.0,
+            thinking_budget=0,
+            backoff_delays=_GEMINI_RETRY_DELAYS,
+            timeout_retries=_GEMINI_TIMEOUT_RETRIES,
+        )
+    except Exception:
+        logger.warning("Income role tagging failed; keeping the label rule", exc_info=True)
+        return statement
+    if answer is None:
+        return statement
+    roles = {row.row: row.income_role for row in answer.rows}
+    items = list(statement.line_items)
+    for number, index in enumerate(income, start=1):
+        if roles.get(number):
+            items[index] = items[index].model_copy(update={"income_role": roles[number]})
+    return statement.model_copy(update={"line_items": items})
+
+
 def _extract_budget_source(
     path: str,
     *,
@@ -986,7 +1037,10 @@ def _extract_budget_source(
     """Read any budget-source upload with Gemini. ``report_type`` on the result
     says whether it is an income statement or a final budget."""
     if route.path == "pdf_vlm":
-        return _extract_pdf_statement_sync(path, source_mode=kind_override, filename=original_filename)
+        result = _extract_pdf_statement_sync(path, source_mode=kind_override, filename=original_filename)
+        if isinstance(result, ExtractedFinancialStatement):
+            result = _run_sync(lambda: _tag_income_roles(result))
+        return result
     return _run_sync(
         lambda: _extract_excel_source(path, original_filename=original_filename, kind_override=kind_override)
     )
@@ -1067,7 +1121,7 @@ def _statement_to_budget_line_items(
                 "percent_change": 0.0,
                 "read_only": _effective_read_only({}, category),
                 "reserve_group": reserve_group,
-                "income_role": item.income_role if category in ("income", "reserve_income") else None,
+                "income_role": item.income_role if category == "income" else None,
                 "source_column": source_column,
                 "source_page_or_cell": (
                     f"page {item.page_number}" if item.page_number is not None else evidence.get("source_cell")
@@ -1378,7 +1432,7 @@ def _table_to_line_items(
             # enriched/extracted table; the engine consumes ONLY this field.
             "source_column": "annual_budget",
             "source_page_or_cell": item.get("Source Page") or item.get("Source Cell"),
-            "income_role": item.get("Income Role") if category in ("income", "reserve_income") else None,
+            "income_role": item.get("Income Role") if category == "income" else None,
             "raw": item,
         }
         line_items.append(normalized)

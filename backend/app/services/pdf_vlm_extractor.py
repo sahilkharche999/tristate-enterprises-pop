@@ -16,7 +16,6 @@ from pydantic import BaseModel, Field, ValidationError
 
 from ..config import settings
 from ..models.financial_document_extraction import (
-    INCOME_ROLE_RULES,
     DisclosureFacts,
     DocumentExtractionFailure,
     ExtractedFinancialStatement,
@@ -734,7 +733,6 @@ _PAGE_SYSTEM_PROMPT_OPERATING = (
     '  "ytd_budget": 327699.0 or null\n'
     '  "ytd_variance": -3.78 or null\n'
     '  "annual_budget": 436932.0 or null\n'
-    '  "income_role": "regular_assessment" or null\n'
     '  "page_number": 1\n\n'
     "PAGE-BASED CLASSIFICATION PRINCIPLE:\n"
     "  Your classification must be driven by which STATEMENT this page belongs to,\n"
@@ -825,7 +823,6 @@ _PAGE_SYSTEM_PROMPT_RESERVE = (
     '  "ytd_budget": 327699.0 or null\n'
     '  "ytd_variance": -3.78 or null\n'
     '  "annual_budget": 436932.0 or null\n'
-    '  "income_role": "interest" or null\n'
     '  "page_number": 1\n\n'
     "Return ONLY the JSON object. No markdown, no explanation."
 )
@@ -876,9 +873,7 @@ async def _extract_single_page(
     import asyncio
     from ..ai_implementation.pipeline.llm_client import call_llm_vision
 
-    system_prompt = (
-        _operating_prompt(prompt_context, is_reserve_page) + _TOTALS_INSTRUCTION + "\n\n" + INCOME_ROLE_RULES
-    )
+    system_prompt = _operating_prompt(prompt_context, is_reserve_page) + _TOTALS_INSTRUCTION
     page_type = "Reserve statement" if is_reserve_page else "Operating statement"
     notes_line = " | ".join(prompt_context.notes) if prompt_context.notes else "none"
 

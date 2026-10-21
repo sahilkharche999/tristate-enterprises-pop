@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any, Literal, Optional, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from pydantic.json_schema import SkipJsonSchema
 
 from ..services.income_statement_parser import SECTION_KINDS
 
@@ -60,7 +61,10 @@ class ExtractedStatementLineItem(BaseModel):
     annual_budget: Optional[float] = None
     page_number: Optional[int] = Field(default=None, ge=1)
     evidence: Optional[dict[str, Any]] = None
-    income_role: Optional[IncomeRoleWire] = Field(default=None, description=INCOME_ROLE_RULES)
+    # Kept out of the schema Gemini reads PDF pages with: asking for it there
+    # slowed scanned pages past their timeout. PDFs get it from one separate
+    # call (IncomeRowRoles); Excel answers it in ExcelSourceLine.
+    income_role: SkipJsonSchema[Optional[IncomeRoleWire]] = None
 
     _income_role_is_known = field_validator("income_role", mode="before")(_known_income_role)
 
@@ -263,6 +267,19 @@ class ExcelSourceLine(WireModel):
     income_role: Optional[IncomeRoleWire] = Field(description=INCOME_ROLE_RULES)
 
     _income_role_is_known = field_validator("income_role", mode="before")(_known_income_role)
+
+
+class IncomeRowRole(WireModel):
+    row: int = Field(description="The row's number in the list.")
+    income_role: Optional[IncomeRoleWire] = Field(description=INCOME_ROLE_RULES)
+
+    _income_role_is_known = field_validator("income_role", mode="before")(_known_income_role)
+
+
+class IncomeRowRoles(WireModel):
+    """Gemini's roles for the income rows of a statement read from a PDF."""
+
+    rows: list[IncomeRowRole]
 
 
 class ExcelSourceExtraction(WireModel):

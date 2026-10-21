@@ -11,6 +11,7 @@ from app.ai_implementation.pipeline.llm_client import _make_gemini_schema
 from app.models.financial_document_extraction import (
     ExcelSourceExtraction,
     ExtractedFinancialStatement,
+    IncomeRowRoles,
 )
 from app.services import budget_history_service as svc
 from app.services.financial_statement_validation import totals_for_validation
@@ -350,3 +351,54 @@ def test_income_roles_reach_the_final_budget_lines(tmp_path, monkeypatch):
     )
 
     assert [line["income_role"] for line in draft_lines] == ["regular_assessment", "other_assessment", None]
+
+
+def _pdf_statement():
+    return ExtractedFinancialStatement.model_validate({
+        "document_family": "pdf_visual_document",
+        "report_type": "income_statement",
+        "line_items": [
+            {"label": "Assessment Income", "section_kind": "income", "annual_budget": 2025540.0},
+            {"label": "Parking Space Income", "section_kind": "income", "annual_budget": 7560.0},
+            {"label": "Reserve Income", "section_kind": "reserve_income", "annual_budget": 672886.0},
+            {"label": "Management Service", "section_kind": "operating", "annual_budget": 93744.0},
+        ],
+    })
+
+
+def test_pdf_income_rows_get_roles_from_one_quick_call(monkeypatch):
+    calls = []
+    answer = IncomeRowRoles.model_validate({"rows": [
+        {"row": 1, "income_role": "regular_assessment"},
+        {"row": 2, "income_role": "other_income"},
+    ]})
+    monkeypatch.setattr("app.ai_implementation.pipeline.llm_client.call_llm", _fake_call_llm([answer], calls))
+
+    tagged = asyncio.run(svc._tag_income_roles(_pdf_statement()))
+
+    # Only operating income rows are asked about; reserve rows keep the label rule.
+    assert [item.income_role for item in tagged.line_items] == ["regular_assessment", "other_income", None, None]
+    assert "1. Assessment Income" in calls[0]["messages"][1]["content"]
+    assert "Reserve Income" not in calls[0]["messages"][1]["content"]
+    assert calls[0]["thinking_budget"] == 0
+
+
+def test_failed_role_call_leaves_the_statement_untagged(monkeypatch):
+    monkeypatch.setattr("app.ai_implementation.pipeline.llm_client.call_llm", _fake_call_llm([None], []))
+    tagged = asyncio.run(svc._tag_income_roles(_pdf_statement()))
+    assert all(item.income_role is None for item in tagged.line_items)
+
+
+def test_reserve_fund_rows_never_keep_a_role():
+    # A reserve "Reserve Income" is the transfer from operating; read as dues
+    # it would double the assessment in the fixed-mode schedule.
+    statement = _pdf_statement()
+    statement.line_items[2] = statement.line_items[2].model_copy(update={"income_role": "regular_assessment"})
+    lines = svc._statement_to_budget_line_items(statement, source_mode=svc.SOURCE_MODE_INCOME_STATEMENT)
+    assert lines[2]["category"] == "reserve_income" and lines[2]["income_role"] is None
+
+
+def test_pdf_page_schema_does_not_ask_for_roles():
+    from app.services.pdf_vlm_extractor import StatementPageWithTotals
+
+    assert "income_role" not in str(StatementPageWithTotals.model_json_schema())
