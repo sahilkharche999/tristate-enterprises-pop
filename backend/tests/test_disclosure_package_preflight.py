@@ -688,3 +688,30 @@ def test_validate_inputs_blocks_dropped_reviewed_component():
         hoa_metadata=_valid_hoa_metadata(),
     )
     assert any(e.code == "dropped_reviewed_component" and e.severity == "blocking" for e in errors)
+
+
+def test_stale_settings_reserve_per_unit_warns_but_matching_does_not():
+    """Old Mill 2027: Settings kept 2026's $200.98 while the budget adopts
+    $808,916.36 ($241.61). The 30-year plan uses $241.61, so say so."""
+    from app.disclosure_package.preflight import validate_inputs
+    from app.disclosure_package.package_specs import OLD_MILL_2026
+    from app.disclosure_package.schemas import BudgetDraft, LineItem
+
+    budget = BudgetDraft(line_items=[
+        LineItem(label="Assessments", amount=Decimal("2025540"), is_revenue=True, section="Income"),
+        LineItem(label="MONTHLY CONTRIBUTION TO RESERVE", amount=Decimal("808916.36")),
+    ])
+
+    def codes(per_unit):
+        errors = validate_inputs(
+            spec=OLD_MILL_2026,
+            budget_draft=budget,
+            reserve_snapshot=_valid_reserve_snapshot(),
+            hoa_metadata=_valid_hoa_metadata(),
+            hoa_settings_overrides={"replacement_fund_monthly_assessment_per_unit": per_unit},
+        )
+        return {e.code for e in errors}
+
+    assert "reserve_per_unit_stale" in codes(200.98)
+    assert "reserve_per_unit_stale" not in codes(241.61)
+    assert "reserve_per_unit_stale" not in codes(None)

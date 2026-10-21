@@ -473,3 +473,36 @@ def test_cover_percent_funded_is_prior_year_end_and_table_is_year_end() -> None:
         cash_reserves=Decimal(year0["ending_balance"]),
         estimated_liability=Decimal(year0["estimated_liability"]),
     )
+
+
+def test_later_years_compound_from_the_adopted_contribution() -> None:
+    """Old Mill 2027: Settings still holds 2026's $200.98, the budget adopts
+    $808,916 ($241.61). 2028 grows from $241.61, not from $200.98."""
+
+    def monthly(year: int, adopted: str) -> list:
+        out = _build_thirty_year_plan(
+            spec=OLD_MILL_2026,
+            hoa_metadata=_hoa(),
+            components=[],
+            total_estimated_liability=Decimal("0"),
+            total_year_replacement_provision=Decimal("0"),
+            cash_eoy_prior=Decimal("2260450"),
+            fiscal_year_start=year,
+            inflation_rate=Decimal("0.03"),
+            interest_rate=Decimal("0.018"),
+            assessment_schedule=_old_mill_schedule(),
+            base_replacement_fund_monthly_per_unit=Decimal("200.98"),
+            study_contributions_by_year={year: Decimal(adopted)},
+        )
+        return out["thirty_year_cash_flow"]["replace_fund_assmnt_per_unit_per_mo"]
+
+    stale = monthly(2027, "808916")
+    assert stale[:2] == [Decimal("241.61"), Decimal("248.86")]
+
+    # A base that already matches the adopted amount keeps today's cents.
+    matching = monthly(2026, "672886")
+    assert matching[:2] == [Decimal("200.98"), Decimal("207.01")]
+
+    # A missing (zero) adopted amount doesn't zero the later years.
+    missing = monthly(2027, "0")
+    assert missing[:2] == [Decimal("0.00"), Decimal("207.01")]

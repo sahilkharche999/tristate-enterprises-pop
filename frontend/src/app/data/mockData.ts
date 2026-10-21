@@ -12,6 +12,13 @@ export interface MergedBudgetLine {
   } | null;
 }
 
+export type IncomeRole =
+  | 'regular_assessment'
+  | 'special_assessment'
+  | 'other_assessment'
+  | 'interest'
+  | 'other_income';
+
 export interface LineItem {
   id: string;
   category: 'income' | 'operating' | 'reserve' | 'reserve_income' | 'reserve_expense';
@@ -24,6 +31,7 @@ export interface LineItem {
   variance?: number | null;
   readOnly?: boolean;    // true = excluded from board-adjustable flow (reserve-study rows)
   readOnlyOverride?: boolean | null; // explicit per-line unlock (null = use category default)
+  incomeRole?: IncomeRole | null; // income lines only (null = label containing "assessment" is the regular assessment)
   accountCode?: number;  // 60000 — parsed from "60000 - Electricity & Gas"
   label?: string;        // "60000 - Electricity & Gas" — full string from col B
   lineItemKey?: string | null;

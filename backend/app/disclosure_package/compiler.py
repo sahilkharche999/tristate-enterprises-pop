@@ -78,6 +78,7 @@ from .reconciliation import (
     build_annual_statement_facts,
     is_interfund_reserve_transfer_line,
     is_nonrecurring_forecast_revenue_line,
+    is_regular_assessment,
     is_reserve_interest_line,
     parse_optional_decimal_setting,
     resolve_assessment_presentation_facts,
@@ -415,28 +416,29 @@ def _cash_flow_rows(
 
     # Walk the escalation schedule year-by-year. The base value applies to
     # year 0; subsequent years compound at the bracket rate for that year.
+    # A year with its own contribution (the adopted budget amount or a study
+    # calendar row) sets that year, and later years compound from it.
     monthly_per_unit_by_year: list[Decimal] = []
+    regular_assessments: list[Decimal] = []
     monthly = base_monthly_per_unit
-    for offset in range(_HORIZON_YEARS):
+    for offset, year in enumerate(years):
         if offset > 0:
-            rate = _bracket_rate_for_year(years[offset], assessment_schedule)
+            rate = _bracket_rate_for_year(year, assessment_schedule)
             monthly = monthly * (Decimal("1") + rate)
-        monthly_per_unit_by_year.append(monthly.quantize(Decimal("0.01")))
-
-    regular_assessments = [
-        (monthly_per_unit_by_year[i] * Decimal(units) * Decimal(12)).quantize(Decimal("1"))
-        for i in range(_HORIZON_YEARS)
-    ]
-    if study_contributions_by_year:
-        for i, year in enumerate(years):
-            study_amount = study_contributions_by_year.get(year)
-            if study_amount is None:
-                continue
-            regular_assessments[i] = Decimal(study_amount).quantize(Decimal("1"))
+        per_unit = monthly.quantize(Decimal("0.01"))
+        annual = (per_unit * Decimal(units) * Decimal(12)).quantize(Decimal("1"))
+        study_amount = (study_contributions_by_year or {}).get(year)
+        if study_amount is not None:
+            annual = Decimal(study_amount).quantize(Decimal("1"))
             if units > 0:
-                monthly_per_unit_by_year[i] = (
-                    Decimal(study_amount) / Decimal(units) / Decimal(12)
-                ).quantize(Decimal("0.01"))
+                exact = Decimal(study_amount) / Decimal(units) / Decimal(12)
+                # Re-base only when the cents differ, so a base that already
+                # matches the year's amount keeps every later year unchanged.
+                if exact > 0 and exact.quantize(Decimal("0.01")) != per_unit:
+                    monthly = exact
+                per_unit = exact.quantize(Decimal("0.01"))
+        monthly_per_unit_by_year.append(per_unit)
+        regular_assessments.append(annual)
     special_assessments_row = [
         (special_assessments_per_unit_by_year[i] * Decimal(units)).quantize(Decimal("1"))
         for i in range(_HORIZON_YEARS)
@@ -973,7 +975,8 @@ def _compute_all(
     data_gaps.extend(assessment_facts.warnings)
     if assessment_facts.source == "missing":
         data_gaps.append(
-            "No operating revenue line item with 'assessment' in its label — "
+            "No operating revenue line is the regular assessment (marked so, or "
+            "'assessment' in its label) — "
             "monthly assessment per unit could not be derived from the active draft. "
             "Set 'approved_monthly_assessment_per_unit' under Disclosure Settings to override."
         )
@@ -1089,7 +1092,7 @@ def _compute_all(
             for li in operating_lis
             if li.is_revenue
             and li.label
-            and "assessment" not in li.label.lower()
+            and not is_regular_assessment(li.label, li.income_role)
             and not is_reserve_interest_line(li)
             and not is_nonrecurring_forecast_revenue_line(li.label)
         ),

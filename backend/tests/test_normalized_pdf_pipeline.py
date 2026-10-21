@@ -32,6 +32,7 @@ def test_normalized_workbook_preserves_four_category_taxonomy_end_to_end(tmp_pat
                     "ytd_actual": 521843.0,
                     "annual_budget": 695790.0,
                     "page_number": 1,
+                    "income_role": "regular_assessment",
                 },
                 {
                     "account_code_text": "65-6510",
@@ -98,6 +99,9 @@ def test_normalized_workbook_preserves_four_category_taxonomy_end_to_end(tmp_pat
     assert by_label["Gas & Electric"]["category"] == "operating"
     assert by_label["Reserve Transfer"]["category"] == "reserve_income"
     assert by_label["5 yr Fire Alarm System - Inspection"]["category"] == "reserve_expense"
+    # Gemini's income role rides through the workbook (column K) to the draft line.
+    assert by_label["Assessments: Regular"]["income_role"] == "regular_assessment"
+    assert by_label["Gas & Electric"]["income_role"] is None
 
     # All categories must be in the canonical taxonomy — no drift
     for li in line_items:

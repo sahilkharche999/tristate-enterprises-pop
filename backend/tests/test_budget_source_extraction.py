@@ -322,3 +322,31 @@ def test_version_totals_read_the_generators_total_operating_expense_row():
         ["", "Net Operating Income", None, 808916.36, None, 799541.96],
     ]}
     assert svc._extract_totals_from_preview(preview) == (2034910.0, 1235368.04, 808916.36)
+
+
+def test_income_roles_reach_the_final_budget_lines(tmp_path, monkeypatch):
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Budget"
+    sheet.append(["Line", "Total"])
+    sheet.append(["Assessments", 2025540])
+    sheet.append(["Parking Garage Assessment Income", 7560])
+    sheet.append(["Management Service", 93744])
+    path = tmp_path / "442.xlsx"
+    workbook.save(path)
+    lines = [
+        {**_line("Assessments", 2, kind="income", annual=2025540.0), "income_role": "regular_assessment"},
+        {**_line("Parking Garage Assessment Income", 3, kind="income", annual=7560.0), "income_role": "other_assessment"},
+        # Gemini is told roles are for income rows; one on an expense row is dropped.
+        {**_line("Management Service", 4, annual=93744.0), "income_role": "other_income"},
+    ]
+    monkeypatch.setattr(
+        "app.ai_implementation.pipeline.llm_client.call_llm", _fake_call_llm([_reading(lines=lines)], [])
+    )
+
+    statement = asyncio.run(svc._extract_excel_source(str(path), original_filename="442.xlsx"))
+    draft_lines = svc._statement_to_budget_line_items(
+        statement, source_mode=svc.SOURCE_MODE_PROFORMA_FINAL_BUDGET
+    )
+
+    assert [line["income_role"] for line in draft_lines] == ["regular_assessment", "other_assessment", None]

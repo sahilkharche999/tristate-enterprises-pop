@@ -755,7 +755,7 @@ def build_var_map(
         # assessments
         "assessment_line": assessment_line,
         "assessment_basis_sentence": _assessment_basis_sentence(
-            computed, _assessments_vary(computed, matrix), change_phrase
+            _assessments_vary(computed, matrix), assessment_line
         ),
         "assessment_change_phrase": change_phrase,
         "monthly_assessment_per_unit": f"${_money(monthly_per_unit)}",
@@ -932,22 +932,22 @@ def _outstanding_loan_note(
     )
 
 
-def _assessment_basis_sentence(
-    computed: Mapping[str, Any], assessments_vary: bool, change_phrase: str
-) -> str:
+def _assessment_basis_sentence(assessments_vary: bool, flat_line: str) -> str:
     """Note 4's assessment sentence.
 
     A *value* chip, not a block chip: it is inline prose that sits mid-sentence
     inside a ``<p>``, where a block carrier would be invalid markup. It carries
     no markup of its own, so an escaped scalar is the right shape.
+
+    A flat HOA gets the cover letter's sentence: the change phrase carries its
+    own verb ("will remain the same at"), so it can't follow "is".
     """
     if assessments_vary:
         return (
             "Current monthly assessments vary by ownership interest as shown in "
             "the assessment schedule included in this package."
         )
-    amount = _money(computed.get("monthly_assessment_per_unit_current"))
-    return f"The current monthly assessment per unit is {change_phrase} ${amount}."
+    return flat_line
 
 
 def _contribution_increase_schedule(static_data: Any) -> Markup:

@@ -808,6 +808,18 @@ def resolve_reserve_funding_facts(
     )
 
 
+def is_regular_assessment(label: object, income_role: object = None) -> bool:
+    """True when a revenue line is the regular assessment (dues).
+
+    Gemini tags each income row when it reads the budget, so "Parking Garage
+    Assessment Income" or a special assessment is not taken for dues. Rows from
+    older drafts have no tag and keep the label test.
+    """
+    if income_role:
+        return income_role == "regular_assessment"
+    return "assessment" in str(label or "").lower()
+
+
 def is_reserve_interest_line(item: LineItem) -> bool:
     """True when a revenue line is reserve-fund interest, not late fees or ops."""
     if not getattr(item, "is_revenue", False):
@@ -909,7 +921,7 @@ def resolve_assessment_facts(
         (
             Decimal(item.amount or 0)
             for item in budget_line_items
-            if item.is_revenue and item.label and "assessment" in item.label.lower()
+            if item.is_revenue and item.label and is_regular_assessment(item.label, item.income_role)
         ),
         Decimal("0"),
     )

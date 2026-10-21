@@ -63,6 +63,7 @@ def _base_context(special_assessments: list[dict[str, Any]]) -> dict[str, Any]:
             "monthly_replacement_contribution_per_unit_2026": Decimal("200.98"),
             "monthly_replacement_revenue_total": Decimal("672886"),
             "percent_funded": 57,
+            "estimated_replacement_fund_cash": Decimal("2600000"),
             "total_estimated_liability": Decimal("4575000"),
             "under_funded_balance_total": Decimal("1975000"),
             "under_funded_balance_per_unit": Decimal("7080"),

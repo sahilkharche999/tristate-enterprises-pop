@@ -151,7 +151,7 @@
           {% for aa in computed.additional_assessments_needed %}
           <tr>
             <td>{{ aa.due_date or hoa_settings.get('letter_date') or '—' }}</td>
-            <td class="right">${{ '{:,.2f}'.format(aa.amount_per_unit|float) }}{% if aa.frequency %} per {{ aa.frequency }}{% endif %}</td>
+            <td class="right">${{ '{:,.2f}'.format(aa.amount_per_unit|float) }}{% if aa.get('frequency') %} per {{ aa.frequency }}{% endif %}</td>
           </tr>
           {% endfor %}
         {% else %}
@@ -182,7 +182,7 @@
       as of <span class="form-fill">{{ fiscal_year - 1 }}</span>.
       The projected reserve fund cash balance at the end of the current
       fiscal year is
-      <span class="form-fill">${{ '{:,.0f}'.format(hoa_settings.reserve_cash_balance_eoy_prior) }}</span>,
+      <span class="form-fill">${{ '{:,.0f}'.format(computed.estimated_replacement_fund_cash) }}</span>,
       resulting in reserves being
       <span class="form-fill">{{ computed.percent_funded }}</span> percent
       funded at this date.

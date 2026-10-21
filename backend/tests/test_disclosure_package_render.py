@@ -136,6 +136,7 @@ def _minimal_computed_context() -> dict[str, Any]:
     return {
         "computed": {
             "percent_funded": 57,
+            "estimated_replacement_fund_cash": Decimal("2600000"),
             "total_estimated_liability": Decimal("4575000"),
             "under_funded_balance_total": Decimal("1975000"),
             "under_funded_balance_per_unit": Decimal("7080"),

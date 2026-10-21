@@ -162,6 +162,7 @@ def from_budget_history_record(record: Any) -> BudgetDraft:
             # unaffected; when codes exist, dropping it here silently orphaned
             # every mapping and blocked the render.
             account_code=_attr_or_key(raw, "account_code"),
+            income_role=_attr_or_key(raw, "income_role"),
         ))
     return BudgetDraft(line_items=items)
 

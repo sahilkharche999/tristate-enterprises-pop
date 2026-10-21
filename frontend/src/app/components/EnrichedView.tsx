@@ -4,7 +4,7 @@ import { toast } from 'sonner';
 import { Input } from './ui/input';
 import { Button } from './ui/button';
 import { saveBudgetNote } from '../api/budgetHistory';
-import { type LineItem } from '../data/mockData';
+import { type IncomeRole, type LineItem } from '../data/mockData';
 import { mergedBadgeLabel, mergedBadgeTooltip } from '../lib/glMerge.ts';
 import { clampTableZoomPercent, TABLE_ZOOM_STEP } from './tableZoom.ts';
 import { parseSourcePage } from '../lib/incomeStatementSourcePage.ts';
@@ -32,6 +32,7 @@ interface EnrichedViewProps {
   onNoteSaved: (itemId: string, title: string, body: string) => void;
   onRequestMerge: (itemId: string) => void;
   onReadOnlyOverride?: (itemId: string, override: boolean | null) => void;
+  onIncomeRoleChange?: (itemId: string, role: IncomeRole) => void;
   units: number;
   reserveInflationRate: number;
   hasUnsavedChanges?: boolean;
@@ -68,6 +69,7 @@ export function EnrichedView({
   onNoteSaved,
   onRequestMerge,
   onReadOnlyOverride,
+  onIncomeRoleChange,
   units,
   reserveInflationRate,
   hasUnsavedChanges = false,
@@ -456,6 +458,28 @@ export function EnrichedView({
                               Unlocked — stays in reserve bucket; won't change operating total
                             </span>
                           ) : null}
+                          {item.category === 'income' && onIncomeRoleChange ? (() => {
+                            // No role yet (older drafts): the package falls back to the label rule.
+                            const inferred = item.incomeRole == null;
+                            const counted = inferred
+                              ? item.name.toLowerCase().includes('assessment')
+                              : item.incomeRole === 'regular_assessment';
+                            return (
+                              <button
+                                type="button"
+                                aria-pressed={counted}
+                                onClick={() => onIncomeRoleChange(item.id, counted ? 'other_income' : 'regular_assessment')}
+                                title={`${counted ? 'Counted' : 'Not counted'} as the regular assessment${inferred ? ' (from the label)' : ''}. Click to ${counted ? 'change' : 'count it'}.`}
+                                className={`inline-flex w-fit rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide ${inferred ? 'border-dashed' : ''} ${
+                                  counted
+                                    ? `border-emerald-300 text-emerald-800 hover:bg-emerald-100 ${inferred ? 'bg-white' : 'bg-emerald-50'}`
+                                    : 'border-[#d4d4d4] bg-white text-[#a3a3a3] hover:text-[#525252]'
+                                }`}
+                              >
+                                Regular assessment
+                              </button>
+                            );
+                          })() : null}
                           {mergedLabel ? (
                             <span
                               title={mergedTooltip}

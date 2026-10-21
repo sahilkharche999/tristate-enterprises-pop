@@ -1,11 +1,37 @@
 """Canonical contracts for multi-format financial document extraction."""
 from __future__ import annotations
 
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from ..services.income_statement_parser import SECTION_KINDS
+
+# What an income row is. Gemini reads it from the document; the disclosure
+# package takes regular_assessment rows as the regular assessment instead of
+# guessing from the label (parking, commercial and special lines carry the
+# word "assessment" too).
+IncomeRoleWire = Literal[
+    "regular_assessment", "special_assessment", "other_assessment", "interest", "other_income"
+]
+INCOME_ROLE_RULES = (
+    "income_role, for income rows only (null on expense rows):\n"
+    "- regular_assessment: the regular dues every owner pays, e.g. 'Assessments', "
+    "'Assessment Income', 'Monthly Dues', 'Regular Assessments', and parts of them such as "
+    "operating/reserve or pro-rata/equal assessments.\n"
+    "- special_assessment: a special assessment.\n"
+    "- other_assessment: a charge named assessment that is not the regular dues, e.g. "
+    "'Parking Garage Assessment Income', 'Parking assessments', 'Commercial assessment income', "
+    "storage assessments.\n"
+    "- interest: interest earned.\n"
+    "- other_income: anything else, e.g. late fees, rentals, reimbursements, laundry, "
+    "'Parking Space Income'."
+)
+
+
+def _known_income_role(value: Any) -> Any:
+    # An unexpected tag must not fail the page; the package falls back to the label.
+    return value if value in get_args(IncomeRoleWire) else None
 
 
 class FinancialDocumentRoute(BaseModel):
@@ -34,6 +60,9 @@ class ExtractedStatementLineItem(BaseModel):
     annual_budget: Optional[float] = None
     page_number: Optional[int] = Field(default=None, ge=1)
     evidence: Optional[dict[str, Any]] = None
+    income_role: Optional[IncomeRoleWire] = Field(default=None, description=INCOME_ROLE_RULES)
+
+    _income_role_is_known = field_validator("income_role", mode="before")(_known_income_role)
 
     @field_validator("section_kind", mode="before")
     @classmethod
@@ -231,6 +260,9 @@ class ExcelSourceLine(WireModel):
     ytd_actual: Optional[float]
     ytd_budget: Optional[float]
     annual_budget: Optional[float]
+    income_role: Optional[IncomeRoleWire] = Field(description=INCOME_ROLE_RULES)
+
+    _income_role_is_known = field_validator("income_role", mode="before")(_known_income_role)
 
 
 class ExcelSourceExtraction(WireModel):

@@ -65,7 +65,7 @@ import {
   type ReserveStudyRow,
 } from '../api/budgetHistory';
 import { DrePdfCompareView } from './DrePdfCompareView';
-import { type AISuggestion, type AISuggestionResponse, type FeedbackDecision, type LineItem } from '../data/mockData';
+import { type AISuggestion, type AISuggestionResponse, type FeedbackDecision, type IncomeRole, type LineItem } from '../data/mockData';
 import type { HOARecord } from '../api/hoa';
 import { formatCurrency, formatTimestamp } from '../lib/budget';
 import {
@@ -784,6 +784,13 @@ export function BudgetScreen({
         const newReadOnly = override === null ? isReserveCategory : override;
         return { ...item, readOnlyOverride: override, readOnly: newReadOnly };
       }),
+    );
+  };
+
+  // Saved with the draft (the line JSON round-trips it); the change alone makes the draft unsaved.
+  const handleIncomeRoleChange = (itemId: string, incomeRole: IncomeRole) => {
+    onLineItemsUpdate(
+      lineItems.map((item) => (item.id === itemId ? { ...item, incomeRole } : item)),
     );
   };
 
@@ -2114,6 +2121,7 @@ export function BudgetScreen({
               onNoteSaved={handleNoteSaved}
               onRequestMerge={handleRequestMerge}
               onReadOnlyOverride={handleReadOnlyOverride}
+              onIncomeRoleChange={handleIncomeRoleChange}
               units={hoa.units}
               reserveInflationRate={activeReserveInflationRate}
               hasUnsavedChanges={hasUnsavedDraftChanges}

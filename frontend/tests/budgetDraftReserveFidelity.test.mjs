@@ -5,6 +5,7 @@
  *   - calcTotalIncome / net surplus-deficit semantics (Issue 4)
  *   - read_only_override round-trip through budgetHistoryLineItemToEditorItem /
  *     mapEditorLineItemsToBudgetHistory (Issue 5)
+ *   - income_role round-trip through the same mappers
  *   - liveTransferTotal computation (Issue 6 live-mirror)
  *   - totalAnnualBudget definition unchanged by new fields
  */
@@ -235,6 +236,47 @@ test('read_only_override on operating line preserved through round-trip', () => 
   const reloaded = mapBudgetHistoryLineItems(serialized);
 
   assert.equal(reloaded[0].readOnlyOverride, true, 'true override on operating line preserved');
+});
+
+// ---------------------------------------------------------------------------
+// income_role round-trip (Gemini's tag on income lines, operator-correctable)
+// ---------------------------------------------------------------------------
+
+test('income_role round-trip: operator change survives serialize → deserialize', () => {
+  const item = makeItem({ category: 'income', label: 'Late Fees', income_role: 'other_income' });
+  assert.equal(item.incomeRole, 'other_income');
+
+  const serialized = mapEditorLineItemsToBudgetHistory([{ ...item, incomeRole: 'regular_assessment' }]);
+  assert.equal(serialized[0].income_role, 'regular_assessment', 'role must be forwarded to API payload');
+
+  const reloaded = mapBudgetHistoryLineItems(serialized);
+  assert.equal(reloaded[0].incomeRole, 'regular_assessment');
+});
+
+test('income_role null or missing (older drafts) stays null', () => {
+  const nullRole = makeItem({ category: 'income', label: 'Regular Assessments', income_role: null });
+  const missingRole = makeItem({ category: 'income', label: 'Regular Assessments' });
+  for (const item of [nullRole, missingRole]) {
+    assert.equal(item.incomeRole, null);
+    assert.equal(mapEditorLineItemsToBudgetHistory([item])[0].income_role, null);
+  }
+});
+
+test('expense line income_role stays null', () => {
+  const item = makeExpenseItem(5000);
+  assert.equal(item.incomeRole, null);
+  assert.equal(mapEditorLineItemsToBudgetHistory([item])[0].income_role, null);
+});
+
+test('draft re-saved without edits serializes identically (no false unsaved changes)', () => {
+  const records = [
+    makeRecord({ category: 'income', label: 'Regular Assessments', income_role: 'regular_assessment' }),
+    makeRecord({ category: 'income', label: 'Interest Income', income_role: null }),
+    makeRecord({ category: 'operating', label: 'Landscaping' }),
+  ];
+  const saved = mapEditorLineItemsToBudgetHistory(mapBudgetHistoryLineItems(records));
+  const resaved = mapEditorLineItemsToBudgetHistory(mapBudgetHistoryLineItems(saved));
+  assert.deepEqual(resaved, saved);
 });
 
 // ---------------------------------------------------------------------------

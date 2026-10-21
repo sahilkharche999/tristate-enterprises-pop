@@ -5,7 +5,7 @@ import {
   incomeStatementHtmlFileUrl,
   reserveStudyFileUrl,
 } from './fileUrls.ts';
-import type { LineItem } from '../data/mockData.ts';
+import type { IncomeRole, LineItem } from '../data/mockData.ts';
 import {
   createBudgetBundleFormData,
   createBudgetSourceFormData,
@@ -569,6 +569,7 @@ export function budgetHistoryLineItemToEditorItem(record: JsonObject, index: num
       record.read_only_override !== undefined
         ? (record.read_only_override as boolean | null)
         : null,
+    incomeRole: (pickString(record.income_role) as IncomeRole | undefined) ?? null,
     accountCode,
     label,
     lineItemKey: pickString(record.line_item_key) ?? null,
@@ -637,6 +638,7 @@ export function mapEditorLineItemsToBudgetHistory(lineItems: LineItem[]): JsonOb
     readOnly: item.readOnly ?? false,
     read_only: item.readOnly ?? false,
     read_only_override: item.readOnlyOverride ?? null,
+    income_role: item.incomeRole ?? null,
     reserve_group: item.reserveGroup ?? null,
     section: item.rawSection ?? null,
     fund_type: item.fundType ?? null,

@@ -28,6 +28,7 @@ from ..assessment_mode import (
 from ..config import settings
 from ..generate_budget_pipeline import BudgetPipeline
 from ..models.financial_document_extraction import (
+    INCOME_ROLE_RULES,
     DocumentExtractionFailure,
     ExcelSourceExtraction,
     ExtractedFinancialStatement,
@@ -260,7 +261,8 @@ section_kind: income (operating revenue), operating (operating expenses, includi
 5. facts: the disclosure facts described in the schema, only where the workbook prints them (null otherwise); never compute them. A balance's as_of_date comes from its label or heading when it names one (e.g. 'Projected Reserves as of 12/31/26' -> 2026-12-31); page is the worksheet row.
 
 If several sheets hold different statements, use the main one (visible, most complete, latest year), name it in primary_sheet, and do not mix sheets.
-"""
+
+""" + INCOME_ROLE_RULES
 # Above this a workbook is almost certainly carrying old years or scratch
 # sheets; ask the operator to trim it rather than silently cutting rows.
 _EXCEL_PROMPT_MAX_CHARS = 300_000
@@ -944,6 +946,7 @@ async def _extract_excel_source(
                     ytd_budget=line.ytd_budget,
                     annual_budget=line.annual_budget,
                     evidence={"source_cell": f"{line.source_sheet or raw.primary_sheet}!R{line.source_row}"},
+                    income_role=line.income_role,
                 )
                 for line in raw.line_items
             ],
@@ -1064,6 +1067,7 @@ def _statement_to_budget_line_items(
                 "percent_change": 0.0,
                 "read_only": _effective_read_only({}, category),
                 "reserve_group": reserve_group,
+                "income_role": item.income_role if category in ("income", "reserve_income") else None,
                 "source_column": source_column,
                 "source_page_or_cell": (
                     f"page {item.page_number}" if item.page_number is not None else evidence.get("source_cell")
@@ -1374,6 +1378,7 @@ def _table_to_line_items(
             # enriched/extracted table; the engine consumes ONLY this field.
             "source_column": "annual_budget",
             "source_page_or_cell": item.get("Source Page") or item.get("Source Cell"),
+            "income_role": item.get("Income Role") if category in ("income", "reserve_income") else None,
             "raw": item,
         }
         line_items.append(normalized)

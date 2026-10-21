@@ -449,6 +449,35 @@ def validate_inputs(
                 suggested_fix="Record why reserve funding differs from the income-statement transfer.",
             ))
 
+    # The 30-year plan grows from the year's adopted contribution, so a
+    # per-unit figure left in Settings from last year no longer drives it.
+    settings_per_unit = parse_optional_decimal_setting(
+        overrides.get("replacement_fund_monthly_assessment_per_unit")
+    )
+    adopted_per_unit = reserve_funding_facts.monthly_per_unit
+    if (
+        settings_per_unit
+        and not package_scenario.use_study_funding_calendar
+        and reserve_funding_facts.annual_contribution > 0
+        and abs(settings_per_unit - adopted_per_unit) > Decimal("0.005")
+    ):
+        errors.append(PreflightError(
+            field_path="hoa_settings.replacement_fund_monthly_assessment_per_unit",
+            message=(
+                f"The replacement fund assessment per unit in Settings "
+                f"(${settings_per_unit:,.2f}) differs from the {spec.fiscal_year} "
+                f"adopted contribution (${adopted_per_unit:,.2f}, from the "
+                f"{reserve_funding_facts.source_label}). The 30-year plan uses "
+                f"${adopted_per_unit:,.2f}."
+            ),
+            severity="warning",
+            code="reserve_per_unit_stale",
+            suggested_fix=(
+                "Update the replacement fund monthly assessment per unit in "
+                "Disclosure Defaults, or clear it."
+            ),
+        ))
+
     if (
         getattr(reserve_snapshot, "study_was_uploaded", False)
         and not reserve_snapshot.funding_plan_rows

@@ -53,6 +53,7 @@ from .adapters import (
 )
 from .compiler import CompileError, _compute_all, compile_package
 from .preflight import partition_errors, validate_inputs
+from .reconciliation import is_regular_assessment
 from .appendix_storage import appendix_file_exists, appendix_file_path
 from .schemas import (
     BudgetDraft,
@@ -124,7 +125,7 @@ def _assessment_revenue_for_budget_draft(budget_draft: Any) -> Decimal:
         label = str(_line_item_value(item, "label", "") or "")
         category = str(_line_item_value(item, "category", "") or "").lower()
         is_revenue = bool(_line_item_value(item, "is_revenue", False)) or category in {"income", "reserve_income"}
-        if not is_revenue or "assessment" not in label.lower():
+        if not is_revenue or not is_regular_assessment(label, _line_item_value(item, "income_role")):
             continue
         amount, _source_column_used = select_assessment_mapping_amount(
             {
@@ -1039,6 +1040,24 @@ def _build_readiness_steps(
     return steps
 
 
+def _reserve_cash_is_zero(overrides: dict, fiscal_year: int, funding_plan_rows: Any) -> bool:
+    """True when cash was supplied but the cash the package prints is $0.
+
+    Judges the resolved cash (year map first), not the legacy field, which can
+    still hold last year's balance or a stray 0.
+    """
+    from .scenario import resolve_opening_reserve_cash
+
+    cash = resolve_opening_reserve_cash(
+        fiscal_year=fiscal_year, settings=overrides, funding_plan_rows=funding_plan_rows
+    )
+    supplied = (
+        overrides.get("reserve_cash_balance_eoy_prior") is not None
+        or cash.source_label == "reserve cash by fiscal year"
+    )
+    return supplied and cash.value == 0
+
+
 def run_preflight(
     session: Session,
     hoa_id: int,
@@ -1199,25 +1218,23 @@ def run_preflight_detailed(
 
     # Zero cash warning (allowed, but often unintentional empty default).
     try:
-        cash = bundle.overrides.get("reserve_cash_balance_eoy_prior")
-        if cash is not None:
-            from decimal import Decimal as _D
-
-            if _D(str(cash)) == 0:
-                errors.append(PreflightError(
-                    field_path="hoa_settings.reserve_cash_balance_eoy_prior",
-                    message=(
-                        "Reserve cash balance (end of prior year) is $0. "
-                        "Generation is allowed, but percent funded will look empty "
-                        "if the association actually holds reserves."
-                    ),
-                    severity="warning",
-                    code="reserve_cash_zero",
-                    suggested_fix=(
-                        "Confirm cash is intentionally zero in Disclosure Defaults, "
-                        "or enter the board’s reserve cash balance."
-                    ),
-                ))
+        if _reserve_cash_is_zero(
+            bundle.overrides, fiscal_year, bundle.reserve_snapshot.funding_plan_rows
+        ):
+            errors.append(PreflightError(
+                field_path="hoa_settings.reserve_cash_balance_eoy_prior",
+                message=(
+                    "Reserve cash balance (end of prior year) is $0. "
+                    "Generation is allowed, but percent funded will look empty "
+                    "if the association actually holds reserves."
+                ),
+                severity="warning",
+                code="reserve_cash_zero",
+                suggested_fix=(
+                    "Confirm cash is intentionally zero in Disclosure Defaults, "
+                    "or enter the board’s reserve cash balance."
+                ),
+            ))
     except Exception:
         logger.exception("zero-cash preflight warning failed for HOA %s", hoa_id)
 

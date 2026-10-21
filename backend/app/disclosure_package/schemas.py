@@ -41,6 +41,9 @@ class LineItem(BaseModel):
     is_reserve: bool = False
     is_revenue: bool = False
     read_only: bool = False
+    # What an income row is, as Gemini read it (regular_assessment, …). None on
+    # older drafts; see reconciliation.is_regular_assessment.
+    income_role: Optional[str] = None
 
 
 class BudgetDraft(BaseModel):

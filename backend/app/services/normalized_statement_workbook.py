@@ -59,6 +59,8 @@ def build_normalized_statement_workbook(
             "YTD Budget",
             "YTD Variance",
             "Annual Budget",
+            # K: carried to the draft lines; the enricher writes from N on.
+            "Income Role",
         ]
     )
 
@@ -101,6 +103,7 @@ def build_normalized_statement_workbook(
                     item.ytd_budget,
                     item.ytd_variance,
                     item.annual_budget,
+                    item.income_role,
                 ]
             )
 

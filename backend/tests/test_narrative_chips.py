@@ -279,7 +279,16 @@ def test_assessment_basis_sentence_both_branches():
     """A value chip, not a block chip: it sits mid-sentence inside a <p>,
     where a block carrier would be invalid markup."""
     flat = _var_map()["assessment_basis_sentence"]
-    assert "The current monthly assessment per unit is increases to $425.00." == flat
+    assert "The monthly assessment per unit for 2026 increases to $425.00." == flat
+    unchanged = _var_map(
+        computed=_computed(
+            presentation_facts={
+                "assessments_vary": False,
+                "assessment_change_phrase": "will remain the same at",
+            }
+        )
+    )["assessment_basis_sentence"]
+    assert "The monthly assessment per unit for 2026 will remain the same at $425.00." == unchanged
 
     varied = _var_map(matrix=SimpleNamespace(recipient_grain="group"))[
         "assessment_basis_sentence"
