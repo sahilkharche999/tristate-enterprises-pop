@@ -39,6 +39,11 @@ const REQUIRED_MONEY_FIELDS = new Set<string>([
   'reserve_funding_source',
 ]);
 
+// Rates are stored as decimals (0.0225) but typed as percents (2.25).
+const PERCENT_FIELDS = new Set<string>(['interest_rate_after_tax']);
+const toPercent = (rate: number) => Number((rate * 100).toFixed(6));
+const fromPercent = (percent: number) => Number((percent / 100).toFixed(8));
+
 const LETTERHEAD_SCALAR_KEYS = new Set<string>([
   'management_company',
   'management_company_address',
@@ -435,7 +440,7 @@ export const HOADisclosureSettingsForm = forwardRef<
     ['reserve_cash_balance_eoy_prior', 'Reserve cash balance (end of prior year)', 'number'],
     ['fund_balance_boy_operations', 'Operating fund balance (beginning of year)', 'number'],
     ['monthly_assessment_per_unit_prior', 'Monthly assessment per unit (prior year)', 'number'],
-    ['interest_rate_after_tax', 'Interest rate after tax (decimal, e.g. 0.018)', 'number'],
+    ['interest_rate_after_tax', 'Interest rate after tax (%, e.g. 2.25)', 'number'],
     ['replacement_fund_monthly_assessment_per_unit', 'Replacement fund monthly assessment per unit (30-year forecast base; blank = derive from reserve study ÷ units ÷ 12)', 'number'],
     ['approved_monthly_assessment_per_unit', 'Approved monthly assessment per unit (overrides derived; cents preserved)', 'number'],
     ['reserve_interest_income_override', 'Reserve interest income override (annual; blank = derive from budget or reserve study)', 'number'],
@@ -840,7 +845,9 @@ export const HOADisclosureSettingsForm = forwardRef<
                     ? numberDrafts[String(key)]
                     : settings[key] === null || settings[key] === undefined
                       ? ''
-                      : String(settings[key])
+                      : PERCENT_FIELDS.has(String(key))
+                        ? String(toPercent(Number(settings[key])))
+                        : String(settings[key])
                 }
                 onChange={(e) => {
                   if (type !== 'number') {
@@ -876,7 +883,9 @@ export const HOADisclosureSettingsForm = forwardRef<
                   setNumberDrafts((prev) => ({ ...prev, [draftKey]: raw }));
                   if (raw === '-' || raw === '.' || raw === '-.' || raw.endsWith('.')) return;
                   const parsed = Number(raw);
-                  if (Number.isFinite(parsed)) update(key, parsed as never);
+                  if (Number.isFinite(parsed)) {
+                    update(key, (PERCENT_FIELDS.has(draftKey) ? fromPercent(parsed) : parsed) as never);
+                  }
                 }}
                 onBlur={() => {
                   const draftKey = String(key);
@@ -967,12 +976,12 @@ export const HOADisclosureSettingsForm = forwardRef<
               />
               <input
                 type="number"
-                step="0.001"
-                placeholder="Rate (decimal, e.g. 0.03)"
-                value={row.rate ?? ''}
+                step="0.01"
+                placeholder="Rate (%, e.g. 3)"
+                value={row.rate == null ? '' : toPercent(row.rate)}
                 onChange={(e) => {
                   const next = [...schedule];
-                  next[i] = { ...row, rate: Number(e.target.value) };
+                  next[i] = { ...row, rate: fromPercent(Number(e.target.value)) };
                   update_schedule(next);
                 }}
                 className="border border-[#d4d4d4] rounded px-2 py-1 text-sm"
