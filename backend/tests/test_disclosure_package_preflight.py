@@ -665,8 +665,18 @@ def test_validate_inputs_blocks_empty_calendar_when_study_uploaded():
         budget_draft=_valid_budget(),
         reserve_snapshot=snap,
         hoa_metadata=_valid_hoa_metadata(),
+        hoa_settings_overrides={"use_study_funding_calendar": True},
     )
     assert any(e.code == "missing_funding_calendar" and e.severity == "blocking" for e in errors)
+
+    # Default plan grows from the adopted contribution and never reads the calendar.
+    errors = validate_inputs(
+        spec=OLD_MILL_2026,
+        budget_draft=_valid_budget(),
+        reserve_snapshot=snap,
+        hoa_metadata=_valid_hoa_metadata(),
+    )
+    assert not any(e.code == "missing_funding_calendar" for e in errors)
 
 
 def test_validate_inputs_blocks_dropped_reviewed_component():

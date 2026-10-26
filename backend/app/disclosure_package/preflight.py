@@ -478,8 +478,11 @@ def validate_inputs(
             ),
         ))
 
+    # Only the study-calendar plan reads these rows; the default plan grows
+    # from the adopted contribution.
     if (
-        getattr(reserve_snapshot, "study_was_uploaded", False)
+        package_scenario.use_study_funding_calendar
+        and getattr(reserve_snapshot, "study_was_uploaded", False)
         and not reserve_snapshot.funding_plan_rows
         and not overrides.get("funding_calendar_confirmed_flat")
     ):

@@ -3631,6 +3631,7 @@ def reopen_version_as_draft(
         status=BUDGET_DRAFT_ACTIVE,
         line_items_json=version.line_items_json,
         reserve_study_rows_json=source_draft.reserve_study_rows_json if source_draft else _json_dumps([]),
+        reserve_funding_plan_rows_json=source_draft.reserve_funding_plan_rows_json if source_draft else None,
         reserve_study_warnings_json=source_draft.reserve_study_warnings_json if source_draft else _json_dumps([]),
         reserve_study_status=(source_draft.reserve_study_status if source_draft else None) or "none",
         global_note=version.summary_note,

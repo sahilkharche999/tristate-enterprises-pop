@@ -691,6 +691,7 @@ def test_reopen_generated_version_preserves_reserve_study_state(
                     "flags": [],
                 }
             ],
+            "funding_plan_rows": [{"year": 2027, "annual_contribution": 808916.36}],
             "warnings": ["Study year inferred from cover page"],
         },
     )
@@ -717,6 +718,7 @@ def test_reopen_generated_version_preserves_reserve_study_state(
     assert reopened_draft["reserve_study_rows"][0]["line_item"] == "Roof"
     assert reopened_draft["reserve_study_warnings"] == ["Study year inferred from cover page"]
     assert reopened_draft["reserve_study_status"] == "review_required"
+    assert reopened_draft["reserve_funding_plan_rows"][0]["year"] == 2027
 
 
 def test_save_reserve_study_rows_returns_derived_reserve_columns(
