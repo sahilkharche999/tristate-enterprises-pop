@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react';
-import { AlertTriangle, ArrowDown, ArrowUp, Heading2, Minus, Plus, Save, Trash2, Upload } from 'lucide-react';
+import { AlertTriangle, ArrowDown, ArrowUp, Heading2, Minus, Plus, RotateCcw, Save, Trash2, Upload } from 'lucide-react';
 
 import { Button } from './ui/button';
 import { Input } from './ui/input';
@@ -31,6 +31,8 @@ interface ReserveStudyViewProps {
   onAddHeader: () => void;
   onMoveRow: (index: number, direction: 'up' | 'down') => void;
   onDeleteRow: (index: number) => void;
+  onRestoreRow: (index: number) => void;
+  onDismissWarning: (warning: string) => void;
   onSave: () => Promise<void>;
   onApply: () => Promise<void>;
   onReplaceFile?: (file: File) => Promise<void>;
@@ -70,6 +72,8 @@ export function ReserveStudyView({
   onAddHeader,
   onMoveRow,
   onDeleteRow,
+  onRestoreRow,
+  onDismissWarning,
   onSave,
   onApply,
   onReplaceFile,
@@ -174,7 +178,7 @@ export function ReserveStudyView({
             </Button>
             <Button
               onClick={() => void onApply()}
-              disabled={isSaving || isApplying || rows.length === 0}
+              disabled={isSaving || isApplying || rows.every((row) => row.deleted)}
               className="whitespace-nowrap bg-[#111111] text-white shadow-sm hover:bg-[#262626]"
             >
               {isApplying ? 'Applying...' : 'Apply to Budget'}
@@ -190,7 +194,16 @@ export function ReserveStudyView({
             </div>
             <ul className="space-y-1 text-sm text-amber-900">
               {warnings.map((warning) => (
-                <li key={warning}>{warning}</li>
+                <li key={warning} className="flex items-start justify-between gap-4">
+                  <span>{warning}</span>
+                  <button
+                    type="button"
+                    onClick={() => onDismissWarning(warning)}
+                    className="shrink-0 text-xs font-medium underline underline-offset-2 hover:text-amber-700"
+                  >
+                    Dismiss
+                  </button>
+                </li>
               ))}
             </ul>
           </div>
@@ -331,7 +344,29 @@ export function ReserveStudyView({
                     </td>
                   </tr>
                 ) : (
-                  rows.map((row, index) => row.row_type === 'header' ? (
+                  rows.map((row, index) => row.deleted ? (
+                    <tr key={row.row_id || `reserve-row-${index}`} className="border-t border-[#f0f0f0] bg-[#fafafa]">
+                      <td className="px-4 py-3" />
+                      {/* The table scrolls sideways, so keep these beside the name. */}
+                      <td className="px-4 py-3" colSpan={10}>
+                        <div className="flex items-center gap-3">
+                          <span className="text-sm text-[#a3a3a3] line-through">{row.line_item}</span>
+                          <span className="rounded-full bg-[#f0f0f0] px-2.5 py-1 text-[11px] font-medium text-[#525252]">
+                            Deleted
+                          </span>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => onRestoreRow(index)}
+                            className="text-[#525252] hover:bg-[#f0f0f0] hover:text-[#111111]"
+                          >
+                            <RotateCcw className="mr-2 h-4 w-4" />
+                            Restore
+                          </Button>
+                        </div>
+                      </td>
+                    </tr>
+                  ) : row.row_type === 'header' ? (
                     <tr key={row.row_id || `reserve-row-${index}`} className="border-t border-[#e5e5e5] bg-[#fafafa]">
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-1">
@@ -571,8 +606,8 @@ export function ReserveStudyView({
             <AlertDialogTitle>Are you sure?</AlertDialogTitle>
             <AlertDialogDescription>
               {pendingDeleteRow
-                ? `This will delete "${pendingDeleteRow.line_item}" from the reserve study table.`
-                : 'This will delete the selected reserve study row.'}
+                ? `"${pendingDeleteRow.line_item}" will be marked deleted. It stays in this table for the record, no longer counts toward reserves or the PDF, and can be restored.`
+                : 'This row will be marked deleted. It stays in this table for the record and can be restored.'}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

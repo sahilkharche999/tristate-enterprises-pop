@@ -1879,7 +1879,7 @@ def _is_applied_reserve_study_line_item(item: dict[str, Any]) -> bool:
 
 
 def _reserve_study_row_due_this_budget_year(row: dict[str, Any]) -> bool:
-    if row.get("row_type") == "header":
+    if row.get("row_type") == "header" or row.get("deleted"):
         return False
     remaining_life = row.get("remaining_life")
     if remaining_life is None:
@@ -3061,14 +3061,34 @@ def save_reserve_study_rows(
     draft = _get_editable_draft(session, hoa_id, draft_id)
     upload = _get_upload(session, draft.source_upload_id)
     normalized_rows, _ = canonicalize_reserve_study_row_dicts(payload.rows)
-    has_review_flags = bool(payload.warnings) or any(
+    live_rows = [row for row in normalized_rows if not row.get("deleted")]
+    # With no items left, the extraction's warnings describe nothing on this draft.
+    warnings = payload.warnings if live_rows else []
+    has_review_flags = bool(warnings) or any(
         isinstance(row.get("flags"), list) and len(row.get("flags") or []) > 0
-        for row in normalized_rows
+        for row in live_rows
     )
+    previously_deleted = {
+        row.get("row_id")
+        for row in _json_loads(draft.reserve_study_rows_json, [])
+        if isinstance(row, dict) and row.get("deleted")
+    }
+    for row in normalized_rows:
+        deleted = bool(row.get("deleted"))
+        if deleted != (row.get("row_id") in previously_deleted):
+            _create_audit_event(
+                session,
+                hoa_id=hoa_id,
+                actor=actor,
+                event_type="reserve_row_deleted" if deleted else "reserve_row_restored",
+                summary=f"{'Deleted' if deleted else 'Restored'} reserve item: {row.get('line_item')}",
+                draft_id=draft.id,
+                payload={"row_id": row.get("row_id"), "line_item": row.get("line_item")},
+            )
     draft.reserve_study_rows_json = _json_dumps(normalized_rows)
     if payload.funding_plan_rows:
         draft.reserve_funding_plan_rows_json = _json_dumps(payload.funding_plan_rows)
-    draft.reserve_study_warnings_json = _json_dumps(payload.warnings)
+    draft.reserve_study_warnings_json = _json_dumps(warnings)
     draft.reserve_study_status = "review_required" if has_review_flags else "completed"
     draft.updated_by_user_id = actor["id"]
     draft.actor_name = _actor_name(actor)

@@ -505,20 +505,26 @@ def test_validate_inputs_warns_when_funding_plan_missing_package_year_row():
         ],
     )
 
-    errors = validate_inputs(
-        spec=OLD_MILL_2026.model_copy(update={"fiscal_year": 2026}),
-        budget_draft=_valid_budget(),
-        reserve_snapshot=reserve_snapshot,
-        hoa_metadata=_valid_hoa_metadata(),
-        appendices_root=None,
-    )
+    def mismatch_codes(overrides):
+        errors = validate_inputs(
+            spec=OLD_MILL_2026.model_copy(update={"fiscal_year": 2026}),
+            budget_draft=_valid_budget(),
+            reserve_snapshot=reserve_snapshot,
+            hoa_metadata=_valid_hoa_metadata(),
+            appendices_root=None,
+            hoa_settings_overrides=overrides,
+        )
+        return [
+            e for e in errors
+            if e.field_path == "reserve_study_snapshot.funding_plan_rows"
+            and "No reserve-study funding plan row was found for fiscal year 2026" in e.message
+            and e.code == "fiscal_year_source_mismatch"
+        ]
 
-    assert any(
-        e.field_path == "reserve_study_snapshot.funding_plan_rows"
-        and "No reserve-study funding plan row was found for fiscal year 2026" in e.message
-        and e.code == "fiscal_year_source_mismatch"
-        for e in errors
-    )
+    assert mismatch_codes({"use_study_funding_calendar": 1})
+    # The budget's reserve line sets funding and the plan ignores the calendar,
+    # so a missing study year changes nothing and must not warn.
+    assert not mismatch_codes({})
 
 
 def test_validate_inputs_warns_when_budget_and_study_reserve_funding_differ():

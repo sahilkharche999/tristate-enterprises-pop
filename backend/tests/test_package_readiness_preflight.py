@@ -40,6 +40,71 @@ def test_build_readiness_steps_mapping_not_required_for_fixed():
     assert budget["status"] == "done"
 
 
+def test_attach_fix_links_reserve_findings():
+    out = dp_service._attach_fix_links(
+        [
+            PreflightError(
+                field_path="reserve_study_snapshot.funding_plan_rows",
+                message="missing row",
+                severity="warning",
+            ),
+            PreflightError(field_path="reserve_funding.source", message="conflict", severity="blocking"),
+            PreflightError(field_path="reserve_interest_income", message="missing", severity="warning"),
+        ],
+        hoa_id=4,
+    )
+    assert out[0].fix_path == "/hoa/4?view=reserve"
+    assert "field=reserve_funding_source" in out[1].fix_path
+    assert "field=reserve_interest_income_override" in out[2].fix_path
+
+
+def _readiness_step(step_id, *, blocking=(), warnings=(), has_reserve_components=True):
+    steps = dp_service._build_readiness_steps(
+        hoa_id=2,
+        blocking=list(blocking),
+        warnings=list(warnings),
+        mapping_step_status="not_required",
+        has_budget=True,
+        has_reserve_components=has_reserve_components,
+    )
+    return next(s for s in steps if s["id"] == step_id)
+
+
+def test_reserve_card_names_the_real_problem_when_a_study_is_attached():
+    warning = PreflightError(
+        field_path="reserve_study_snapshot.funding_plan_rows",
+        message="No funding plan row for 2027",
+        severity="warning",
+    )
+    reserve = _readiness_step("reserve_study", warnings=[warning])
+    assert reserve["status"] == "warning"
+    assert reserve["detail"] == "No funding plan row for 2027"
+    # A reserve-study finding is not a Settings problem.
+    assert _readiness_step("disclosure_settings", warnings=[warning])["status"] == "done"
+
+
+def test_reserve_card_needs_action_when_a_reserve_finding_blocks():
+    finding = PreflightError(
+        field_path="reserve_study_snapshot.components",
+        message="Row was dropped",
+        severity="blocking",
+    )
+    reserve = _readiness_step("reserve_study", blocking=[finding])
+    assert reserve["status"] == "needs_action"
+    assert reserve["detail"] == "Row was dropped"
+
+
+def test_settings_card_names_its_finding():
+    finding = PreflightError(
+        field_path="hoa_settings.reserve_study_date",
+        message="Reserve study date is missing.",
+        severity="warning",
+    )
+    settings = _readiness_step("disclosure_settings", warnings=[finding])
+    assert settings["status"] == "warning"
+    assert settings["detail"] == "Reserve study date is missing."
+
+
 def test_build_readiness_steps_budget_needs_action():
     blocking = [
         PreflightError(

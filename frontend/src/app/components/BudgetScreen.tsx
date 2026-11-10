@@ -1379,9 +1379,41 @@ export function BudgetScreen({
     setReserveStudyApplyMessage(null);
   };
 
-  const handleDeleteReserveStudyRow = (index: number) => {
-    setReserveStudyRows((current) => current.filter((_, rowIndex) => rowIndex !== index));
+  // Deletes and dismissals are confirmed actions, so they don't wait for Save.
+  const saveReserveChangeNow = (rows: ReserveStudyRow[], warnings: string[]) => {
+    reserveRowsRef.current = rows;
+    reserveWarningsRef.current = warnings;
+    setReserveStudyRows(rows);
+    setReserveStudyWarnings(warnings);
     setReserveStudyApplyMessage(null);
+    persistReserveStudySnapshot(rows, warnings).catch((error) => {
+      toast.error(getErrorMessage(error, 'Could not save that reserve study change.'));
+    });
+  };
+
+  const handleDeleteReserveStudyRow = (index: number) => {
+    const rows = reserveRowsRef.current;
+    // A row with no name was never a real item, so there is nothing to keep on record.
+    const next = rows[index]?.line_item?.trim()
+      ? rows.map((row, rowIndex) => (rowIndex === index ? { ...row, deleted: true } : row))
+      : rows.filter((_, rowIndex) => rowIndex !== index);
+    saveReserveChangeNow(next, reserveWarningsRef.current);
+  };
+
+  const handleRestoreReserveStudyRow = (index: number) => {
+    saveReserveChangeNow(
+      reserveRowsRef.current.map((row, rowIndex) =>
+        rowIndex === index ? { ...row, deleted: false } : row,
+      ),
+      reserveWarningsRef.current,
+    );
+  };
+
+  const handleDismissReserveWarning = (warning: string) => {
+    saveReserveChangeNow(
+      reserveRowsRef.current,
+      reserveWarningsRef.current.filter((entry) => entry !== warning),
+    );
   };
 
   const handleSaveReserveStudy = async () => {
@@ -1526,14 +1558,20 @@ export function BudgetScreen({
                 </p>
                 {latestVersionSummary && uploadState === 'initial' ? (
                   <p className="mt-3 rounded-lg border border-[#e5e5e5] bg-[#fafafa] px-3 py-2 text-left text-xs text-[#525252]">
-                    A generated version ({latestVersionSummary.version_code}) already exists.{' '}
+                    {latestVersionSummary.version_code} is locked. Upload next year&apos;s files below,
+                    or{' '}
                     <Link
                       to={`/hoa/${hoaId}?generated=true&versionId=${latestVersionSummary.id}&readOnly=1`}
                       className="font-medium underline"
                     >
-                      Open latest generated
+                      open {latestVersionSummary.version_code}
                     </Link>{' '}
-                    instead of starting from an empty upload, or continue below to create a new draft.
+                    to review it. The package year is {hoa.portfolio_year ?? 'not set'}; if these files
+                    are for another year,{' '}
+                    <Link to={`/hoa/${hoaId}/settings?section=database`} className="font-medium underline">
+                      change it in Settings
+                    </Link>{' '}
+                    first.
                   </p>
                 ) : null}
               </div>
@@ -1797,7 +1835,7 @@ export function BudgetScreen({
                 ? 'This cannot be undone. The active draft and its unsaved edits will be removed.'
                 : confirmAction === 'replace'
                   ? 'The primary budget source file will be replaced and draft line items may change. Continue only if you intend to re-extract from a new file.'
-                  : 'This creates an immutable budget version (not the homeowner disclosure PDF). The draft may be superseded. Use Disclosure Package separately for the owner PDF.'}
+                  : "Generate the Disclosure Package PDF first. This locks the budget as a new version, closes this draft and returns you to the portfolio. Opening this HOA again starts next year's upload."}
             </AlertDialogDescription>
           </AlertDialogHeader>
           {confirmAction === 'replace' ? (
@@ -2102,7 +2140,7 @@ export function BudgetScreen({
                     : 'Generate budget version'}
               </Button>
               <span className="max-w-[16rem] text-right text-[11px] text-[#737373]">
-                Locks a budget version — not the owner PDF. Use Disclosure Package for that.
+                Generate the Disclosure Package PDF first. This locks the budget and closes the draft.
               </span>
             </div>
           )}
@@ -2229,6 +2267,8 @@ export function BudgetScreen({
               onAddHeader={handleAddReserveStudyHeader}
               onMoveRow={handleMoveReserveStudyRow}
               onDeleteRow={handleDeleteReserveStudyRow}
+              onRestoreRow={handleRestoreReserveStudyRow}
+              onDismissWarning={handleDismissReserveWarning}
               onSave={handleSaveReserveStudy}
               onApply={handleApplyReserveStudy}
               onReplaceFile={draftId ? handleReplaceReserveFile : undefined}

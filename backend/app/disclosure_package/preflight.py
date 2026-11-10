@@ -129,6 +129,7 @@ def check_reserve_study_age(
                     "§5550 requires a reserve study dated within the past 3 years."
                 ),
                 severity="warning",
+                suggested_fix="Enter the reserve study date in Disclosure Defaults.",
             )
         ]
 
@@ -142,6 +143,7 @@ def check_reserve_study_age(
                     "Use YYYY-MM-DD or MM/DD/YYYY."
                 ),
                 severity="warning",
+                suggested_fix="Re-enter the reserve study date in Disclosure Defaults.",
             )
         ]
 
@@ -161,6 +163,10 @@ def check_reserve_study_age(
                     "requires ≤ 3 years."
                 ),
                 severity="blocking",
+                suggested_fix=(
+                    "Upload a newer reserve study, then update the study date "
+                    "in Disclosure Defaults."
+                ),
             )
         ]
     if age_years == 3:
@@ -172,6 +178,7 @@ def check_reserve_study_age(
                     "years old; next package year will require a refresh."
                 ),
                 severity="warning",
+                suggested_fix="No change needed for this package. Order a new study before next year's.",
             )
         ]
     if age_years == 2:
@@ -183,6 +190,7 @@ def check_reserve_study_age(
                     "refresh due next package year."
                 ),
                 severity="warning",
+                suggested_fix="No change needed for this package. Plan a new study for next year.",
             )
         ]
     return []
@@ -293,6 +301,7 @@ def validate_inputs(
             field_path="budget_draft.line_items",
             message="At least one line item is required",
             severity="blocking",
+            suggested_fix="Upload a budget file or add line items to the draft.",
         ))
 
     # 2. Reserve study components present. Income-statement-only PDFs can still
@@ -302,10 +311,14 @@ def validate_inputs(
         errors.append(PreflightError(
             field_path="reserve_study_snapshot.components",
             message=(
-                "Reserve study has no components — reserve-derived schedules "
-                "will render with default $0/0% values"
+                "This budget has no reserve study items, so reserve schedules "
+                "will print $0 and 0% funded."
             ),
             severity="warning",
+            suggested_fix=(
+                "Upload a reserve study or add items on the Reserve Study tab. "
+                "If this HOA has no study, you can ignore this."
+            ),
         ))
 
     # 3. HOA fiscal year end month set + valid (1-12)
@@ -315,6 +328,7 @@ def validate_inputs(
             field_path="hoa_metadata.fiscal_year_end_month",
             message="HOA fiscal_year_end_month must be 1-12",
             severity="blocking",
+            suggested_fix="Set the fiscal year end month in HOA Database.",
         ))
 
     # 4. Reserve cash balance set (REQ-D11-004). In the DRE-driven model the
@@ -335,6 +349,7 @@ def validate_inputs(
             field_path="reserve_cash_balance.amount",
             message="Reserve cash balance for end of prior year must be >= 0",
             severity="blocking",
+            suggested_fix="Enter a reserve cash balance of $0 or more in Disclosure Defaults.",
         ))
 
     # 5. Reserve study staleness (CA §5550; Phase 5.7 of
@@ -345,28 +360,6 @@ def validate_inputs(
             package_fiscal_year=spec.fiscal_year,
         )
     )
-    if (
-        1900 <= spec.fiscal_year <= 3000
-        and reserve_snapshot.funding_plan_rows
-        and not any(
-            row.year == spec.fiscal_year for row in reserve_snapshot.funding_plan_rows
-        )
-    ):
-        errors.append(PreflightError(
-            field_path="reserve_study_snapshot.funding_plan_rows",
-            message=(
-                "No reserve-study funding plan row was found for fiscal year "
-                f"{spec.fiscal_year}; reserve funding may be pulled from a "
-                "different year or fallback source."
-            ),
-            severity="warning",
-            code="fiscal_year_source_mismatch",
-            affected_value={"package_fiscal_year": spec.fiscal_year},
-            suggested_fix=(
-                "Upload a reserve-study funding plan for the package year or "
-                "choose a manual/budget reserve funding source."
-            ),
-        ))
     for row in reserve_snapshot.funding_plan_rows:
         for warning in row.consistency_warnings(units=hoa_metadata.units):
             code, suggested_fix = _reserve_funding_row_issue_details(warning)
@@ -431,6 +424,34 @@ def validate_inputs(
         reserve_snapshot=reserve_snapshot,
         settings=overrides,
     )
+    # A missing year only matters when the package reads the study's row.
+    funding_set_elsewhere = reserve_funding_facts.source in {
+        "manual",
+        "budget_reserve_contribution",
+    }
+    if (
+        (package_scenario.use_study_funding_calendar or not funding_set_elsewhere)
+        and 1900 <= spec.fiscal_year <= 3000
+        and reserve_snapshot.funding_plan_rows
+        and not any(
+            row.year == spec.fiscal_year for row in reserve_snapshot.funding_plan_rows
+        )
+    ):
+        errors.append(PreflightError(
+            field_path="reserve_study_snapshot.funding_plan_rows",
+            message=(
+                "No reserve-study funding plan row was found for fiscal year "
+                f"{spec.fiscal_year}; reserve funding may be pulled from a "
+                "different year or fallback source."
+            ),
+            severity="warning",
+            code="fiscal_year_source_mismatch",
+            affected_value={"package_fiscal_year": spec.fiscal_year},
+            suggested_fix=(
+                "Upload a reserve-study funding plan for the package year or "
+                "choose a manual/budget reserve funding source."
+            ),
+        ))
     for reason in package_scenario.blocking_reasons:
         if "undated" in reason.lower() or "does not match" in reason.lower():
             errors.append(PreflightError(
@@ -645,6 +666,7 @@ def check_appendix_cadence(
                         f"{valid_through}; package year {package_fiscal_year} requires a refresh."
                     ),
                     severity="blocking",
+                    suggested_fix="Upload a current version in Settings under Appendices.",
                 )
             )
 
@@ -659,6 +681,7 @@ def check_appendix_cadence(
                     "the package."
                 ),
                 severity="blocking",
+                suggested_fix="Upload this year's version in Settings under Appendices.",
             )
         )
 
@@ -767,6 +790,7 @@ def check_special_assessments(
                             "but has no amount_per_unit, total_amount, or category link."
                         ),
                         severity="blocking",
+                        suggested_fix="Add an amount or category to this special assessment in Disclosure Defaults.",
                     )
                 )
 
@@ -783,6 +807,7 @@ def check_special_assessments(
                             "needs either due_date or due_dates."
                         ),
                         severity="blocking",
+                        suggested_fix="Add a due date to this special assessment in Disclosure Defaults.",
                     )
                 )
 
@@ -797,6 +822,7 @@ def check_special_assessments(
                             "status='possible_disclosure_only' needs display_language."
                         ),
                         severity="blocking",
+                        suggested_fix="Add the disclosure wording to this special assessment in Disclosure Defaults.",
                     )
                 )
 

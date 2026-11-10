@@ -37,8 +37,6 @@ export function BudgetScreenWrapper() {
   const showGeneratedBudget = searchParams.get('generated') === 'true';
   const versionId = searchParams.get('versionId');
   const draftId = searchParams.get('draftId');
-  const readOnly = searchParams.get('readOnly') === '1';
-  const forceCreateDraft = searchParams.get('create') === '1';
   const initialView = (searchParams.get('view') || 'enriched') as 'enriched' | 'budget' | 'ai';
 
   const [hoa, setHoa] = useState<HOARecord | null>(null);
@@ -113,13 +111,11 @@ export function BudgetScreenWrapper() {
         if (cancelled) return;
         setActiveDraft(draft);
 
-        // History is used for honest empty-state when no active draft exists.
-        let latestSummary: BudgetVersionSummary | null = null;
+        // Feeds the "V3 is locked" note on the upload window.
         try {
           const history = await getBudgetHistory(id);
           if (!cancelled) {
-            latestSummary = history.versions?.[0] ?? null;
-            setLatestVersionSummary(latestSummary);
+            setLatestVersionSummary(history.versions?.[0] ?? null);
           }
         } catch {
           if (!cancelled) {
@@ -132,23 +128,6 @@ export function BudgetScreenWrapper() {
           if (cancelled) return;
           setGeneratedVersion(version);
           setLineItems(mapBudgetHistoryLineItems(version.line_items));
-        } else if (
-          !draft &&
-          !forceCreateDraft &&
-          latestSummary &&
-          !showGeneratedBudget
-        ) {
-          // No active draft but a generated version exists — open latest
-          // generated view instead of empty Create Budget Draft upload.
-          const version = await getBudgetVersion(id, latestSummary.id);
-          if (cancelled) return;
-          setGeneratedVersion(version);
-          setLineItems(mapBudgetHistoryLineItems(version.line_items));
-          const params = new URLSearchParams();
-          params.set('generated', 'true');
-          params.set('versionId', String(latestSummary.id));
-          params.set('readOnly', '1');
-          setSearchParams(params, { replace: true });
         } else {
           setGeneratedVersion(null);
           setLineItems(draft ? mapBudgetHistoryLineItems(draft.line_items) : []);
@@ -168,7 +147,7 @@ export function BudgetScreenWrapper() {
     return () => {
       cancelled = true;
     };
-  }, [draftId, forceCreateDraft, id, setSearchParams, showGeneratedBudget, versionId]);
+  }, [draftId, id, versionId]);
 
   const handleDraftChange = (draft: BudgetDraftPayload) => {
     setActiveDraft(draft);
@@ -181,16 +160,6 @@ export function BudgetScreenWrapper() {
     setGeneratedVersion(null);
     setSearchParams(new URLSearchParams());
     toast.success('Draft discarded.');
-  };
-
-  const updateGeneratedSearchParams = (nextVersionId: number, nextReadOnly: boolean) => {
-    const params = new URLSearchParams();
-    params.set('generated', 'true');
-    params.set('versionId', String(nextVersionId));
-    if (nextReadOnly) {
-      params.set('readOnly', '1');
-    }
-    setSearchParams(params);
   };
 
   const handleGenerateBudget = async (payload: {
@@ -210,30 +179,13 @@ export function BudgetScreenWrapper() {
         line_items: mapEditorLineItemsToBudgetHistory(payload.lineItems),
         global_note: payload.globalNote || null,
       });
-      setActiveDraft(response.draft);
-      setGeneratedVersion(response.version);
-      setLineItems(mapBudgetHistoryLineItems(response.version.line_items));
-      updateGeneratedSearchParams(response.version.id, false);
-      toast.success(`${response.version.version_code} generated successfully.`);
+      toast.success(
+        `${response.version.version_code} is locked. Open ${hoa?.name ?? 'this HOA'} when you're ready to upload next year's files.`,
+      );
+      navigate('/workspace');
     } finally {
       setIsGenerating(false);
     }
-  };
-
-  const handleRegenerateSnapshot = async () => {
-    if (!activeDraft) {
-      toast.error('This historical version is read-only. Reopen flows land in the next plan.');
-      return;
-    }
-
-    await handleGenerateBudget({
-      draftId: activeDraft.id,
-      lineItems,
-      globalNote: activeDraft.global_note ?? '',
-      statementMonth: activeDraft.statement_month ?? null,
-      growthFactor: activeDraft.growth_factor ?? null,
-      growthFactorNote: activeDraft.growth_factor_note ?? '',
-    });
   };
 
   const handleReopenAsDraft = async () => {
@@ -256,32 +208,6 @@ export function BudgetScreenWrapper() {
     } finally {
       setIsReopening(false);
     }
-  };
-
-  const handleBackToDraft = async () => {
-    if (!id) {
-      return;
-    }
-
-    // Active draft exists — open the editor for that draft.
-    if (activeDraft?.status === 'active') {
-      const params = new URLSearchParams();
-      params.set('view', 'enriched');
-      params.set('draftId', String(activeDraft.id));
-      setSearchParams(params);
-      return;
-    }
-
-    // Writable generated version (not read-only): reopen as a new editable draft.
-    if (generatedVersion && !readOnly) {
-      await handleReopenAsDraft();
-      return;
-    }
-
-    // Read-only latest-generated (typical after Generate) or no draft to open:
-    // leave the HOA. Clearing params alone re-triggers auto-open of the latest
-    // generated version and traps the operator in a back-button loop.
-    navigate('/workspace');
   };
 
   if (isHoaLoading) {
@@ -323,8 +249,7 @@ export function BudgetScreenWrapper() {
           generatedVersion.source_upload_filename ?? activeDraft?.upload_filename ?? undefined
         }
         sourceMode={generatedVersion.source_mode ?? activeDraft?.source_mode ?? null}
-        onRegenerateSnapshot={handleRegenerateSnapshot}
-        onBackToDraft={handleBackToDraft}
+        hasActiveDraft={activeDraft?.status === 'active'}
         onReopenAsDraft={handleReopenAsDraft}
         budgetPreview={
           generatedVersion.budget_preview && typeof generatedVersion.budget_preview === 'object'
@@ -334,9 +259,7 @@ export function BudgetScreenWrapper() {
         growthFactor={generatedVersion.growth_factor ?? undefined}
         growthFactorNote={generatedVersion.growth_factor_note ?? undefined}
         reserveInflationRate={generatedVersion.reserve_inflation_rate}
-        isRegenerating={isGenerating}
         isReopening={isReopening}
-        readOnly={readOnly}
       />
     );
   }

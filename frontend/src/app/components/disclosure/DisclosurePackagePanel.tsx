@@ -12,12 +12,22 @@
 // The Generate button is disabled while blocking preflight findings exist.
 
 import { useCallback, useEffect, useState } from 'react';
+import { Download } from 'lucide-react';
+import { toast } from 'sonner';
 
 import { listAnnualPackages } from '../../api/annualPackages';
 import {
   getDisclosurePreflight,
   type DisclosurePreflightResult,
 } from '../../api/disclosurePackage';
+import {
+  boilerplateReferencePdfUrl,
+  listBoilerplateReferenceJobs,
+  type BoilerplateReferenceJob,
+} from '../../api/hoaSettings';
+import { authHeaders, handleBlobResponse } from '../../api/http';
+import { downloadBlob } from '../../lib/downloadBlob';
+import { getErrorMessage } from '../../lib/errors';
 import { useDisclosureJob } from './useDisclosureJob';
 import {
   DisclosurePreflightChecklist,
@@ -37,6 +47,8 @@ export interface DisclosurePackagePanelProps {
   // Phase-11 gate; always true now (is_supported_hoa retired). Kept on
   // signature so parent components don't need to be updated simultaneously.
   isSupportedHoa: boolean;
+  /** Receives every preflight result; null when the check failed to load. */
+  onPreflight?: (result: DisclosurePreflightResult | null) => void;
 }
 
 function findingsToRows(result: DisclosurePreflightResult): PreflightRow[] {
@@ -71,9 +83,13 @@ export function DisclosurePackagePanel({
   fiscalYear,
   hoaName,
   isSupportedHoa,
+  onPreflight,
 }: DisclosurePackagePanelProps) {
   const { state, job, stage, elapsedMs, error, generate, reset } = useDisclosureJob();
   const [auditOpen, setAuditOpen] = useState(false);
+  const [lastPdf, setLastPdf] = useState<BoilerplateReferenceJob | null>(null);
+  const [downloadingLastPdf, setDownloadingLastPdf] = useState(false);
+  const jobCompleted = state === 'completed';
 
   const [preflight, setPreflight] = useState<DisclosurePreflightResult | null>(null);
   const [preflightLoading, setPreflightLoading] = useState(false);
@@ -86,13 +102,40 @@ export function DisclosurePackagePanel({
     try {
       const result = await getDisclosurePreflight(hoaId, fiscalYear);
       setPreflight(result);
+      onPreflight?.(result);
     } catch {
       setPreflight(null);
       setPreflightFailed(true);
+      onPreflight?.(null);
     } finally {
       setPreflightLoading(false);
     }
-  }, [hoaId, fiscalYear]);
+  }, [hoaId, fiscalYear, onPreflight]);
+
+  // Newest first, and already limited to PDFs still on disk.
+  useEffect(() => {
+    void listBoilerplateReferenceJobs(hoaId)
+      .then((jobs) => setLastPdf(jobs[0] ?? null))
+      .catch(() => setLastPdf(null));
+  }, [hoaId, jobCompleted]);
+
+  const handleDownloadLastPdf = async () => {
+    if (!lastPdf || downloadingLastPdf) return;
+    setDownloadingLastPdf(true);
+    try {
+      const res = await fetch(boilerplateReferencePdfUrl(hoaId, 'job', lastPdf.job_id), {
+        headers: authHeaders(),
+      });
+      const blob = await handleBlobResponse(res);
+      // This route names every file package.pdf, so match the normal download's name.
+      const slug = hoaName.replace(/[^A-Za-z0-9]+/g, '-').replace(/^-|-$/g, '').toLowerCase() || 'hoa';
+      downloadBlob(blob, `${slug}-${lastPdf.fiscal_year}-disclosure-package.pdf`);
+    } catch (err) {
+      toast.error(getErrorMessage(err, 'Could not download the last PDF.'));
+    } finally {
+      setDownloadingLastPdf(false);
+    }
+  };
 
   useEffect(() => {
     void listAnnualPackages(hoaId)
@@ -198,6 +241,24 @@ export function DisclosurePackagePanel({
         </div>
 
         <div className="mt-6">
+          {state === 'idle' && lastPdf ? (
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-[#e5e5e5] bg-[#fafafa] px-4 py-3 text-sm text-[#525252]">
+              <span>
+                Last generated:{' '}
+                <strong className="text-[#111111]">{lastPdf.fiscal_year} package</strong>
+                {lastPdf.completed_at ? `, ${new Date(lastPdf.completed_at).toLocaleString()}` : ''}
+              </span>
+              <Button
+                variant="outline"
+                onClick={() => void handleDownloadLastPdf()}
+                disabled={downloadingLastPdf}
+                className="whitespace-nowrap"
+              >
+                <Download className="mr-2 h-4 w-4" />
+                {downloadingLastPdf ? 'Downloading…' : 'Download PDF'}
+              </Button>
+            </div>
+          ) : null}
           {state === 'idle' && isSupportedHoa ? (
             <DisclosurePreflightChecklist
               rows={preflightRows}

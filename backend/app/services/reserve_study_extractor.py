@@ -1735,7 +1735,9 @@ async def extract_reserve_study(
         if not funding_plan_rows:
             unique_warnings.append(
                 "Cash-flow / funding-plan pages were found, but no year rows "
-                "could be extracted. Confirm the calendar before generating."
+                "could be extracted. This only matters if the 30-year plan uses "
+                "the study's funding calendar in Disclosure Defaults; otherwise "
+                "you can dismiss this."
             )
 
     confidence_inputs = [discovery.confidence, *confidences]

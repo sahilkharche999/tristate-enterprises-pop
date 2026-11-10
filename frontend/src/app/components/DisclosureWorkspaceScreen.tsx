@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router';
 import {
   ArrowLeft,
@@ -16,7 +16,7 @@ import {
 import { AnnualPackagesPanel } from './AnnualPackagesPanel';
 import { BoilerplateWorkbench } from './BoilerplateWorkbench';
 import { DisclosurePackagePanel } from './disclosure/DisclosurePackagePanel';
-import { getDisclosurePreflight, type ReadinessStep } from '../api/disclosurePackage';
+import type { DisclosurePreflightResult, ReadinessStep } from '../api/disclosurePackage';
 import { getHOA, type HOARecord } from '../api/hoa';
 import { getErrorMessage } from '../lib/errors';
 import {
@@ -116,31 +116,18 @@ export function DisclosureWorkspaceScreen() {
 
   const fiscalYear = hoa?.portfolio_year ?? new Date().getFullYear();
 
-  useEffect(() => {
-    if (!hoa) return;
-    let cancelled = false;
-    void (async () => {
-      try {
-        const pf = await getDisclosurePreflight(hoa.id, fiscalYear);
-        if (cancelled) return;
-        setSteps(pf.steps ?? []);
-        setPreflightReady(pf.ready);
-        const needs = (pf.steps ?? []).filter((s) => s.status === 'needs_action');
-        const key = `disclosure-intercept:${hoa.id}:${fiscalYear}`;
-        if (needs.length > 0 && !sessionStorage.getItem(key)) {
-          setInterceptOpen(true);
-        }
-      } catch {
-        if (!cancelled) {
-          setSteps([]);
-          setPreflightReady(null);
-        }
+  // The panel owns the one preflight fetch, so Re-check updates these cards too.
+  const handlePreflight = useCallback(
+    (pf: DisclosurePreflightResult | null) => {
+      setSteps(pf?.steps ?? []);
+      setPreflightReady(pf ? pf.ready : null);
+      if (!pf?.steps?.some((s) => s.status === 'needs_action')) return;
+      if (!sessionStorage.getItem(`disclosure-intercept:${id}:${fiscalYear}`)) {
+        setInterceptOpen(true);
       }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [hoa, fiscalYear]);
+    },
+    [id, fiscalYear],
+  );
 
   if (isLoading) {
     return (
@@ -374,6 +361,7 @@ export function DisclosureWorkspaceScreen() {
           fiscalYear={fiscalYear}
           hoaName={hoa.name}
           isSupportedHoa
+          onPreflight={handlePreflight}
         />
 
         <section className="rounded-lg border border-[#e5e5e5] bg-white shadow-sm">

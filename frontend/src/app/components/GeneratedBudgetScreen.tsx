@@ -1,8 +1,7 @@
 import { useState } from 'react';
-import { Link, useNavigate } from 'react-router';
+import { Link } from 'react-router';
 import {
   ArrowLeft,
-  CheckCircle2,
   Download,
   FileText,
   History,
@@ -79,16 +78,13 @@ interface GeneratedBudgetScreenProps {
   createdAt: string;
   sourceUploadFilename?: string;
   sourceMode?: BudgetSourceMode | null;
-  onRegenerateSnapshot: () => Promise<void> | void;
-  onBackToDraft: () => Promise<void> | void;
+  hasActiveDraft: boolean;
   /** Reopen this version as a new editable draft (no active draft case). */
   onReopenAsDraft?: () => Promise<void> | void;
   budgetPreview?: SheetTable | null;
   growthFactor?: number;
   growthFactorNote?: string;
   reserveInflationRate?: number;
-  isRegenerating?: boolean;
-  readOnly?: boolean;
   isReopening?: boolean;
 }
 
@@ -103,18 +99,14 @@ export function GeneratedBudgetScreen({
   createdAt,
   sourceUploadFilename,
   sourceMode,
-  onRegenerateSnapshot,
-  onBackToDraft,
+  hasActiveDraft,
   onReopenAsDraft,
   budgetPreview,
   growthFactor,
   growthFactorNote,
   reserveInflationRate,
-  isRegenerating = false,
-  readOnly = false,
   isReopening = false,
 }: GeneratedBudgetScreenProps) {
-  const navigate = useNavigate();
   const [isDownloading, setIsDownloading] = useState(false);
   const packageYear = hoa.portfolio_year ?? new Date().getFullYear();
   const fiscalYearLabel = formatFiscalYearRangeLabel(
@@ -166,25 +158,13 @@ export function GeneratedBudgetScreen({
       <header className="sticky top-0 z-10 border-b border-[#e5e5e5] bg-white shadow-sm">
         <div className="flex items-center justify-between px-8 py-6">
           <div className="flex items-center gap-6">
-            {readOnly ? (
-              <Link
-                to="/workspace"
-                className="rounded-lg p-2 transition-colors hover:bg-[#f5f5f5]"
-                aria-label="Back to portfolio"
-              >
-                <ArrowLeft className="h-5 w-5 text-[#525252]" />
-              </Link>
-            ) : (
-              <Button
-                variant="ghost"
-                size="icon"
-                onClick={onBackToDraft}
-                className="hover:bg-[#f5f5f5]"
-                aria-label="Back to draft"
-              >
-                <ArrowLeft className="h-5 w-5 text-[#525252]" />
-              </Button>
-            )}
+            <Link
+              to="/workspace"
+              className="rounded-lg p-2 transition-colors hover:bg-[#f5f5f5]"
+              aria-label="Back to portfolio"
+            >
+              <ArrowLeft className="h-5 w-5 text-[#525252]" />
+            </Link>
             <div>
               <h1 className="text-xl font-semibold text-[#111111]">{hoa.name}</h1>
               <p className="text-sm text-[#737373]">Fiscal Year: {fiscalYearLabel}</p>
@@ -232,19 +212,14 @@ export function GeneratedBudgetScreen({
       <main className="mx-auto max-w-7xl px-8 py-8">
         <div className="mb-8 rounded-lg border border-[#e5e5e5] bg-[#fafafa] p-6">
           <div className="flex items-start gap-3">
-            {readOnly ? (
-              <Lock className="mt-0.5 h-5 w-5 flex-shrink-0 text-[#111111]" />
-            ) : (
-              <CheckCircle2 className="mt-0.5 h-5 w-5 flex-shrink-0 text-[#111111]" />
-            )}
+            <Lock className="mt-0.5 h-5 w-5 flex-shrink-0 text-[#111111]" />
             <div>
               <h2 className="mb-1 text-lg font-semibold text-[#111111]">
-                {readOnly ? 'Historical Version Review' : 'Budget Generated Successfully'}
+                Historical Version Review
               </h2>
               <p className="text-sm text-[#737373]">
-                {readOnly
-                  ? `You are reviewing ${versionCode} in read-only mode. Historical versions stay immutable. This is the budget snapshot — not the homeowner disclosure PDF.`
-                  : `This snapshot was persisted as ${versionCode}. Regenerating creates a new immutable version.`}
+                You are reviewing {versionCode} in read-only mode. Historical versions stay
+                immutable. This is the budget snapshot — not the homeowner disclosure PDF.
               </p>
               {label ? <p className="mt-2 text-sm text-[#525252]">Label: {label}</p> : null}
               {sourceUploadFilename ? (
@@ -260,7 +235,7 @@ export function GeneratedBudgetScreen({
           </div>
         </div>
 
-        {readOnly ? (
+        {!hasActiveDraft ? (
           <div className="mb-8 rounded-xl border-2 border-[#111111] bg-white p-6 shadow-sm">
             <h2 className="text-lg font-semibold text-[#111111]">
               Start the normal {packageYear} budget flow
@@ -272,16 +247,16 @@ export function GeneratedBudgetScreen({
             </p>
             <ol className="mt-4 list-decimal space-y-2 pl-5 text-sm text-[#525252]">
               <li>
-                <strong>New draft</strong> — upload income statement (+ reserve study), or reopen
-                this version as an editable draft.
+                <strong>New draft</strong> — start from this version, or upload next year&apos;s
+                income statement (+ reserve study).
               </li>
               <li>
-                <strong>Review / edit</strong> line items, then <strong>Generate budget version</strong>{' '}
-                (locks numbers — not the owner PDF).
+                <strong>Review / edit</strong> line items, then generate the{' '}
+                <strong>{packageYear}</strong> homeowner PDF in <strong>Disclosure Package</strong>.
               </li>
               <li>
-                <strong>Disclosure Package</strong> — readiness checklist and generate the{' '}
-                <strong>{packageYear}</strong> homeowner PDF (only after the budget is ready).
+                <strong>Generate budget version</strong> last. It locks the numbers and closes the
+                draft.
               </li>
             </ol>
             <p className="mt-3 max-w-3xl text-sm text-[#737373]">
@@ -289,32 +264,32 @@ export function GeneratedBudgetScreen({
               there before starting if you need a different year.
             </p>
             <div className="mt-6 flex flex-wrap gap-3">
-              <Link to={`/hoa/${hoaId}?create=1`}>
-                <Button className="bg-[#111111] text-white shadow-sm hover:bg-[#262626]">
-                  <Upload className="mr-2 h-4 w-4" />
-                  Step 1: Upload income statement / reserve study
-                </Button>
-              </Link>
               {onReopenAsDraft ? (
                 <Button
-                  variant="outline"
                   disabled={isReopening}
                   onClick={() => void onReopenAsDraft()}
-                  className="border-[#111111] text-[#111111] hover:bg-[#f5f5f5]"
+                  className="bg-[#111111] text-white shadow-sm hover:bg-[#262626]"
                 >
                   <FileText className="mr-2 h-4 w-4" />
-                  {isReopening
-                    ? 'Opening draft…'
-                    : 'Or start draft from this version (no new upload)'}
+                  {isReopening ? 'Opening draft…' : 'Start draft from this version (no new upload)'}
                 </Button>
               ) : null}
+              <Link to={`/hoa/${hoaId}?create=1`}>
+                <Button
+                  variant="outline"
+                  className="border-[#111111] text-[#111111] hover:bg-[#f5f5f5]"
+                >
+                  <Upload className="mr-2 h-4 w-4" />
+                  Upload next year&apos;s files
+                </Button>
+              </Link>
               <Link to={`/hoa/${hoaId}/disclosure`}>
                 <Button
                   variant="outline"
                   className="border-[#d4d4d4] text-[#525252] hover:bg-[#f5f5f5]"
                 >
                   <PackageCheck className="mr-2 h-4 w-4" />
-                  Skip to {packageYear} disclosure (only if budget already final)
+                  Disclosure Package (download last PDF)
                 </Button>
               </Link>
               <Link to={`/hoa/${hoaId}/sync-history`}>
@@ -394,24 +369,14 @@ export function GeneratedBudgetScreen({
         </div>
 
         <div className="mb-8 flex items-center justify-between border-b border-[#e5e5e5] pb-8">
-          {readOnly ? (
-            <Link to="/workspace">
-              <Button
-                variant="outline"
-                className="border-[#e5e5e5] text-[#525252] hover:bg-[#f5f5f5] hover:text-[#111111]"
-              >
-                Return to portfolio
-              </Button>
-            </Link>
-          ) : (
+          <Link to="/workspace">
             <Button
               variant="outline"
-              onClick={onBackToDraft}
               className="border-[#e5e5e5] text-[#525252] hover:bg-[#f5f5f5] hover:text-[#111111]"
             >
-              Back to Draft
+              Return to portfolio
             </Button>
-          )}
+          </Link>
           <div className="flex items-center gap-3">
             <Button
               variant="outline"
@@ -422,29 +387,8 @@ export function GeneratedBudgetScreen({
               <Download className="mr-2 h-4 w-4" />
               {isDownloading ? 'Downloading...' : 'Download Version'}
             </Button>
-            {!readOnly && (
-              <Button
-                onClick={() => void onRegenerateSnapshot()}
-                disabled={isRegenerating}
-                className="bg-[#111111] text-white shadow-sm hover:bg-[#262626]"
-              >
-                {isRegenerating ? 'Generating...' : 'Create New Immutable Version'}
-              </Button>
-            )}
           </div>
         </div>
-
-        {!readOnly && (
-          <div className="flex justify-center">
-            <Button
-              variant="outline"
-              onClick={() => navigate(`/hoa/${hoaId}?view=budget`)}
-              className="border-[#e5e5e5] text-[#525252] hover:bg-[#f5f5f5] hover:text-[#111111]"
-            >
-              View Detailed Budget Table
-            </Button>
-          </div>
-        )}
       </main>
     </div>
   );

@@ -257,6 +257,7 @@ export interface ReserveStudyRow {
   flags?: string[];
   excluded?: boolean;
   exclude_reason?: string | null;
+  deleted?: boolean;
 }
 
 export interface ReserveFundingPlanRow {

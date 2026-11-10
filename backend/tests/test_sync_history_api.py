@@ -1,9 +1,12 @@
 import sqlite3
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from app.ai_implementation.db import BUDGET_DRAFT_ACTIVE, BudgetDraft, BudgetUpload
+from app.disclosure_package.service import _build_reserve_doc_from_draft
 from app.models.financial_document_extraction import ExtractedFinancialStatement
+from app.models.reserve_study_extraction import ExtractedReserveStudyPage
 from app.services import macros_service
 
 
@@ -972,3 +975,94 @@ def test_version_metadata_update_and_download_are_audited(client, budget_history
         "version_marked_final",
         "file_downloaded",
     }
+
+
+def test_preflight_after_generate_names_the_locked_version(client, budget_history_test_harness):
+    draft = _upload_income_statement(client).json()["draft"]
+    version = _generate_version(client, draft).json()["version"]
+
+    body = client.get(
+        "/api/disclosure-package/hoa/1/preflight", params={"fiscal_year": 2026}
+    ).json()
+
+    assert body["ready"] is False
+    finding = body["blocking"][0]
+    assert "locked as V1" in finding["message"]
+    assert finding["fix_path"] == f"/hoa/1?generated=true&versionId={version['id']}"
+    assert finding["fix_label"] == "Open V1"
+    # The portfolio's next step still goes to the upload window.
+    budget_step = next(s for s in body["steps"] if s["id"] == "budget_draft")
+    assert budget_step["fix_path"] == "/hoa/1"
+    assert "locked as V1" in budget_step["detail"]
+
+
+def _reserve_row(row_id, line_item, **extra):
+    return {
+        "row_id": row_id,
+        "row_type": "item",
+        "line_item": line_item,
+        "useful_life": 20,
+        "remaining_life": 1,
+        "replacement_cost": 5000.0,
+        **extra,
+    }
+
+
+def _save_reserve_rows(client, draft_id, rows, warnings=()):
+    response = client.patch(
+        f"/hoa/1/budget/drafts/{draft_id}/reserve-study",
+        json={"rows": rows, "warnings": list(warnings)},
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def test_deleted_reserve_row_stays_on_record_but_leaves_the_package(
+    client, budget_history_test_harness
+):
+    draft_id = _upload_income_statement(client).json()["draft"]["id"]
+    roof, paint = _reserve_row("roof", "Roof"), _reserve_row("paint", "Paint")
+    _save_reserve_rows(client, draft_id, [roof, paint])
+
+    saved = _save_reserve_rows(client, draft_id, [{**roof, "deleted": True}, paint])
+
+    rows = {row["row_id"]: row for row in saved["reserve_study_rows"]}
+    assert rows["roof"]["deleted"] is True
+    assert rows["paint"]["deleted"] is False
+    timeline = client.get("/hoa/1/history").json()["timeline"]
+    deleted_events = [e for e in timeline if e["event_type"] == "reserve_row_deleted"]
+    assert [e["summary"] for e in deleted_events] == ["Deleted reserve item: Roof"]
+
+    doc = _build_reserve_doc_from_draft(SimpleNamespace(**saved))
+    assert [row["line_item"] for row in doc.rows] == ["Paint"]
+
+    applied = client.post(f"/hoa/1/budget/drafts/{draft_id}/reserve-study/apply").json()
+    assert applied["applied_count"] == 1
+    names = {item.get("label") for item in applied["draft"]["line_items"]}
+    assert "Paint" in names and "Roof" not in names
+
+    # Saving again logs nothing new; restoring logs once.
+    _save_reserve_rows(client, draft_id, [{**roof, "deleted": True}, paint])
+    _save_reserve_rows(client, draft_id, [{**roof, "deleted": False}, paint])
+    events = [e["event_type"] for e in client.get("/hoa/1/history").json()["timeline"]]
+    assert events.count("reserve_row_deleted") == 1
+    assert events.count("reserve_row_restored") == 1
+
+
+def test_reserve_warnings_clear_once_no_live_rows_remain(client, budget_history_test_harness):
+    draft_id = _upload_income_statement(client).json()["draft"]["id"]
+    roof = _reserve_row("roof", "Roof")
+
+    kept = _save_reserve_rows(client, draft_id, [roof], warnings=["No funding plan rows"])
+    assert kept["reserve_study_warnings"] == ["No funding plan rows"]
+    assert kept["reserve_study_status"] == "review_required"
+
+    cleared = _save_reserve_rows(
+        client, draft_id, [{**roof, "deleted": True}], warnings=["No funding plan rows"]
+    )
+    assert cleared["reserve_study_warnings"] == []
+    assert cleared["reserve_study_status"] == "completed"
+
+
+def test_deleted_flag_stays_out_of_the_gemini_schema():
+    assert "deleted" not in json.dumps(ExtractedReserveStudyPage.model_json_schema())

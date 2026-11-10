@@ -34,6 +34,7 @@ from ..ai_implementation.db.models import (
     DISCLOSURE_JOB_RUNNING,
     DISCLOSURE_STAGE_COMPUTING,
     DISCLOSURE_STAGE_VALIDATING,
+    BudgetVersion,
     DisclosurePackageJob,
     Property,
 )
@@ -47,6 +48,7 @@ from ..services.assessment_mapping_category import (
     _assessment_mapping_fund_type,
 )
 from .adapters import (
+    _attr_or_key,
     from_budget_history_record,
     from_hoa_record,
     from_reserve_study_extraction,
@@ -453,7 +455,11 @@ def _build_reserve_doc_from_draft(
     (auto-populated when the operator uploads a reserve study, editable
     via the Disclosure Settings form).
     """
-    rows = list(getattr(draft_payload, "reserve_study_rows", []) or [])
+    rows = [
+        row
+        for row in (getattr(draft_payload, "reserve_study_rows", []) or [])
+        if not _attr_or_key(row, "deleted")
+    ]
     funding_plan_rows = list(
         getattr(draft_payload, "reserve_funding_plan_rows", []) or []
     )
@@ -886,6 +892,20 @@ def _attach_fix_links(errors: list[PreflightError], hoa_id: int) -> list[Preflig
                     + f"&returnTo=/hoa/{hoa_id}/disclosure"
                 )
                 fix_label = "Open disclosure settings"
+            elif path.startswith("reserve_study"):
+                fix_path = f"/hoa/{hoa_id}?view=reserve"
+                fix_label = "Open reserve study"
+            elif path.startswith(("reserve_funding", "reserve_interest")):
+                field = (
+                    "reserve_funding_source"
+                    if path.startswith("reserve_funding")
+                    else "reserve_interest_income_override"
+                )
+                fix_path = (
+                    f"/hoa/{hoa_id}/settings?section=disclosure&tab=money&field={field}"
+                    f"&returnTo=/hoa/{hoa_id}/disclosure"
+                )
+                fix_label = "Open disclosure settings"
             elif path.startswith("budget_draft") or path == "budget_draft.line_items":
                 fix_path = f"/hoa/{hoa_id}"
                 fix_label = "Open budget"
@@ -929,12 +949,20 @@ def _build_readiness_steps(
     def _has_warn(prefix: str) -> bool:
         return any((e.field_path or "").startswith(prefix) for e in warnings)
 
+    def _first_message(*prefixes: str) -> Optional[str]:
+        """The finding a card should name: blockers first, then warnings."""
+        for finding in (*blocking, *warnings):
+            if (finding.field_path or "").startswith(prefixes):
+                return finding.message
+        return None
+
     budget_status = "needs_action" if _has_block("budget_draft") or not has_budget else "done"
-    reserve_status = (
-        "warning"
-        if _has_warn("reserve_study") or (has_budget and not has_reserve_components)
-        else ("done" if has_reserve_components else "warning")
-    )
+    if _has_block("reserve_study"):
+        reserve_status = "needs_action"
+    elif _has_warn("reserve_study") or not has_reserve_components:
+        reserve_status = "warning"
+    else:
+        reserve_status = "done"
     settings_status = (
         "needs_action"
         if any(
@@ -947,7 +975,7 @@ def _build_readiness_steps(
             if any(
                 (e.field_path or "").startswith(p)
                 for e in warnings
-                for p in ("hoa_settings", "reserve_cash", "reserve_study")
+                for p in ("hoa_settings", "reserve_cash")
             )
             else "done"
         )
@@ -972,7 +1000,7 @@ def _build_readiness_steps(
             "status": budget_status,
             "detail": "Active budget with line items."
             if budget_status == "done"
-            else "Upload and activate a budget draft.",
+            else _first_message("budget_draft") or "Upload and activate a budget draft.",
             "fix_path": f"/hoa/{hoa_id}",
             "fix_label": "Open budget",
         },
@@ -982,7 +1010,8 @@ def _build_readiness_steps(
             "status": reserve_status,
             "detail": "Reserve components attached."
             if reserve_status == "done"
-            else "Attach a reserve study for funded reserve disclosures (warning if missing).",
+            else _first_message("reserve_study")
+            or "No reserve study items yet. Upload a study on the Reserve Study tab.",
             "fix_path": f"/hoa/{hoa_id}?view=reserve",
             "fix_label": "Open reserve study",
         },
@@ -990,7 +1019,10 @@ def _build_readiness_steps(
             "id": "disclosure_settings",
             "label": "Disclosure settings",
             "status": settings_status,
-            "detail": "Cash, funding, and letter defaults for the PDF.",
+            "detail": "Cash, funding, and letter defaults for the PDF."
+            if settings_status == "done"
+            else _first_message("hoa_settings", "reserve_cash", "reserve_funding", "hoa_metadata")
+            or "Cash, funding, and letter defaults for the PDF.",
             "fix_path": f"/hoa/{hoa_id}/settings?section=disclosure&returnTo=/hoa/{hoa_id}/disclosure",
             "fix_label": "Open disclosure settings",
         },
@@ -1058,6 +1090,37 @@ def _reserve_cash_is_zero(overrides: dict, fiscal_year: int, funding_plan_rows: 
     return supplied and cash.value == 0
 
 
+def _no_working_draft_finding(session: Session, hoa_id: int) -> PreflightError:
+    """Name the way out: a locked year reopens, a new HOA uploads."""
+    latest = (
+        session.query(BudgetVersion)
+        .filter(BudgetVersion.property_id == hoa_id)
+        .order_by(BudgetVersion.created_at.desc(), BudgetVersion.id.desc())
+        .first()
+    )
+    if latest is None:
+        return PreflightError(
+            field_path="budget_draft.line_items",
+            message="No active budget draft found. Upload and activate a budget before generating.",
+            severity="blocking",
+            suggested_fix="Go to Budget and upload or activate a budget draft.",
+        )
+    return PreflightError(
+        field_path="budget_draft.line_items",
+        message=(
+            f"The budget is locked as {latest.version_code}, so there is no "
+            "working draft to build a PDF from."
+        ),
+        severity="blocking",
+        suggested_fix=(
+            f"Open {latest.version_code} and start a draft from it, or upload "
+            "next year's files on the budget page."
+        ),
+        fix_path=f"/hoa/{hoa_id}?generated=true&versionId={latest.id}",
+        fix_label=f"Open {latest.version_code}",
+    )
+
+
 def run_preflight(
     session: Session,
     hoa_id: int,
@@ -1099,7 +1162,7 @@ def run_preflight_detailed(
                 message=str(exc),
                 severity="blocking",
             )], []
-        _attach_fix_links(blocking + warnings, hoa_id)
+        blocking, warnings = partition_errors(_attach_fix_links(blocking + warnings, hoa_id))
         steps = _build_readiness_steps(
             hoa_id=hoa_id,
             blocking=blocking,
@@ -1110,13 +1173,7 @@ def run_preflight_detailed(
         )
         return {"blocking": blocking, "warnings": warnings, "steps": steps}
     except LookupError:
-        blocking = [PreflightError(
-            field_path="budget_draft.line_items",
-            message="No active budget draft found. Upload and activate a budget before generating.",
-            severity="blocking",
-            suggested_fix="Go to Budget and upload or activate a budget draft.",
-        )]
-        _attach_fix_links(blocking, hoa_id)
+        blocking = _attach_fix_links([_no_working_draft_finding(session, hoa_id)], hoa_id)
         steps = _build_readiness_steps(
             hoa_id=hoa_id,
             blocking=blocking,

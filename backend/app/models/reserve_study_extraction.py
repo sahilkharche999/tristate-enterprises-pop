@@ -5,6 +5,7 @@ from enum import Enum
 from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic.json_schema import SkipJsonSchema
 
 
 class ReserveStudyPageRole(str, Enum):
@@ -67,6 +68,8 @@ class ExtractedReserveStudyRow(BaseModel):
     flags: list[str] = Field(default_factory=list)
     excluded: bool = False
     exclude_reason: Optional[str] = None
+    # Set by an operator, never by Gemini, so it stays out of the response schema.
+    deleted: SkipJsonSchema[bool] = False
 
     @model_validator(mode="before")
     @classmethod
