@@ -235,6 +235,128 @@ def test_assessment_split_substring_reserve_in_label_without_lines_is_ops() -> N
     assert ops + res == total
 
 
+def _rebased_split(
+    pools: list[tuple[str, str, str, str]],
+    *,
+    total: str,
+    fallback: str = "1.00",
+) -> tuple[Decimal, Decimal, str]:
+    """Each pool is (key, rebased annual, operating mapped, reserve mapped)."""
+    from app.disclosure_package.reconciliation import PoolLineFundTotals
+
+    return assessment_split_from_schedule_components(
+        [
+            SimpleNamespace(component_key=key, component_label=key, annual_amount=Decimal(annual))
+            for key, annual, _ops, _res in pools
+        ],
+        total_regular_assessment_revenue=Decimal(total),
+        fallback_reserve_assessment=Decimal(fallback),
+        pool_line_fund_totals={
+            key: PoolLineFundTotals(operating_mapped=Decimal(ops), reserve_mapped=Decimal(res))
+            for key, _annual, ops, res in pools
+        },
+    )
+
+
+def test_assessment_split_keeps_reserve_dollars_when_other_income_shrinks_schedule() -> None:
+    """Esprit 2027: other income scales pools down 15%; the reserve transfer stays whole."""
+    ops, res, source = _rebased_split(
+        [
+            ("variable_costs", "332729.18", "392559.96", "0"),
+            ("equal_costs", "861274.23", "749369.04", "266778.00"),
+        ],
+        total="1194003.41",
+    )
+    assert source == "schedule_matrix_line_fund"
+    assert res == Decimal("266778.00")
+    assert ops == Decimal("927225.41")
+
+
+def test_assessment_split_keeps_reserve_dollars_when_schedule_scales_up() -> None:
+    """A budget that collects more than it spends: the surplus stays in operations."""
+    ops, res, source = _rebased_split(
+        [("equal_pool", "132000.00", "100000.00", "20000.00")],
+        total="132000.00",
+    )
+    assert source == "schedule_matrix_line_fund"
+    assert res == Decimal("20000.00")
+    assert ops == Decimal("112000.00")
+
+
+def test_assessment_split_keeps_dedicated_reserve_pool_at_budgeted_dollars() -> None:
+    """Sharon Ridge shape: a pool that is all reserve is not scaled either."""
+    ops, res, _source = _rebased_split(
+        [
+            ("operating", "80000.00", "100000.00", "0"),
+            ("reserve_contributions", "20000.00", "0", "25000.00"),
+        ],
+        total="100000.00",
+    )
+    assert res == Decimal("25000.00")
+    assert ops == Decimal("75000.00")
+
+
+def test_assessment_split_sums_reserve_across_pools() -> None:
+    """A reserve line split between pools still adds up to the budgeted amount."""
+    ops, res, _source = _rebased_split(
+        [
+            ("sq_ft", "45000.00", "40000.00", "10000.00"),
+            ("equal", "45000.00", "40000.00", "10000.00"),
+        ],
+        total="90000.00",
+    )
+    assert res == Decimal("20000.00")
+    assert ops == Decimal("70000.00")
+
+
+def test_assessment_split_reserve_never_exceeds_assessments() -> None:
+    ops, res, _source = _rebased_split(
+        [("equal", "5000.00", "1000.00", "9000.00")],
+        total="5000.00",
+    )
+    assert res == Decimal("5000.00")
+    assert ops == Decimal("0.00")
+
+
+def _sharon_shape_split(*, fallback: str, firm: bool) -> tuple[Decimal, Decimal, str]:
+    from app.disclosure_package.reconciliation import PoolLineFundTotals
+
+    return assessment_split_from_schedule_components(
+        [
+            SimpleNamespace(component_key="general_operating", component_label="Operating", annual_amount=Decimal("268875.09")),
+            SimpleNamespace(component_key="reserve_contributions", component_label="Reserve", annual_amount=Decimal("103992.51")),
+        ],
+        total_regular_assessment_revenue=Decimal("372867.60"),
+        fallback_reserve_assessment=Decimal(fallback),
+        pool_line_fund_totals={
+            "general_operating": PoolLineFundTotals(operating_mapped=Decimal("273851.00"), reserve_mapped=Decimal("0")),
+            "reserve_contributions": PoolLineFundTotals(operating_mapped=Decimal("0"), reserve_mapped=Decimal("105917.04")),
+        },
+        adopted_reserve_is_firm=firm,
+    )
+
+
+def test_assessment_split_uses_the_adopted_contribution_when_it_is_known() -> None:
+    """Levy's Sharon Ridge statement prints the adopted $118,132, not the schedule's pool."""
+    ops, res, source = _sharon_shape_split(fallback="118132", firm=True)
+    assert source == "adopted_reserve_funding"
+    assert res == Decimal("118132.00")
+    assert ops == Decimal("254735.60")
+
+
+def test_assessment_split_falls_back_to_budgeted_lines_when_contribution_is_a_guess() -> None:
+    """A provision fallback isn't the board's number, so mapped reserve lines win."""
+    _ops, res, source = _sharon_shape_split(fallback="90685", firm=False)
+    assert source == "schedule_matrix_line_fund"
+    assert res == Decimal("105917.04")
+
+
+def test_assessment_split_uses_budgeted_lines_when_firm_contribution_is_zero() -> None:
+    _ops, res, source = _sharon_shape_split(fallback="0", firm=True)
+    assert source == "schedule_matrix_line_fund"
+    assert res == Decimal("105917.04")
+
+
 def test_assessment_split_mixed_pool_line_ratio() -> None:
     """When a pool has both ops and reserve mapped lines, split component annual by ratio."""
     from app.disclosure_package.reconciliation import PoolLineFundTotals

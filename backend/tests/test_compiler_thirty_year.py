@@ -506,3 +506,96 @@ def test_later_years_compound_from_the_adopted_contribution() -> None:
     # A missing (zero) adopted amount doesn't zero the later years.
     missing = monthly(2027, "0")
     assert missing[:2] == [Decimal("0.00"), Decimal("207.01")]
+
+
+def _five_year_plan(**overrides) -> dict:
+    args = {
+        "spec": OLD_MILL_2026,
+        "hoa_metadata": _hoa(),
+        "components": [],
+        "total_estimated_liability": Decimal("0"),
+        "total_year_replacement_provision": Decimal("0"),
+        "cash_eoy_prior": Decimal("1000000"),
+        "fiscal_year_start": 2027,
+        "inflation_rate": Decimal("0.03"),
+        "interest_rate": Decimal("0"),
+        "assessment_schedule": [{"start_year": 2028, "end_year": 2056, "rate": 0.05}],
+        "base_replacement_fund_monthly_per_unit": Decimal("100.00"),
+        "study_contributions_by_year": {2027: Decimal("334800")},
+    }
+    return _build_thirty_year_plan(**{**args, **overrides})
+
+
+def _endings(rows: list[dict]) -> list[int]:
+    return [row["ending_balance"] for row in rows]
+
+
+def test_existing_assessments_hold_this_years_contribution_flat() -> None:
+    out = _five_year_plan()
+    existing, plan = out["five_year_existing_assessments"], out["thirty_year_funding_plan"]
+
+    assert [row["year"] for row in existing] == [2027, 2028, 2029, 2030, 2031]
+    assert _endings(existing) == [1000000 + 334800 * n for n in range(1, 6)]
+    # Same first year, then the funding plan's increases pull ahead.
+    assert existing[0]["ending_balance"] == plan[0]["ending_balance"]
+    assert existing[4]["ending_balance"] < plan[4]["ending_balance"]
+
+
+def test_existing_assessments_match_the_plan_when_it_has_no_increases() -> None:
+    out = _five_year_plan(assessment_schedule=[], interest_rate=Decimal("0.0175"))
+    assert _endings(out["five_year_existing_assessments"]) == _endings(out["thirty_year_funding_plan"][:5])
+
+
+def test_existing_assessments_tie_to_the_plan_when_cents_round() -> None:
+    """Old Mill shape: $672,886 adopted vs $200.98 x 279 x 12 = $672,881 in later years."""
+    out = _five_year_plan(
+        assessment_schedule=[],
+        base_replacement_fund_monthly_per_unit=Decimal("200.98"),
+        study_contributions_by_year={2027: Decimal("672886")},
+    )
+    assert _endings(out["five_year_existing_assessments"]) == _endings(out["thirty_year_funding_plan"][:5])
+
+
+def test_existing_assessments_ignore_later_study_calendar_years() -> None:
+    out = _five_year_plan(
+        assessment_schedule=[],
+        study_contributions_by_year={
+            2027 + n: Decimal("334800") + Decimal("10000") * n for n in range(30)
+        },
+    )
+    assert _endings(out["five_year_existing_assessments"]) == [1000000 + 334800 * n for n in range(1, 6)]
+    assert out["thirty_year_funding_plan"][1]["annual_contribution"] == 344800
+
+
+def test_existing_assessments_count_only_approved_special_assessments() -> None:
+    out = _five_year_plan(
+        special_assessments=[
+            {"year": 2028, "per_unit": 100, "status": "approved_scheduled"},
+            {"year": 2029, "per_unit": 500, "status": "possible_disclosure_only"},
+        ],
+    )
+    special = 100 * 279
+    assert _endings(out["five_year_existing_assessments"])[:3] == [
+        1334800,
+        1669600 + special,
+        2004400 + special,
+    ]
+
+
+def test_existing_assessments_use_year_end_liability_and_their_own_percent() -> None:
+    out = _five_year_plan(
+        components=[
+            ReserveStudyComponent(
+                line_item="Roof", useful_life=20, remaining_life=10, replacement_cost=Decimal("2000000")
+            ),
+        ],
+        total_estimated_liability=Decimal("1000000"),
+    )
+    existing, plan = out["five_year_existing_assessments"], out["thirty_year_funding_plan"]
+
+    assert [row["estimated_liability"] for row in existing] == [
+        row["estimated_liability"] for row in plan[:5]
+    ]
+    final = existing[4]
+    assert final["percent_funded"] == round(final["ending_balance"] * 100 / final["estimated_liability"])
+    assert final["percent_funded"] < plan[4]["percent_funded"]

@@ -577,6 +577,36 @@ def _legacy_funding_plan(
     return rows
 
 
+def _special_assessments_per_unit_by_year(
+    entries: list[dict[str, Any]],
+    *,
+    units: int,
+    fiscal_year_start: int,
+) -> list[Decimal]:
+    """Map special-assessment entries onto a length-30 per-unit array."""
+    by_year = [Decimal("0")] * _HORIZON_YEARS
+    for entry in entries:
+        year = entry.get("year")
+        per_unit = entry.get("per_unit") or entry.get("amount_per_unit") or entry.get("amount")
+        # Pool-based special assessment (add-variable-special-assessments): carry
+        # its total into the forecast as total / units, so a total-only entry is
+        # not silently dropped to $0. Still requires a forecast ``year`` (the
+        # projection is year-indexed); a one-time special with no year stays a
+        # §5570 disclosure and does not enter the multi-year projection. Whether
+        # one-time specials should feed the forecast at all is client-gated.
+        if per_unit is None and entry.get("total_amount") is not None and units:
+            try:
+                per_unit = Decimal(str(entry.get("total_amount"))) / Decimal(units)
+            except (ArithmeticError, ValueError, TypeError):
+                per_unit = None
+        if year is None or per_unit is None:
+            continue
+        offset = int(year) - fiscal_year_start
+        if 0 <= offset < _HORIZON_YEARS:
+            by_year[offset] = Decimal(str(per_unit))
+    return by_year
+
+
 def _build_thirty_year_plan(
     *,
     spec: PackageSpec,
@@ -640,26 +670,11 @@ def _build_thirty_year_plan(
 
     # Special assessments and board deferrals: map operator-entered structured
     # lists into length-30 per-year arrays.
-    special_per_unit_by_year = [Decimal("0")] * _HORIZON_YEARS
-    for entry in special_assessments or []:
-        year = entry.get("year")
-        per_unit = entry.get("per_unit") or entry.get("amount_per_unit") or entry.get("amount")
-        # Pool-based special assessment (add-variable-special-assessments): carry
-        # its total into the forecast as total / units, so a total-only entry is
-        # not silently dropped to $0. Still requires a forecast ``year`` (the
-        # projection is year-indexed); a one-time special with no year stays a
-        # §5570 disclosure and does not enter the multi-year projection. Whether
-        # one-time specials should feed the forecast at all is client-gated.
-        if per_unit is None and entry.get("total_amount") is not None and hoa_metadata.units:
-            try:
-                per_unit = Decimal(str(entry.get("total_amount"))) / Decimal(hoa_metadata.units)
-            except (ArithmeticError, ValueError, TypeError):
-                per_unit = None
-        if year is None or per_unit is None:
-            continue
-        offset = int(year) - fiscal_year_start
-        if 0 <= offset < _HORIZON_YEARS:
-            special_per_unit_by_year[offset] = Decimal(str(per_unit))
+    special_per_unit_by_year = _special_assessments_per_unit_by_year(
+        special_assessments or [],
+        units=hoa_metadata.units,
+        fiscal_year_start=fiscal_year_start,
+    )
 
     deferrals_by_year = [Decimal("0")] * _HORIZON_YEARS
     for entry in board_deferrals or []:
@@ -692,10 +707,50 @@ def _build_thirty_year_plan(
         total_estimated_liability_now=total_estimated_liability or Decimal("0"),
     )
 
+    # §5570(a)(7) asks for two five-year cash projections. The funding plan
+    # above is the second; this first one counts only what is already approved:
+    # this year's contribution held flat, and only scheduled special assessments.
+    existing_cash_flow = _cash_flow_rows(
+        units=hoa_metadata.units,
+        base_monthly_per_unit=base_monthly,
+        assessment_schedule=[],
+        special_assessments_per_unit_by_year=_special_assessments_per_unit_by_year(
+            [
+                entry
+                for entry in special_assessments or []
+                if infer_special_assessment_status(entry) == "approved_scheduled"
+            ],
+            units=hoa_metadata.units,
+            fiscal_year_start=fiscal_year_start,
+        ),
+        reserve_cash_balance_eoy_prior=cash_eoy_prior,
+        interest_rate=rate,
+        inflation=inflation,
+        replacement_costs_by_year_inflated=inflated_aggregate,
+        board_deferrals_by_year=deferrals_by_year,
+        fiscal_year_start=fiscal_year_start,
+        study_contributions_by_year={fiscal_year_start: cash_flow["regular_assessments"][0]},
+    )
+    five_year_existing_assessments = []
+    for offset, plan_row in enumerate(legacy[:5]):
+        ending = existing_cash_flow["cash_balance_end"][offset]
+        five_year_existing_assessments.append({
+            "year": plan_row["year"],
+            "estimated_liability": plan_row["estimated_liability"],
+            "ending_balance": int(ending),
+            "percent_funded": int(
+                percent_funded(
+                    cash_reserves=ending,
+                    estimated_liability=Decimal(plan_row["estimated_liability"]),
+                )
+            ),
+        })
+
     return {
         "thirty_year_cash_flow": cash_flow,
         "major_component_expenditure_schedule": per_component,
         "thirty_year_funding_plan": legacy,
+        "five_year_existing_assessments": five_year_existing_assessments,
     }
 
 
@@ -1132,6 +1187,8 @@ def _compute_all(
             total_regular_assessment_revenue=annual_assessment_revenue,
             fallback_reserve_assessment=reserve_funding_facts.annual_contribution,
             pool_line_fund_totals=pool_line_fund_totals,
+            adopted_reserve_is_firm=reserve_funding_facts.source
+            in {"manual", "budget_reserve_contribution", "reserve_study_cash_flow"},
         )
     )
     annual_statement_facts = build_annual_statement_facts(

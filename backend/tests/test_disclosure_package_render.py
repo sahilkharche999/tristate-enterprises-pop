@@ -177,6 +177,7 @@ def _minimal_computed_context() -> dict[str, Any]:
             "fund_balance_eoy_operations": Decimal("100000"),
             "fund_balance_eoy_replacement": Decimal("1500000"),
             "thirty_year_funding_plan": _thirty_year_rows(30),
+            "five_year_existing_assessments": _thirty_year_rows(5),
             "thirty_year_cash_flow": {
                 "years": list(range(2026, 2056)),
                 "increase_brackets": [

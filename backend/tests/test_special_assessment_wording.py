@@ -95,6 +95,7 @@ def _base_context(special_assessments: list[dict[str, Any]]) -> dict[str, Any]:
             "fund_balance_eoy_operations": Decimal("100000"),
             "fund_balance_eoy_replacement": Decimal("1500000"),
             "thirty_year_funding_plan": [],
+            "five_year_existing_assessments": [],
             "major_component_expenditure_schedule": [],
             "monthly_assessment_per_unit_current": Decimal("605.00"),
             "monthly_replacement_contribution_total": Decimal("0"),

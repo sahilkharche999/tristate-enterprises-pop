@@ -40,6 +40,32 @@ def test_item_4_row_saved_from_settings_renders():
     assert "2027-01-01 $150.00" in _summary_text(ctx)
 
 
+def _five_year_row(year: int, liability: int, ending: int, pct: int) -> dict:
+    return {"year": year, "estimated_liability": liability, "ending_balance": ending, "percent_funded": pct}
+
+
+def test_item_7_prints_approved_assessments_and_funding_plan_separately():
+    ctx = _base_context([])
+    ctx["computed"]["five_year_existing_assessments"] = [_five_year_row(2028, 2878000, 2413000, 84)]
+    ctx["computed"]["thirty_year_funding_plan"] = [
+        _five_year_row(2028, 2878000, 2428000, 84),
+        *[_five_year_row(year, 1, 1, 1) for year in range(2029, 2060)],
+    ]
+
+    text = _summary_text(ctx)
+
+    approved = text.index("only assessments already approved")
+    plan = text.index("reserve funding plan approved by the association is implemented")
+    assert approved < text.index("$2,413,000") < plan < text.index("$2,428,000")
+    # The funding-plan table stops at five years.
+    assert text.count("Percent Funded") == 2
+    assert "2033" not in text
+
+
+def test_item_7_says_so_when_no_projection_exists():
+    assert _summary_text(_base_context([])).count("Five-year projection not available.") == 2
+
+
 def test_zero_cash_warning_judges_the_cash_the_package_prints():
     assert _reserve_cash_is_zero({"reserve_cash_balance_eoy_prior": 0.0}, 2027, [])
     assert not _reserve_cash_is_zero(

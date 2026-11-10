@@ -441,8 +441,14 @@ def assessment_split_from_schedule_components(
     pool_line_fund_totals: Optional[
         Mapping[str, Union[PoolLineFundTotals, Mapping[str, Any], object]]
     ] = None,
+    adopted_reserve_is_firm: bool = False,
 ) -> tuple[Decimal, Decimal, str]:
     """Policy S (Option B): dual-fund P&L assessment columns from line funds.
+
+    When the board's contribution is known (``adopted_reserve_is_firm``), the
+    Replacement Fund column is that amount, the same one the cover letter,
+    notes and 30-year plan print. The schedule split below only decides the
+    column when the contribution had to be guessed or is missing.
 
     Returns ``(operating_assessment_annual, reserve_assessment_annual, source)``
     where source is one of:
@@ -462,6 +468,11 @@ def assessment_split_from_schedule_components(
     \"reserve\" in a label is not enough). Does **not** change assessment
     schedule math — only reads component annuals + optional mapped line
     fund totals for dual-fund statement columns.
+
+    Mapped reserve dollars are taken as budgeted, before the schedule is
+    rebased to assessment income. Rebasing sets what each unit pays; other
+    income offsets operations, so it must not change what reaches the
+    Replacement Fund. Operations takes the difference.
     """
     total = Decimal(total_regular_assessment_revenue or 0).quantize(Decimal("0.01"))
     fallback_reserve = Decimal(fallback_reserve_assessment or 0).quantize(Decimal("0.01"))
@@ -474,12 +485,15 @@ def assessment_split_from_schedule_components(
         ops = max(total - fallback_reserve, Decimal("0")).quantize(Decimal("0.01"))
         return ops, fallback_reserve, source
 
+    if adopted_reserve_is_firm and fallback_reserve > 0:
+        return _settings_fallback("adopted_reserve_funding")
+
     if not component_summary_rows:
         return _settings_fallback("settings_funding_fallback")
 
     line_totals = _coerce_pool_line_fund_totals(pool_line_fund_totals)
     used_line_fund = False
-    ops = Decimal("0")
+    combined = Decimal("0")
     reserve = Decimal("0")
     for row in component_summary_rows:
         if isinstance(row, dict):
@@ -506,27 +520,16 @@ def assessment_split_from_schedule_components(
         if amount <= 0:
             continue
 
+        combined += amount
         ft = line_totals.get(key_s)
         if ft is not None and ft.total_mapped > 0:
             used_line_fund = True
-            ratio_res = ft.reserve_mapped / (ft.operating_mapped + ft.reserve_mapped)
-            res_part = (amount * ratio_res).quantize(Decimal("0.01"))
-            if res_part < 0:
-                res_part = Decimal("0.00")
-            if res_part > amount:
-                res_part = amount
-            ops_part = (amount - res_part).quantize(Decimal("0.01"))
-            ops += ops_part
-            reserve += res_part
-            continue
-
-        # No usable mapped line totals: strict pool_key allowlist only.
-        if is_strict_reserve_pool_key(key_s):
+            reserve += ft.reserve_mapped
+        elif is_strict_reserve_pool_key(key_s):
+            # No usable mapped line totals: strict pool_key allowlist only.
             reserve += amount
-        else:
-            ops += amount
 
-    combined = (ops + reserve).quantize(Decimal("0.01"))
+    combined = combined.quantize(Decimal("0.01"))
     if combined <= 0:
         return _settings_fallback("settings_funding_fallback")
 
@@ -542,13 +545,9 @@ def assessment_split_from_schedule_components(
 
     # Prefer matrix split when it reconciles to assessment income (Policy S).
     if total > 0 and abs(combined - total) <= _STATEMENT_TOLERANCE:
-        # Distribute any penny drift to operating so columns sum exactly.
-        ops_q = ops.quantize(Decimal("0.01"))
-        res_q = (total - ops_q).quantize(Decimal("0.01"))
-        if res_q < 0:
-            res_q = Decimal("0.00")
-            ops_q = total
-        return ops_q, res_q, source_base
+        # Operating takes any penny drift so the columns sum exactly.
+        res_q = min(reserve.quantize(Decimal("0.01")), total)
+        return (total - res_q).quantize(Decimal("0.01")), res_q, source_base
 
     # Matrix present with a reserve share but does not reconcile to
     # assessment income. Do not invent a scaled split — that turned

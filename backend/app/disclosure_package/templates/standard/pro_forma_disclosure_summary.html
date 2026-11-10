@@ -2,6 +2,33 @@
 {% block title %}Assessment And Reserve Funding Disclosure Summary — {{ fiscal_year }}{% endblock %}
 {% block content %}
 
+{% macro five_year_table(rows, cash_heading) %}
+    <table class="form-5570-table">
+      <thead>
+        <tr>
+          <th class="left">Year</th>
+          <th class="right">Required Reserves</th>
+          <th class="right">{{ cash_heading }}</th>
+          <th class="right">Percent Funded</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% if rows %}
+          {% for row in rows %}
+            <tr>
+              <td class="left">{{ row.year }}</td>
+              <td class="right">${{ '{:,.0f}'.format(row.estimated_liability) }}</td>
+              <td class="right">${{ '{:,.0f}'.format(row.ending_balance) }}</td>
+              <td class="right">{{ row.percent_funded }}%</td>
+            </tr>
+          {% endfor %}
+        {% else %}
+          <tr><td colspan="4" class="muted italic">Five-year projection not available.</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+{% endmacro %}
+
 {# Civil Code § 5570 Assessment and Reserve Funding Disclosure Summary form.
    Layout mirrors LEC's CPA-firm template: framed title block, numbered items
    with hanging indents, right-margin "page reference" callouts, footer crediting
@@ -198,31 +225,13 @@
       taking into account only assessments already approved and other known
       revenues, is as follows:
     </div>
-    <table class="form-5570-table">
-      <thead>
-        <tr>
-          <th class="left">Year</th>
-          <th class="right">Reserves</th>
-          <th class="right">Projected Reserves</th>
-          <th class="right">Percent Funded</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% set thirty_year = computed.thirty_year_funding_plan %}
-        {% if thirty_year %}
-          {% for row in thirty_year[:5] %}
-            <tr>
-              <td class="left">{{ row.year }}</td>
-              <td class="right">${{ '{:,.0f}'.format(row.estimated_liability) }}</td>
-              <td class="right">${{ '{:,.0f}'.format(row.ending_balance) }}</td>
-              <td class="right">{{ row.percent_funded }}%</td>
-            </tr>
-          {% endfor %}
-        {% else %}
-          <tr><td colspan="4" class="muted italic">Five-year projection not available.</td></tr>
-        {% endif %}
-      </tbody>
-    </table>
+    {{ five_year_table(computed.five_year_existing_assessments, 'Cash Reserves &ndash; Existing Assessments'|safe) }}
+    <div class="form-5570-item">
+      If the reserve funding plan approved by the association is implemented,
+      the projected reserve fund cash balance in each of those years will be
+      as follows:
+    </div>
+    {{ five_year_table(computed.thirty_year_funding_plan[:5], 'Cash Reserves &ndash; Projected Assessments'|safe) }}
   </li>
 
 </ol>
